@@ -363,6 +363,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_ioctl_run(argp);
 	case EBPFOS_IOC_SET_STATE:
 		return ebpfos_ioctl_set_state(state, argp);
+	case EBPFOS_IOC_OBJECT_CREATE:
+		return ebpfos_object_create_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}

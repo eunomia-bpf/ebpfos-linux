@@ -6,25 +6,35 @@
 #include <linux/types.h>
 #include <uapi/linux/ebpfos.h>
 
+struct file;
+
 #ifdef CONFIG_EBPFOS
 /* Public dispatch selects typed struct_ops first and raw graph as fallback. */
 u32 ebpfos_run_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args);
 u32 ebpfos_run_raw_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args);
 bool ebpfos_hook_enabled(enum ebpfos_hook_id hook);
+long ebpfos_object_create_ioctl(void __user *argp);
 #else
 static inline u32 ebpfos_run_hook(enum ebpfos_hook_id hook,
 				  const u64 *args, u32 nr_args)
 {
 	return EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
 }
+
 static inline u32 ebpfos_run_raw_hook(enum ebpfos_hook_id hook,
 				      const u64 *args, u32 nr_args)
 {
 	return EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
 }
+
 static inline bool ebpfos_hook_enabled(enum ebpfos_hook_id hook)
 {
 	return false;
+}
+
+static inline long ebpfos_object_create_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
 }
 #endif
 
