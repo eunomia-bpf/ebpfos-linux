@@ -9,6 +9,8 @@
 #include <linux/module.h>
 #include <linux/backing-dev.h>
 #include <linux/bio.h>
+#include <linux/ebpfos.h>
+#include <linux/ebpfos_ops.h>
 #include <linux/blkdev.h>
 #include <linux/blk-integrity.h>
 #include <linux/kmemleak.h>
@@ -3123,6 +3125,13 @@ static bool bio_unaligned(const struct bio *bio, struct request_queue *q)
  */
 void blk_mq_submit_bio(struct bio *bio)
 {
+	/* EBPFOS generated boundary: block component. */
+	if (IS_ENABLED(CONFIG_EBPFOS_BLOCK_HOOK)) {
+		u64 ebpfos_args[4] = { bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_opf, (u64)(unsigned long)bio->bi_bdev };
+		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_BLOCK_SUBMIT, ebpfos_args, ARRAY_SIZE(ebpfos_args));
+		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) { bio_io_error(bio); return; }
+	}
+
 	struct request_queue *q = bdev_get_queue(bio->bi_bdev);
 	struct blk_plug *plug = current->plug;
 	const int is_sync = op_is_sync(bio->bi_opf);

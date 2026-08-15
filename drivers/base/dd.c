@@ -18,6 +18,8 @@
 
 #include <linux/debugfs.h>
 #include <linux/device.h>
+#include <linux/ebpfos.h>
+#include <linux/ebpfos_ops.h>
 #include <linux/delay.h>
 #include <linux/dma-map-ops.h>
 #include <linux/init.h>
@@ -653,6 +655,13 @@ static int call_driver_probe(struct device *dev, const struct device_driver *drv
 
 static int really_probe(struct device *dev, const struct device_driver *drv)
 {
+	/* EBPFOS generated boundary: driver component. */
+	if (IS_ENABLED(CONFIG_EBPFOS_DRIVER_HOOK)) {
+		u64 ebpfos_args[4] = { (u64)(unsigned long)dev, (u64)(unsigned long)drv, (u64)(unsigned long)dev->bus, (u64)(unsigned long)drv->owner };
+		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_DRIVER_PROBE, ebpfos_args, ARRAY_SIZE(ebpfos_args));
+		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) return ebpfos_action_error(ebpfos_action);
+	}
+
 	bool test_remove = IS_ENABLED(CONFIG_DEBUG_TEST_DRIVER_REMOVE) &&
 			   !drv->suppress_bind_attrs;
 	int ret, link_ret;
@@ -1323,6 +1332,12 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 
 	drv = dev->driver;
 	if (drv) {
+		/* EBPFOS generated boundary: driver lifecycle component. */
+		if (IS_ENABLED(CONFIG_EBPFOS_DRIVER_HOOK)) {
+			u64 ebpfos_args[3] = { 1, (u64)(unsigned long)dev, (u64)(unsigned long)drv };
+			u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_DRIVER_LIFECYCLE, ebpfos_args, ARRAY_SIZE(ebpfos_args));
+			if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) return;
+		}
 		pm_runtime_get_sync(dev);
 
 		while (device_links_busy(dev)) {

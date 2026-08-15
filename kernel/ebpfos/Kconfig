@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config EBPFOS
+	bool "eBPFOS transactional component graph"
+	depends on BPF_SYSCALL
+	default n
+config EBPFOS_SYSCALL_HOOK
+	bool "eBPFOS x86-64 syscall component boundary"
+	depends on EBPFOS && X86_64
+	default y
+config EBPFOS_VFS_HOOK
+	bool "eBPFOS VFS path component boundary"
+	depends on EBPFOS
+	default y
+config EBPFOS_MM_HOOK
+	bool "eBPFOS memory reclaim component boundary"
+	depends on EBPFOS
+	default y
+config EBPFOS_BLOCK_HOOK
+	bool "eBPFOS block submission component boundary"
+	depends on EBPFOS && BLOCK
+	default y
+config EBPFOS_NET_HOOK
+	bool "eBPFOS network RX/TX component boundary"
+	depends on EBPFOS && NET
+	default y
+config EBPFOS_DRIVER_HOOK
+	bool "eBPFOS driver probe component boundary"
+	depends on EBPFOS
+	default y

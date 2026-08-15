@@ -40,6 +40,8 @@
 #include <linux/bitops.h>
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
+#include <linux/ebpfos.h>
+#include <linux/ebpfos_ops.h>
 
 #include <asm/runtime-const.h>
 
@@ -2260,6 +2262,13 @@ static const char *handle_dots(struct nameidata *nd, int type)
 
 static __always_inline const char *walk_component(struct nameidata *nd, int flags)
 {
+	/* EBPFOS generated boundary: VFS component. */
+	if (IS_ENABLED(CONFIG_EBPFOS_VFS_HOOK)) {
+		u64 ebpfos_args[4] = { nd->last.hash, nd->last.len, flags, nd->flags };
+		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_VFS_LOOKUP, ebpfos_args, ARRAY_SIZE(ebpfos_args));
+		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) return ERR_PTR(ebpfos_action_error(ebpfos_action));
+	}
+
 	struct dentry *dentry;
 	/*
 	 * "." and ".." are special - ".." especially so because it has
