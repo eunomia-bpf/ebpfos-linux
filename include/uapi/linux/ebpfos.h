@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_UAPI_VERSION 3
+#define EBPFOS_UAPI_VERSION 8
 #define EBPFOS_IOC_MAGIC 0xe7
 #define EBPFOS_MAX_ARGS 6
 #define EBPFOS_MAX_STATE_SLOTS 16
@@ -313,6 +313,444 @@ struct ebpfos_ioc_audit_get {
 	struct ebpfos_audit_record record;
 };
 
+/* Already-open regular-file replacement nucleus. */
+#define EBPFOS_FILE_SNAPSHOT_MAX (32U * 1024U * 1024U)
+#define EBPFOS_FILE_DELTA_CAPACITY 1024U
+#define EBPFOS_FILE_CATCHUP_BATCH 64U
+#define EBPFOS_FILE_COMMIT_TAIL 32U
+#define EBPFOS_FILE_CATCHUP_MAX_BATCHES 1024U
+
+#define EBPFOS_FILE_SCHEMA_NATIVE 0x46494c454e415401ULL
+#define EBPFOS_FILE_SCHEMA_V1 0xc63b53e891db458eULL
+#define EBPFOS_FILE_SCHEMA_V2 0xeee4a07cb179aee4ULL
+#define EBPFOS_FILE_V1_KEY_SIZE 4U
+#define EBPFOS_FILE_V1_VALUE_SIZE 256U
+#define EBPFOS_FILE_V1_MAX_ENTRIES 131073U
+#define EBPFOS_FILE_V2_KEY_SIZE 4U
+#define EBPFOS_FILE_V2_VALUE_SIZE 1056U
+#define EBPFOS_FILE_V2_MAX_ENTRIES 32770U
+
+enum ebpfos_file_route_state {
+	EBPFOS_FILE_ROUTE_ACTIVATING = 0,
+	EBPFOS_FILE_ROUTE_ACTIVE = 1,
+	EBPFOS_FILE_ROUTE_FENCED = 2,
+	EBPFOS_FILE_ROUTE_DEAD = 3,
+};
+
+enum ebpfos_file_migration_phase {
+	EBPFOS_FILE_MIGRATION_IDLE = 0,
+	EBPFOS_FILE_MIGRATION_SNAPSHOTTING = 1,
+	EBPFOS_FILE_MIGRATION_IMPORTING = 2,
+	EBPFOS_FILE_MIGRATION_CATCHING_UP = 3,
+	EBPFOS_FILE_MIGRATION_DRAINING = 4,
+	EBPFOS_FILE_MIGRATION_FREEZING = 5,
+	EBPFOS_FILE_MIGRATION_DOOMED = 6,
+};
+
+enum ebpfos_file_recovery_phase {
+	EBPFOS_FILE_RECOVERY_NONE = 0,
+	EBPFOS_FILE_RECOVERY_PREPARING = 1,
+	EBPFOS_FILE_RECOVERY_ARMED_E3 = 2,
+	EBPFOS_FILE_RECOVERY_FENCED = 3,
+	EBPFOS_FILE_RECOVERY_DRAINED = 4,
+	EBPFOS_FILE_RECOVERY_REPLAYING = 5,
+	EBPFOS_FILE_RECOVERY_READY_E4 = 6,
+	EBPFOS_FILE_RECOVERY_PUBLISHED_E4 = 7,
+	EBPFOS_FILE_RECOVERY_RETIRING = 8,
+	EBPFOS_FILE_RECOVERY_FAILED = 9,
+};
+
+enum ebpfos_file_admission_gate {
+	EBPFOS_FILE_ADMISSION_LEGACY = 0,
+	EBPFOS_FILE_ADMISSION_E3_OPEN = 1,
+	EBPFOS_FILE_ADMISSION_RECOVERING = 2,
+	EBPFOS_FILE_ADMISSION_E4_OPEN = 3,
+	EBPFOS_FILE_ADMISSION_FAILED = 4,
+};
+
+enum ebpfos_file_recovery_trigger {
+	EBPFOS_FILE_RECOVERY_TRIGGER_NONE = 0,
+	EBPFOS_FILE_RECOVERY_TRIGGER_TYPED_FAULT = 1,
+	EBPFOS_FILE_RECOVERY_TRIGGER_LOG_CAPACITY = 2,
+};
+
+/* Source compatibility for the original single-phase migration ABI. */
+#define EBPFOS_FILE_MIGRATION_CAPTURING \
+	EBPFOS_FILE_MIGRATION_CATCHING_UP
+
+enum ebpfos_file_op {
+	EBPFOS_FILE_OP_READ = 1,
+	EBPFOS_FILE_OP_WRITE = 2,
+	EBPFOS_FILE_OP_DESCRIBE = 3,
+	EBPFOS_FILE_OP_EXPORT_CHUNK = 4,
+	EBPFOS_FILE_OP_IMPORT_BEGIN = 5,
+	EBPFOS_FILE_OP_IMPORT_CHUNK = 6,
+	EBPFOS_FILE_OP_IMPORT_END = 7,
+};
+
+#define EBPFOS_FILE_F_APPEND (1U << 0)
+#define EBPFOS_FILE_F_FOREGROUND (1U << 1)
+#define EBPFOS_FILE_F_SHADOW (1U << 2)
+/* EXPORT_CHUNK is bounded by ctx->visible_size, not the live source size. */
+#define EBPFOS_FILE_F_SOURCE_SNAPSHOT (1U << 3)
+
+/*
+ * Fixed verifier-visible provider context.  The header is exactly 128 bytes
+ * and the opaque payload is exactly 1024 bytes.  Providers own the payload
+ * schema; the nucleus interprets only the header and transfer length.
+ */
+#define EBPFOS_FILE_BPF_DATA_SIZE 1024U
+#define EBPFOS_FILE_BPF_CTX_SIZE 1152U
+
+struct ebpfos_file_bpf_ctx {
+	__u32 op;
+	__u32 flags;
+	__u64 route_id;
+	__u64 file_cookie;
+	__u64 epoch;
+	__u64 sequence;
+	__u64 offset;
+	__u64 count;
+	__u64 visible_size;
+	__s64 result;
+	__u64 result_offset;
+	__u64 result_visible_size;
+	__u64 data_size;
+	__u64 reserved[4];
+	__u8 data[EBPFOS_FILE_BPF_DATA_SIZE];
+};
+
+struct ebpfos_ioc_file_enroll {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 route_id;
+	__u64 provider_id;
+	__u64 epoch;
+	__u64 file_cookie;
+	__u64 inode_number;
+	__u64 device;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+};
+
+struct ebpfos_ioc_file_status {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 route_id;
+	__u64 provider_id;
+	__u64 epoch;
+	__u64 file_cookie;
+	__u64 inode_number;
+	__u64 device;
+	__u64 visible_size;
+	__u64 native_backing_size;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+	__u64 last_sequence;
+	__u64 read_calls;
+	__u64 write_calls;
+	__u64 read_bytes;
+	__u64 write_bytes;
+	__u64 native_read_body_calls;
+	__u64 native_write_body_calls;
+	__u64 rejected_calls;
+	__u64 active_calls;
+	__u32 route_state;
+	__u32 provider_kind;
+	__u32 inode_mode;
+	__u32 inode_uid;
+	__u32 inode_gid;
+	__u32 file_flags;
+	__u32 file_mode;
+	__u32 file_cred_uid;
+	__u32 file_cred_gid;
+	__u64 active_schema_hash;
+	__u64 migration_txn_id;
+	__u64 candidate_provider_id;
+	__u64 migration_snapshot_sequence;
+	__u64 migration_snapshot_size;
+	__u64 captured_deltas;
+	__u64 captured_delta_bytes;
+	__u64 candidate_validated_bytes;
+	__u64 fault_count;
+	__u32 active_prog_id;
+	__u32 active_map_id;
+	__u32 migration_phase;
+	__u32 candidate_ready;
+	__u32 native_retired;
+	__u32 candidate_bytes_validated;
+	__u64 dequeued_deltas;
+	__u64 dequeued_delta_bytes;
+	__u64 replayed_deltas;
+	__u64 replayed_delta_bytes;
+	__u64 verified_deltas;
+	__u64 verified_delta_bytes;
+	/* Logical outstanding work, including an ownership-transferred batch. */
+	__u64 pending_deltas;
+	__u64 pending_delta_bytes;
+	/* Physical producer ring occupancy; inflight_batch_* is disjoint. */
+	__u64 queued_deltas;
+	__u64 queued_delta_bytes;
+	__u64 replay_batches;
+	__u64 ring_high_water;
+	__u64 ring_wraps;
+	__u64 backpressure_waits;
+	__u64 backpressure_waiters;
+	__u64 quiesce_waiters;
+	__u64 queue_tail_visible;
+	__u64 queue_last_write_sequence;
+	__u64 dequeue_visible;
+	__u64 dequeue_last_write_sequence;
+	__u64 candidate_visible;
+	__u64 candidate_last_write_sequence;
+	__u64 verified_visible;
+	__u64 verified_last_write_sequence;
+	__u64 quiesce_captured_deltas;
+	__u64 quiesce_pending_deltas;
+	__u64 freeze_route_sequence;
+	__u64 freeze_visible;
+	__u64 freeze_tail_deltas;
+	/* Successful nonzero deltas classified by their enqueue phase. */
+	__u64 snapshotting_captured_deltas;
+	__u64 importing_captured_deltas;
+	__u64 catching_up_captured_deltas;
+	__u32 ring_head;
+	__u32 inflight_batch_count;
+	__u32 inflight_batch_applied;
+	__u32 candidate_busy;
+	__u32 commit_requested;
+	__s32 fatal_error;
+};
+
+/* Active native or BPF provider -> verifier-isolated BPF transaction. */
+struct ebpfos_ioc_file_replace_begin {
+	__s32 file_fd;
+	__s32 prog_fd;
+	__s32 map_fd;
+	__u32 flags;
+	__u64 expected_route_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+	__u64 target_schema_hash;
+	__u64 txn_id;
+	__u64 candidate_provider_id;
+	__u64 snapshot_sequence;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+	__u64 delta_capacity;
+	__u32 candidate_prog_id;
+	__u32 candidate_map_id;
+};
+
+struct ebpfos_ioc_file_replace_end {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 txn_id;
+	__u64 expected_route_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+};
+
+struct ebpfos_ioc_file_replace_status {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 expected_route_id;
+	__u64 route_id;
+	__u64 active_provider_id;
+	__u64 active_epoch;
+	__u64 active_schema_hash;
+	__u64 txn_id;
+	__u64 candidate_provider_id;
+	__u64 target_epoch;
+	__u64 target_schema_hash;
+	__u64 snapshot_sequence;
+	__u64 snapshot_size;
+	__u64 captured_deltas;
+	__u64 captured_delta_bytes;
+	__u64 candidate_validated_bytes;
+	__u64 delta_capacity;
+	__u32 active_prog_id;
+	__u32 active_map_id;
+	__u32 candidate_prog_id;
+	__u32 candidate_map_id;
+	__u32 migration_phase;
+	__u32 candidate_ready;
+	__u32 caller_owns_transaction;
+	__u32 native_retired;
+	__u32 candidate_bytes_validated;
+	__u64 dequeued_deltas;
+	__u64 dequeued_delta_bytes;
+	__u64 replayed_deltas;
+	__u64 replayed_delta_bytes;
+	__u64 verified_deltas;
+	__u64 verified_delta_bytes;
+	/* Logical outstanding work, including an ownership-transferred batch. */
+	__u64 pending_deltas;
+	__u64 pending_delta_bytes;
+	/* Physical producer ring occupancy; inflight_batch_* is disjoint. */
+	__u64 queued_deltas;
+	__u64 queued_delta_bytes;
+	__u64 replay_batches;
+	__u64 ring_high_water;
+	__u64 ring_wraps;
+	__u64 backpressure_waits;
+	__u64 backpressure_waiters;
+	__u64 quiesce_waiters;
+	__u64 queue_tail_visible;
+	__u64 queue_last_write_sequence;
+	__u64 dequeue_visible;
+	__u64 dequeue_last_write_sequence;
+	__u64 candidate_visible;
+	__u64 candidate_last_write_sequence;
+	__u64 verified_visible;
+	__u64 verified_last_write_sequence;
+	__u64 quiesce_captured_deltas;
+	__u64 quiesce_pending_deltas;
+	__u64 freeze_route_sequence;
+	__u64 freeze_visible;
+	__u64 freeze_tail_deltas;
+	/* Successful nonzero deltas classified by their enqueue phase. */
+	__u64 snapshotting_captured_deltas;
+	__u64 importing_captured_deltas;
+	__u64 catching_up_captured_deltas;
+	__u32 ring_head;
+	__u32 inflight_batch_count;
+	__u32 inflight_batch_applied;
+	__u32 candidate_busy;
+	__u32 commit_requested;
+	__s32 fatal_error;
+};
+
+struct ebpfos_ioc_file_replace_catchup {
+	__s32 file_fd;
+	/* EAGAIN means this ioctl completed no batch; partial work returns 0. */
+	__u32 max_batches;
+	__u64 txn_id;
+	__u64 expected_route_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+};
+
+/* One E2 transaction prepares both recoverable E3 and private fresh E4. */
+struct ebpfos_ioc_file_recovery_begin {
+	__s32 file_fd;
+	__s32 e3_prog_fd;
+	__s32 e3_map_fd;
+	__s32 e4_prog_fd;
+	__s32 e4_map_fd;
+	__u32 flags;
+	/* Exhaustion fences E3 before provider execution and recovers through E4. */
+	__u32 log_capacity;
+	__u32 expected_fault_reason;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+	__u64 e3_schema_hash;
+	__u64 e4_schema_hash;
+	__u64 txn_id;
+	__u64 recovery_id;
+	__u64 e3_provider_id;
+	__u64 e3_epoch;
+	__u64 e4_provider_id;
+	__u64 e4_epoch;
+	__u64 snapshot_sequence;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+	__u32 e3_prog_id;
+	__u32 e3_map_id;
+	__u32 e4_prog_id;
+	__u32 e4_map_id;
+};
+
+struct ebpfos_ioc_file_recovery_end {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 txn_id;
+	__u64 recovery_id;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+	__u64 base_sequence;
+	__u64 base_size;
+	__u64 base_digest;
+	__u64 e3_provider_id;
+	__u64 e3_epoch;
+	__u64 e4_provider_id;
+	__u64 e4_epoch;
+};
+
+/* Explicitly discard published recovery evidence and reopen ordinary replace. */
+struct ebpfos_ioc_file_recovery_retire {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 recovery_id;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u64 expected_schema_hash;
+};
+
+struct ebpfos_ioc_file_recovery_status {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 expected_route_id;
+	__u64 route_id;
+	__u64 recovery_id;
+	__u64 active_provider_id;
+	__u64 active_epoch;
+	__u64 active_schema_hash;
+	__u64 e2_provider_id;
+	__u64 e2_epoch;
+	__u64 e3_provider_id;
+	__u64 e3_epoch;
+	__u64 e4_provider_id;
+	__u64 e4_epoch;
+	__u64 base_sequence;
+	__u64 base_size;
+	__u64 base_digest;
+	__u64 next_acquire_id;
+	__u64 fence_acquire_id;
+	__u64 admitted_e3;
+	__u64 admitted_e4;
+	__u64 committed_deltas;
+	__u64 committed_delta_bytes;
+	__u64 frozen_deltas;
+	__u64 replayed_deltas;
+	__u64 backpressure_waits;
+	__u64 e3_write_attempts;
+	__u64 faults_observed;
+	__u64 coalesced_faults;
+	__u64 pending_retries;
+	__u64 retry_commits;
+	__u64 retry_failures;
+	__u64 unretried_invocations;
+	__u64 capacity_triggers;
+	__u64 trigger_invocation_id;
+	__u64 trigger_acquire_id;
+	__u64 trigger_sequence;
+	__u64 trigger_epoch;
+	__u64 fault_invocation_id;
+	__u64 fault_acquire_id;
+	__u64 fault_sequence;
+	__u64 fault_epoch;
+	__u64 retry_invocation_id;
+	__u64 retry_acquire_id;
+	__u64 retry_sequence;
+	__u64 retry_epoch;
+	__u32 log_capacity;
+	__u32 fault_reason;
+	__u32 retry_count;
+	__s32 retry_result;
+	__u32 recovery_phase;
+	__u32 admission_gate;
+	__u32 recovery_trigger;
+	__s32 fatal_error;
+	__u32 e4_ready;
+	__u32 reserved;
+};
+
 #define EBPFOS_IOC_OBJECT_CREATE \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x10, struct ebpfos_ioc_object_create)
 #define EBPFOS_IOC_CAP_DERIVE \
@@ -333,5 +771,29 @@ struct ebpfos_ioc_audit_get {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x18, struct ebpfos_ioc_provider_stats)
 #define EBPFOS_IOC_AUDIT_GET \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x19, struct ebpfos_ioc_audit_get)
+#define EBPFOS_IOC_FILE_ENROLL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x20, struct ebpfos_ioc_file_enroll)
+#define EBPFOS_IOC_FILE_STATUS \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x21, struct ebpfos_ioc_file_status)
+#define EBPFOS_IOC_FILE_REPLACE_BEGIN \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x22, struct ebpfos_ioc_file_replace_begin)
+#define EBPFOS_IOC_FILE_REPLACE_COMMIT \
+	_IOW(EBPFOS_IOC_MAGIC, 0x23, struct ebpfos_ioc_file_replace_end)
+#define EBPFOS_IOC_FILE_REPLACE_ABORT \
+	_IOW(EBPFOS_IOC_MAGIC, 0x24, struct ebpfos_ioc_file_replace_end)
+#define EBPFOS_IOC_FILE_REPLACE_STATUS \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x25, struct ebpfos_ioc_file_replace_status)
+#define EBPFOS_IOC_FILE_REPLACE_CATCHUP \
+	_IOW(EBPFOS_IOC_MAGIC, 0x26, struct ebpfos_ioc_file_replace_catchup)
+#define EBPFOS_IOC_FILE_RECOVERY_BEGIN \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x27, struct ebpfos_ioc_file_recovery_begin)
+#define EBPFOS_IOC_FILE_RECOVERY_ARM \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x28, struct ebpfos_ioc_file_recovery_end)
+#define EBPFOS_IOC_FILE_RECOVERY_ABORT \
+	_IOW(EBPFOS_IOC_MAGIC, 0x29, struct ebpfos_ioc_file_recovery_end)
+#define EBPFOS_IOC_FILE_RECOVERY_STATUS \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x2a, struct ebpfos_ioc_file_recovery_status)
+#define EBPFOS_IOC_FILE_RECOVERY_RETIRE \
+	_IOW(EBPFOS_IOC_MAGIC, 0x2b, struct ebpfos_ioc_file_recovery_retire)
 
 #endif /* _UAPI_EBPFOS_H */

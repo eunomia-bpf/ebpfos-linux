@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
+#include <linux/rcupdate_trace.h>
 
 #include "map_in_map.h"
 
@@ -106,28 +107,93 @@ void *bpf_map_fd_get_ptr(struct bpf_map *map,
 		return ERR_PTR(-ENOTSUPP);
 
 	inner_map_meta = map->inner_map_meta;
-	if (inner_map_meta->ops->map_meta_equal(inner_map_meta, inner_map))
-		bpf_map_inc(inner_map);
-	else
-		inner_map = ERR_PTR(-EINVAL);
+	if (!inner_map_meta->ops->map_meta_equal(inner_map_meta, inner_map))
+		return ERR_PTR(-EINVAL);
+	if (bpf_ebpfos_map_candidate(inner_map) &&
+	    !bpf_ebpfos_map_external_get(inner_map))
+		return ERR_PTR(-EBUSY);
+	bpf_map_inc(inner_map);
 
 	return inner_map;
+}
+
+static void bpf_ebpfos_map_external_put_rcu(struct rcu_head *rcu)
+{
+	struct bpf_map *map = container_of(rcu, struct bpf_map,
+					   ebpfos_external_rcu);
+	u32 refs;
+	bool requeue = false;
+
+	spin_lock(&map->owner_lock);
+	refs = map->ebpfos_external_gp_refs;
+	if (WARN_ON_ONCE(!refs || map->ebpfos_external_writers < refs)) {
+		map->ebpfos_external_gp_refs = 0;
+		map->ebpfos_external_next_refs = 0;
+		map->ebpfos_external_gp_queued = false;
+		spin_unlock(&map->owner_lock);
+		return;
+	}
+	map->ebpfos_external_writers -= refs;
+	if (map->ebpfos_external_next_refs) {
+		map->ebpfos_external_gp_refs = map->ebpfos_external_next_refs;
+		map->ebpfos_external_next_refs = 0;
+		requeue = true;
+	} else {
+		map->ebpfos_external_gp_refs = 0;
+		map->ebpfos_external_gp_queued = false;
+	}
+	spin_unlock(&map->owner_lock);
+
+	while (refs--)
+		bpf_map_put(map);
+	if (requeue)
+		call_rcu_tasks_trace(&map->ebpfos_external_rcu,
+				     bpf_ebpfos_map_external_put_rcu);
+}
+
+static void bpf_ebpfos_map_external_put_deferred(struct bpf_map *map)
+{
+	bool queue = false;
+
+	/* Keep both exclusivity and the stored map reference until every BPF
+	 * reader that could have observed the removed inner-map pointer drains.
+	 * Tasks-trace RCU also covers non-sleepable BPF readers.
+	 */
+	spin_lock(&map->owner_lock);
+	if (WARN_ON_ONCE(!map->ebpfos_external_writers)) {
+		spin_unlock(&map->owner_lock);
+		return;
+	}
+	if (!map->ebpfos_external_gp_queued) {
+		map->ebpfos_external_gp_queued = true;
+		map->ebpfos_external_gp_refs = 1;
+		queue = true;
+	} else {
+		map->ebpfos_external_next_refs++;
+	}
+	spin_unlock(&map->owner_lock);
+
+	if (queue)
+		call_rcu_tasks_trace(&map->ebpfos_external_rcu,
+				     bpf_ebpfos_map_external_put_rcu);
 }
 
 void bpf_map_fd_put_ptr(struct bpf_map *map, void *ptr, bool need_defer)
 {
 	struct bpf_map *inner_map = ptr;
 
-	/* Defer the freeing of inner map according to the sleepable attribute
-	 * of bpf program which owns the outer map, so unnecessary waiting for
-	 * RCU tasks trace grace period can be avoided.
-	 */
 	if (need_defer) {
+		if (bpf_ebpfos_map_candidate(inner_map)) {
+			bpf_ebpfos_map_external_put_deferred(inner_map);
+			return;
+		}
 		if (atomic64_read(&map->sleepable_refcnt))
 			WRITE_ONCE(inner_map->free_after_mult_rcu_gp, true);
 		else
 			WRITE_ONCE(inner_map->free_after_rcu_gp, true);
 	}
+	if (bpf_ebpfos_map_candidate(inner_map))
+		bpf_ebpfos_map_external_put(inner_map);
 	bpf_map_put(inner_map);
 }
 

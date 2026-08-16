@@ -759,6 +759,8 @@ struct inode_state_flags {
 	enum inode_state_flags_enum __state;
 };
 
+struct ebpfos_inode_route;
+
 /*
  * Keep mostly read-only and often accessed (especially for
  * the RCU path lookup and 'stat' data) fields at the beginning
@@ -873,6 +875,9 @@ struct inode {
 #endif
 
 	void			*i_private; /* fs or device private pointer */
+#ifdef CONFIG_EBPFOS
+	struct ebpfos_inode_route __rcu *i_ebpfos_route;
+#endif
 } __randomize_layout;
 
 /*
@@ -1297,6 +1302,9 @@ struct file {
 	};
 	file_ref_t			f_ref;
 	/* --- cacheline 3 boundary (192 bytes) --- */
+#ifdef CONFIG_EBPFOS
+	atomic64_t			f_ebpfos_cookie;
+#endif
 } __randomize_layout
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 

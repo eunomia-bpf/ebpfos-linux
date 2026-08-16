@@ -329,6 +329,14 @@ struct bpf_map {
 	atomic64_t writecnt;
 	spinlock_t owner_lock;
 	struct bpf_map_owner *owner;
+	/* Protected by owner_lock.  eBPFOS providers require exclusive use. */
+	struct bpf_prog_aux *ebpfos_provider_owner;
+	u32 ebpfos_prog_users;
+	u32 ebpfos_external_writers;
+	u32 ebpfos_external_gp_refs;
+	u32 ebpfos_external_next_refs;
+	bool ebpfos_external_gp_queued;
+	struct rcu_head ebpfos_external_rcu;
 	bool bypass_spec_v1;
 	bool frozen; /* write-once; write-protected by freeze_mutex */
 	bool free_after_mult_rcu_gp;
@@ -338,6 +346,92 @@ struct bpf_map {
 	u64 cookie; /* write-once */
 	char *excl_prog_sha;
 };
+
+#define BPF_EBPFOS_PROVIDER_V1_VALUE_SIZE	256U
+#define BPF_EBPFOS_PROVIDER_V1_MAX_ENTRIES	131073U
+#define BPF_EBPFOS_PROVIDER_V2_VALUE_SIZE	1056U
+#define BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES	32770U
+
+static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
+{
+	bool v1 = map->value_size == BPF_EBPFOS_PROVIDER_V1_VALUE_SIZE &&
+		  map->max_entries == BPF_EBPFOS_PROVIDER_V1_MAX_ENTRIES;
+	bool v2 = map->value_size == BPF_EBPFOS_PROVIDER_V2_VALUE_SIZE &&
+		  map->max_entries == BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES;
+
+	return IS_ENABLED(CONFIG_EBPFOS) &&
+	       map->map_type == BPF_MAP_TYPE_ARRAY &&
+	       map->key_size == sizeof(u32) && !map->map_flags &&
+	       !map->map_extra && !map->inner_map_meta && !map->btf &&
+	       !map->btf_key_type_id && !map->btf_value_type_id &&
+	       !map->btf_vmlinux_value_type_id && !map->record &&
+	       !map->excl && !map->excl_prog_sha && (v1 || v2);
+}
+
+static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
+					   struct bpf_prog_aux *aux,
+					   bool provider)
+{
+	bool allowed = false;
+
+	spin_lock(&map->owner_lock);
+	if (provider) {
+		if (!map->ebpfos_provider_owner && !map->ebpfos_prog_users &&
+		    !map->ebpfos_external_writers)
+			map->ebpfos_provider_owner = aux;
+		if (map->ebpfos_provider_owner == aux) {
+			map->ebpfos_prog_users++;
+			allowed = true;
+		}
+	} else if (!map->ebpfos_provider_owner &&
+		   map->ebpfos_prog_users != U32_MAX) {
+		map->ebpfos_prog_users++;
+		allowed = true;
+	}
+	spin_unlock(&map->owner_lock);
+
+	return allowed;
+}
+
+static inline void bpf_ebpfos_map_prog_put(struct bpf_map *map,
+					   struct bpf_prog_aux *aux)
+{
+	spin_lock(&map->owner_lock);
+	if (WARN_ON_ONCE(!map->ebpfos_prog_users))
+		goto out;
+
+	map->ebpfos_prog_users--;
+	if (map->ebpfos_provider_owner == aux) {
+		WARN_ON_ONCE(map->ebpfos_prog_users);
+		if (!map->ebpfos_prog_users)
+			map->ebpfos_provider_owner = NULL;
+	}
+out:
+	spin_unlock(&map->owner_lock);
+}
+
+static inline bool bpf_ebpfos_map_external_get(struct bpf_map *map)
+{
+	bool allowed = false;
+
+	spin_lock(&map->owner_lock);
+	if (!map->ebpfos_provider_owner &&
+	    map->ebpfos_external_writers != U32_MAX) {
+		map->ebpfos_external_writers++;
+		allowed = true;
+	}
+	spin_unlock(&map->owner_lock);
+
+	return allowed;
+}
+
+static inline void bpf_ebpfos_map_external_put(struct bpf_map *map)
+{
+	spin_lock(&map->owner_lock);
+	if (!WARN_ON_ONCE(!map->ebpfos_external_writers))
+		map->ebpfos_external_writers--;
+	spin_unlock(&map->owner_lock);
+}
 
 static inline const char *btf_field_type_name(enum btf_field_type type)
 {
@@ -1699,6 +1793,7 @@ struct bpf_prog_aux {
 	bool changes_pkt_data;
 	bool might_sleep;
 	bool kprobe_write_ctx;
+	bool ebpfos_provider;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;

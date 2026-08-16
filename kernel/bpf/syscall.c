@@ -41,6 +41,7 @@
 #include <linux/overflow.h>
 #include <linux/cookie.h>
 #include <linux/verification.h>
+#include <uapi/linux/ebpfos.h>
 
 #include <net/netfilter/nf_bpf_link.h>
 #include <net/netkit.h>
@@ -55,6 +56,16 @@
 			IS_FD_HASH(map))
 
 #define BPF_OBJ_FLAG_MASK   (BPF_F_RDONLY | BPF_F_WRONLY)
+
+static_assert(offsetof(struct ebpfos_file_bpf_ctx, data) == 128);
+static_assert(sizeof(struct ebpfos_file_bpf_ctx) == EBPFOS_FILE_BPF_CTX_SIZE);
+
+#define EBPFOS_PROVIDER_CTX_INPUT_END \
+	offsetof(struct ebpfos_file_bpf_ctx, result)
+#define EBPFOS_PROVIDER_CTX_OUTPUT_END \
+	offsetof(struct ebpfos_file_bpf_ctx, reserved)
+#define EBPFOS_PROVIDER_CTX_DATA_START \
+	offsetof(struct ebpfos_file_bpf_ctx, data)
 
 DEFINE_PER_CPU(int, bpf_prog_active);
 DEFINE_COOKIE(bpf_map_cookie);
@@ -888,6 +899,13 @@ static void bpf_map_free(struct bpf_map *map)
 	struct btf_record *rec = map->record;
 	struct btf *btf = map->btf;
 
+	WARN_ON_ONCE(map->ebpfos_provider_owner);
+	WARN_ON_ONCE(map->ebpfos_prog_users);
+	WARN_ON_ONCE(map->ebpfos_external_writers);
+	WARN_ON_ONCE(map->ebpfos_external_gp_refs);
+	WARN_ON_ONCE(map->ebpfos_external_next_refs);
+	WARN_ON_ONCE(map->ebpfos_external_gp_queued);
+
 	/* implementation dependent freeing. Disabling migration to simplify
 	 * the free of values or special fields allocated from bpf memory
 	 * allocator.
@@ -1523,6 +1541,12 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	atomic64_set(&map->usercnt, 1);
 	mutex_init(&map->freeze_mutex);
 	spin_lock_init(&map->owner_lock);
+	map->ebpfos_provider_owner = NULL;
+	map->ebpfos_prog_users = 0;
+	map->ebpfos_external_writers = 0;
+	map->ebpfos_external_gp_refs = 0;
+	map->ebpfos_external_next_refs = 0;
+	map->ebpfos_external_gp_queued = false;
 
 	if (attr->btf_key_type_id || attr->btf_value_type_id ||
 	    /* Even the map's value is a kernel's struct,
@@ -2370,6 +2394,14 @@ void bpf_prog_free_id(struct bpf_prog *prog)
 static void __bpf_prog_put_rcu(struct rcu_head *rcu)
 {
 	struct bpf_prog_aux *aux = container_of(rcu, struct bpf_prog_aux, rcu);
+	u32 i;
+
+	/*
+	 * Keep map exclusivity until after the program's execution grace period.
+	 * bpf_prog_free() drops the actual map references asynchronously later.
+	 */
+	for (i = 0; i < aux->used_map_cnt; i++)
+		bpf_ebpfos_map_prog_put(aux->used_maps[i], aux);
 
 	kvfree(aux->func_info);
 	kfree(aux->func_info_aux);
@@ -2894,7 +2926,25 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_XDP_HAS_FRAGS |
 				 BPF_F_XDP_DEV_BOUND_ONLY |
 				 BPF_F_TEST_REG_INVARIANTS |
+				 BPF_F_EBPFOS_PROVIDER |
 				 BPF_F_TOKEN_FD))
+		return -EINVAL;
+	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
+	    (type != BPF_PROG_TYPE_SYSCALL ||
+	     attr->prog_flags != (BPF_F_EBPFOS_PROVIDER | BPF_F_SLEEPABLE)))
+		return -EINVAL;
+	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
+	    !IS_ENABLED(CONFIG_EBPFOS))
+		return -EOPNOTSUPP;
+	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
+	    (attr->expected_attach_type || attr->prog_ifindex ||
+	     attr->prog_btf_fd || attr->func_info_rec_size ||
+	     attr->func_info || attr->func_info_cnt ||
+	     attr->line_info_rec_size || attr->line_info ||
+	     attr->line_info_cnt || attr->attach_btf_id ||
+	     attr->attach_prog_fd || attr->core_relo_cnt ||
+	     attr->core_relos || attr->core_relo_rec_size ||
+	     attr->fd_array || attr->fd_array_cnt))
 		return -EINVAL;
 
 	bpf_prog_load_fixup_attach_type(attr);
@@ -3007,6 +3057,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 
 	prog->expected_attach_type = attr->expected_attach_type;
 	prog->sleepable = !!(attr->prog_flags & BPF_F_SLEEPABLE);
+	prog->aux->ebpfos_provider = !!(attr->prog_flags & BPF_F_EBPFOS_PROVIDER);
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
 	prog->aux->dst_prog = dst_prog;
@@ -4754,10 +4805,15 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	prog = bpf_prog_get(attr->test.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (prog->aux->ebpfos_provider) {
+		ret = -EPERM;
+		goto out_put;
+	}
 
 	if (prog->aux->ops->test_run)
 		ret = prog->aux->ops->test_run(prog, attr, uattr);
 
+out_put:
 	bpf_prog_put(prog);
 	return ret;
 }
@@ -6124,6 +6180,10 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 	prog = bpf_prog_get(attr->prog_bind_map.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (prog->aux->ebpfos_provider) {
+		ret = -EPERM;
+		goto out_prog_put;
+	}
 
 	map = bpf_map_get(attr->prog_bind_map.map_fd);
 	if (IS_ERR(map)) {
@@ -6145,6 +6205,11 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 				     prog->aux->used_map_cnt + 1);
 	if (!used_maps_new) {
 		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	if (!bpf_ebpfos_map_prog_get(map, prog->aux, false)) {
+		kfree(used_maps_new);
+		ret = -EBUSY;
 		goto out_unlock;
 	}
 
@@ -6411,6 +6476,26 @@ static bool syscall_prog_is_valid_access(int off, int size,
 					 const struct bpf_prog *prog,
 					 struct bpf_insn_access_aux *info)
 {
+	if (prog->aux->ebpfos_provider) {
+		u64 end;
+
+		if (off < 0 || (size != 1 && size != 2 && size != 4 && size != 8))
+			return false;
+		if (!IS_ALIGNED(off, size))
+			return false;
+		end = (u64)off + size;
+		if (off < EBPFOS_PROVIDER_CTX_INPUT_END &&
+		    end <= EBPFOS_PROVIDER_CTX_INPUT_END)
+			return type == BPF_READ;
+		if (off >= EBPFOS_PROVIDER_CTX_INPUT_END &&
+		    end <= EBPFOS_PROVIDER_CTX_OUTPUT_END)
+			return type == BPF_READ || type == BPF_WRITE;
+		if (off >= EBPFOS_PROVIDER_CTX_DATA_START &&
+		    end <= EBPFOS_FILE_BPF_CTX_SIZE)
+			return type == BPF_READ || type == BPF_WRITE;
+		return false;
+	}
+
 	if (off < 0 || off >= U16_MAX)
 		return false;
 	/* No alignment requirements for syscall ctx accesses. */
@@ -6460,6 +6545,10 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 		prog = bpf_prog_get_type(attr->test.prog_fd, BPF_PROG_TYPE_SYSCALL);
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
+		if (prog->aux->ebpfos_provider) {
+			bpf_prog_put(prog);
+			return -EPERM;
+		}
 
 		if (attr->test.ctx_size_in < prog->aux->max_ctx_offset ||
 		    attr->test.ctx_size_in > U16_MAX) {
@@ -6548,6 +6637,10 @@ static const struct bpf_func_proto bpf_kallsyms_lookup_name_proto = {
 static const struct bpf_func_proto *
 syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (prog->aux->ebpfos_provider)
+		return func_id == BPF_FUNC_map_lookup_elem ?
+		       &bpf_map_lookup_elem_proto : NULL;
+
 	switch (func_id) {
 	case BPF_FUNC_sys_bpf:
 		return !bpf_token_capable(prog->aux->token, CAP_PERFMON)

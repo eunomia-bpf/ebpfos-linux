@@ -218,6 +218,9 @@ static int init_file(struct file *f, int flags, const struct cred *cred)
 
 	f->f_iocb_flags = 0;
 	f->f_pos	= 0;
+#ifdef CONFIG_EBPFOS
+	atomic64_set(&f->f_ebpfos_cookie, 0);
+#endif
 	f->f_wb_err	= 0;
 	f->f_sb_err	= 0;
 

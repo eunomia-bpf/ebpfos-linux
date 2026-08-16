@@ -33,6 +33,9 @@ struct ebpfos_graph {
 
 struct ebpfos_file {
 	struct ebpfos_graph *pending;
+	/* Serializes the one file-replacement transaction owned by this FD. */
+	struct mutex file_txn_lock;
+	void *file_txn;
 };
 
 static DEFINE_MUTEX(ebpfos_graph_lock);
@@ -81,7 +84,7 @@ static struct ebpfos_graph *ebpfos_graph_clone_locked(void)
 	lockdep_assert_held(&ebpfos_graph_lock);
 	old = rcu_dereference_protected(ebpfos_active_graph,
 					lockdep_is_held(&ebpfos_graph_lock));
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new, GFP_KERNEL);
 	if (!new)
 		return NULL;
 	if (!old)
@@ -157,9 +160,10 @@ static int ebpfos_open(struct inode *inode, struct file *file)
 {
 	struct ebpfos_file *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state, GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
+	mutex_init(&state->file_txn_lock);
 	file->private_data = state;
 	return 0;
 }
@@ -169,7 +173,9 @@ static int ebpfos_release(struct inode *inode, struct file *file)
 	struct ebpfos_file *state = file->private_data;
 
 	if (state) {
+		ebpfos_file_replace_release(&state->file_txn);
 		ebpfos_graph_put(state->pending);
+		mutex_destroy(&state->file_txn_lock);
 		kfree(state);
 	}
 	return 0;
@@ -343,6 +349,7 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct ebpfos_file *state = file->private_data;
 	void __user *argp = (void __user *)arg;
+	long result;
 
 	switch (cmd) {
 	case EBPFOS_IOC_VERSION:
@@ -365,6 +372,62 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_ioctl_set_state(state, argp);
 	case EBPFOS_IOC_OBJECT_CREATE:
 		return ebpfos_object_create_ioctl(argp);
+	case EBPFOS_IOC_FILE_ENROLL:
+		return ebpfos_file_enroll_ioctl(argp);
+	case EBPFOS_IOC_FILE_STATUS:
+		return ebpfos_file_status_ioctl(argp);
+	case EBPFOS_IOC_FILE_REPLACE_BEGIN:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_begin_ioctl(argp,
+							 &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_REPLACE_CATCHUP:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_catchup_ioctl(argp,
+							   &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_REPLACE_COMMIT:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_commit_ioctl(argp,
+							  &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_REPLACE_ABORT:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_abort_ioctl(argp,
+							 &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_REPLACE_STATUS:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_status_ioctl(argp,
+							  &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_RECOVERY_BEGIN:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_recovery_begin_ioctl(argp,
+							  &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_RECOVERY_ARM:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_recovery_arm_ioctl(argp,
+							&state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_RECOVERY_ABORT:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_recovery_abort_ioctl(argp,
+							  &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
+	case EBPFOS_IOC_FILE_RECOVERY_STATUS:
+		return ebpfos_file_recovery_status_ioctl(argp);
+	case EBPFOS_IOC_FILE_RECOVERY_RETIRE:
+		return ebpfos_file_recovery_retire_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}
@@ -393,7 +456,7 @@ static int __init ebpfos_init(void)
 	struct ebpfos_graph *initial;
 	int error;
 
-	initial = kzalloc(sizeof(*initial), GFP_KERNEL);
+	initial = kzalloc_obj(*initial, GFP_KERNEL);
 	if (!initial)
 		return -ENOMEM;
 	initial->generation = 1;

@@ -23,6 +23,7 @@ struct bpf_iter_priv_data {
 	struct bpf_iter_target_info *tinfo;
 	const struct bpf_iter_seq_info *seq_info;
 	struct bpf_prog *prog;
+	struct bpf_map *ebpfos_external_map;
 	u64 session_id;
 	u64 seq_num;
 	bool done_stop;
@@ -271,6 +272,8 @@ static int iter_release(struct inode *inode, struct file *file)
 	iter_priv = container_of(seq->private, struct bpf_iter_priv_data,
 				 target_private);
 
+	if (iter_priv->ebpfos_external_map)
+		bpf_ebpfos_map_external_put(iter_priv->ebpfos_external_map);
 	if (iter_priv->seq_info->fini_seq_private)
 		iter_priv->seq_info->fini_seq_private(seq->private);
 
@@ -610,11 +613,19 @@ static int prepare_seq_file(struct file *file, struct bpf_iter_link *link)
 		err = -ENOMEM;
 		goto release_prog;
 	}
+	/* An iterator fd can outlive its link and continue writing map values. */
+	if (link->aux.map && bpf_ebpfos_map_candidate(link->aux.map)) {
+		if (!bpf_ebpfos_map_external_get(link->aux.map)) {
+			err = -EBUSY;
+			goto release_seq_file;
+		}
+		priv_data->ebpfos_external_map = link->aux.map;
+	}
 
 	if (seq_info->init_seq_private) {
 		err = seq_info->init_seq_private(priv_data->target_private, &link->aux);
 		if (err)
-			goto release_seq_file;
+			goto release_external_map;
 	}
 
 	init_seq_meta(priv_data, tinfo, seq_info, prog);
@@ -623,6 +634,9 @@ static int prepare_seq_file(struct file *file, struct bpf_iter_link *link)
 
 	return 0;
 
+release_external_map:
+	if (priv_data->ebpfos_external_map)
+		bpf_ebpfos_map_external_put(priv_data->ebpfos_external_map);
 release_seq_file:
 	seq_release_private(file->f_inode, file);
 	file->private_data = NULL;

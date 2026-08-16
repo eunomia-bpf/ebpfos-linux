@@ -138,6 +138,11 @@ static int bpf_iter_attach_map(struct bpf_prog *prog,
 		err = -EACCES;
 		goto put_map;
 	}
+	if (bpf_ebpfos_map_candidate(map) &&
+	    !bpf_ebpfos_map_external_get(map)) {
+		err = -EBUSY;
+		goto put_map;
+	}
 
 	aux->map = map;
 	return 0;
@@ -149,6 +154,8 @@ put_map:
 
 static void bpf_iter_detach_map(struct bpf_iter_aux_info *aux)
 {
+	if (bpf_ebpfos_map_candidate(aux->map))
+		bpf_ebpfos_map_external_put(aux->map);
 	bpf_map_put_with_uref(aux->map);
 }
 
