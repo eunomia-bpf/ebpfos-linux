@@ -34,39 +34,58 @@ static int ebpfos_ops_init(struct btf *btf)
 #define DEFINE_EBPFOS_REGISTRY(_name, _type, _active)                         \
 static int ebpfos_##_name##_reg(void *kdata, struct bpf_link *link)           \
 {                                                                              \
-	int ret = 0;                                                              \
-	mutex_lock(&ebpfos_ops_lock);                                             \
-	if (rcu_access_pointer(_active))                                          \
-		ret = -EBUSY;                                                       \
-	else                                                                       \
-		rcu_assign_pointer(_active, (struct _type *)kdata);                  \
-	mutex_unlock(&ebpfos_ops_lock);                                           \
+	int ret;                                                                  \
+	ebpfos_admission_gate_lock();                                             \
+	ret = ebpfos_legacy_mutation_check_locked();                              \
+	if (!ret) {                                                               \
+		mutex_lock(&ebpfos_ops_lock);                                     \
+		if (rcu_access_pointer(_active))                                  \
+			ret = -EBUSY;                                               \
+		else {                                                             \
+			ret = ebpfos_legacy_binding_add_locked();                   \
+			if (!ret)                                                   \
+				rcu_assign_pointer(_active,                         \
+						   (struct _type *)kdata);          \
+		}                                                                  \
+		mutex_unlock(&ebpfos_ops_lock);                                   \
+	}                                                                          \
+	ebpfos_admission_gate_unlock();                                           \
 	return ret;                                                                \
 }                                                                                \
 static void ebpfos_##_name##_unreg(void *kdata, struct bpf_link *link)         \
 {                                                                              \
 	bool removed = false;                                                     \
+	ebpfos_admission_gate_lock();                                             \
 	mutex_lock(&ebpfos_ops_lock);                                             \
 	if (rcu_access_pointer(_active) == (struct _type *)kdata) {               \
 		RCU_INIT_POINTER(_active, NULL);                                     \
 		removed = true;                                                      \
 	}                                                                          \
 	mutex_unlock(&ebpfos_ops_lock);                                           \
-	if (removed)                                                               \
+	if (removed) {                                                             \
 		synchronize_rcu();                                                   \
+		ebpfos_legacy_binding_del_locked();                                  \
+	}                                                                          \
+	ebpfos_admission_gate_unlock();                                           \
 }                                                                                \
 static int ebpfos_##_name##_update(void *kdata, void *old_kdata,               \
 				   struct bpf_link *link)                         \
 {                                                                              \
-	int ret = 0;                                                              \
-	mutex_lock(&ebpfos_ops_lock);                                             \
-	if (rcu_access_pointer(_active) != (struct _type *)old_kdata)             \
-		ret = -ESTALE;                                                      \
-	else                                                                       \
-		rcu_assign_pointer(_active, (struct _type *)kdata);                  \
-	mutex_unlock(&ebpfos_ops_lock);                                           \
-	if (!ret)                                                                  \
-		synchronize_rcu();                                                   \
+	int ret;                                                                  \
+	ebpfos_admission_gate_lock();                                             \
+	ret = ebpfos_legacy_mutation_check_locked();                              \
+	if (!ret) {                                                               \
+		mutex_lock(&ebpfos_ops_lock);                                     \
+		if (rcu_access_pointer(_active) !=                               \
+		    (struct _type *)old_kdata)                                    \
+			ret = -ESTALE;                                              \
+		else                                                               \
+			rcu_assign_pointer(_active, (struct _type *)kdata);          \
+		mutex_unlock(&ebpfos_ops_lock);                                   \
+		if (!ret)                                                          \
+			synchronize_rcu();                                           \
+	}                                                                          \
+	ebpfos_admission_gate_unlock();                                           \
 	return ret;                                                                \
 }
 

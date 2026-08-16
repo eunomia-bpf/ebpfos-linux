@@ -3,6 +3,7 @@
 #define _LINUX_EBPFOS_H
 
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/types.h>
 #include <uapi/linux/ebpfos.h>
 
@@ -10,16 +11,82 @@ struct file;
 struct inode;
 struct iov_iter;
 struct kiocb;
+struct bpf_map;
+struct bpf_prog;
+struct ebpfos_admission;
+struct ebpfos_binding;
+struct ebpfos_prog_identity;
 
 typedef ssize_t (*ebpfos_file_iter_fn)(struct kiocb *iocb,
 				       struct iov_iter *iter);
 
 #ifdef CONFIG_EBPFOS
-/* Public dispatch selects typed struct_ops first and raw graph as fallback. */
+/* Legacy graph dispatch; typed struct_ops call it only as a fallback. */
 u32 ebpfos_run_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args);
-u32 ebpfos_run_raw_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args);
 bool ebpfos_hook_enabled(enum ebpfos_hook_id hook);
+long ebpfos_policy_activate_ioctl(void __user *argp);
+long ebpfos_policy_status_ioctl(void __user *argp);
+long ebpfos_admission_seal_ioctl(void __user *argp);
+long ebpfos_admission_info_ioctl(void __user *argp);
+
+/* The admission gate is outermost to every subsystem route/object lock. */
+void ebpfos_admission_gate_lock(void);
+void ebpfos_admission_gate_unlock(void);
+bool ebpfos_policy_enforcing(void);
+bool ebpfos_policy_enforcing_locked(void);
+int ebpfos_legacy_mutation_check_locked(void);
+int ebpfos_legacy_binding_add_locked(void);
+void ebpfos_legacy_binding_del_locked(void);
+/* Mark every managed file route DRAINING and wake its admission waiters. */
+int ebpfos_file_policy_rotate_locked(void);
+
+struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd);
+/* Final put may acquire the admission gate; callers must not hold it. */
+void ebpfos_admission_put(struct ebpfos_admission *admission);
+int ebpfos_admission_claim_locked(struct ebpfos_admission *admission,
+				  const struct ebpfos_binding *predecessor,
+				  u32 expected_use);
+int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
+				       struct ebpfos_admission *e4,
+				       const struct ebpfos_binding *predecessor);
+int ebpfos_admission_publish_validate_locked(
+	struct ebpfos_admission *admission,
+	const struct ebpfos_binding *predecessor, bool recovery);
+int ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
+				    bool recovery);
+int ebpfos_admission_recovery_e3_consume_locked(
+	struct ebpfos_admission *e3, struct ebpfos_admission *e4);
+void ebpfos_admission_burn_locked(struct ebpfos_admission *admission);
+void ebpfos_admission_burn_pair_locked(struct ebpfos_admission *first,
+				       struct ebpfos_admission *second);
+u32 ebpfos_admission_state_locked(struct ebpfos_admission *admission);
+void ebpfos_admission_fill_identity_locked(
+	struct ebpfos_admission *admission,
+	struct ebpfos_admission_identity_v1 *identity);
+struct ebpfos_binding *ebpfos_admission_binding_get(
+	struct ebpfos_admission *admission);
+
+int ebpfos_native_binding_create_locked(struct ebpfos_binding **binding);
+struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding);
+void ebpfos_binding_put(struct ebpfos_binding *binding);
+int ebpfos_binding_acquire_current_locked(struct ebpfos_binding *binding);
+bool ebpfos_binding_content_matches(const struct ebpfos_binding *binding,
+				    const u8 digest[32]);
+u64 ebpfos_binding_policy_generation(const struct ebpfos_binding *binding);
+u64 ebpfos_binding_runtime_schema(const struct ebpfos_binding *binding);
+u32 ebpfos_binding_use(const struct ebpfos_binding *binding);
+u32 ebpfos_binding_kind(const struct ebpfos_binding *binding);
+const u8 *ebpfos_binding_content_digest(const struct ebpfos_binding *binding);
+const struct ebpfos_component_desc_v1 *
+ebpfos_binding_descriptor(const struct ebpfos_binding *binding);
+struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
+struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
+void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
+				  struct ebpfos_admission_identity_v1 *identity);
+void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
+
 long ebpfos_object_create_ioctl(void __user *argp);
+/* Caller holds the admission gate across FILE_ENROLL publication. */
 long ebpfos_file_enroll_ioctl(void __user *argp);
 long ebpfos_file_status_ioctl(void __user *argp);
 long ebpfos_file_replace_begin_ioctl(void __user *argp, void **txn_slot);
@@ -56,15 +123,225 @@ static inline u32 ebpfos_run_hook(enum ebpfos_hook_id hook,
 	return EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
 }
 
-static inline u32 ebpfos_run_raw_hook(enum ebpfos_hook_id hook,
-				      const u64 *args, u32 nr_args)
-{
-	return EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
-}
-
 static inline bool ebpfos_hook_enabled(enum ebpfos_hook_id hook)
 {
 	return false;
+}
+
+static inline long ebpfos_policy_activate_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_policy_status_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_admission_seal_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_admission_info_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void ebpfos_admission_gate_lock(void)
+{
+}
+
+static inline void ebpfos_admission_gate_unlock(void)
+{
+}
+
+static inline bool ebpfos_policy_enforcing(void)
+{
+	return false;
+}
+
+static inline bool ebpfos_policy_enforcing_locked(void)
+{
+	return false;
+}
+
+static inline int ebpfos_legacy_mutation_check_locked(void)
+{
+	return 0;
+}
+
+static inline int ebpfos_legacy_binding_add_locked(void)
+{
+	return 0;
+}
+
+static inline void ebpfos_legacy_binding_del_locked(void)
+{
+}
+
+static inline int ebpfos_file_policy_rotate_locked(void)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+static inline void ebpfos_admission_put(struct ebpfos_admission *admission)
+{
+}
+
+static inline int
+ebpfos_admission_claim_locked(struct ebpfos_admission *admission,
+			      const struct ebpfos_binding *predecessor,
+			      u32 expected_use)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int
+ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
+				   struct ebpfos_admission *e4,
+				   const struct ebpfos_binding *predecessor)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ebpfos_admission_publish_validate_locked(
+	struct ebpfos_admission *admission,
+	const struct ebpfos_binding *predecessor, bool recovery)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int
+ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
+				bool recovery)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ebpfos_admission_recovery_e3_consume_locked(
+	struct ebpfos_admission *e3, struct ebpfos_admission *e4)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void
+ebpfos_admission_burn_locked(struct ebpfos_admission *admission)
+{
+}
+
+static inline void ebpfos_admission_burn_pair_locked(
+	struct ebpfos_admission *first, struct ebpfos_admission *second)
+{
+}
+
+static inline u32
+ebpfos_admission_state_locked(struct ebpfos_admission *admission)
+{
+	return EBPFOS_ADMISSION_NONE;
+}
+
+static inline void ebpfos_admission_fill_identity_locked(
+	struct ebpfos_admission *admission,
+	struct ebpfos_admission_identity_v1 *identity)
+{
+}
+
+static inline struct ebpfos_binding *
+ebpfos_admission_binding_get(struct ebpfos_admission *admission)
+{
+	return NULL;
+}
+
+static inline int
+ebpfos_native_binding_create_locked(struct ebpfos_binding **binding)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline struct ebpfos_binding *
+ebpfos_binding_get(struct ebpfos_binding *binding)
+{
+	return NULL;
+}
+
+static inline void ebpfos_binding_put(struct ebpfos_binding *binding)
+{
+}
+
+static inline int
+ebpfos_binding_acquire_current_locked(struct ebpfos_binding *binding)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline bool
+ebpfos_binding_content_matches(const struct ebpfos_binding *binding,
+			       const u8 digest[32])
+{
+	return false;
+}
+
+static inline u64
+ebpfos_binding_policy_generation(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline u64
+ebpfos_binding_runtime_schema(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline u32 ebpfos_binding_use(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline u32 ebpfos_binding_kind(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline const u8 *
+ebpfos_binding_content_digest(const struct ebpfos_binding *binding)
+{
+	return NULL;
+}
+
+static inline const struct ebpfos_component_desc_v1 *
+ebpfos_binding_descriptor(const struct ebpfos_binding *binding)
+{
+	return NULL;
+}
+
+static inline struct bpf_prog *
+ebpfos_binding_prog(const struct ebpfos_binding *binding)
+{
+	return NULL;
+}
+
+static inline struct bpf_map *
+ebpfos_binding_map(const struct ebpfos_binding *binding)
+{
+	return NULL;
+}
+
+static inline void ebpfos_binding_fill_identity(
+	const struct ebpfos_binding *binding,
+	struct ebpfos_admission_identity_v1 *identity)
+{
+}
+
+static inline void
+ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity)
+{
 }
 
 static inline long ebpfos_object_create_ioctl(void __user *argp)

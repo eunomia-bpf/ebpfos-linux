@@ -1,8 +1,27 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config EBPFOS
 	bool "eBPFOS transactional component graph"
-	depends on BPF_SYSCALL
+	depends on BPF_SYSCALL && BPF_JIT
+	depends on KEYS && ASYMMETRIC_KEY_TYPE
+	depends on X509_CERTIFICATE_PARSER = y
+	depends on SYSTEM_DATA_VERIFICATION
+	select CRYPTO_LIB_SHA256
 	default n
+	help
+	  Build the eBPFOS component nucleus and its kernel-enforced admission
+	  boundary.  Admission uses a private keyring populated from exactly one
+	  compile-time X.509 certificate; it never consults a caller-selected or
+	  system-wide keyring.
+
+config EBPFOS_TRUSTED_KEYS
+	string "eBPFOS admission X.509 certificate"
+	depends on EBPFOS
+	help
+	  Path to one PEM X.509 certificate.  The build converts it to
+	  DER, and boot fails the admission trust setup unless the resulting
+	  list contains exactly one certificate.  Do not place a private key in
+	  this option or in the kernel image.
+
 config EBPFOS_SYSCALL_HOOK
 	bool "eBPFOS x86-64 syscall component boundary"
 	depends on EBPFOS && X86_64

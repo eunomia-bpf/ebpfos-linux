@@ -38,6 +38,7 @@ struct bpf_verifier_log;
 struct perf_event;
 struct bpf_prog;
 struct bpf_prog_aux;
+struct ebpfos_prog_identity;
 struct bpf_map;
 struct bpf_arena;
 struct sock;
@@ -1794,6 +1795,8 @@ struct bpf_prog_aux {
 	bool might_sleep;
 	bool kprobe_write_ctx;
 	bool ebpfos_provider;
+	u32 ebpfos_load_insn_cnt;
+	struct ebpfos_prog_identity *ebpfos_identity;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;

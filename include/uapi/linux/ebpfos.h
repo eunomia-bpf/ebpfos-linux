@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_UAPI_VERSION 8
+#define EBPFOS_UAPI_VERSION 9
 #define EBPFOS_IOC_MAGIC 0xe7
 #define EBPFOS_MAX_ARGS 6
 #define EBPFOS_MAX_STATE_SLOTS 16
@@ -366,6 +366,9 @@ enum ebpfos_file_admission_gate {
 	EBPFOS_FILE_ADMISSION_RECOVERING = 2,
 	EBPFOS_FILE_ADMISSION_E4_OPEN = 3,
 	EBPFOS_FILE_ADMISSION_FAILED = 4,
+	EBPFOS_FILE_ADMISSION_NATIVE_OPEN = 5,
+	EBPFOS_FILE_ADMISSION_BPF_OPEN = 6,
+	EBPFOS_FILE_ADMISSION_DRAINING = 7,
 };
 
 enum ebpfos_file_recovery_trigger {
@@ -751,6 +754,337 @@ struct ebpfos_ioc_file_recovery_status {
 	__u32 reserved;
 };
 
+/* Kernel-enforced component admission. */
+#define EBPFOS_POLICY_RECORD_V1_SIZE 256U
+#define EBPFOS_RESOURCE_DESC_V1_SIZE 96U
+#define EBPFOS_COMPONENT_DESC_V1_SIZE 1024U
+#define EBPFOS_ADMISSION_MAX_RESOURCES 1U
+#define EBPFOS_ADMISSION_MAX_SIGNATURE 16384U
+
+#define EBPFOS_POLICY_RECORD_V1_MAGIC "EBPFPOL1"
+#define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
+#define EBPFOS_ADMISSION_FORMAT_VERSION 1U
+
+#define EBPFOS_POLICY_F_ALLOW_NATIVE_BOOTSTRAP (1U << 0)
+#define EBPFOS_POLICY_F_TEST_ONLY (1U << 1)
+#define EBPFOS_POLICY_F_ALL \
+	(EBPFOS_POLICY_F_ALLOW_NATIVE_BOOTSTRAP | EBPFOS_POLICY_F_TEST_ONLY)
+
+#define EBPFOS_COMPONENT_F_TEST_ONLY (1U << 0)
+#define EBPFOS_COMPONENT_F_ALL EBPFOS_COMPONENT_F_TEST_ONLY
+
+#define EBPFOS_RESOURCE_F_FROZEN_BEFORE_LOAD (1U << 0)
+#define EBPFOS_RESOURCE_F_EXCLUSIVE_PROGRAM_OWNER (1U << 1)
+#define EBPFOS_RESOURCE_F_INITIAL_HASH_REQUIRED (1U << 2)
+#define EBPFOS_RESOURCE_F_ALL \
+	(EBPFOS_RESOURCE_F_FROZEN_BEFORE_LOAD | \
+	 EBPFOS_RESOURCE_F_EXCLUSIVE_PROGRAM_OWNER | \
+	 EBPFOS_RESOURCE_F_INITIAL_HASH_REQUIRED)
+
+#define EBPFOS_CAP_FILE_READ (1ULL << 0)
+#define EBPFOS_CAP_FILE_APPEND (1ULL << 1)
+#define EBPFOS_CAP_FILE_MIGRATE (1ULL << 2)
+#define EBPFOS_CAP_FILE_ALL \
+	(EBPFOS_CAP_FILE_READ | EBPFOS_CAP_FILE_APPEND | \
+	 EBPFOS_CAP_FILE_MIGRATE)
+
+#define EBPFOS_EFFECT_MAP_LOOKUP (1ULL << 0)
+#define EBPFOS_EFFECT_MAP_UPDATE (1ULL << 1)
+#define EBPFOS_EFFECT_OBJECT_READ (1ULL << 2)
+#define EBPFOS_EFFECT_OBJECT_WRITE (1ULL << 3)
+#define EBPFOS_EFFECT_STATE_READ (1ULL << 4)
+#define EBPFOS_EFFECT_STATE_WRITE (1ULL << 5)
+#define EBPFOS_EFFECT_FILE_PROVIDER_ALL \
+	(EBPFOS_EFFECT_MAP_LOOKUP | EBPFOS_EFFECT_MAP_UPDATE | \
+	 EBPFOS_EFFECT_OBJECT_READ | EBPFOS_EFFECT_OBJECT_WRITE | \
+	 EBPFOS_EFFECT_STATE_READ | EBPFOS_EFFECT_STATE_WRITE)
+
+enum ebpfos_policy_state {
+	EBPFOS_POLICY_INACTIVE = 0,
+	EBPFOS_POLICY_ACTIVE = 1,
+};
+
+enum ebpfos_component_domain {
+	EBPFOS_COMPONENT_DOMAIN_FILE = 1,
+};
+
+#define EBPFOS_COMPONENT_DOMAIN_FILE_MASK \
+	(1U << EBPFOS_COMPONENT_DOMAIN_FILE)
+
+enum ebpfos_component_use {
+	EBPFOS_COMPONENT_USE_PROD_V1 = 1,
+	EBPFOS_COMPONENT_USE_PROD_V2 = 2,
+	EBPFOS_COMPONENT_USE_RECOVERY_E2 = 3,
+	EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT = 4,
+	EBPFOS_COMPONENT_USE_RECOVERY_E4 = 5,
+};
+
+enum ebpfos_component_code_format {
+	EBPFOS_COMPONENT_CODE_BPF_ELF = 1,
+};
+
+enum ebpfos_verifier_profile {
+	EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER = 1,
+};
+
+#define EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK \
+	(1ULL << EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER)
+
+enum ebpfos_resource_kind {
+	EBPFOS_RESOURCE_ARRAY_MAP = 1,
+};
+
+enum ebpfos_admission_state {
+	EBPFOS_ADMISSION_NONE = 0,
+	EBPFOS_ADMISSION_FRESH = 1,
+	EBPFOS_ADMISSION_STAGED = 2,
+	EBPFOS_ADMISSION_STAGED_RECOVERY = 3,
+	EBPFOS_ADMISSION_CONSUMED = 4,
+	EBPFOS_ADMISSION_BURNED = 5,
+	EBPFOS_ADMISSION_STALE = 6,
+};
+
+enum ebpfos_admitted_binding_kind {
+	EBPFOS_ADMITTED_BINDING_NATIVE = 1,
+	EBPFOS_ADMITTED_BINDING_BPF = 2,
+};
+
+struct ebpfos_policy_record_v1 {
+	__u8 magic[8];
+	__le16 format_version;
+	__le16 header_size;
+	__le32 total_size;
+	__le32 flags;
+	__le32 domain_mask;
+	__u8 realm_id[16];
+	__le64 generation;
+	__u8 previous_record_digest[32];
+	__u8 host_policy_sha256[32];
+	__le64 verifier_profile_mask;
+	__le64 capability_ceiling;
+	__le64 effect_ceiling;
+	__le32 max_static_insns;
+	__le32 max_verified_insns;
+	__le32 max_stack_depth;
+	__le32 max_context_size;
+	__le32 max_resources;
+	__le32 reserved0;
+	__le64 max_map_bytes;
+	__le64 max_call_bytes;
+	__u8 kernel_abi_sha256[32];
+	__u8 native_bootstrap_sha256[32];
+	__u8 reserved[16];
+};
+
+struct ebpfos_resource_desc_v1 {
+	__le32 kind;
+	__le32 flags;
+	__le32 map_type;
+	__le32 key_size;
+	__le32 value_size;
+	__le32 max_entries;
+	__le32 map_flags;
+	__le32 reserved0;
+	__le64 map_extra;
+	__le64 logical_bytes;
+	__le64 canonical_bytes;
+	__u8 reserved[40];
+};
+
+struct ebpfos_component_desc_v1 {
+	__u8 magic[8];
+	__le16 format_version;
+	__le16 header_size;
+	__le32 total_size;
+	__le32 flags;
+	__le32 domain;
+	__le32 use;
+	__le32 code_format;
+	__le32 verifier_profile;
+	__le32 reserved0;
+	__u8 realm_id[16];
+	__le64 policy_generation;
+	__u8 policy_record_digest[32];
+	__u8 host_policy_sha256[32];
+	__u8 component_id[16];
+	__le64 component_version;
+	__le64 provider_type_id;
+	__le64 transition_id;
+	__le64 predecessor_policy_generation;
+	__u8 predecessor_policy_digest[32];
+	__u8 predecessor_content_digest[32];
+	__u8 contract_sha256[32];
+	__u8 interface_sha256[32];
+	__u8 authority_sha256[32];
+	__u8 abstract_schema_sha256[32];
+	__u8 concrete_schema_sha256[32];
+	__u8 attested_elf_sha256[32];
+	__u8 load_image_sha256[32];
+	__u8 initial_map_sha256[32];
+	__le64 abi_id;
+	__le32 abi_version;
+	__le32 context_size;
+	__le64 runtime_schema_u64;
+	__le64 capability_mask;
+	__le64 effect_mask;
+	__le32 prog_type;
+	__le32 semantic_prog_flags;
+	__le32 exact_insn_count;
+	__le32 max_verified_insns;
+	__le32 max_stack_depth;
+	__le32 max_ctx_offset;
+	__le32 max_tail_calls;
+	__le32 resource_count;
+	__le64 max_call_bytes;
+	struct ebpfos_resource_desc_v1 resource;
+	__u8 reserved[352];
+};
+
+struct ebpfos_ioc_policy_activate {
+	struct ebpfos_policy_record_v1 record;
+	__aligned_u64 signature;
+	__u32 signature_size;
+	__u32 flags;
+};
+
+struct ebpfos_ioc_policy_status {
+	__u32 state;
+	__u32 policy_flags;
+	__u8 realm_id[16];
+	__u64 generation;
+	__u8 policy_record_digest[32];
+	__u8 root_fingerprint[32];
+	__u64 staged_grants;
+	__u64 legacy_bindings;
+	__u8 reserved[16];
+};
+
+struct ebpfos_ioc_admission_seal {
+	__s32 prog_fd;
+	__s32 map_fd;
+	__u32 flags;
+	__u32 signature_size;
+	__aligned_u64 signature;
+	struct ebpfos_component_desc_v1 descriptor;
+	__s32 admission_fd;
+	__u32 admission_state;
+	__u64 grant_id;
+	__u32 prog_id;
+	__u32 map_id;
+	__u8 content_digest[32];
+	__u8 program_digest[32];
+	__u8 map_digest[32];
+};
+
+struct ebpfos_ioc_admission_info {
+	__s32 admission_fd;
+	__u32 flags;
+	__u64 grant_id;
+	__u32 admission_state;
+	__u32 prog_id;
+	__u32 map_id;
+	__u32 reserved0;
+	__u8 content_digest[32];
+	__u8 program_digest[32];
+	__u8 map_digest[32];
+	struct ebpfos_component_desc_v1 descriptor;
+};
+
+struct ebpfos_ioc_file_replace_begin_v2 {
+	__s32 file_fd;
+	__s32 admission_fd;
+	__u32 flags;
+	__u32 reserved0;
+	__u64 expected_route_id;
+	__u64 expected_epoch;
+	__u8 expected_active_content_digest[32];
+	__u64 txn_id;
+	__u64 candidate_provider_id;
+	__u64 target_epoch;
+	__u64 snapshot_sequence;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+	__u32 candidate_prog_id;
+	__u32 candidate_map_id;
+	__u8 candidate_content_digest[32];
+	__u8 reserved[8];
+};
+
+struct ebpfos_ioc_file_recovery_begin_v2 {
+	__s32 file_fd;
+	__s32 e3_admission_fd;
+	__s32 e4_admission_fd;
+	__u32 flags;
+	__u32 log_capacity;
+	__u32 expected_fault_reason;
+	__u32 reserved0;
+	__u32 reserved1;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u8 expected_active_content_digest[32];
+	__u64 txn_id;
+	__u64 recovery_id;
+	__u64 e3_provider_id;
+	__u64 e3_epoch;
+	__u64 e4_provider_id;
+	__u64 e4_epoch;
+	__u64 snapshot_sequence;
+	__u64 snapshot_size;
+	__u64 snapshot_digest;
+	__u8 e3_content_digest[32];
+	__u8 e4_content_digest[32];
+};
+
+/* Input-only: publication is complete before this command returns. */
+struct ebpfos_ioc_file_recovery_arm_v2 {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 txn_id;
+	__u64 recovery_id;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u8 expected_active_content_digest[32];
+	__u8 expected_e3_content_digest[32];
+	__u8 expected_e4_content_digest[32];
+	__u8 reserved[16];
+};
+
+struct ebpfos_admission_identity_v1 {
+	__u64 grant_id;
+	__u64 policy_generation;
+	__u32 binding_kind;
+	__u32 admission_state;
+	__u32 prog_id;
+	__u32 map_id;
+	__u8 policy_record_digest[32];
+	__u8 content_digest[32];
+	__u8 program_digest[32];
+	__u8 map_digest[32];
+	__u8 contract_sha256[32];
+	__u8 abstract_schema_sha256[32];
+	__u8 concrete_schema_sha256[32];
+	__u8 authority_sha256[32];
+};
+
+struct ebpfos_ioc_file_admission_status {
+	__s32 file_fd;
+	__u32 flags;
+	__u64 expected_route_id;
+	__u64 route_id;
+	__u64 provider_id;
+	__u64 epoch;
+	__u32 route_state;
+	__u32 active_present;
+	__u32 candidate_present;
+	__u32 admission_gate;
+	struct ebpfos_admission_identity_v1 active;
+	struct ebpfos_admission_identity_v1 candidate;
+	__u32 admitted_calls;
+	__u32 admission_waiters;
+};
+
 #define EBPFOS_IOC_OBJECT_CREATE \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x10, struct ebpfos_ioc_object_create)
 #define EBPFOS_IOC_CAP_DERIVE \
@@ -795,5 +1129,21 @@ struct ebpfos_ioc_file_recovery_status {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x2a, struct ebpfos_ioc_file_recovery_status)
 #define EBPFOS_IOC_FILE_RECOVERY_RETIRE \
 	_IOW(EBPFOS_IOC_MAGIC, 0x2b, struct ebpfos_ioc_file_recovery_retire)
+#define EBPFOS_IOC_POLICY_ACTIVATE \
+	_IOW(EBPFOS_IOC_MAGIC, 0x30, struct ebpfos_ioc_policy_activate)
+#define EBPFOS_IOC_POLICY_STATUS \
+	_IOR(EBPFOS_IOC_MAGIC, 0x31, struct ebpfos_ioc_policy_status)
+#define EBPFOS_IOC_ADMISSION_SEAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x32, struct ebpfos_ioc_admission_seal)
+#define EBPFOS_IOC_ADMISSION_INFO \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x33, struct ebpfos_ioc_admission_info)
+#define EBPFOS_IOC_FILE_REPLACE_BEGIN_V2 \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x34, struct ebpfos_ioc_file_replace_begin_v2)
+#define EBPFOS_IOC_FILE_RECOVERY_BEGIN_V2 \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x35, struct ebpfos_ioc_file_recovery_begin_v2)
+#define EBPFOS_IOC_FILE_RECOVERY_ARM_V2 \
+	_IOW(EBPFOS_IOC_MAGIC, 0x36, struct ebpfos_ioc_file_recovery_arm_v2)
+#define EBPFOS_IOC_FILE_ADMISSION_STATUS \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x37, struct ebpfos_ioc_file_admission_status)
 
 #endif /* _UAPI_EBPFOS_H */

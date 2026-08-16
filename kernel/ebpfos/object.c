@@ -38,6 +38,7 @@ struct ebpfos_provider {
 	u64 deactivated_epoch;
 	u32 kind;
 	bool active;
+	bool legacy_published;
 };
 
 struct ebpfos_migration {
@@ -48,6 +49,7 @@ struct ebpfos_migration {
 	u64 snapshot_sequence;
 	u32 delta_count;
 	bool overflow;
+	bool initializing;
 };
 
 struct ebpfos_object {
@@ -93,6 +95,7 @@ struct ebpfos_prepared_call {
 	u64 argument;
 	u64 result;
 	u32 audit_flags;
+	bool legacy_unpublished;
 };
 
 static atomic64_t ebpfos_next_object_id = ATOMIC64_INIT(0);
@@ -242,6 +245,29 @@ static void ebpfos_provider_free(struct ebpfos_provider *provider)
 	kfree(provider);
 }
 
+static int ebpfos_provider_publish_locked(struct ebpfos_provider *provider)
+{
+	int error;
+
+	if (provider->kind != EBPFOS_PROVIDER_BPF ||
+	    provider->legacy_published)
+		return 0;
+	error = ebpfos_legacy_binding_add_locked();
+	if (error)
+		return error;
+	provider->legacy_published = true;
+	return 0;
+}
+
+static void ebpfos_provider_unpublish_locked(struct ebpfos_provider *provider)
+{
+	if (provider->kind != EBPFOS_PROVIDER_BPF ||
+	    !provider->legacy_published)
+		return;
+	provider->legacy_published = false;
+	ebpfos_legacy_binding_del_locked();
+}
+
 static void ebpfos_provider_snapshot(const struct ebpfos_provider *provider,
 				     struct ebpfos_ioc_provider_stats *stats)
 {
@@ -258,14 +284,17 @@ static void ebpfos_provider_snapshot(const struct ebpfos_provider *provider,
 	stats->active = provider->active;
 }
 
-static void ebpfos_provider_archive_locked(struct ebpfos_object *object,
+static bool ebpfos_provider_archive_locked(struct ebpfos_object *object,
 					   struct ebpfos_provider *provider)
 {
 	struct ebpfos_ioc_provider_stats *slot;
+	bool legacy_published;
 
 	lockdep_assert_held(&object->lock);
 	if (!provider)
-		return;
+		return false;
+	legacy_published = provider->legacy_published;
+	provider->legacy_published = false;
 	slot = &object->provider_history[object->provider_history_next];
 	ebpfos_provider_snapshot(provider, slot);
 	slot->active = 0;
@@ -276,6 +305,7 @@ static void ebpfos_provider_archive_locked(struct ebpfos_object *object,
 		object->provider_history_count++;
 	list_del(&provider->node);
 	ebpfos_provider_free(provider);
+	return legacy_published;
 }
 
 /*
@@ -365,6 +395,7 @@ static void ebpfos_migration_reset(struct ebpfos_object *object)
 	object->migration.snapshot_sequence = 0;
 	object->migration.delta_count = 0;
 	object->migration.overflow = false;
+	object->migration.initializing = false;
 }
 
 static void ebpfos_migration_abort_locked(struct ebpfos_object *object)
@@ -411,7 +442,8 @@ static int ebpfos_replay_log(struct ebpfos_object *object,
 	return 0;
 }
 
-static int ebpfos_rollback_locked(struct ebpfos_object *object)
+static int ebpfos_rollback_locked(struct ebpfos_object *object,
+				  bool *legacy_unpublished)
 {
 	struct ebpfos_provider *failed = object->active;
 	struct ebpfos_provider *rollback = object->rollback;
@@ -454,7 +486,7 @@ static int ebpfos_rollback_locked(struct ebpfos_object *object)
 	object->rollback_log_count = 0;
 	object->rollback_valid = false;
 	object->rollback_count++;
-	ebpfos_provider_archive_locked(object, failed);
+	*legacy_unpublished = ebpfos_provider_archive_locked(object, failed);
 	return 0;
 }
 
@@ -489,7 +521,8 @@ static int ebpfos_prepare_call_locked(struct ebpfos_cap_file *cap,
 					&call->result);
 	if (error == EBPFOS_EXEC_FAULT) {
 		object->fault_count++;
-		error = ebpfos_rollback_locked(object);
+		error = ebpfos_rollback_locked(object,
+					       &call->legacy_unpublished);
 		if (error)
 			return error;
 		call->audit_flags |= EBPFOS_AUDIT_F_ROLLBACK;
@@ -599,6 +632,16 @@ static void ebpfos_commit_call_locked(struct ebpfos_object *object,
 	record->flags = call->audit_flags;
 }
 
+static void ebpfos_finish_call_unpublish(struct ebpfos_prepared_call *call)
+{
+	if (!call->legacy_unpublished)
+		return;
+	ebpfos_admission_gate_lock();
+	ebpfos_legacy_binding_del_locked();
+	ebpfos_admission_gate_unlock();
+	call->legacy_unpublished = false;
+}
+
 static void ebpfos_object_release_kref(struct kref *ref)
 {
 	struct ebpfos_object *object =
@@ -606,10 +649,13 @@ static void ebpfos_object_release_kref(struct kref *ref)
 	struct ebpfos_provider *provider;
 	struct ebpfos_provider *next;
 
+	ebpfos_admission_gate_lock();
 	list_for_each_entry_safe(provider, next, &object->providers, node) {
 		list_del(&provider->node);
+		ebpfos_provider_unpublish_locked(provider);
 		ebpfos_provider_free(provider);
 	}
+	ebpfos_admission_gate_unlock();
 	kvfree(object->migration.deltas);
 	kvfree(object->rollback_log);
 	kvfree(object->audit);
@@ -749,6 +795,7 @@ static ssize_t ebpfos_object_read(struct file *file, char __user *buffer,
 	if (!error)
 		ebpfos_commit_call_locked(object, &call);
 	mutex_unlock(&object->lock);
+	ebpfos_finish_call_unpublish(&call);
 	return error ? error : sizeof(call.result);
 }
 
@@ -772,6 +819,7 @@ static ssize_t ebpfos_object_write(struct file *file,
 	if (!error)
 		ebpfos_commit_call_locked(object, &call);
 	mutex_unlock(&object->lock);
+	ebpfos_finish_call_unpublish(&call);
 	return error ? error : sizeof(argument);
 }
 
@@ -846,11 +894,13 @@ static long ebpfos_call_ioctl(struct ebpfos_cap_file *cap, void __user *argp)
 	}
 	if (copy_to_user(argp, &request, sizeof(request))) {
 		mutex_unlock(&object->lock);
+		ebpfos_finish_call_unpublish(&call);
 		return -EFAULT;
 	}
 	if (!error)
 		ebpfos_commit_call_locked(object, &call);
 	mutex_unlock(&object->lock);
+	ebpfos_finish_call_unpublish(&call);
 	return error;
 }
 
@@ -864,6 +914,8 @@ static long ebpfos_replace_begin_ioctl(struct ebpfos_cap_file *cap,
 	struct bpf_prog *prog = NULL;
 	u64 value;
 	u64 result;
+	u64 txn_id;
+	int copy_error;
 	int error;
 
 	if (!(cap->rights & EBPFOS_RIGHT_REPLACE))
@@ -909,6 +961,10 @@ static long ebpfos_replace_begin_ioctl(struct ebpfos_cap_file *cap,
 		return -ENOMEM;
 	}
 
+	ebpfos_admission_gate_lock();
+	error = ebpfos_legacy_mutation_check_locked();
+	if (error)
+		goto error_gate;
 	mutex_lock(&object->lock);
 	if (object->migration.candidate) {
 		error = -EBUSY;
@@ -949,19 +1005,41 @@ static long ebpfos_replace_begin_ioctl(struct ebpfos_cap_file *cap,
 	object->migration.snapshot_sequence = object->last_sequence;
 	object->migration.delta_count = 0;
 	object->migration.overflow = false;
+	object->migration.initializing = true;
 	request.txn_id = object->migration.txn_id;
 	request.snapshot_sequence = object->migration.snapshot_sequence;
 	request.target_provider_id = candidate->id;
-	if (copy_to_user(argp, &request, sizeof(request))) {
+	txn_id = object->migration.txn_id;
+	candidate = NULL;
+	deltas = NULL;
+	mutex_unlock(&object->lock);
+	ebpfos_admission_gate_unlock();
+
+	copy_error = copy_to_user(argp, &request, sizeof(request)) ?
+		     -EFAULT : 0;
+	ebpfos_admission_gate_lock();
+	error = ebpfos_legacy_mutation_check_locked();
+	mutex_lock(&object->lock);
+	if (!object->migration.candidate ||
+	    object->migration.txn_id != txn_id ||
+	    object->migration.owner_capability_id != cap->id) {
+		if (!copy_error && !error)
+			error = -ESTALE;
+	} else if (copy_error || error) {
 		ebpfos_migration_abort_locked(object);
-		mutex_unlock(&object->lock);
-		return -EFAULT;
+		if (copy_error)
+			error = copy_error;
+	} else {
+		object->migration.initializing = false;
 	}
 	mutex_unlock(&object->lock);
-	return 0;
+	ebpfos_admission_gate_unlock();
+	return copy_error ?: error;
 
 error_locked:
 	mutex_unlock(&object->lock);
+error_gate:
+	ebpfos_admission_gate_unlock();
 	kvfree(deltas);
 	ebpfos_provider_free(candidate);
 	return error;
@@ -985,11 +1063,19 @@ static long ebpfos_replace_commit_ioctl(struct ebpfos_cap_file *cap,
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 
+	ebpfos_admission_gate_lock();
+	error = ebpfos_legacy_mutation_check_locked();
+	if (error)
+		goto out_gate;
 	mutex_lock(&object->lock);
 	candidate = object->migration.candidate;
 	if (!candidate || request.txn_id != object->migration.txn_id ||
 	    object->migration.owner_capability_id != cap->id) {
 		error = -ESTALE;
+		goto out_unlock;
+	}
+	if (object->migration.initializing) {
+		error = -EBUSY;
 		goto out_unlock;
 	}
 	if (object->migration.overflow) {
@@ -1015,8 +1101,12 @@ static long ebpfos_replace_commit_ioctl(struct ebpfos_cap_file *cap,
 	old = object->active;
 	captured = object->migration.delta_count;
 	deltas = object->migration.deltas;
-	if (object->rollback)
-		ebpfos_provider_archive_locked(object, object->rollback);
+	error = ebpfos_provider_publish_locked(candidate);
+	if (error)
+		goto abort_locked;
+	if (object->rollback &&
+	    ebpfos_provider_archive_locked(object, object->rollback))
+		ebpfos_legacy_binding_del_locked();
 	object->last_snapshot_sequence = object->migration.snapshot_sequence;
 	object->last_captured_deltas = captured;
 	ebpfos_migration_reset(object);
@@ -1031,6 +1121,7 @@ static long ebpfos_replace_commit_ioctl(struct ebpfos_cap_file *cap,
 	object->rollback_valid = true;
 	object->active = candidate;
 	mutex_unlock(&object->lock);
+	ebpfos_admission_gate_unlock();
 	kvfree(deltas);
 	return 0;
 
@@ -1038,6 +1129,8 @@ abort_locked:
 	ebpfos_migration_abort_locked(object);
 out_unlock:
 	mutex_unlock(&object->lock);
+out_gate:
+	ebpfos_admission_gate_unlock();
 	return error;
 }
 

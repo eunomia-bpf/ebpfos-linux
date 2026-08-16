@@ -41,6 +41,21 @@ struct ebpfos_file {
 static DEFINE_MUTEX(ebpfos_graph_lock);
 static struct ebpfos_graph __rcu *ebpfos_active_graph;
 
+static bool ebpfos_graph_has_legacy_binding(const struct ebpfos_graph *graph)
+{
+	return graph && (graph->hook_mask || graph->state_mask);
+}
+
+static int ebpfos_legacy_mutation_check(void)
+{
+	int error;
+
+	ebpfos_admission_gate_lock();
+	error = ebpfos_legacy_mutation_check_locked();
+	ebpfos_admission_gate_unlock();
+	return error;
+}
+
 static const u64 ebpfos_hook_abi[EBPFOS_HOOK_MAX] = {
 	[EBPFOS_HOOK_SYSCALL_ENTER] = EBPFOS_ABI_SYSCALL_ENTER,
 	[EBPFOS_HOOK_SYSCALL_EXIT] = EBPFOS_ABI_SYSCALL_EXIT,
@@ -114,6 +129,18 @@ u32 ebpfos_run_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args)
 	u32 result = EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
 	u32 i;
 
+	/* Activation proves the legacy graph empty; typed fallbacks stay neutral. */
+	if (ebpfos_policy_enforcing()) {
+		bool legacy;
+
+		rcu_read_lock();
+		graph = rcu_dereference(ebpfos_active_graph);
+		legacy = ebpfos_graph_has_legacy_binding(graph);
+		rcu_read_unlock();
+		if (WARN_ON_ONCE(legacy))
+			return EBPFOS_ACTION(EBPFOS_VERDICT_DENY, EPERM);
+		return result;
+	}
 	if ((unsigned int)hook >= EBPFOS_HOOK_MAX)
 		return result;
 	if (nr_args > EBPFOS_MAX_ARGS)
@@ -144,7 +171,8 @@ bool ebpfos_hook_enabled(enum ebpfos_hook_id hook)
 	struct ebpfos_graph *graph;
 	bool enabled = false;
 
-	if ((unsigned int)hook >= EBPFOS_HOOK_MAX)
+	if (ebpfos_policy_enforcing() ||
+	    (unsigned int)hook >= EBPFOS_HOOK_MAX)
 		return false;
 
 	rcu_read_lock();
@@ -194,9 +222,13 @@ static long ebpfos_ioctl_version(void __user *argp)
 static long ebpfos_ioctl_begin(struct ebpfos_file *state)
 {
 	struct ebpfos_graph *pending;
+	int error;
 
 	if (state->pending)
 		return -EBUSY;
+	error = ebpfos_legacy_mutation_check();
+	if (error)
+		return error;
 	mutex_lock(&ebpfos_graph_lock);
 	pending = ebpfos_graph_clone_locked();
 	mutex_unlock(&ebpfos_graph_lock);
@@ -211,9 +243,13 @@ static long ebpfos_ioctl_set_hook(struct ebpfos_file *state, void __user *argp)
 	struct ebpfos_ioc_set_hook request;
 	struct bpf_prog *prog = NULL;
 	struct bpf_prog *old;
+	int error;
 
 	if (!state->pending)
 		return -EINVAL;
+	error = ebpfos_legacy_mutation_check();
+	if (error)
+		return error;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 	if (request.hook_id >= EBPFOS_HOOK_MAX)
@@ -249,9 +285,13 @@ static long ebpfos_ioctl_set_state(struct ebpfos_file *state,
 	struct ebpfos_ioc_set_state request;
 	struct bpf_map *map = NULL;
 	struct bpf_map *old;
+	int error;
 
 	if (!state->pending)
 		return -EINVAL;
+	error = ebpfos_legacy_mutation_check();
+	if (error)
+		return error;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 	if (request.slot >= EBPFOS_MAX_STATE_SLOTS)
@@ -288,22 +328,42 @@ static long ebpfos_ioctl_commit(struct ebpfos_file *state, void __user *argp)
 	struct ebpfos_ioc_commit request;
 	struct ebpfos_graph *old;
 	struct ebpfos_graph *new;
+	bool new_legacy;
+	bool old_legacy;
+	int error;
 
 	if (!state->pending)
 		return -EINVAL;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 
+	ebpfos_admission_gate_lock();
+	error = ebpfos_legacy_mutation_check_locked();
+	if (error) {
+		ebpfos_admission_gate_unlock();
+		return error;
+	}
 	mutex_lock(&ebpfos_graph_lock);
 	old = rcu_dereference_protected(ebpfos_active_graph,
 					lockdep_is_held(&ebpfos_graph_lock));
 	if (request.expected_generation && old &&
 	    request.expected_generation != old->generation) {
 		mutex_unlock(&ebpfos_graph_lock);
+		ebpfos_admission_gate_unlock();
 		return -ESTALE;
 	}
 
 	new = state->pending;
+	old_legacy = ebpfos_graph_has_legacy_binding(old);
+	new_legacy = ebpfos_graph_has_legacy_binding(new);
+	if (!old_legacy && new_legacy) {
+		error = ebpfos_legacy_binding_add_locked();
+		if (error) {
+			mutex_unlock(&ebpfos_graph_lock);
+			ebpfos_admission_gate_unlock();
+			return error;
+		}
+	}
 	new->generation = old ? old->generation + 1 : 1;
 	state->pending = NULL;
 	rcu_assign_pointer(ebpfos_active_graph, new);
@@ -312,6 +372,9 @@ static long ebpfos_ioctl_commit(struct ebpfos_file *state, void __user *argp)
 
 	synchronize_rcu();
 	ebpfos_graph_put(old);
+	if (old_legacy && !new_legacy)
+		ebpfos_legacy_binding_del_locked();
+	ebpfos_admission_gate_unlock();
 	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
@@ -334,14 +397,22 @@ static long ebpfos_ioctl_status(void __user *argp)
 static long ebpfos_ioctl_run(void __user *argp)
 {
 	struct ebpfos_ioc_run request;
+	int error = 0;
 
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 	if (request.hook_id >= EBPFOS_HOOK_MAX ||
 	    request.nr_args > EBPFOS_MAX_ARGS)
 		return -ERANGE;
-	request.result = ebpfos_run_hook(request.hook_id, request.args,
-					request.nr_args);
+	ebpfos_admission_gate_lock();
+	if (ebpfos_policy_enforcing_locked())
+		error = -EPERM;
+	else
+		request.result = ebpfos_run_hook(request.hook_id, request.args,
+						request.nr_args);
+	ebpfos_admission_gate_unlock();
+	if (error)
+		return error;
 	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
@@ -370,28 +441,63 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_ioctl_run(argp);
 	case EBPFOS_IOC_SET_STATE:
 		return ebpfos_ioctl_set_state(state, argp);
+	case EBPFOS_IOC_POLICY_ACTIVATE:
+		return ebpfos_policy_activate_ioctl(argp);
+	case EBPFOS_IOC_POLICY_STATUS:
+		return ebpfos_policy_status_ioctl(argp);
+	case EBPFOS_IOC_ADMISSION_SEAL:
+		return ebpfos_admission_seal_ioctl(argp);
+	case EBPFOS_IOC_ADMISSION_INFO:
+		return ebpfos_admission_info_ioctl(argp);
 	case EBPFOS_IOC_OBJECT_CREATE:
 		return ebpfos_object_create_ioctl(argp);
 	case EBPFOS_IOC_FILE_ENROLL:
-		return ebpfos_file_enroll_ioctl(argp);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_file_enroll_ioctl(argp);
+		ebpfos_admission_gate_unlock();
+		return result;
 	case EBPFOS_IOC_FILE_STATUS:
 		return ebpfos_file_status_ioctl(argp);
 	case EBPFOS_IOC_FILE_REPLACE_BEGIN:
 		mutex_lock(&state->file_txn_lock);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_legacy_mutation_check_locked();
+		if (result) {
+			ebpfos_admission_gate_unlock();
+			mutex_unlock(&state->file_txn_lock);
+			return result;
+		}
 		result = ebpfos_file_replace_begin_ioctl(argp,
 							 &state->file_txn);
+		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_CATCHUP:
 		mutex_lock(&state->file_txn_lock);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_legacy_mutation_check_locked();
+		if (result) {
+			ebpfos_admission_gate_unlock();
+			mutex_unlock(&state->file_txn_lock);
+			return result;
+		}
 		result = ebpfos_file_replace_catchup_ioctl(argp,
 							   &state->file_txn);
+		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_COMMIT:
 		mutex_lock(&state->file_txn_lock);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_legacy_mutation_check_locked();
+		if (result) {
+			ebpfos_admission_gate_unlock();
+			mutex_unlock(&state->file_txn_lock);
+			return result;
+		}
 		result = ebpfos_file_replace_commit_ioctl(argp,
 							  &state->file_txn);
+		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_ABORT:
@@ -408,14 +514,30 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_BEGIN:
 		mutex_lock(&state->file_txn_lock);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_legacy_mutation_check_locked();
+		if (result) {
+			ebpfos_admission_gate_unlock();
+			mutex_unlock(&state->file_txn_lock);
+			return result;
+		}
 		result = ebpfos_file_recovery_begin_ioctl(argp,
 							  &state->file_txn);
+		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_ARM:
 		mutex_lock(&state->file_txn_lock);
+		ebpfos_admission_gate_lock();
+		result = ebpfos_legacy_mutation_check_locked();
+		if (result) {
+			ebpfos_admission_gate_unlock();
+			mutex_unlock(&state->file_txn_lock);
+			return result;
+		}
 		result = ebpfos_file_recovery_arm_ioctl(argp,
 							&state->file_txn);
+		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_ABORT:
@@ -428,6 +550,11 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_file_recovery_status_ioctl(argp);
 	case EBPFOS_IOC_FILE_RECOVERY_RETIRE:
 		return ebpfos_file_recovery_retire_ioctl(argp);
+	case EBPFOS_IOC_FILE_REPLACE_BEGIN_V2:
+	case EBPFOS_IOC_FILE_RECOVERY_BEGIN_V2:
+	case EBPFOS_IOC_FILE_RECOVERY_ARM_V2:
+	case EBPFOS_IOC_FILE_ADMISSION_STATUS:
+		return -EOPNOTSUPP;
 	default:
 		return -ENOTTY;
 	}

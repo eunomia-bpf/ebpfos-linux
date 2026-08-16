@@ -3058,6 +3058,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->expected_attach_type = attr->expected_attach_type;
 	prog->sleepable = !!(attr->prog_flags & BPF_F_SLEEPABLE);
 	prog->aux->ebpfos_provider = !!(attr->prog_flags & BPF_F_EBPFOS_PROVIDER);
+	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
 	prog->aux->dst_prog = dst_prog;
