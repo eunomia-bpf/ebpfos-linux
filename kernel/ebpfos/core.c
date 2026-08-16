@@ -452,52 +452,25 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case EBPFOS_IOC_OBJECT_CREATE:
 		return ebpfos_object_create_ioctl(argp);
 	case EBPFOS_IOC_FILE_ENROLL:
-		ebpfos_admission_gate_lock();
-		result = ebpfos_file_enroll_ioctl(argp);
-		ebpfos_admission_gate_unlock();
-		return result;
+		return ebpfos_file_enroll_ioctl(argp);
 	case EBPFOS_IOC_FILE_STATUS:
 		return ebpfos_file_status_ioctl(argp);
 	case EBPFOS_IOC_FILE_REPLACE_BEGIN:
 		mutex_lock(&state->file_txn_lock);
-		ebpfos_admission_gate_lock();
-		result = ebpfos_legacy_mutation_check_locked();
-		if (result) {
-			ebpfos_admission_gate_unlock();
-			mutex_unlock(&state->file_txn_lock);
-			return result;
-		}
 		result = ebpfos_file_replace_begin_ioctl(argp,
 							 &state->file_txn);
-		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_CATCHUP:
 		mutex_lock(&state->file_txn_lock);
-		ebpfos_admission_gate_lock();
-		result = ebpfos_legacy_mutation_check_locked();
-		if (result) {
-			ebpfos_admission_gate_unlock();
-			mutex_unlock(&state->file_txn_lock);
-			return result;
-		}
 		result = ebpfos_file_replace_catchup_ioctl(argp,
 							   &state->file_txn);
-		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_COMMIT:
 		mutex_lock(&state->file_txn_lock);
-		ebpfos_admission_gate_lock();
-		result = ebpfos_legacy_mutation_check_locked();
-		if (result) {
-			ebpfos_admission_gate_unlock();
-			mutex_unlock(&state->file_txn_lock);
-			return result;
-		}
 		result = ebpfos_file_replace_commit_ioctl(argp,
 							  &state->file_txn);
-		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_REPLACE_ABORT:
@@ -514,30 +487,14 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_BEGIN:
 		mutex_lock(&state->file_txn_lock);
-		ebpfos_admission_gate_lock();
-		result = ebpfos_legacy_mutation_check_locked();
-		if (result) {
-			ebpfos_admission_gate_unlock();
-			mutex_unlock(&state->file_txn_lock);
-			return result;
-		}
 		result = ebpfos_file_recovery_begin_ioctl(argp,
 							  &state->file_txn);
-		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_ARM:
 		mutex_lock(&state->file_txn_lock);
-		ebpfos_admission_gate_lock();
-		result = ebpfos_legacy_mutation_check_locked();
-		if (result) {
-			ebpfos_admission_gate_unlock();
-			mutex_unlock(&state->file_txn_lock);
-			return result;
-		}
 		result = ebpfos_file_recovery_arm_ioctl(argp,
 							&state->file_txn);
-		ebpfos_admission_gate_unlock();
 		mutex_unlock(&state->file_txn_lock);
 		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_ABORT:
@@ -551,10 +508,25 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case EBPFOS_IOC_FILE_RECOVERY_RETIRE:
 		return ebpfos_file_recovery_retire_ioctl(argp);
 	case EBPFOS_IOC_FILE_REPLACE_BEGIN_V2:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_replace_begin_v2_ioctl(argp,
+							    &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_BEGIN_V2:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_recovery_begin_v2_ioctl(
+			argp, &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
 	case EBPFOS_IOC_FILE_RECOVERY_ARM_V2:
+		mutex_lock(&state->file_txn_lock);
+		result = ebpfos_file_recovery_arm_v2_ioctl(argp,
+							   &state->file_txn);
+		mutex_unlock(&state->file_txn_lock);
+		return result;
 	case EBPFOS_IOC_FILE_ADMISSION_STATUS:
-		return -EOPNOTSUPP;
+		return ebpfos_file_admission_status_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}

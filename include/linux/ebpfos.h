@@ -86,19 +86,22 @@ void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 
 long ebpfos_object_create_ioctl(void __user *argp);
-/* Caller holds the admission gate across FILE_ENROLL publication. */
 long ebpfos_file_enroll_ioctl(void __user *argp);
 long ebpfos_file_status_ioctl(void __user *argp);
 long ebpfos_file_replace_begin_ioctl(void __user *argp, void **txn_slot);
+long ebpfos_file_replace_begin_v2_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_replace_catchup_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_replace_commit_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_replace_abort_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_replace_status_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_recovery_begin_ioctl(void __user *argp, void **txn_slot);
+long ebpfos_file_recovery_begin_v2_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_recovery_arm_ioctl(void __user *argp, void **txn_slot);
+long ebpfos_file_recovery_arm_v2_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_recovery_abort_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_recovery_status_ioctl(void __user *argp);
 long ebpfos_file_recovery_retire_ioctl(void __user *argp);
+long ebpfos_file_admission_status_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
@@ -365,6 +368,12 @@ static inline long ebpfos_file_replace_begin_ioctl(void __user *argp,
 	return -EOPNOTSUPP;
 }
 
+static inline long ebpfos_file_replace_begin_v2_ioctl(void __user *argp,
+						      void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
 static inline long ebpfos_file_replace_catchup_ioctl(void __user *argp,
 						     void **txn_slot)
 {
@@ -395,8 +404,20 @@ static inline long ebpfos_file_recovery_begin_ioctl(void __user *argp,
 	return -EOPNOTSUPP;
 }
 
+static inline long ebpfos_file_recovery_begin_v2_ioctl(void __user *argp,
+						       void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
 static inline long ebpfos_file_recovery_arm_ioctl(void __user *argp,
 						  void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_file_recovery_arm_v2_ioctl(void __user *argp,
+						     void **txn_slot)
 {
 	return -EOPNOTSUPP;
 }
@@ -413,6 +434,11 @@ static inline long ebpfos_file_recovery_status_ioctl(void __user *argp)
 }
 
 static inline long ebpfos_file_recovery_retire_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_file_admission_status_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
 }

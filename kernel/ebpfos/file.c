@@ -65,6 +65,7 @@ enum ebpfos_file_fault_role {
 };
 
 struct ebpfos_file_admission {
+	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
 	u64 invocation_id;
 	u64 acquire_id;
@@ -74,6 +75,7 @@ struct ebpfos_file_admission {
 	u32 provider_kind;
 	bool counted_e3;
 	bool counted_e4;
+	bool counted_binding;
 };
 
 struct ebpfos_file_call {
@@ -91,6 +93,8 @@ struct ebpfos_file_call {
 };
 
 struct ebpfos_file_recovery {
+	struct ebpfos_admission *e4_admission;
+	struct ebpfos_binding *e4_binding;
 	struct bpf_prog *e4_prog;
 	struct bpf_map *e4_map;
 	struct ebpfos_file_map_lease *e4_map_lease;
@@ -146,6 +150,7 @@ struct ebpfos_file_recovery {
 	bool e3_ready;
 	bool e4_base_ready;
 	bool e4_ready;
+	bool e4_burn_pending;
 };
 
 struct ebpfos_file_stream_state {
@@ -233,10 +238,12 @@ struct ebpfos_file_stream_report {
 
 struct ebpfos_inode_route {
 	struct kref ref;
+	struct list_head registry_node;
 	struct mutex op_lock; /* Serializes route state and provider calls. */
 	spinlock_t admission_lock;
 	struct inode *inode;
 	void *snapshot;
+	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
 	struct bpf_map *map;
 	struct ebpfos_file_map_lease *map_lease;
@@ -249,6 +256,8 @@ struct ebpfos_inode_route {
 	atomic64_t next_invocation_id;
 	atomic_t admitted_e3;
 	atomic_t admitted_e4;
+	atomic_t acquired_calls;
+	atomic_t admission_waiters;
 	u64 next_acquire_id;
 	u64 route_id;
 	u64 provider_id;
@@ -277,6 +286,10 @@ struct ebpfos_inode_route {
 	/* Monotone after the first BPF cutover: tmpfs must never resurrect. */
 	bool native_retired;
 	bool last_migration_bytes_validated;
+	bool registry_linked;
+	bool legacy_counted;
+	bool rotation_reserved;
+	u32 rotation_saved_gate;
 	u32 admission_gate;
 	u32 provider_kind;
 	u32 state;
@@ -285,6 +298,9 @@ struct ebpfos_inode_route {
 struct ebpfos_file_transaction {
 	struct ebpfos_inode_route *route;
 	struct file *file;
+	struct ebpfos_admission *admission;
+	struct ebpfos_binding *binding;
+	struct ebpfos_binding *source_binding;
 	struct bpf_prog *prog;
 	struct bpf_map *map;
 	struct ebpfos_file_map_lease *map_lease;
@@ -307,14 +323,18 @@ struct ebpfos_file_transaction {
 	struct ebpfos_file_stream_state stream;
 	int capture_error;
 	u32 source_provider_kind;
+	u32 source_admission_gate;
 	bool candidate_ready;
 	bool candidate_bytes_validated;
+	bool admitted;
 };
 
 DEFINE_STATIC_SRCU(ebpfos_inode_srcu);
 static DEFINE_MUTEX(ebpfos_file_enroll_lock);
 static DEFINE_MUTEX(ebpfos_file_map_lease_lock);
 static LIST_HEAD(ebpfos_file_map_leases);
+/* Protected by the global admission publish gate. */
+static LIST_HEAD(ebpfos_file_routes);
 static atomic64_t ebpfos_next_file_route_id = ATOMIC64_INIT(0);
 static atomic64_t ebpfos_next_file_provider_id = ATOMIC64_INIT(0);
 static atomic64_t ebpfos_next_file_cookie = ATOMIC64_INIT(0);
@@ -387,10 +407,15 @@ static void ebpfos_file_recovery_free(struct ebpfos_file_recovery *recovery)
 	if (!recovery)
 		return;
 	ebpfos_file_map_lease_release(recovery->e4_map_lease);
-	if (recovery->e4_prog)
-		bpf_prog_put(recovery->e4_prog);
-	if (recovery->e4_map)
-		bpf_map_put(recovery->e4_map);
+	ebpfos_admission_put(recovery->e4_admission);
+	if (recovery->e4_admission) {
+		ebpfos_binding_put(recovery->e4_binding);
+	} else {
+		if (recovery->e4_prog)
+			bpf_prog_put(recovery->e4_prog);
+		if (recovery->e4_map)
+			bpf_map_put(recovery->e4_map);
+	}
 	kvfree(recovery->canonical_base);
 	kvfree(recovery->log);
 	kfree(recovery);
@@ -402,10 +427,14 @@ static void ebpfos_inode_route_release(struct kref *ref)
 		container_of(ref, struct ebpfos_inode_route, ref);
 
 	ebpfos_file_map_lease_release(route->map_lease);
-	if (route->prog)
-		bpf_prog_put(route->prog);
-	if (route->map)
-		bpf_map_put(route->map);
+	if (route->binding) {
+		ebpfos_binding_put(route->binding);
+	} else {
+		if (route->prog)
+			bpf_prog_put(route->prog);
+		if (route->map)
+			bpf_map_put(route->map);
+	}
 	ebpfos_file_recovery_free(route->recovery);
 	kvfree(route->snapshot);
 	kfree(route);
@@ -430,6 +459,102 @@ ebpfos_inode_route_get(struct inode *inode)
 	return route;
 }
 
+int ebpfos_file_policy_rotate_locked(void)
+{
+	struct ebpfos_inode_route *route;
+	bool wake;
+	int error;
+
+	/* Also supplies the publish-gate lockdep assertion. */
+	if (!ebpfos_policy_enforcing_locked())
+		return -EUCLEAN;
+
+	/*
+	 * Do not take op_lock here: an already-acquired provider call may be
+	 * blocked in user copyout while holding it.  The publish gate excludes
+	 * new acquisitions and BEGIN, while admission_lock serializes this
+	 * reservation with fault/recovery state changes and transaction detach.
+	 */
+	list_for_each_entry(route, &ebpfos_file_routes, registry_node) {
+		spin_lock(&route->admission_lock);
+		if (READ_ONCE(route->state) != EBPFOS_FILE_ROUTE_ACTIVE ||
+		    route->migration || route->rotation_reserved) {
+			error = -EBUSY;
+		} else {
+			switch (route->admission_gate) {
+			case EBPFOS_FILE_ADMISSION_NATIVE_OPEN:
+			case EBPFOS_FILE_ADMISSION_BPF_OPEN:
+			case EBPFOS_FILE_ADMISSION_E4_OPEN:
+				route->rotation_saved_gate =
+					route->admission_gate;
+				route->rotation_reserved = true;
+				route->admission_gate =
+					EBPFOS_FILE_ADMISSION_DRAINING;
+				error = 0;
+				break;
+			default:
+				error = -EBUSY;
+				break;
+			}
+		}
+		spin_unlock(&route->admission_lock);
+		if (error)
+			goto rollback;
+	}
+
+	/*
+	 * A pre-acquired call may fail while routes are marked one by one.  If
+	 * every reservation still holds, the last DRAINING store is the global
+	 * rotation linearization point.  A later fault is ordered after it.
+	 */
+	list_for_each_entry(route, &ebpfos_file_routes, registry_node) {
+		spin_lock(&route->admission_lock);
+		if (!route->rotation_reserved ||
+		    READ_ONCE(route->state) != EBPFOS_FILE_ROUTE_ACTIVE ||
+		    route->migration ||
+		    route->admission_gate != EBPFOS_FILE_ADMISSION_DRAINING)
+			error = -EBUSY;
+		spin_unlock(&route->admission_lock);
+		if (error)
+			goto rollback;
+	}
+
+	list_for_each_entry(route, &ebpfos_file_routes, registry_node) {
+		spin_lock(&route->admission_lock);
+		route->rotation_reserved = false;
+		spin_unlock(&route->admission_lock);
+		atomic64_inc(&route->migration_progress);
+		atomic64_inc(&route->recovery_progress);
+		wake_up_all(&route->migration_wait);
+	}
+	return 0;
+
+rollback:
+	list_for_each_entry(route, &ebpfos_file_routes, registry_node) {
+		wake = false;
+		spin_lock(&route->admission_lock);
+		if (route->rotation_reserved) {
+			if (READ_ONCE(route->state) ==
+				    EBPFOS_FILE_ROUTE_ACTIVE &&
+			    !route->migration &&
+			    route->admission_gate ==
+				    EBPFOS_FILE_ADMISSION_DRAINING) {
+				route->admission_gate =
+					route->rotation_saved_gate;
+				wake = true;
+			}
+			route->rotation_reserved = false;
+		}
+		spin_unlock(&route->admission_lock);
+		if (wake) {
+			atomic64_inc(&route->migration_progress);
+			atomic64_inc(&route->recovery_progress);
+			wake_up_all(&route->migration_wait);
+		}
+	}
+	return error;
+}
+
 void ebpfos_inode_route_init(struct inode *inode)
 {
 	RCU_INIT_POINTER(inode->i_ebpfos_route, NULL);
@@ -439,12 +564,22 @@ void ebpfos_inode_route_destroy(struct inode *inode)
 {
 	struct ebpfos_inode_route *route;
 
+	ebpfos_admission_gate_lock();
 	route = rcu_dereference_protected(inode->i_ebpfos_route, true);
-	if (!route)
+	if (!route) {
+		ebpfos_admission_gate_unlock();
 		return;
+	}
 
 	rcu_assign_pointer(inode->i_ebpfos_route, NULL);
-	synchronize_srcu(&ebpfos_inode_srcu);
+	if (route->registry_linked) {
+		list_del_init(&route->registry_node);
+		route->registry_linked = false;
+	}
+	if (route->legacy_counted) {
+		ebpfos_legacy_binding_del_locked();
+		route->legacy_counted = false;
+	}
 	mutex_lock(&route->op_lock);
 	spin_lock(&route->admission_lock);
 	route->admission_gate = EBPFOS_FILE_ADMISSION_FAILED;
@@ -452,7 +587,13 @@ void ebpfos_inode_route_destroy(struct inode *inode)
 	spin_unlock(&route->admission_lock);
 	atomic64_inc(&route->migration_progress);
 	wake_up_all(&route->migration_wait);
+	if (route->recovery)
+		ebpfos_admission_burn_locked(route->recovery->e4_admission);
+	atomic64_inc(&route->migration_progress);
+	wake_up_all(&route->migration_wait);
 	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	synchronize_srcu(&ebpfos_inode_srcu);
 	ebpfos_inode_route_put(route);
 }
 
@@ -521,32 +662,81 @@ static int ebpfos_file_admission_acquire(
 	int error = 0;
 
 	memset(admission, 0, sizeof(*admission));
+	ebpfos_admission_gate_lock();
 	spin_lock(&route->admission_lock);
 	switch (route->admission_gate) {
 	case EBPFOS_FILE_ADMISSION_LEGACY:
+		if (ebpfos_policy_enforcing_locked())
+			error = -EUCLEAN;
 		break;
+	case EBPFOS_FILE_ADMISSION_NATIVE_OPEN:
+	case EBPFOS_FILE_ADMISSION_BPF_OPEN:
 	case EBPFOS_FILE_ADMISSION_E3_OPEN:
 	case EBPFOS_FILE_ADMISSION_E4_OPEN:
-		if (route->next_acquire_id == U64_MAX) {
+		if (!route->binding) {
+			if (ebpfos_policy_enforcing_locked()) {
+				error = -EUCLEAN;
+				break;
+			}
+			if (route->admission_gate !=
+				    EBPFOS_FILE_ADMISSION_E3_OPEN &&
+			    route->admission_gate !=
+				    EBPFOS_FILE_ADMISSION_E4_OPEN) {
+				error = -EUCLEAN;
+				break;
+			}
+			if (route->next_acquire_id == U64_MAX) {
+				error = -EOVERFLOW;
+				break;
+			}
+			admission->acquire_id = ++route->next_acquire_id;
+			admission->prog = route->prog;
+			admission->provider_id = route->provider_id;
+			admission->epoch = route->epoch;
+			admission->schema_hash = route->schema_hash;
+			admission->provider_kind = route->provider_kind;
+			if (route->admission_gate ==
+			    EBPFOS_FILE_ADMISSION_E3_OPEN) {
+				admission->counted_e3 = true;
+				atomic_inc(&route->admitted_e3);
+			} else {
+				admission->counted_e4 = true;
+				atomic_inc(&route->admitted_e4);
+			}
+			break;
+		}
+		if (route->next_acquire_id == U64_MAX ||
+		    atomic_read(&route->acquired_calls) == INT_MAX) {
 			error = -EOVERFLOW;
 			break;
 		}
+		error = ebpfos_binding_acquire_current_locked(route->binding);
+		if (error) {
+			if (error == -EAGAIN)
+				route->admission_gate =
+					EBPFOS_FILE_ADMISSION_DRAINING;
+			break;
+		}
+		admission->binding = route->binding;
 		admission->acquire_id = ++route->next_acquire_id;
-		admission->prog = route->prog;
+		admission->prog = ebpfos_binding_prog(route->binding);
 		admission->provider_id = route->provider_id;
 		admission->epoch = route->epoch;
 		admission->schema_hash = route->schema_hash;
 		admission->provider_kind = route->provider_kind;
-		if (route->admission_gate ==
-		    EBPFOS_FILE_ADMISSION_E3_OPEN) {
+		admission->counted_binding = true;
+		atomic_inc(&route->acquired_calls);
+		if (route->admission_gate == EBPFOS_FILE_ADMISSION_E3_OPEN) {
 			admission->counted_e3 = true;
 			atomic_inc(&route->admitted_e3);
-		} else {
+		} else if (route->admission_gate ==
+			   EBPFOS_FILE_ADMISSION_E4_OPEN) {
 			admission->counted_e4 = true;
 			atomic_inc(&route->admitted_e4);
 		}
 		break;
 	case EBPFOS_FILE_ADMISSION_RECOVERING:
+	case EBPFOS_FILE_ADMISSION_DRAINING:
 		error = -EAGAIN;
 		break;
 	default:
@@ -554,6 +744,9 @@ static int ebpfos_file_admission_acquire(
 		break;
 	}
 	spin_unlock(&route->admission_lock);
+	ebpfos_admission_gate_unlock();
+	if (error == -EAGAIN)
+		wake_up_all(&route->migration_wait);
 	return error;
 }
 
@@ -561,19 +754,26 @@ static void ebpfos_file_admission_release(
 	struct ebpfos_inode_route *route,
 	struct ebpfos_file_admission *admission)
 {
+	bool wake = false;
+
 	if (admission->counted_e3) {
 		admission->counted_e3 = false;
-		if (!atomic_dec_and_test(&route->admitted_e3))
-			return;
+		wake = atomic_dec_and_test(&route->admitted_e3);
 	} else if (admission->counted_e4) {
 		admission->counted_e4 = false;
-		if (!atomic_dec_and_test(&route->admitted_e4))
-			return;
-	} else {
-		return;
+		wake = atomic_dec_and_test(&route->admitted_e4);
 	}
-	atomic64_inc(&route->recovery_progress);
-	wake_up_all(&route->migration_wait);
+	if (admission->counted_binding) {
+		admission->counted_binding = false;
+		wake |= atomic_dec_and_test(&route->acquired_calls);
+		ebpfos_binding_put(admission->binding);
+		admission->binding = NULL;
+		admission->prog = NULL;
+	}
+	if (wake) {
+		atomic64_inc(&route->recovery_progress);
+		wake_up_all(&route->migration_wait);
+	}
 }
 
 static void ebpfos_file_recovery_progress_locked(
@@ -587,10 +787,13 @@ static void ebpfos_file_recovery_progress_locked(
 static void ebpfos_file_fence_locked(struct ebpfos_inode_route *route)
 {
 	lockdep_assert_held(&route->op_lock);
-	if (route->provider_kind == EBPFOS_PROVIDER_BPF &&
-	    route->state == EBPFOS_FILE_ROUTE_ACTIVE) {
-		route->fault_count++;
-		WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_FENCED);
+	if (route->provider_kind == EBPFOS_PROVIDER_BPF) {
+		spin_lock(&route->admission_lock);
+		if (route->state == EBPFOS_FILE_ROUTE_ACTIVE) {
+			route->fault_count++;
+			WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_FENCED);
+		}
+		spin_unlock(&route->admission_lock);
 	}
 }
 
@@ -656,10 +859,27 @@ static void ebpfos_file_recovery_fail_locked(
 	if (!recovery->fatal_error)
 		recovery->fatal_error = error;
 	recovery->phase = EBPFOS_FILE_RECOVERY_FAILED;
+	recovery->e4_burn_pending = !!recovery->e4_admission;
 	spin_lock(&route->admission_lock);
 	route->admission_gate = EBPFOS_FILE_ADMISSION_FAILED;
 	spin_unlock(&route->admission_lock);
 	ebpfos_file_recovery_progress_locked(route);
+}
+
+static void ebpfos_file_recovery_burn_failed(
+	struct ebpfos_inode_route *route)
+{
+	struct ebpfos_file_recovery *recovery;
+
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	recovery = route->recovery;
+	if (recovery && recovery->e4_burn_pending) {
+		ebpfos_admission_burn_locked(recovery->e4_admission);
+		recovery->e4_burn_pending = false;
+	}
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
 }
 
 static void ebpfos_file_recovery_attempt_fail_locked(
@@ -685,13 +905,18 @@ static void ebpfos_file_recovery_attempt_fail_locked(
 	ebpfos_file_recovery_fail_locked(route, error);
 }
 
-static void ebpfos_file_recovery_trigger_locked(
+static bool ebpfos_file_recovery_trigger_locked(
 	struct ebpfos_inode_route *route, struct ebpfos_file_call *call,
 	u32 trigger, u64 sequence, u64 epoch)
 {
 	struct ebpfos_file_recovery *recovery = route->recovery;
 
 	lockdep_assert_held(&route->op_lock);
+	spin_lock(&route->admission_lock);
+	if (route->admission_gate != EBPFOS_FILE_ADMISSION_E3_OPEN) {
+		spin_unlock(&route->admission_lock);
+		return false;
+	}
 	call->needs_retry = true;
 	recovery->pending_retries++;
 	recovery->trigger = trigger;
@@ -700,12 +925,12 @@ static void ebpfos_file_recovery_trigger_locked(
 	recovery->trigger_sequence = sequence;
 	recovery->trigger_epoch = epoch;
 	recovery->phase = EBPFOS_FILE_RECOVERY_FENCED;
-	spin_lock(&route->admission_lock);
 	recovery->fence_acquire_id = route->next_acquire_id;
 	route->admission_gate = EBPFOS_FILE_ADMISSION_RECOVERING;
 	WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_FENCED);
 	spin_unlock(&route->admission_lock);
 	ebpfos_file_recovery_progress_locked(route);
+	return true;
 }
 
 static bool ebpfos_file_recovery_capacity_locked(
@@ -720,10 +945,11 @@ static bool ebpfos_file_recovery_capacity_locked(
 	    call->admission.provider_id != recovery->e3_provider_id ||
 	    call->admission.epoch != recovery->e3_epoch)
 		return false;
+	if (!ebpfos_file_recovery_trigger_locked(
+		    route, call, EBPFOS_FILE_RECOVERY_TRIGGER_LOG_CAPACITY,
+		    sequence, call->admission.epoch))
+		return false;
 	recovery->capacity_triggers++;
-	ebpfos_file_recovery_trigger_locked(
-		route, call, EBPFOS_FILE_RECOVERY_TRIGGER_LOG_CAPACITY,
-		sequence, call->admission.epoch);
 	return true;
 }
 
@@ -754,6 +980,10 @@ static enum ebpfos_file_fault_role ebpfos_file_recovery_fault_locked(
 	if (recovery->phase != EBPFOS_FILE_RECOVERY_ARMED_E3)
 		return EBPFOS_FILE_FAULT_NONE;
 
+	if (!ebpfos_file_recovery_trigger_locked(
+		    route, call, EBPFOS_FILE_RECOVERY_TRIGGER_TYPED_FAULT,
+		    ctx->sequence, call->admission.epoch))
+		return EBPFOS_FILE_FAULT_NONE;
 	call->typed_fault = true;
 	recovery->faults_observed++;
 	recovery->fault_invocation_id = call->admission.invocation_id;
@@ -761,9 +991,6 @@ static enum ebpfos_file_fault_role ebpfos_file_recovery_fault_locked(
 	recovery->fault_sequence = ctx->sequence;
 	recovery->fault_epoch = ctx->epoch;
 	route->fault_count++;
-	ebpfos_file_recovery_trigger_locked(
-		route, call, EBPFOS_FILE_RECOVERY_TRIGGER_TYPED_FAULT,
-		ctx->sequence, call->admission.epoch);
 	return EBPFOS_FILE_FAULT_LEADER;
 }
 
@@ -1022,7 +1249,7 @@ static ssize_t ebpfos_file_bpf_write_locked(
 		}
 		recovery_delta = &recovery->log[recovery->log_count];
 		memcpy(recovery_delta->data, call->data, count);
-	} else if (!call->admission.prog) {
+	} else {
 		error = ebpfos_file_delta_slot_locked(route, count, &delta);
 		if (error)
 			return error;
@@ -1110,7 +1337,7 @@ static ssize_t ebpfos_file_bpf_write_locked(
 		recovery_delta->size = count;
 		recovery->committed_delta_bytes += count;
 		recovery->log_count++;
-	} else if (!call->admission.prog) {
+	} else {
 		ebpfos_file_capture_delta_locked(route, delta, file_cookie, sequence,
 						 before, new_size, count, count);
 	}
@@ -1318,12 +1545,12 @@ static bool ebpfos_file_admission_valid_locked(
 	struct ebpfos_file_recovery *recovery = route->recovery;
 
 	lockdep_assert_held(&route->op_lock);
-	if (!admission->prog)
+	if (!admission->binding)
 		return route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
 		       READ_ONCE(route->admission_gate) ==
 			       EBPFOS_FILE_ADMISSION_LEGACY;
 	if (route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
-	    route->prog == admission->prog &&
+	    route->binding == admission->binding &&
 	    route->provider_id == admission->provider_id &&
 	    route->epoch == admission->epoch)
 		return true;
@@ -1353,10 +1580,14 @@ ebpfos_file_locked_call(struct ebpfos_inode_route *route, struct kiocb *iocb,
 retry_admission:
 	error = ebpfos_file_admission_acquire(route, &call->admission);
 	if (error == -EAGAIN) {
+		atomic_inc(&route->admission_waiters);
 		result = wait_event_killable(
 			route->migration_wait,
 			READ_ONCE(route->admission_gate) !=
-				EBPFOS_FILE_ADMISSION_RECOVERING);
+				EBPFOS_FILE_ADMISSION_RECOVERING &&
+			READ_ONCE(route->admission_gate) !=
+				EBPFOS_FILE_ADMISSION_DRAINING);
+		atomic_dec(&route->admission_waiters);
 		if (result)
 			return result;
 		goto retry_admission;
@@ -1366,43 +1597,55 @@ retry_admission:
 			mutex_lock(&route->op_lock);
 			ebpfos_file_recovery_attempt_fail_locked(route, call, error);
 			mutex_unlock(&route->op_lock);
+			ebpfos_file_recovery_burn_failed(route);
 		}
 		return error;
 	}
 	call->admission.invocation_id = call->invocation_id;
 
 	mutex_lock(&route->op_lock);
-retry_legacy:
 	if (route->state == EBPFOS_FILE_ROUTE_DEAD) {
-		bool retired = route->native_retired;
+		bool retired = route->native_retired ||
+			       call->admission.binding ||
+			       ebpfos_policy_enforcing();
 
 		if (call->needs_retry && !call->retry_finished)
 			ebpfos_file_recovery_attempt_fail_locked(route, call, -EIO);
-		mutex_unlock(&route->op_lock);
 		ebpfos_file_admission_release(route, &call->admission);
+		mutex_unlock(&route->op_lock);
+		if (READ_ONCE(route->admission_gate) ==
+		    EBPFOS_FILE_ADMISSION_FAILED)
+			ebpfos_file_recovery_burn_failed(route);
 		return retired ? -EIO : native(iocb, iter);
 	}
 	if (!ebpfos_file_admission_valid_locked(route, &call->admission)) {
 		u32 gate = READ_ONCE(route->admission_gate);
 
 		atomic64_inc(&route->rejected_calls);
-		mutex_unlock(&route->op_lock);
 		ebpfos_file_admission_release(route, &call->admission);
+		mutex_unlock(&route->op_lock);
 		if (gate == EBPFOS_FILE_ADMISSION_E3_OPEN ||
 		    gate == EBPFOS_FILE_ADMISSION_E4_OPEN ||
-		    gate == EBPFOS_FILE_ADMISSION_RECOVERING)
+		    gate == EBPFOS_FILE_ADMISSION_RECOVERING ||
+		    gate == EBPFOS_FILE_ADMISSION_NATIVE_OPEN ||
+		    gate == EBPFOS_FILE_ADMISSION_BPF_OPEN ||
+		    gate == EBPFOS_FILE_ADMISSION_DRAINING)
 			goto retry_admission;
 		mutex_lock(&route->op_lock);
 		if (call->needs_retry && !call->retry_finished)
 			ebpfos_file_recovery_attempt_fail_locked(route, call, -EIO);
 		mutex_unlock(&route->op_lock);
+		if (READ_ONCE(route->admission_gate) ==
+		    EBPFOS_FILE_ADMISSION_FAILED)
+			ebpfos_file_recovery_burn_failed(route);
 		return -EIO;
 	}
-	if (!call->admission.prog && write &&
+	if (write &&
 	    ebpfos_file_write_must_wait_locked(route)) {
 		route->migration->stream.backpressure_waits++;
 		atomic64_inc(&route->migration_waiters);
 		progress = atomic64_read(&route->migration_progress);
+		ebpfos_file_admission_release(route, &call->admission);
 		mutex_unlock(&route->op_lock);
 		result = wait_event_killable(
 			route->migration_wait,
@@ -1410,16 +1653,15 @@ retry_legacy:
 		atomic64_dec(&route->migration_waiters);
 		if (result)
 			return result;
-		mutex_lock(&route->op_lock);
-		goto retry_legacy;
+		goto retry_admission;
 	}
 	ebpfos_file_cookie(iocb->ki_filp);
 	start_recovery = false;
 	wait_recovery = false;
 	atomic64_inc(&route->active_calls);
-	if ((call->admission.prog &&
+	if ((call->admission.binding &&
 	     call->admission.provider_kind == EBPFOS_PROVIDER_BPF) ||
-	    (!call->admission.prog &&
+	    (!call->admission.binding &&
 	     route->provider_kind == EBPFOS_PROVIDER_BPF))
 		result = write ? ebpfos_file_bpf_write_locked(
 			route, iocb, iter, call, &start_recovery,
@@ -1430,8 +1672,10 @@ retry_legacy:
 		result = ebpfos_file_native_call_locked(route, iocb, iter,
 							native, write);
 	atomic64_dec(&route->active_calls);
-	mutex_unlock(&route->op_lock);
 	ebpfos_file_admission_release(route, &call->admission);
+	mutex_unlock(&route->op_lock);
+	if (READ_ONCE(route->admission_gate) == EBPFOS_FILE_ADMISSION_FAILED)
+		ebpfos_file_recovery_burn_failed(route);
 	if (write && start_recovery) {
 		error = ebpfos_file_complete_recovery(route, call,
 						      iocb->ki_filp);
@@ -1441,6 +1685,7 @@ retry_legacy:
 				ebpfos_file_recovery_attempt_fail_locked(
 					route, call, error);
 			mutex_unlock(&route->op_lock);
+			ebpfos_file_recovery_burn_failed(route);
 			return error;
 		}
 		call->retry_count = 1;
@@ -1571,6 +1816,7 @@ ebpfos_inode_route_alloc(struct inode *inode)
 	if (!route)
 		return NULL;
 	kref_init(&route->ref);
+	INIT_LIST_HEAD(&route->registry_node);
 	mutex_init(&route->op_lock);
 	spin_lock_init(&route->admission_lock);
 	init_waitqueue_head(&route->migration_wait);
@@ -1580,6 +1826,8 @@ ebpfos_inode_route_alloc(struct inode *inode)
 	atomic64_set(&route->next_invocation_id, 0);
 	atomic_set(&route->admitted_e3, 0);
 	atomic_set(&route->admitted_e4, 0);
+	atomic_set(&route->acquired_calls, 0);
+	atomic_set(&route->admission_waiters, 0);
 	route->inode = inode;
 	route->route_id = ebpfos_file_new_id(&ebpfos_next_file_route_id);
 	route->provider_id =
@@ -1594,14 +1842,23 @@ ebpfos_inode_route_alloc(struct inode *inode)
 	return route;
 }
 
-static void ebpfos_file_enroll_fail(struct inode *inode,
-				    struct ebpfos_inode_route *route)
+static void ebpfos_file_enroll_unpublish_locked(
+	struct inode *inode, struct ebpfos_inode_route *route)
 {
+	lockdep_assert_held(&route->op_lock);
 	rcu_assign_pointer(inode->i_ebpfos_route, NULL);
-	synchronize_srcu(&ebpfos_inode_srcu);
+	if (route->registry_linked) {
+		list_del_init(&route->registry_node);
+		route->registry_linked = false;
+	}
+	if (route->legacy_counted) {
+		ebpfos_legacy_binding_del_locked();
+		route->legacy_counted = false;
+	}
+	spin_lock(&route->admission_lock);
+	route->admission_gate = EBPFOS_FILE_ADMISSION_FAILED;
 	WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_DEAD);
-	mutex_unlock(&route->op_lock);
-	ebpfos_inode_route_put(route);
+	spin_unlock(&route->admission_lock);
 }
 
 long ebpfos_file_enroll_ioctl(void __user *argp)
@@ -1614,6 +1871,8 @@ long ebpfos_file_enroll_ioctl(void __user *argp)
 	loff_t size;
 	long error = 0;
 	u64 cookie;
+	u32 open_gate;
+	bool published = false;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -1631,47 +1890,66 @@ long ebpfos_file_enroll_ioctl(void __user *argp)
 	}
 	inode = file_inode(file);
 
+	ebpfos_admission_gate_lock();
 	mutex_lock(&ebpfos_file_enroll_lock);
 	if (rcu_access_pointer(inode->i_ebpfos_route)) {
 		error = -EALREADY;
-		goto out_enroll;
+		goto out_unlock;
 	}
 
 	route = ebpfos_inode_route_alloc(inode);
 	if (!route) {
 		error = -ENOMEM;
-		goto out_enroll;
+		goto out_unlock;
 	}
 	mutex_lock(&route->op_lock);
+	if (ebpfos_policy_enforcing_locked()) {
+		error = ebpfos_native_binding_create_locked(&route->binding);
+		if (error)
+			goto fail_unpublished;
+		open_gate = EBPFOS_FILE_ADMISSION_NATIVE_OPEN;
+	} else {
+		error = ebpfos_legacy_binding_add_locked();
+		if (error)
+			goto fail_unpublished;
+		route->legacy_counted = true;
+		open_gate = EBPFOS_FILE_ADMISSION_LEGACY;
+	}
+	route->admission_gate = EBPFOS_FILE_ADMISSION_DRAINING;
 
 	i_mmap_lock_write(inode->i_mapping);
 	if (mapping_mapped(inode->i_mapping)) {
 		i_mmap_unlock_write(inode->i_mapping);
 		error = -EBUSY;
-		mutex_unlock(&route->op_lock);
-		ebpfos_inode_route_put(route);
-		goto out_enroll;
+		goto fail_unpublished;
 	}
 	rcu_assign_pointer(inode->i_ebpfos_route, route);
+	list_add_tail(&route->registry_node, &ebpfos_file_routes);
+	route->registry_linked = true;
+	published = true;
 	i_mmap_unlock_write(inode->i_mapping);
+	mutex_unlock(&route->op_lock);
+	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
 
-	/* Drain every read/write call that observed the native NULL route. */
+	/* New route observers wait on DRAINING while NULL-route calls finish. */
 	synchronize_srcu(&ebpfos_inode_srcu);
 
 	/* Lock order: route operation mutex before inode i_rwsem. */
+	mutex_lock(&route->op_lock);
 	inode_lock(inode);
 	size = i_size_read(inode);
 	route->visible_size = size;
 	inode_unlock(inode);
 	if (size < 0 || size > EBPFOS_FILE_SNAPSHOT_MAX) {
 		error = size < 0 ? -EIO : -EFBIG;
-		goto fail_published;
+		goto fail;
 	}
 	if (size) {
 		route->snapshot = kvmalloc(size, GFP_KERNEL | __GFP_NOWARN);
 		if (!route->snapshot) {
 			error = -ENOMEM;
-			goto fail_published;
+			goto fail;
 		}
 	}
 
@@ -1689,7 +1967,6 @@ long ebpfos_file_enroll_ioctl(void __user *argp)
 	route->visible_size = size;
 	route->snapshot_digest = ebpfos_file_digest(route->snapshot, size);
 	cookie = ebpfos_file_cookie(file);
-	WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_ACTIVE);
 	inode_unlock(inode);
 
 	request.route_id = route->route_id;
@@ -1700,20 +1977,97 @@ long ebpfos_file_enroll_ioctl(void __user *argp)
 	request.device = new_encode_dev(inode->i_sb->s_dev);
 	request.snapshot_size = route->snapshot_size;
 	request.snapshot_digest = route->snapshot_digest;
+	mutex_unlock(&route->op_lock);
+
+	/* No application call can pass DRAINING before a successful copyout. */
 	if (copy_to_user(argp, &request, sizeof(request))) {
 		error = -EFAULT;
-		ebpfos_file_enroll_fail(inode, route);
-	} else {
-		mutex_unlock(&route->op_lock);
+		goto fail_after_snapshot;
 	}
-	goto out_enroll;
+
+	/* Success is published after copyout and before this ioctl returns. */
+	ebpfos_admission_gate_lock();
+	mutex_lock(&ebpfos_file_enroll_lock);
+	mutex_lock(&route->op_lock);
+	if (rcu_access_pointer(inode->i_ebpfos_route) != route ||
+	    route->state != EBPFOS_FILE_ROUTE_ACTIVATING ||
+	    route->admission_gate != EBPFOS_FILE_ADMISSION_DRAINING) {
+		error = -ECANCELED;
+		goto fail_publish;
+	}
+	if (route->binding) {
+		error = ebpfos_binding_acquire_current_locked(route->binding);
+		if (!error)
+			ebpfos_binding_put(route->binding);
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+	}
+	if (error)
+		goto fail_publish;
+	spin_lock(&route->admission_lock);
+	route->admission_gate = open_gate;
+	WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_ACTIVE);
+	spin_unlock(&route->admission_lock);
+	mutex_unlock(&route->op_lock);
+	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
+	wake_up_all(&route->migration_wait);
+	goto out_file;
+
+fail_after_snapshot:
+	ebpfos_admission_gate_lock();
+	mutex_lock(&ebpfos_file_enroll_lock);
+	mutex_lock(&route->op_lock);
+	if (rcu_access_pointer(inode->i_ebpfos_route) == route)
+		ebpfos_file_enroll_unpublish_locked(inode, route);
+	else
+		WARN_ON_ONCE(1);
+	mutex_unlock(&route->op_lock);
+	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
+	synchronize_srcu(&ebpfos_inode_srcu);
+	ebpfos_inode_route_put(route);
+	goto out_file;
 
 out_inode_fail:
 	inode_unlock(inode);
-fail_published:
-	ebpfos_file_enroll_fail(inode, route);
-out_enroll:
+fail:
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_lock();
+	mutex_lock(&ebpfos_file_enroll_lock);
+	mutex_lock(&route->op_lock);
+	if (published && rcu_access_pointer(inode->i_ebpfos_route) == route)
+		ebpfos_file_enroll_unpublish_locked(inode, route);
+	mutex_unlock(&route->op_lock);
 	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
+	if (published)
+		synchronize_srcu(&ebpfos_inode_srcu);
+	ebpfos_inode_route_put(route);
+	goto out_file;
+
+fail_publish:
+	if (rcu_access_pointer(inode->i_ebpfos_route) == route)
+		ebpfos_file_enroll_unpublish_locked(inode, route);
+	else
+		WARN_ON_ONCE(1);
+	mutex_unlock(&route->op_lock);
+	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
+	synchronize_srcu(&ebpfos_inode_srcu);
+	ebpfos_inode_route_put(route);
+	goto out_file;
+
+fail_unpublished:
+	if (route->legacy_counted) {
+		ebpfos_legacy_binding_del_locked();
+		route->legacy_counted = false;
+	}
+	mutex_unlock(&route->op_lock);
+	ebpfos_inode_route_put(route);
+out_unlock:
+	mutex_unlock(&ebpfos_file_enroll_lock);
+	ebpfos_admission_gate_unlock();
 out_file:
 	fput(file);
 	return error;
@@ -1782,11 +2136,26 @@ static void ebpfos_file_transaction_free(
 {
 	if (!txn)
 		return;
+	if (txn->admitted) {
+		ebpfos_admission_gate_lock();
+		if (txn->recovery)
+			ebpfos_admission_burn_pair_locked(
+				txn->admission, txn->recovery->e4_admission);
+		else
+			ebpfos_admission_burn_locked(txn->admission);
+		ebpfos_admission_gate_unlock();
+	}
 	ebpfos_file_map_lease_release(txn->map_lease);
-	if (txn->prog)
-		bpf_prog_put(txn->prog);
-	if (txn->map)
-		bpf_map_put(txn->map);
+	ebpfos_admission_put(txn->admission);
+	ebpfos_binding_put(txn->source_binding);
+	if (txn->admitted) {
+		ebpfos_binding_put(txn->binding);
+	} else {
+		if (txn->prog)
+			bpf_prog_put(txn->prog);
+		if (txn->map)
+			bpf_map_put(txn->map);
+	}
 	ebpfos_file_recovery_free(txn->recovery);
 	kvfree(txn->snapshot);
 	kvfree(txn->deltas);
@@ -1894,7 +2263,47 @@ static bool ebpfos_file_source_matches_locked(
 	       route->provider_id == txn->source_provider_id &&
 	       route->epoch == txn->source_epoch &&
 	       route->schema_hash == txn->source_schema_hash &&
-	       route->provider_kind == txn->source_provider_kind;
+	       route->provider_kind == txn->source_provider_kind &&
+	       (!txn->admitted || route->binding == txn->source_binding);
+}
+
+static int ebpfos_file_transaction_mode_check(
+	struct ebpfos_file_transaction *txn)
+{
+	struct ebpfos_binding *e4_binding = NULL;
+	struct ebpfos_binding *binding = NULL;
+	int error;
+
+	ebpfos_admission_gate_lock();
+	if (!txn->admitted) {
+		error = ebpfos_legacy_mutation_check_locked();
+		goto out_unlock;
+	}
+	if (!ebpfos_policy_enforcing_locked() || !txn->admission ||
+	    !txn->binding) {
+		error = -EUCLEAN;
+		goto out_unlock;
+	}
+	error = ebpfos_binding_acquire_current_locked(txn->binding);
+	if (error)
+		goto out_unlock;
+	binding = txn->binding;
+	if (txn->recovery) {
+		if (!txn->recovery->e4_admission ||
+		    !txn->recovery->e4_binding) {
+			error = -EUCLEAN;
+			goto out_unlock;
+		}
+		error = ebpfos_binding_acquire_current_locked(
+			txn->recovery->e4_binding);
+		if (!error)
+			e4_binding = txn->recovery->e4_binding;
+	}
+out_unlock:
+	ebpfos_admission_gate_unlock();
+	ebpfos_binding_put(e4_binding);
+	ebpfos_binding_put(binding);
+	return error;
 }
 
 static int ebpfos_file_source_export_locked(
@@ -2240,15 +2649,78 @@ static void ebpfos_file_transaction_detach_locked(
 	struct ebpfos_file_transaction *txn)
 {
 	lockdep_assert_held(&txn->route->op_lock);
+	spin_lock(&txn->route->admission_lock);
 	if (txn->route->migration == txn)
 		txn->route->migration = NULL;
+	spin_unlock(&txn->route->admission_lock);
 	if (txn->owner_slot && *txn->owner_slot == txn)
 		*txn->owner_slot = NULL;
 	ebpfos_file_migration_progress_locked(txn->route);
 }
 
+static int ebpfos_file_admitted_transition_locked(
+	struct ebpfos_inode_route *route, struct ebpfos_binding *candidate,
+	struct ebpfos_file_recovery *recovery)
+{
+	u32 candidate_use;
+	u32 source_use;
+	u32 gate;
+
+	lockdep_assert_held(&route->op_lock);
+	if (!route->binding || !candidate ||
+	    ebpfos_binding_kind(candidate) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    (route->admission_gate != EBPFOS_FILE_ADMISSION_NATIVE_OPEN &&
+	     route->admission_gate != EBPFOS_FILE_ADMISSION_BPF_OPEN &&
+	     route->admission_gate != EBPFOS_FILE_ADMISSION_DRAINING))
+		return -EPERM;
+	candidate_use = ebpfos_binding_use(candidate);
+	source_use = ebpfos_binding_use(route->binding);
+	gate = route->admission_gate;
+	if (recovery) {
+		if (ebpfos_binding_kind(route->binding) !=
+				EBPFOS_ADMITTED_BINDING_BPF ||
+		    source_use != EBPFOS_COMPONENT_USE_RECOVERY_E2 ||
+		    candidate_use != EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT ||
+		    !recovery->e4_binding ||
+		    ebpfos_binding_use(recovery->e4_binding) !=
+				EBPFOS_COMPONENT_USE_RECOVERY_E4)
+			return -EPROTOTYPE;
+		return 0;
+	}
+
+	switch (candidate_use) {
+	case EBPFOS_COMPONENT_USE_PROD_V1:
+		return ebpfos_binding_kind(route->binding) ==
+			       EBPFOS_ADMITTED_BINDING_NATIVE ? 0 : -EPROTOTYPE;
+	case EBPFOS_COMPONENT_USE_RECOVERY_E2:
+		if (ebpfos_binding_kind(route->binding) ==
+		    EBPFOS_ADMITTED_BINDING_NATIVE)
+			return 0;
+		if (source_use == EBPFOS_COMPONENT_USE_RECOVERY_E4 &&
+		    gate == EBPFOS_FILE_ADMISSION_DRAINING &&
+		    ebpfos_binding_policy_generation(route->binding) <
+			    ebpfos_binding_policy_generation(candidate))
+			return 0;
+		return -EPROTOTYPE;
+	case EBPFOS_COMPONENT_USE_PROD_V2:
+		if (source_use == EBPFOS_COMPONENT_USE_PROD_V1)
+			return 0;
+		if (source_use == EBPFOS_COMPONENT_USE_PROD_V2 &&
+		    gate == EBPFOS_FILE_ADMISSION_DRAINING &&
+		    ebpfos_binding_policy_generation(route->binding) <
+			    ebpfos_binding_policy_generation(candidate))
+			return 0;
+		return -EPROTOTYPE;
+	default:
+		return -EPROTOTYPE;
+	}
+}
+
 static long ebpfos_file_replace_begin(
-	struct ebpfos_ioc_file_replace_begin *request, void **txn_slot)
+	struct ebpfos_ioc_file_replace_begin *request, void **txn_slot,
+	struct ebpfos_admission *admission, struct ebpfos_binding *binding,
+	struct ebpfos_file_recovery *recovery,
+	const u8 expected_content_digest[32], u32 expected_use)
 {
 	struct ebpfos_file_transaction *txn = NULL;
 	struct ebpfos_inode_route *route = NULL;
@@ -2260,23 +2732,33 @@ static long ebpfos_file_replace_begin(
 	u32 ignored_value;
 	u32 ignored_key;
 	long error;
+	bool admitted = !!admission;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-	if (request->flags || request->file_fd < 0 || request->prog_fd < 0 ||
-	    request->map_fd < 0)
-		return -EINVAL;
+	if (request->flags || request->file_fd < 0 ||
+	    (!admitted && (request->prog_fd < 0 || request->map_fd < 0)) ||
+	    (admitted && (!binding || !expected_content_digest ||
+			 ebpfos_binding_use(binding) != expected_use))) {
+		error = -EINVAL;
+		goto out;
+	}
+	if (admitted)
+		request->target_schema_hash =
+			ebpfos_binding_runtime_schema(binding);
 	error = ebpfos_file_schema_tuple(request->target_schema_hash,
 					 &ignored_key, &ignored_value,
 					 &ignored_entries);
 	if (error)
-		return error;
-	if (*txn_slot)
-		return -EBUSY;
+		goto out;
+	if (*txn_slot) {
+		error = -EBUSY;
+		goto out;
+	}
 
 	file = fget(request->file_fd);
-	if (!file)
-		return -EBADF;
+	if (!file) {
+		error = -EBADF;
+		goto out;
+	}
 	if (!ebpfos_file_supported(file) || !S_ISREG(file_inode(file)->i_mode)) {
 		error = -EOPNOTSUPP;
 		goto out;
@@ -2288,18 +2770,27 @@ static long ebpfos_file_replace_begin(
 		goto out;
 	}
 
-	prog = bpf_prog_get_type_dev(request->prog_fd, BPF_PROG_TYPE_SYSCALL,
-				     false);
-	if (IS_ERR(prog)) {
-		error = PTR_ERR(prog);
-		prog = NULL;
-		goto out;
-	}
-	map = bpf_map_get(request->map_fd);
-	if (IS_ERR(map)) {
-		error = PTR_ERR(map);
-		map = NULL;
-		goto out;
+	if (admitted) {
+		prog = ebpfos_binding_prog(binding);
+		map = ebpfos_binding_map(binding);
+		if (!prog || !map) {
+			error = -EUCLEAN;
+			goto out;
+		}
+	} else {
+		prog = bpf_prog_get_type_dev(request->prog_fd,
+					     BPF_PROG_TYPE_SYSCALL, false);
+		if (IS_ERR(prog)) {
+			error = PTR_ERR(prog);
+			prog = NULL;
+			goto out;
+		}
+		map = bpf_map_get(request->map_fd);
+		if (IS_ERR(map)) {
+			error = PTR_ERR(map);
+			map = NULL;
+			goto out;
+		}
 	}
 	error = ebpfos_file_validate_candidate(prog, map,
 					       request->target_schema_hash);
@@ -2330,6 +2821,13 @@ static long ebpfos_file_replace_begin(
 	route = NULL;
 	txn->file = file;
 	file = NULL;
+	txn->admission = admission;
+	admission = NULL;
+	txn->binding = binding;
+	binding = NULL;
+	txn->recovery = recovery;
+	recovery = NULL;
+	txn->admitted = admitted;
 	txn->prog = prog;
 	prog = NULL;
 	txn->map = map;
@@ -2341,6 +2839,17 @@ static long ebpfos_file_replace_begin(
 		ebpfos_file_new_id(&ebpfos_next_file_provider_id);
 	txn->target_schema_hash = request->target_schema_hash;
 
+	ebpfos_admission_gate_lock();
+	if (admitted) {
+		if (!ebpfos_policy_enforcing_locked()) {
+			error = -EPERM;
+			goto out_gate;
+		}
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+		if (error)
+			goto out_gate;
+	}
 	mutex_lock(&txn->route->op_lock);
 	if (txn->route->state != EBPFOS_FILE_ROUTE_ACTIVE) {
 		error = -EOPNOTSUPP;
@@ -2374,8 +2883,22 @@ static long ebpfos_file_replace_begin(
 		error = -ESTALE;
 		goto out_unlock;
 	}
-	if (request->expected_schema_hash != txn->route->schema_hash) {
+	if ((!admitted && request->expected_schema_hash !=
+			 txn->route->schema_hash) ||
+	    (admitted &&
+	     !ebpfos_binding_content_matches(
+		     txn->route->binding, expected_content_digest))) {
 		error = -EXDEV;
+		goto out_unlock;
+	}
+	if (admitted) {
+		error = ebpfos_file_admitted_transition_locked(
+			txn->route, txn->binding, txn->recovery);
+		if (error)
+			goto out_unlock;
+	} else if (txn->route->admission_gate !=
+		   EBPFOS_FILE_ADMISSION_LEGACY) {
+		error = -EPERM;
 		goto out_unlock;
 	}
 	if (txn->route->epoch == U64_MAX ||
@@ -2388,6 +2911,25 @@ static long ebpfos_file_replace_begin(
 	txn->source_schema_hash = txn->route->schema_hash;
 	txn->source_provider_kind = txn->route->provider_kind;
 	txn->target_epoch = txn->route->epoch + 1;
+	if (txn->recovery) {
+		if (txn->recovery->e2_provider_id != txn->source_provider_id) {
+			error = -ESTALE;
+			goto out_unlock;
+		}
+		if (txn->target_epoch == U64_MAX ||
+		    txn->prog == txn->recovery->e4_prog ||
+		    txn->map == txn->recovery->e4_map) {
+			error = txn->target_epoch == U64_MAX ? -EOVERFLOW : -EINVAL;
+			goto out_unlock;
+		}
+		txn->recovery->e2_provider_id = txn->source_provider_id;
+		txn->recovery->e2_epoch = txn->source_epoch;
+		txn->recovery->e2_schema_hash = txn->source_schema_hash;
+		txn->recovery->e3_provider_id = txn->provider_id;
+		txn->recovery->e3_epoch = txn->target_epoch;
+		txn->recovery->e3_schema_hash = txn->target_schema_hash;
+		txn->recovery->e4_epoch = txn->target_epoch + 1;
+	}
 	txn->snapshot_sequence = txn->route->last_sequence;
 	txn->snapshot_size = txn->route->visible_size;
 	if (txn->snapshot_size > EBPFOS_FILE_SNAPSHOT_MAX) {
@@ -2399,6 +2941,21 @@ static long ebpfos_file_replace_begin(
 		error = -EREMOTEIO;
 		goto out_unlock;
 	}
+	if (admitted) {
+		if (txn->recovery)
+			error = ebpfos_admission_claim_pair_locked(
+				txn->admission, txn->recovery->e4_admission,
+				txn->route->binding);
+		else
+			error = ebpfos_admission_claim_locked(
+				txn->admission, txn->route->binding,
+				expected_use);
+		if (error)
+			goto out_unlock;
+		txn->source_binding =
+			ebpfos_binding_get(txn->route->binding);
+	}
+	txn->source_admission_gate = txn->route->admission_gate;
 	txn->stream.phase = EBPFOS_FILE_MIGRATION_SNAPSHOTTING;
 	txn->stream.queue_tail_visible = txn->snapshot_size;
 	txn->stream.queue_last_write_sequence = txn->snapshot_sequence;
@@ -2408,10 +2965,13 @@ static long ebpfos_file_replace_begin(
 	txn->stream.candidate_last_write_sequence = txn->snapshot_sequence;
 	txn->stream.verified_visible = txn->snapshot_size;
 	txn->stream.verified_last_write_sequence = txn->snapshot_sequence;
+	spin_lock(&txn->route->admission_lock);
 	txn->route->migration = txn;
+	spin_unlock(&txn->route->admission_lock);
 	*txn_slot = txn;
 	ebpfos_file_migration_progress_locked(txn->route);
 	mutex_unlock(&txn->route->op_lock);
+	ebpfos_admission_gate_unlock();
 
 	/*
 	 * Capture is installed before this allocation and immutable-prefix read.
@@ -2483,13 +3043,18 @@ fail_installed_locked:
 
 out_unlock:
 	mutex_unlock(&txn->route->op_lock);
+out_gate:
+	ebpfos_admission_gate_unlock();
 out:
 	if (txn)
 		ebpfos_file_transaction_free(txn);
-	if (prog)
+	if (prog && !admitted)
 		bpf_prog_put(prog);
-	if (map)
+	if (map && !admitted)
 		bpf_map_put(map);
+	ebpfos_admission_put(admission);
+	ebpfos_binding_put(binding);
+	ebpfos_file_recovery_free(recovery);
 	if (route)
 		ebpfos_inode_route_put(route);
 	if (file)
@@ -2506,9 +3071,81 @@ long ebpfos_file_replace_begin_ioctl(void __user *argp, void **txn_slot)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	error = ebpfos_file_replace_begin(&request, txn_slot);
+	error = ebpfos_file_replace_begin(&request, txn_slot, NULL, NULL, NULL,
+					  NULL, 0);
 	if (error)
 		return error;
+	if (!copy_to_user(argp, &request, sizeof(request)))
+		return 0;
+	ebpfos_file_replace_release(txn_slot);
+	return -EFAULT;
+}
+
+long ebpfos_file_replace_begin_v2_ioctl(void __user *argp, void **txn_slot)
+{
+	struct ebpfos_ioc_file_replace_begin_v2 request;
+	struct ebpfos_ioc_file_replace_begin begin = {};
+	struct ebpfos_admission *admission;
+	struct ebpfos_binding *binding;
+	struct ebpfos_file_transaction *txn;
+	u32 use;
+	long error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.flags || request.reserved0 || request.file_fd < 0 ||
+	    request.admission_fd < 0 ||
+	    memchr_inv(request.reserved, 0, sizeof(request.reserved)))
+		return -EINVAL;
+
+	admission = ebpfos_admission_get_from_fd(request.admission_fd);
+	if (IS_ERR(admission))
+		return PTR_ERR(admission);
+	binding = ebpfos_admission_binding_get(admission);
+	if (!binding) {
+		ebpfos_admission_put(admission);
+		return -EUCLEAN;
+	}
+	use = ebpfos_binding_use(binding);
+	if (ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    (use != EBPFOS_COMPONENT_USE_PROD_V1 &&
+	     use != EBPFOS_COMPONENT_USE_PROD_V2 &&
+	     use != EBPFOS_COMPONENT_USE_RECOVERY_E2)) {
+		ebpfos_binding_put(binding);
+		ebpfos_admission_put(admission);
+		return -EPROTOTYPE;
+	}
+
+	begin.file_fd = request.file_fd;
+	begin.expected_route_id = request.expected_route_id;
+	begin.expected_epoch = request.expected_epoch;
+	error = ebpfos_file_replace_begin(
+		&begin, txn_slot, admission, binding, NULL,
+		request.expected_active_content_digest, use);
+	/* The common path consumes both independent references on every return. */
+	if (error)
+		return error;
+	txn = *txn_slot;
+	if (WARN_ON_ONCE(!txn || !txn->admitted || !txn->binding)) {
+		ebpfos_file_replace_release(txn_slot);
+		return -EUCLEAN;
+	}
+
+	request.reserved0 = 0;
+	request.txn_id = txn->txn_id;
+	request.candidate_provider_id = txn->provider_id;
+	request.target_epoch = txn->target_epoch;
+	request.snapshot_sequence = txn->snapshot_sequence;
+	request.snapshot_size = txn->snapshot_size;
+	request.snapshot_digest = txn->snapshot_digest;
+	request.candidate_prog_id = txn->prog->aux->id;
+	request.candidate_map_id = txn->map->id;
+	memcpy(request.candidate_content_digest,
+	       ebpfos_binding_content_digest(txn->binding),
+	       sizeof(request.candidate_content_digest));
+	memset(request.reserved, 0, sizeof(request.reserved));
 	if (!copy_to_user(argp, &request, sizeof(request)))
 		return 0;
 	ebpfos_file_replace_release(txn_slot);
@@ -2588,7 +3225,8 @@ long ebpfos_file_recovery_begin_ioctl(void __user *argp, void **txn_slot)
 	e3_request.expected_epoch = request.expected_epoch;
 	e3_request.expected_schema_hash = request.expected_schema_hash;
 	e3_request.target_schema_hash = request.e3_schema_hash;
-	error = ebpfos_file_replace_begin(&e3_request, txn_slot);
+	error = ebpfos_file_replace_begin(&e3_request, txn_slot, NULL, NULL, NULL,
+					  NULL, 0);
 	if (error)
 		goto out;
 	txn = *txn_slot;
@@ -2645,6 +3283,166 @@ out:
 		bpf_prog_put(e4_prog);
 	if (e4_map)
 		bpf_map_put(e4_map);
+	ebpfos_file_recovery_free(recovery);
+	return error;
+}
+
+long ebpfos_file_recovery_begin_v2_ioctl(void __user *argp,
+						  void **txn_slot)
+{
+	struct ebpfos_ioc_file_recovery_begin_v2 request;
+	struct ebpfos_ioc_file_replace_begin e3_request = {};
+	struct ebpfos_admission *e3_admission = NULL;
+	struct ebpfos_admission *e4_admission = NULL;
+	struct ebpfos_binding *e3_binding = NULL;
+	struct ebpfos_binding *e4_binding = NULL;
+	struct ebpfos_file_recovery *recovery = NULL;
+	struct ebpfos_file_transaction *txn;
+	struct bpf_prog *e4_prog;
+	struct bpf_map *e4_map;
+	long error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.flags || request.reserved0 || request.reserved1 ||
+	    request.file_fd < 0 || request.e3_admission_fd < 0 ||
+	    request.e4_admission_fd < 0 || request.log_capacity < 2 ||
+	    request.log_capacity > EBPFOS_FILE_DELTA_CAPACITY ||
+	    !request.expected_fault_reason ||
+	    request.expected_fault_reason > EBPFOS_CALL_RETURN_PAYLOAD_MASK)
+		return -EINVAL;
+	if (request.expected_epoch > U64_MAX - 2)
+		return -EOVERFLOW;
+	if (*txn_slot)
+		return -EBUSY;
+
+	e3_admission = ebpfos_admission_get_from_fd(
+		request.e3_admission_fd);
+	if (IS_ERR(e3_admission)) {
+		error = PTR_ERR(e3_admission);
+		e3_admission = NULL;
+		goto out;
+	}
+	e4_admission = ebpfos_admission_get_from_fd(
+		request.e4_admission_fd);
+	if (IS_ERR(e4_admission)) {
+		error = PTR_ERR(e4_admission);
+		e4_admission = NULL;
+		goto out;
+	}
+	if (e3_admission == e4_admission) {
+		error = -EINVAL;
+		goto out;
+	}
+	e3_binding = ebpfos_admission_binding_get(e3_admission);
+	e4_binding = ebpfos_admission_binding_get(e4_admission);
+	if (!e3_binding || !e4_binding) {
+		error = -EUCLEAN;
+		goto out;
+	}
+	if (e3_binding == e4_binding ||
+	    ebpfos_binding_kind(e3_binding) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    ebpfos_binding_kind(e4_binding) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    ebpfos_binding_use(e3_binding) !=
+		    EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT ||
+	    ebpfos_binding_use(e4_binding) != EBPFOS_COMPONENT_USE_RECOVERY_E4 ||
+	    ebpfos_binding_runtime_schema(e3_binding) != EBPFOS_FILE_SCHEMA_V2 ||
+	    ebpfos_binding_runtime_schema(e4_binding) != EBPFOS_FILE_SCHEMA_V2) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
+	e4_prog = ebpfos_binding_prog(e4_binding);
+	e4_map = ebpfos_binding_map(e4_binding);
+	if (!e4_prog || !e4_map) {
+		error = -EUCLEAN;
+		goto out;
+	}
+	error = ebpfos_file_validate_candidate(e4_prog, e4_map,
+					       EBPFOS_FILE_SCHEMA_V2);
+	if (error)
+		goto out;
+
+	recovery = kzalloc_obj(*recovery, GFP_KERNEL);
+	if (!recovery) {
+		error = -ENOMEM;
+		goto out;
+	}
+	recovery->log = kvcalloc(request.log_capacity,
+				 sizeof(*recovery->log),
+				 GFP_KERNEL | __GFP_NOWARN);
+	if (!recovery->log) {
+		error = -ENOMEM;
+		goto out;
+	}
+	error = ebpfos_file_map_lease_reserve(e4_map,
+					      &recovery->e4_map_lease);
+	if (error)
+		goto out;
+	recovery->e4_admission = e4_admission;
+	e4_admission = NULL;
+	recovery->e4_binding = e4_binding;
+	e4_binding = NULL;
+	recovery->e4_prog = e4_prog;
+	recovery->e4_map = e4_map;
+	recovery->recovery_id =
+		ebpfos_file_new_id(&ebpfos_next_file_recovery_id);
+	recovery->e2_provider_id = request.expected_provider_id;
+	recovery->e4_provider_id =
+		ebpfos_file_new_id(&ebpfos_next_file_provider_id);
+	recovery->e4_schema_hash = EBPFOS_FILE_SCHEMA_V2;
+	recovery->log_capacity = request.log_capacity;
+	recovery->expected_fault_reason = request.expected_fault_reason;
+	recovery->phase = EBPFOS_FILE_RECOVERY_PREPARING;
+	recovery->retry_result = -EINPROGRESS;
+
+	e3_request.file_fd = request.file_fd;
+	e3_request.expected_route_id = request.expected_route_id;
+	e3_request.expected_epoch = request.expected_epoch;
+	error = ebpfos_file_replace_begin(
+		&e3_request, txn_slot, e3_admission, e3_binding, recovery,
+		request.expected_active_content_digest,
+		EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT);
+	e3_admission = NULL;
+	e3_binding = NULL;
+	recovery = NULL;
+	if (error)
+		return error;
+	txn = *txn_slot;
+	if (WARN_ON_ONCE(!txn || !txn->admitted || !txn->recovery ||
+			 !txn->binding || !txn->recovery->e4_binding)) {
+		ebpfos_file_replace_release(txn_slot);
+		return -EUCLEAN;
+	}
+
+	request.reserved0 = 0;
+	request.reserved1 = 0;
+	request.txn_id = txn->txn_id;
+	request.recovery_id = txn->recovery->recovery_id;
+	request.e3_provider_id = txn->provider_id;
+	request.e3_epoch = txn->target_epoch;
+	request.e4_provider_id = txn->recovery->e4_provider_id;
+	request.e4_epoch = txn->recovery->e4_epoch;
+	request.snapshot_sequence = txn->snapshot_sequence;
+	request.snapshot_size = txn->snapshot_size;
+	request.snapshot_digest = txn->snapshot_digest;
+	memcpy(request.e3_content_digest,
+	       ebpfos_binding_content_digest(txn->binding),
+	       sizeof(request.e3_content_digest));
+	memcpy(request.e4_content_digest,
+	       ebpfos_binding_content_digest(txn->recovery->e4_binding),
+	       sizeof(request.e4_content_digest));
+	if (!copy_to_user(argp, &request, sizeof(request)))
+		return 0;
+	ebpfos_file_replace_release(txn_slot);
+	return -EFAULT;
+
+out:
+	ebpfos_binding_put(e4_binding);
+	ebpfos_binding_put(e3_binding);
+	ebpfos_admission_put(e4_admission);
+	ebpfos_admission_put(e3_admission);
 	ebpfos_file_recovery_free(recovery);
 	return error;
 }
@@ -2879,6 +3677,11 @@ long ebpfos_file_replace_catchup_ioctl(void __user *argp, void **txn_slot)
 		return -EINVAL;
 	if (!txn)
 		return -ENOENT;
+	error = ebpfos_file_transaction_mode_check(txn);
+	if (error) {
+		ebpfos_file_replace_release(txn_slot);
+		return error;
+	}
 	if (request.txn_id != txn->txn_id ||
 	    request.expected_route_id != txn->route->route_id ||
 	    request.expected_epoch + 1 != txn->target_epoch ||
@@ -2955,6 +3758,7 @@ static int ebpfos_file_complete_recovery(
 {
 	struct ebpfos_file_map_lease *old_map_lease = NULL;
 	struct ebpfos_file_recovery *recovery;
+	struct ebpfos_binding *old_binding = NULL;
 	struct ebpfos_file_transaction e4 = {};
 	struct ebpfos_file_bpf_ctx *ctx;
 	struct bpf_prog *old_prog = NULL;
@@ -2962,6 +3766,7 @@ static int ebpfos_file_complete_recovery(
 	void *expected = NULL;
 	u64 expected_size;
 	u64 cursor;
+	bool admitted;
 	u32 i;
 	int error = 0;
 
@@ -3050,18 +3855,64 @@ static int ebpfos_file_complete_recovery(
 		goto out_fail;
 	recovery->e4_ready = true;
 	recovery->phase = EBPFOS_FILE_RECOVERY_READY_E4;
+	admitted = !!recovery->e4_admission;
 
 	if (route->epoch == U64_MAX ||
 	    recovery->e4_epoch != route->epoch + 1 ||
 	    !recovery->e4_prog || !recovery->e4_map ||
-	    !recovery->e4_map_lease) {
+	    !recovery->e4_map_lease ||
+	    (admitted && (!recovery->e4_binding || !route->binding))) {
 		error = -EREMOTEIO;
 		goto out_fail;
 	}
+	mutex_unlock(&route->op_lock);
+
+	/* E4 publication and its one-shot consume share the global linearizer. */
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	if (route->recovery != recovery ||
+	    recovery->phase != EBPFOS_FILE_RECOVERY_READY_E4 ||
+	    route->state != EBPFOS_FILE_ROUTE_FENCED ||
+	    route->admission_gate != EBPFOS_FILE_ADMISSION_RECOVERING ||
+	    route->provider_id != recovery->e3_provider_id ||
+	    route->epoch != recovery->e3_epoch ||
+	    route->schema_hash != recovery->e3_schema_hash ||
+	    atomic_read(&route->admitted_e3) ||
+	    (admitted &&
+	     (atomic_read(&route->acquired_calls) ||
+	      route->binding == recovery->e4_binding))) {
+		error = -ECANCELED;
+		goto out_publish_fail;
+	}
+	if (admitted) {
+		if (!ebpfos_policy_enforcing_locked()) {
+			error = -EUCLEAN;
+			goto out_publish_fail;
+		}
+		error = ebpfos_admission_publish_validate_locked(
+			recovery->e4_admission, route->binding, true);
+		if (error)
+			goto out_publish_fail;
+		error = ebpfos_admission_consume_locked(
+			recovery->e4_admission, true);
+		if (error)
+			goto out_publish_fail;
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+		if (error)
+			goto out_publish_fail;
+	}
+
 	spin_lock(&route->admission_lock);
-	old_prog = route->prog;
-	old_map = route->map;
 	old_map_lease = route->map_lease;
+	if (admitted) {
+		old_binding = route->binding;
+		route->binding = recovery->e4_binding;
+		recovery->e4_binding = NULL;
+	} else {
+		old_prog = route->prog;
+		old_map = route->map;
+	}
 	route->prog = recovery->e4_prog;
 	recovery->e4_prog = NULL;
 	route->map = recovery->e4_map;
@@ -3078,15 +3929,27 @@ static int ebpfos_file_complete_recovery(
 	spin_unlock(&route->admission_lock);
 	ebpfos_file_recovery_progress_locked(route);
 	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
 
 	ebpfos_file_map_lease_release(old_map_lease);
-	if (old_prog)
-		bpf_prog_put(old_prog);
-	if (old_map)
-		bpf_map_put(old_map);
+	ebpfos_binding_put(old_binding);
+	if (!admitted) {
+		if (old_prog)
+			bpf_prog_put(old_prog);
+		if (old_map)
+			bpf_map_put(old_map);
+	}
 	kvfree(expected);
 	kfree(ctx);
 	return 0;
+
+out_publish_fail:
+	ebpfos_file_recovery_fail_locked(route, error);
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	kvfree(expected);
+	kfree(ctx);
+	return error;
 
 out_fail:
 	if (recovery)
@@ -3103,6 +3966,7 @@ static long ebpfos_file_replace_commit(
 {
 	struct ebpfos_file_transaction *txn = *txn_slot;
 	struct ebpfos_file_map_lease *old_map_lease = NULL;
+	struct ebpfos_binding *old_binding = NULL;
 	struct ebpfos_file_bpf_ctx *ctx;
 	struct bpf_prog *old_prog = NULL;
 	struct bpf_map *old_map = NULL;
@@ -3110,6 +3974,8 @@ static long ebpfos_file_replace_commit(
 	u64 total_size;
 	u64 applied_bytes = 0;
 	u32 applied = 0;
+	bool admission_fenced = false;
+	bool wake = false;
 	int count;
 	long error = 0;
 
@@ -3119,6 +3985,11 @@ static long ebpfos_file_replace_commit(
 		return -EINVAL;
 	if (!txn)
 		return -ENOENT;
+	error = ebpfos_file_transaction_mode_check(txn);
+	if (error) {
+		ebpfos_file_replace_release(txn_slot);
+		return error;
+	}
 	if (!!txn->recovery != recovery_arm)
 		return -EINVAL;
 	if (request->txn_id != txn->txn_id ||
@@ -3138,6 +4009,18 @@ static long ebpfos_file_replace_commit(
 	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
+
+	ebpfos_admission_gate_lock();
+	if (txn->admitted) {
+		if (!ebpfos_policy_enforcing_locked()) {
+			error = -EUCLEAN;
+			goto out_initial_gate;
+		}
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+		if (error)
+			goto out_initial_gate;
+	}
 	mutex_lock(&txn->route->op_lock);
 	if (txn->route->migration != txn || !txn->candidate_ready ||
 	    txn->capture_error || !ebpfos_file_source_matches_locked(txn) ||
@@ -3148,7 +4031,26 @@ static long ebpfos_file_replace_commit(
 		error = txn->capture_error ? txn->capture_error :
 			(txn->route->last_sequence == U64_MAX ? -EOVERFLOW :
 			 -ECANCELED);
-		goto out_unlock;
+		goto out_initial_unlock;
+	}
+	if (txn->admitted) {
+		if (txn->route->admission_gate !=
+		    txn->source_admission_gate) {
+			error = -ECANCELED;
+			goto out_initial_unlock;
+		}
+		error = ebpfos_admission_publish_validate_locked(
+			txn->admission, txn->source_binding, false);
+		if (!error && recovery_arm)
+			error = ebpfos_admission_publish_validate_locked(
+				txn->recovery->e4_admission, txn->binding,
+				false);
+		if (error)
+			goto out_initial_unlock;
+		spin_lock(&txn->route->admission_lock);
+		txn->route->admission_gate = EBPFOS_FILE_ADMISSION_DRAINING;
+		spin_unlock(&txn->route->admission_lock);
+		admission_fenced = true;
 	}
 
 	/*
@@ -3165,6 +4067,21 @@ static long ebpfos_file_replace_commit(
 		atomic64_read(&txn->route->migration_waiters);
 	ebpfos_file_migration_progress_locked(txn->route);
 	mutex_unlock(&txn->route->op_lock);
+	ebpfos_admission_gate_unlock();
+
+	if (txn->admitted) {
+		error = wait_event_killable(
+			txn->route->migration_wait,
+			!atomic_read(&txn->route->acquired_calls) ||
+			READ_ONCE(txn->route->state) ==
+				EBPFOS_FILE_ROUTE_DEAD);
+		if (error)
+			goto fail_unlocked;
+		if (READ_ONCE(txn->route->state) == EBPFOS_FILE_ROUTE_DEAD) {
+			error = -ECANCELED;
+			goto fail_unlocked;
+		}
+	}
 
 	for (;;) {
 		mutex_lock(&txn->route->op_lock);
@@ -3172,7 +4089,7 @@ static long ebpfos_file_replace_commit(
 		    txn->stream.phase != EBPFOS_FILE_MIGRATION_DRAINING) {
 			error = txn->capture_error ? txn->capture_error :
 				-ECANCELED;
-			goto out_unlock;
+			goto fail_locked;
 		}
 		if (txn->stream.ring_count <= EBPFOS_FILE_COMMIT_TAIL) {
 			mutex_unlock(&txn->route->op_lock);
@@ -3192,7 +4109,7 @@ static long ebpfos_file_replace_commit(
 		error = txn->capture_error ? txn->capture_error : -ECANCELED;
 		if (txn->route->last_sequence == U64_MAX)
 			error = -EOVERFLOW;
-		goto out_unlock;
+		goto fail_locked;
 	}
 
 	/* The op_lock-held tail is bounded and no new source write is admitted. */
@@ -3204,7 +4121,7 @@ static long ebpfos_file_replace_commit(
 					      EBPFOS_FILE_COMMIT_TAIL);
 	if (count < 0) {
 		error = count;
-		goto out_unlock;
+		goto fail_locked;
 	}
 	if (count) {
 		error = ebpfos_file_apply_batch(txn, ctx, &applied,
@@ -3212,7 +4129,7 @@ static long ebpfos_file_replace_commit(
 		error = ebpfos_file_finish_batch_locked(txn, applied,
 							 applied_bytes, error);
 		if (error)
-			goto out_unlock;
+			goto fail_locked;
 	}
 
 	if (txn->stream.ring_count || txn->stream.pending_delta_bytes ||
@@ -3240,7 +4157,7 @@ static long ebpfos_file_replace_commit(
 	    (txn->source_provider_kind == EBPFOS_PROVIDER_NATIVE &&
 	     i_size_read(txn->route->inode) != txn->route->visible_size)) {
 		error = -EREMOTEIO;
-		goto out_unlock;
+		goto fail_locked;
 	}
 	total_size = txn->route->visible_size;
 	mutex_unlock(&txn->route->op_lock);
@@ -3286,23 +4203,78 @@ static long ebpfos_file_replace_commit(
 		error = txn->capture_error ? txn->capture_error : -EREMOTEIO;
 		if (txn->route->last_sequence == U64_MAX)
 			error = -EOVERFLOW;
-		goto out_unlock;
+		goto fail_locked;
 	}
 	error = ebpfos_file_candidate_describe_at(
 		txn, ctx, txn->route->last_sequence, total_size);
 	if (error)
-		goto out_unlock;
+		goto fail_locked;
 	error = ebpfos_file_candidate_export_at(
 		txn, ctx, txn->route->last_sequence, total_size, 1, total_size);
 	if (error)
-		goto out_unlock;
+		goto fail_locked;
 	txn->candidate_validated_bytes = total_size;
 	txn->candidate_bytes_validated = true;
+	mutex_unlock(&txn->route->op_lock);
 
-	if (recovery_arm)
-		spin_lock(&txn->route->admission_lock);
-	old_prog = txn->route->prog;
-	old_map = txn->route->map;
+	/* Revalidate and publish under the policy/route linearization order. */
+	ebpfos_admission_gate_lock();
+	mutex_lock(&txn->route->op_lock);
+	if (txn->route->migration != txn || txn->capture_error ||
+	    txn->stream.phase != EBPFOS_FILE_MIGRATION_FREEZING ||
+	    !ebpfos_file_source_matches_locked(txn) ||
+	    txn->route->epoch + 1 != txn->target_epoch ||
+	    txn->route->last_sequence == U64_MAX ||
+	    txn->stream.ring_count || txn->stream.candidate_busy ||
+	    !txn->candidate_bytes_validated ||
+	    txn->stream.candidate_visible != total_size ||
+	    txn->stream.verified_visible != total_size ||
+	    txn->route->visible_size != total_size ||
+	    (txn->admitted &&
+	     (txn->route->admission_gate != EBPFOS_FILE_ADMISSION_DRAINING ||
+	      atomic_read(&txn->route->acquired_calls))) ||
+	    (txn->source_provider_kind == EBPFOS_PROVIDER_NATIVE &&
+	     i_size_read(txn->route->inode) != total_size)) {
+		error = txn->capture_error ? txn->capture_error : -ECANCELED;
+		if (txn->route->last_sequence == U64_MAX)
+			error = -EOVERFLOW;
+		goto out_publish_unlock;
+	}
+	if (txn->admitted) {
+		if (!ebpfos_policy_enforcing_locked()) {
+			error = -EUCLEAN;
+			goto out_publish_unlock;
+		}
+		error = ebpfos_admission_publish_validate_locked(
+			txn->admission, txn->source_binding, false);
+		if (!error && recovery_arm)
+			error = ebpfos_admission_publish_validate_locked(
+				txn->recovery->e4_admission, txn->binding,
+				false);
+		if (error)
+			goto out_publish_unlock;
+		if (recovery_arm)
+			error = ebpfos_admission_recovery_e3_consume_locked(
+				txn->admission, txn->recovery->e4_admission);
+		else
+			error = ebpfos_admission_consume_locked(txn->admission,
+								false);
+		if (error)
+			goto out_publish_unlock;
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+		if (error)
+			goto out_publish_unlock;
+	}
+
+	if (txn->admitted) {
+		old_binding = txn->route->binding;
+		txn->route->binding = txn->binding;
+		txn->binding = NULL;
+	} else {
+		old_prog = txn->route->prog;
+		old_map = txn->route->map;
+	}
 	old_map_lease = txn->route->map_lease;
 	txn->route->prog = txn->prog;
 	txn->prog = NULL;
@@ -3332,14 +4304,13 @@ static long ebpfos_file_replace_commit(
 	txn->stream.commit_requested = false;
 	txn->stream.phase = EBPFOS_FILE_MIGRATION_IDLE;
 	txn->route->last_migration_stream = txn->stream;
+	spin_lock(&txn->route->admission_lock);
 	if (recovery_arm) {
 		txn->recovery->phase = EBPFOS_FILE_RECOVERY_ARMED_E3;
 		txn->route->recovery = txn->recovery;
 		txn->recovery = NULL;
 		txn->route->admission_gate =
 			EBPFOS_FILE_ADMISSION_E3_OPEN;
-		spin_unlock(&txn->route->admission_lock);
-		ebpfos_file_recovery_progress_locked(txn->route);
 		if (recovery_result) {
 			recovery_result->base_sequence =
 				txn->route->recovery->base_sequence;
@@ -3354,26 +4325,72 @@ static long ebpfos_file_replace_commit(
 			recovery_result->e4_provider_id =
 				txn->route->recovery->e4_provider_id;
 			recovery_result->e4_epoch =
-				txn->route->recovery->e4_epoch;
+					txn->route->recovery->e4_epoch;
 		}
+	} else if (txn->admitted) {
+		txn->route->admission_gate =
+			EBPFOS_FILE_ADMISSION_BPF_OPEN;
 	}
+	spin_unlock(&txn->route->admission_lock);
+	wake = txn->admitted || recovery_arm;
+	if (recovery_arm)
+		ebpfos_file_recovery_progress_locked(txn->route);
 	ebpfos_file_transaction_detach_locked(txn);
-out_unlock:
-	if (error && txn->route->migration == txn)
-		ebpfos_file_transaction_detach_locked(txn);
 	mutex_unlock(&txn->route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (wake)
+		wake_up_all(&txn->route->migration_wait);
 	ebpfos_file_map_lease_release(old_map_lease);
-	if (old_prog)
-		bpf_prog_put(old_prog);
-	if (old_map)
-		bpf_map_put(old_map);
+	ebpfos_binding_put(old_binding);
+	if (!txn->admitted) {
+		if (old_prog)
+			bpf_prog_put(old_prog);
+		if (old_map)
+			bpf_map_put(old_map);
+	}
+	kfree(ctx);
+	ebpfos_file_transaction_free(txn);
+	return 0;
+
+out_publish_unlock:
+	mutex_unlock(&txn->route->op_lock);
+	ebpfos_admission_gate_unlock();
+	goto fail_unlocked;
+
+fail_locked:
+	mutex_unlock(&txn->route->op_lock);
+fail_unlocked:
+	ebpfos_admission_gate_lock();
+	mutex_lock(&txn->route->op_lock);
+	if (txn->route->migration == txn) {
+		if (admission_fenced && txn->admitted &&
+		    txn->source_admission_gate !=
+			    EBPFOS_FILE_ADMISSION_DRAINING &&
+		    txn->route->admission_gate ==
+			    EBPFOS_FILE_ADMISSION_DRAINING &&
+		    ebpfos_policy_enforcing_locked() &&
+		    ebpfos_file_source_matches_locked(txn)) {
+			spin_lock(&txn->route->admission_lock);
+			txn->route->admission_gate =
+				txn->source_admission_gate;
+			spin_unlock(&txn->route->admission_lock);
+			wake = true;
+		}
+		ebpfos_file_transaction_detach_locked(txn);
+	}
+	mutex_unlock(&txn->route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (wake)
+		wake_up_all(&txn->route->migration_wait);
 	kfree(ctx);
 	ebpfos_file_transaction_free(txn);
 	return error;
 
-fail_unlocked:
-	mutex_lock(&txn->route->op_lock);
-	goto out_unlock;
+out_initial_unlock:
+	mutex_unlock(&txn->route->op_lock);
+out_initial_gate:
+	ebpfos_admission_gate_unlock();
+	goto fail_unlocked;
 }
 
 long ebpfos_file_replace_commit_ioctl(void __user *argp, void **txn_slot)
@@ -3398,6 +4415,9 @@ long ebpfos_file_recovery_arm_ioctl(void __user *argp, void **txn_slot)
 		return -EINVAL;
 	if (!txn || !txn->recovery)
 		return -ENOENT;
+	/* The legacy ARM copies results after publication and is never admitted. */
+	if (txn->admitted || ebpfos_policy_enforcing())
+		return -EPERM;
 	if (request.recovery_id != txn->recovery->recovery_id ||
 	    request.expected_provider_id != txn->source_provider_id)
 		return -ESTALE;
@@ -3413,11 +4433,52 @@ long ebpfos_file_recovery_arm_ioctl(void __user *argp, void **txn_slot)
 	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
+long ebpfos_file_recovery_arm_v2_ioctl(void __user *argp, void **txn_slot)
+{
+	struct ebpfos_ioc_file_recovery_arm_v2 request;
+	struct ebpfos_ioc_file_replace_end replace = {};
+	struct ebpfos_file_transaction *txn = *txn_slot;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.flags || request.file_fd < 0 ||
+	    memchr_inv(request.reserved, 0, sizeof(request.reserved)))
+		return -EINVAL;
+	if (!txn || !txn->admitted || !txn->recovery ||
+	    !txn->source_binding || !txn->binding ||
+	    !txn->recovery->e4_binding)
+		return -ENOENT;
+	if (request.txn_id != txn->txn_id ||
+	    request.recovery_id != txn->recovery->recovery_id ||
+	    request.expected_route_id != txn->route->route_id ||
+	    request.expected_provider_id != txn->source_provider_id ||
+	    request.expected_epoch != txn->source_epoch ||
+	    !ebpfos_binding_content_matches(
+		    txn->source_binding,
+		    request.expected_active_content_digest) ||
+	    !ebpfos_binding_content_matches(
+		    txn->binding, request.expected_e3_content_digest) ||
+	    !ebpfos_binding_content_matches(
+		    txn->recovery->e4_binding,
+		    request.expected_e4_content_digest))
+		return -ESTALE;
+
+	replace.file_fd = request.file_fd;
+	replace.txn_id = request.txn_id;
+	replace.expected_route_id = request.expected_route_id;
+	replace.expected_epoch = request.expected_epoch;
+	replace.expected_schema_hash = txn->source_schema_hash;
+	return ebpfos_file_replace_commit(&replace, txn_slot, true, NULL);
+}
+
 long ebpfos_file_replace_abort_ioctl(void __user *argp, void **txn_slot)
 {
 	struct ebpfos_ioc_file_replace_end request;
 	struct ebpfos_file_transaction *txn = *txn_slot;
 	struct file *file;
+	long error;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -3427,6 +4488,9 @@ long ebpfos_file_replace_abort_ioctl(void __user *argp, void **txn_slot)
 		return -EINVAL;
 	if (!txn)
 		return -ENOENT;
+	error = ebpfos_file_transaction_mode_check(txn);
+	if (error)
+		return error;
 	if (txn->recovery)
 		return -EINVAL;
 	if (request.txn_id != txn->txn_id ||
@@ -3459,6 +4523,7 @@ long ebpfos_file_recovery_abort_ioctl(void __user *argp, void **txn_slot)
 	struct ebpfos_ioc_file_recovery_end request;
 	struct ebpfos_file_transaction *txn = *txn_slot;
 	struct file *file;
+	long error;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -3468,6 +4533,9 @@ long ebpfos_file_recovery_abort_ioctl(void __user *argp, void **txn_slot)
 		return -EINVAL;
 	if (!txn || !txn->recovery)
 		return -ENOENT;
+	error = ebpfos_file_transaction_mode_check(txn);
+	if (error)
+		return error;
 	if (request.txn_id != txn->txn_id ||
 	    request.recovery_id != txn->recovery->recovery_id ||
 	    request.expected_route_id != txn->route->route_id ||
@@ -3501,7 +4569,10 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 	struct ebpfos_ioc_file_recovery_retire request;
 	struct ebpfos_file_recovery *recovery;
 	struct ebpfos_inode_route *route;
+	struct ebpfos_binding *current_binding = NULL;
 	struct file *file;
+	u32 original_gate;
+	bool admitted;
 	long error = 0;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -3519,11 +4590,24 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 		goto out_file;
 	}
 
+	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
 	recovery = route->recovery;
 	if (!recovery) {
 		error = -ENOENT;
-		goto out_unlock;
+		goto out_initial_unlock;
+	}
+	admitted = !!route->binding;
+	if (admitted) {
+		if (!ebpfos_policy_enforcing_locked() ||
+		    !recovery->e4_admission) {
+			error = -EUCLEAN;
+			goto out_initial_unlock;
+		}
+	} else {
+		error = ebpfos_legacy_mutation_check_locked();
+		if (error)
+			goto out_initial_unlock;
 	}
 	if (request.recovery_id != recovery->recovery_id ||
 	    request.expected_route_id != route->route_id ||
@@ -3531,14 +4615,14 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 	    request.expected_epoch != route->epoch ||
 	    request.expected_schema_hash != route->schema_hash) {
 		error = -ESTALE;
-		goto out_unlock;
+		goto out_initial_unlock;
 	}
 	if (recovery->phase != EBPFOS_FILE_RECOVERY_PUBLISHED_E4 ||
 	    recovery->pending_retries ||
 	    recovery->retry_count !=
 		    recovery->retry_commits + recovery->retry_failures) {
 		error = -EBUSY;
-		goto out_unlock;
+		goto out_initial_unlock;
 	}
 	if (!recovery->trigger_invocation_id ||
 	    recovery->retry_count !=
@@ -3554,7 +4638,7 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 	    (recovery->trigger != EBPFOS_FILE_RECOVERY_TRIGGER_TYPED_FAULT &&
 	     recovery->trigger != EBPFOS_FILE_RECOVERY_TRIGGER_LOG_CAPACITY)) {
 		error = -EREMOTEIO;
-		goto out_unlock;
+		goto out_initial_unlock;
 	}
 	if (route->state != EBPFOS_FILE_ROUTE_ACTIVE || !recovery->e4_ready ||
 	    route->provider_id != recovery->e4_provider_id ||
@@ -3562,27 +4646,36 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 	    route->schema_hash != recovery->e4_schema_hash ||
 	    atomic_read(&route->admitted_e3)) {
 		error = -EREMOTEIO;
-		goto out_unlock;
+		goto out_initial_unlock;
 	}
 	spin_lock(&route->admission_lock);
-	if (route->admission_gate != EBPFOS_FILE_ADMISSION_E4_OPEN) {
+	original_gate = route->admission_gate;
+	if ((!admitted && original_gate != EBPFOS_FILE_ADMISSION_E4_OPEN) ||
+	    (admitted && original_gate != EBPFOS_FILE_ADMISSION_E4_OPEN &&
+	     original_gate != EBPFOS_FILE_ADMISSION_DRAINING)) {
 		spin_unlock(&route->admission_lock);
 		error = -EBUSY;
-		goto out_unlock;
+		goto out_initial_unlock;
 	}
-	route->admission_gate = EBPFOS_FILE_ADMISSION_RECOVERING;
+	route->admission_gate = admitted ? EBPFOS_FILE_ADMISSION_DRAINING :
+					  EBPFOS_FILE_ADMISSION_RECOVERING;
 	recovery->phase = EBPFOS_FILE_RECOVERY_RETIRING;
 	spin_unlock(&route->admission_lock);
 	ebpfos_file_recovery_progress_locked(route);
 	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
 
 	wait_event(route->migration_wait,
-		   !atomic_read(&route->admitted_e4) ||
+		   !(admitted ? atomic_read(&route->acquired_calls) :
+				 atomic_read(&route->admitted_e4)) ||
 		   READ_ONCE(route->state) == EBPFOS_FILE_ROUTE_DEAD);
+
+	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
 	if (route->recovery != recovery ||
 	    recovery->phase != EBPFOS_FILE_RECOVERY_RETIRING ||
-	    atomic_read(&route->admitted_e4) ||
+	    (admitted ? atomic_read(&route->acquired_calls) :
+			atomic_read(&route->admitted_e4)) ||
 	    route->state != EBPFOS_FILE_ROUTE_ACTIVE ||
 	    route->provider_id != recovery->e4_provider_id ||
 	    route->epoch != recovery->e4_epoch) {
@@ -3590,16 +4683,34 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 		goto out_reopen;
 	}
 	spin_lock(&route->admission_lock);
-	if (route->admission_gate != EBPFOS_FILE_ADMISSION_RECOVERING) {
+	if (route->admission_gate !=
+		    (admitted ? EBPFOS_FILE_ADMISSION_DRAINING :
+				EBPFOS_FILE_ADMISSION_RECOVERING)) {
 		spin_unlock(&route->admission_lock);
 		error = -ECANCELED;
 		goto out_reopen;
 	}
+	if (admitted) {
+		error = ebpfos_binding_acquire_current_locked(route->binding);
+		if (!error) {
+			current_binding = route->binding;
+		} else if (error == -EAGAIN) {
+			error = 0;
+		} else {
+			spin_unlock(&route->admission_lock);
+			goto out_reopen;
+		}
+	}
 	route->recovery = NULL;
-	route->admission_gate = EBPFOS_FILE_ADMISSION_LEGACY;
+	route->admission_gate = admitted ?
+		(current_binding ? EBPFOS_FILE_ADMISSION_BPF_OPEN :
+				   EBPFOS_FILE_ADMISSION_DRAINING) :
+		EBPFOS_FILE_ADMISSION_LEGACY;
 	spin_unlock(&route->admission_lock);
 	ebpfos_file_recovery_progress_locked(route);
 	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	ebpfos_binding_put(current_binding);
 	ebpfos_file_recovery_free(recovery);
 	ebpfos_inode_route_put(route);
 	fput(file);
@@ -3610,19 +4721,27 @@ out_reopen:
 	    recovery->phase == EBPFOS_FILE_RECOVERY_RETIRING &&
 	    route->state == EBPFOS_FILE_ROUTE_ACTIVE) {
 		spin_lock(&route->admission_lock);
-		if (route->admission_gate == EBPFOS_FILE_ADMISSION_RECOVERING) {
+		if (route->admission_gate ==
+		    (admitted ? EBPFOS_FILE_ADMISSION_DRAINING :
+				EBPFOS_FILE_ADMISSION_RECOVERING)) {
 			recovery->phase = EBPFOS_FILE_RECOVERY_PUBLISHED_E4;
-			route->admission_gate = EBPFOS_FILE_ADMISSION_E4_OPEN;
+			route->admission_gate = original_gate;
 		}
 		spin_unlock(&route->admission_lock);
 		ebpfos_file_recovery_progress_locked(route);
 	}
-out_unlock:
 	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
 	ebpfos_inode_route_put(route);
 out_file:
 	fput(file);
 	return error;
+
+out_initial_unlock:
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	ebpfos_inode_route_put(route);
+	goto out_file;
 }
 
 void ebpfos_file_replace_release(void **txn_slot)
@@ -3889,6 +5008,81 @@ long ebpfos_file_recovery_status_ioctl(void __user *argp)
 	request.e4_ready = recovery->e4_ready;
 out_unlock:
 	mutex_unlock(&route->op_lock);
+	ebpfos_inode_route_put(route);
+	if (!error && copy_to_user(argp, &request, sizeof(request)))
+		error = -EFAULT;
+out_file:
+	fput(file);
+	return error;
+}
+
+long ebpfos_file_admission_status_ioctl(void __user *argp)
+{
+	struct ebpfos_ioc_file_admission_status request;
+	struct ebpfos_file_transaction *migration;
+	struct ebpfos_admission *candidate = NULL;
+	struct ebpfos_inode_route *route;
+	struct file *file;
+	u64 expected_route_id;
+	s32 file_fd;
+	long error = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.flags || request.file_fd < 0)
+		return -EINVAL;
+	file_fd = request.file_fd;
+	expected_route_id = request.expected_route_id;
+	memset(&request, 0, sizeof(request));
+	request.file_fd = file_fd;
+	request.expected_route_id = expected_route_id;
+	file = fget(file_fd);
+	if (!file)
+		return -EBADF;
+	route = ebpfos_inode_route_get(file_inode(file));
+	if (!route) {
+		error = -ENOENT;
+		goto out_file;
+	}
+
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	if (expected_route_id && expected_route_id != route->route_id) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
+	request.route_id = route->route_id;
+	request.provider_id = route->provider_id;
+	request.epoch = route->epoch;
+	request.route_state = route->state;
+	spin_lock(&route->admission_lock);
+	request.admission_gate = route->admission_gate;
+	spin_unlock(&route->admission_lock);
+	if (route->binding) {
+		request.active_present = 1;
+		ebpfos_binding_fill_identity(route->binding, &request.active);
+	}
+	migration = route->migration;
+	if (migration && migration->admitted)
+		candidate = migration->admission;
+	else if (route->recovery && route->recovery->e4_admission)
+		candidate = route->recovery->e4_admission;
+	if (candidate &&
+	    (ebpfos_admission_state_locked(candidate) ==
+		    EBPFOS_ADMISSION_STAGED ||
+	     ebpfos_admission_state_locked(candidate) ==
+		    EBPFOS_ADMISSION_STAGED_RECOVERY)) {
+		request.candidate_present = 1;
+		ebpfos_admission_fill_identity_locked(candidate,
+						      &request.candidate);
+	}
+	request.admitted_calls = atomic_read(&route->acquired_calls);
+	request.admission_waiters = atomic_read(&route->admission_waiters);
+out_unlock:
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
 	ebpfos_inode_route_put(route);
 	if (!error && copy_to_user(argp, &request, sizeof(request)))
 		error = -EFAULT;
