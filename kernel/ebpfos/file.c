@@ -1545,12 +1545,14 @@ static bool ebpfos_file_admission_valid_locked(
 	struct ebpfos_file_recovery *recovery = route->recovery;
 
 	lockdep_assert_held(&route->op_lock);
-	if (!admission->binding)
+	if (!admission->binding && !admission->prog)
 		return route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
 		       READ_ONCE(route->admission_gate) ==
 			       EBPFOS_FILE_ADMISSION_LEGACY;
 	if (route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
-	    route->binding == admission->binding &&
+	    ((admission->binding && route->binding == admission->binding) ||
+	     (!admission->binding && !route->binding &&
+	      route->prog == admission->prog)) &&
 	    route->provider_id == admission->provider_id &&
 	    route->epoch == admission->epoch)
 		return true;
