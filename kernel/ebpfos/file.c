@@ -299,6 +299,7 @@ struct ebpfos_inode_route {
 	bool native_retired;
 	bool last_migration_bytes_validated;
 	bool split_reader_repair_pending;
+	bool split_replay_fault_armed;
 	bool registry_linked;
 	bool legacy_counted;
 	bool rotation_reserved;
@@ -358,6 +359,8 @@ static_assert(sizeof(struct ebpfos_file_bpf_ctx) ==
 	      EBPFOS_FILE_BPF_CTX_SIZE);
 static_assert(sizeof(struct ebpfos_file_split_publish) ==
 	      240);
+static_assert(sizeof(struct ebpfos_file_split_control) ==
+	      160);
 static_assert(EBPFOS_FILE_COMMIT_TAIL <= EBPFOS_FILE_CATCHUP_BATCH);
 static_assert(EBPFOS_FILE_CATCHUP_BATCH <= EBPFOS_FILE_DELTA_CAPACITY);
 static_assert(offsetof(struct ebpfos_ioc_file_status, fatal_error) +
@@ -1314,6 +1317,10 @@ ebpfos_file_split_replay_reader_locked(struct ebpfos_inode_route *route,
 	reader_prog = ebpfos_binding_prog(route->split_reader_binding);
 	if (!reader_prog)
 		return -EUCLEAN;
+	if (route->split_replay_fault_armed) {
+		route->split_replay_fault_armed = false;
+		return -EIO;
+	}
 	ebpfos_file_ctx_init(ctx, EBPFOS_FILE_OP_WRITE,
 			     EBPFOS_FILE_F_APPEND | EBPFOS_FILE_F_SHADOW,
 			     route, call->file_cookie, call->admission.epoch,
@@ -5458,6 +5465,7 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 	route->split_reader_frontier = snapshot_frontier;
 	route->split_writer_frontier = snapshot_frontier;
 	route->split_reader_repair_pending = false;
+	route->split_replay_fault_armed = false;
 	memset(&route->split_pending_delta, 0,
 	       sizeof(route->split_pending_delta));
 	spin_lock(&route->admission_lock);
@@ -5514,6 +5522,302 @@ out:
 		ebpfos_inode_route_put(route);
 	if (file)
 		fput(file);
+	return error;
+}
+
+static bool
+ebpfos_file_split_binding_test_only(const struct ebpfos_binding *binding)
+{
+	const struct ebpfos_component_desc_v1 *descriptor =
+		ebpfos_binding_descriptor(binding);
+
+	return descriptor &&
+	       (le32_to_cpu(descriptor->flags) & EBPFOS_COMPONENT_F_TEST_ONLY);
+}
+
+static bool
+ebpfos_file_split_writer_ahead_locked(const struct ebpfos_inode_route *route)
+{
+	const struct ebpfos_file_delta *pending = &route->split_pending_delta;
+	u64 expected_visible;
+
+	lockdep_assert_held(&route->op_lock);
+	return route->graph &&
+	       route->graph->shape == EBPFOS_FILE_GRAPH_SPLIT &&
+	       route->state == EBPFOS_FILE_ROUTE_FENCED &&
+	       route->admission_gate == EBPFOS_FILE_ADMISSION_FAILED &&
+	       route->split_reader_repair_pending &&
+	       !route->split_replay_fault_armed &&
+	       route->split_reader_frontier >= route->graph->publish_frontier &&
+	       route->split_reader_frontier < route->split_writer_frontier &&
+	       route->split_writer_frontier == route->last_sequence &&
+	       pending->sequence == route->split_writer_frontier &&
+	       pending->size <= EBPFOS_FILE_BPF_DATA_SIZE &&
+	       !check_add_overflow(pending->visible_before, (u64)pending->size,
+				   &expected_visible) &&
+	       expected_visible == pending->visible_after &&
+	       pending->visible_after == route->visible_size;
+}
+
+static int
+ebpfos_file_split_control_validate_locked(const struct ebpfos_inode_route *route,
+					  const struct ebpfos_file_split_control *request)
+{
+	lockdep_assert_held(&route->op_lock);
+	if (!ebpfos_policy_enforcing_locked() || !route->graph ||
+	    route->graph->shape != EBPFOS_FILE_GRAPH_SPLIT ||
+	    !route->binding || !route->split_reader_binding ||
+	    !route->split_writer_binding || route->migration || route->recovery ||
+	    !ebpfos_file_graph_matches_route(route, false) ||
+	    !ebpfos_file_graph_matches_route(route, true))
+		return -EUCLEAN;
+	if (request->expected_route_id != route->route_id ||
+	    request->expected_graph_epoch != route->graph->epoch ||
+	    request->expected_reader_frontier != route->split_reader_frontier ||
+	    request->expected_writer_frontier != route->split_writer_frontier)
+		return -ESTALE;
+	if (route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
+	    route->admission_gate == EBPFOS_FILE_ADMISSION_BPF_OPEN)
+		return ebpfos_file_split_ready_locked(route) ? 0 : -EUCLEAN;
+	return ebpfos_file_split_writer_ahead_locked(route) ? 0 : -EUCLEAN;
+}
+
+static bool
+ebpfos_file_split_control_test_only_locked(const struct ebpfos_inode_route *route)
+{
+	lockdep_assert_held(&route->op_lock);
+	return ebpfos_file_split_binding_test_only(route->binding) &&
+	       ebpfos_file_split_binding_test_only(route->split_reader_binding) &&
+	       ebpfos_file_split_binding_test_only(route->split_writer_binding);
+}
+
+static void
+ebpfos_file_split_control_fill_locked(struct ebpfos_file_split_control *request,
+				      const struct ebpfos_inode_route *route,
+				      u64 repaired_bytes)
+{
+	const struct ebpfos_file_delta *pending = &route->split_pending_delta;
+
+	lockdep_assert_held(&route->op_lock);
+	request->route_id = route->route_id;
+	request->graph_epoch = route->graph->epoch;
+	request->reader_frontier = route->split_reader_frontier;
+	request->writer_frontier = route->split_writer_frontier;
+	request->pending_sequence = 0;
+	request->pending_file_cookie = 0;
+	request->pending_visible_before = 0;
+	request->pending_visible_after = 0;
+	request->pending_size = 0;
+	request->pending_digest = 0;
+	if (route->split_reader_repair_pending) {
+		request->pending_sequence = pending->sequence;
+		request->pending_file_cookie = pending->file_cookie;
+		request->pending_visible_before = pending->visible_before;
+		request->pending_visible_after = pending->visible_after;
+		request->pending_size = pending->size;
+		request->pending_digest =
+			ebpfos_file_digest(pending->data, pending->size);
+	}
+	request->visible_size = route->visible_size;
+	request->repaired_bytes = repaired_bytes;
+	request->route_state = route->state;
+	request->admission_gate = route->admission_gate;
+	request->repair_pending = route->split_reader_repair_pending;
+	request->replay_fault_armed = route->split_replay_fault_armed;
+}
+
+static int
+ebpfos_file_split_capture_writer_locked(struct ebpfos_inode_route *route,
+					struct file *file, void *snapshot)
+{
+	struct ebpfos_file_bpf_ctx *ctx;
+	struct bpf_prog *prog =
+		ebpfos_binding_prog(route->split_writer_binding);
+	u64 offset = 0;
+	int error = 0;
+
+	lockdep_assert_held(&route->op_lock);
+	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	for (;;) {
+		bool at_end = offset == route->visible_size;
+		size_t count = at_end ? 1 :
+			min_t(u64, EBPFOS_FILE_BPF_DATA_SIZE,
+			      route->visible_size - offset);
+
+		error = ebpfos_file_provider_export_locked(route, file, prog,
+							   ctx, route->graph->epoch,
+			route->split_writer_frontier, offset, count,
+			route->visible_size, at_end ? NULL : snapshot + offset);
+		if (error || at_end)
+			break;
+		offset += count;
+		cond_resched();
+	}
+	kfree(ctx);
+	return error;
+}
+
+static int
+ebpfos_file_split_repair_reader_locked(struct ebpfos_inode_route *route,
+				       struct file *file, bool corrupt)
+{
+	struct ebpfos_file_transaction candidate = {
+		.route = route,
+		.file = file,
+		.prog = ebpfos_binding_prog(route->split_reader_binding),
+		.target_epoch = route->graph->epoch,
+		.snapshot_sequence = route->split_writer_frontier,
+		.snapshot_size = route->visible_size,
+	};
+	struct ebpfos_file_bpf_ctx *ctx = NULL;
+	void *snapshot = NULL;
+	int error;
+
+	lockdep_assert_held(&route->op_lock);
+	if (route->visible_size) {
+		snapshot = kvmalloc(route->visible_size,
+				    GFP_KERNEL | __GFP_NOWARN);
+		if (!snapshot)
+			return -ENOMEM;
+	}
+	candidate.snapshot = snapshot;
+	error = ebpfos_file_split_capture_writer_locked(route, file, snapshot);
+	if (error)
+		goto out;
+	if (corrupt)
+		((u8 *)snapshot)[0] ^= 1;
+	error = ebpfos_file_candidate_import(&candidate);
+	if (corrupt)
+		((u8 *)snapshot)[0] ^= 1;
+	if (error)
+		goto out;
+	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
+	if (!ctx) {
+		error = -ENOMEM;
+		goto out;
+	}
+	error = ebpfos_file_validate_candidate_buffer(&candidate, ctx, snapshot,
+						      route->split_writer_frontier,
+		route->visible_size);
+out:
+	kfree(ctx);
+	kvfree(snapshot);
+	return error;
+}
+
+long ebpfos_file_split_control_experimental_ioctl(void __user *argp)
+{
+	struct ebpfos_file_split_control request;
+	struct ebpfos_inode_route *route = NULL;
+	struct file *file = NULL;
+	bool wake = false;
+	long error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.reserved0 || request.file_fd < 0 ||
+	    request.operation > EBPFOS_FILE_SPLIT_CONTROL_REPAIR_READER ||
+	    (request.operation != EBPFOS_FILE_SPLIT_CONTROL_REPAIR_READER &&
+	     request.flags) ||
+	    (request.flags & ~EBPFOS_FILE_SPLIT_CONTROL_F_CORRUPT_IMPORT))
+		return -EINVAL;
+	file = fget(request.file_fd);
+	if (!file)
+		return -EBADF;
+	if (!ebpfos_file_supported(file) ||
+	    !S_ISREG(file_inode(file)->i_mode)) {
+		error = -EOPNOTSUPP;
+		goto out;
+	}
+	route = ebpfos_inode_route_get(file_inode(file));
+	if (!route) {
+		error = -ENOENT;
+		goto out;
+	}
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	error = ebpfos_file_split_control_validate_locked(route, &request);
+	if (error)
+		goto out_unlock;
+	switch (request.operation) {
+	case EBPFOS_FILE_SPLIT_CONTROL_STATUS:
+		ebpfos_file_split_control_fill_locked(&request, route, 0);
+		if (copy_to_user(argp, &request, sizeof(request)))
+			error = -EFAULT;
+		break;
+	case EBPFOS_FILE_SPLIT_CONTROL_ARM_REPLAY_FAULT:
+		if (!ebpfos_file_split_ready_locked(route) ||
+		    !ebpfos_file_split_control_test_only_locked(route)) {
+			error = -EACCES;
+			break;
+		}
+		if (route->split_replay_fault_armed) {
+			error = -EALREADY;
+			break;
+		}
+		ebpfos_file_split_control_fill_locked(&request, route, 0);
+		request.replay_fault_armed = 1;
+		if (copy_to_user(argp, &request, sizeof(request))) {
+			error = -EFAULT;
+			break;
+		}
+		route->split_replay_fault_armed = true;
+		break;
+	case EBPFOS_FILE_SPLIT_CONTROL_REPAIR_READER:
+		if (!ebpfos_file_split_writer_ahead_locked(route)) {
+			error = -EUCLEAN;
+			break;
+		}
+		if (request.flags &&
+		    (!route->visible_size ||
+		     !ebpfos_file_split_control_test_only_locked(route))) {
+			error = -EACCES;
+			break;
+		}
+		error = ebpfos_file_split_repair_reader_locked(route, file,
+							       !!request.flags);
+		if (error)
+			break;
+		ebpfos_file_split_control_fill_locked(&request, route,
+						      route->visible_size);
+		request.reader_frontier = route->split_writer_frontier;
+		request.pending_sequence = 0;
+		request.pending_file_cookie = 0;
+		request.pending_visible_before = 0;
+		request.pending_visible_after = 0;
+		request.pending_size = 0;
+		request.pending_digest = 0;
+		request.route_state = EBPFOS_FILE_ROUTE_ACTIVE;
+		request.admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
+		request.repair_pending = 0;
+		if (copy_to_user(argp, &request, sizeof(request))) {
+			error = -EFAULT;
+			break;
+		}
+		route->split_reader_frontier = route->split_writer_frontier;
+		route->split_reader_repair_pending = false;
+		memset(&route->split_pending_delta, 0,
+		       sizeof(route->split_pending_delta));
+		spin_lock(&route->admission_lock);
+		WRITE_ONCE(route->state, EBPFOS_FILE_ROUTE_ACTIVE);
+		route->admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
+		spin_unlock(&route->admission_lock);
+		wake = true;
+		break;
+	}
+out_unlock:
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (wake)
+		wake_up_all(&route->migration_wait);
+out:
+	if (route)
+		ebpfos_inode_route_put(route);
+	fput(file);
 	return error;
 }
 

@@ -2,6 +2,7 @@
 #ifndef _LINUX_EBPFOS_H
 #define _LINUX_EBPFOS_H
 
+#include <linux/bits.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/types.h>
@@ -49,6 +50,42 @@ struct ebpfos_file_split_publish {
 #define EBPFOS_IOC_FILE_SPLIT_PUBLISH_EXPERIMENTAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x38, \
 	      struct ebpfos_file_split_publish)
+
+#define EBPFOS_FILE_SPLIT_CONTROL_STATUS 0U
+#define EBPFOS_FILE_SPLIT_CONTROL_ARM_REPLAY_FAULT 1U
+#define EBPFOS_FILE_SPLIT_CONTROL_REPAIR_READER 2U
+#define EBPFOS_FILE_SPLIT_CONTROL_F_CORRUPT_IMPORT BIT(0)
+
+struct ebpfos_file_split_control {
+	__s32 file_fd;
+	__u32 operation;
+	__u32 flags;
+	__u32 reserved0;
+	__u64 expected_route_id;
+	__u64 expected_graph_epoch;
+	__u64 expected_reader_frontier;
+	__u64 expected_writer_frontier;
+	__u64 route_id;
+	__u64 graph_epoch;
+	__u64 reader_frontier;
+	__u64 writer_frontier;
+	__u64 pending_sequence;
+	__u64 pending_file_cookie;
+	__u64 pending_visible_before;
+	__u64 pending_visible_after;
+	__u64 pending_size;
+	__u64 pending_digest;
+	__u64 visible_size;
+	__u64 repaired_bytes;
+	__u32 route_state;
+	__u32 admission_gate;
+	__u32 repair_pending;
+	__u32 replay_fault_armed;
+};
+
+#define EBPFOS_IOC_FILE_SPLIT_CONTROL_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x39, \
+	      struct ebpfos_file_split_control)
 
 struct file;
 struct inode;
@@ -151,6 +188,7 @@ long ebpfos_file_recovery_status_ioctl(void __user *argp);
 long ebpfos_file_recovery_retire_ioctl(void __user *argp);
 long ebpfos_file_admission_status_ioctl(void __user *argp);
 long ebpfos_file_split_publish_experimental_ioctl(void __user *argp);
+long ebpfos_file_split_control_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
@@ -509,6 +547,12 @@ static inline long ebpfos_file_admission_status_ioctl(void __user *argp)
 
 static inline long
 ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long
+ebpfos_file_split_control_experimental_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
 }
