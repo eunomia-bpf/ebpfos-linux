@@ -21,6 +21,8 @@
 #include <linux/uio.h>
 #include <linux/wait.h>
 
+#include "file_graph.h"
+
 #define EBPFOS_FILE_DIGEST_INITIAL 0xcbf29ce484222325ULL
 #define EBPFOS_FILE_DIGEST_PRIME 0x100000001b3ULL
 
@@ -242,6 +244,7 @@ struct ebpfos_inode_route {
 	struct mutex op_lock; /* Serializes route state and provider calls. */
 	spinlock_t admission_lock;
 	struct inode *inode;
+	struct ebpfos_file_graph *graph;
 	void *snapshot;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
@@ -361,6 +364,40 @@ static u64 ebpfos_file_new_id(atomic64_t *counter)
 	return id ? id : atomic64_inc_return(counter);
 }
 
+static struct ebpfos_file_graph *ebpfos_file_graph_alloc_combined(
+	u64 provider_id, u64 schema_hash, u32 provider_kind, u64 epoch,
+	u64 publish_frontier)
+{
+	struct ebpfos_file_graph *graph;
+
+	graph = kzalloc_obj(*graph, GFP_KERNEL);
+	if (!graph)
+		return NULL;
+	if (ebpfos_file_graph_init_combined(graph, epoch, publish_frontier,
+					    provider_id, schema_hash,
+					    provider_kind)) {
+		kfree(graph);
+		return NULL;
+	}
+	return graph;
+}
+
+static bool ebpfos_file_graph_matches_route(
+	const struct ebpfos_inode_route *route, bool append)
+{
+	const struct ebpfos_file_graph_slot *slot;
+
+	if (!route->graph ||
+	    route->graph->shape != EBPFOS_FILE_GRAPH_COMBINED ||
+	    route->graph->epoch != route->epoch ||
+	    route->graph->publish_frontier > READ_ONCE(route->last_sequence))
+		return false;
+	slot = ebpfos_file_graph_select(route->graph, append);
+	return slot && slot->provider_id == route->provider_id &&
+	       slot->schema_hash == route->schema_hash &&
+	       slot->provider_kind == route->provider_kind;
+}
+
 static void ebpfos_file_map_lease_release(
 	struct ebpfos_file_map_lease *lease)
 {
@@ -426,6 +463,7 @@ static void ebpfos_inode_route_release(struct kref *ref)
 	struct ebpfos_inode_route *route =
 		container_of(ref, struct ebpfos_inode_route, ref);
 
+	kfree(route->graph);
 	ebpfos_file_map_lease_release(route->map_lease);
 	if (route->binding) {
 		ebpfos_binding_put(route->binding);
@@ -657,13 +695,17 @@ static bool ebpfos_file_scalar_io(struct kiocb *iocb,
 
 static int ebpfos_file_admission_acquire(
 	struct ebpfos_inode_route *route,
-	struct ebpfos_file_admission *admission)
+	struct ebpfos_file_admission *admission, bool write)
 {
 	int error = 0;
 
 	memset(admission, 0, sizeof(*admission));
 	ebpfos_admission_gate_lock();
 	spin_lock(&route->admission_lock);
+	if (!ebpfos_file_graph_matches_route(route, write)) {
+		error = -EUCLEAN;
+		goto out_unlock;
+	}
 	switch (route->admission_gate) {
 	case EBPFOS_FILE_ADMISSION_LEGACY:
 		if (ebpfos_policy_enforcing_locked())
@@ -743,6 +785,7 @@ static int ebpfos_file_admission_acquire(
 		error = -EIO;
 		break;
 	}
+out_unlock:
 	spin_unlock(&route->admission_lock);
 	ebpfos_admission_gate_unlock();
 	if (error == -EAGAIN)
@@ -1580,7 +1623,7 @@ ebpfos_file_locked_call(struct ebpfos_inode_route *route, struct kiocb *iocb,
 	}
 
 retry_admission:
-	error = ebpfos_file_admission_acquire(route, &call->admission);
+	error = ebpfos_file_admission_acquire(route, &call->admission, write);
 	if (error == -EAGAIN) {
 		atomic_inc(&route->admission_waiters);
 		result = wait_event_killable(
@@ -1837,6 +1880,14 @@ ebpfos_inode_route_alloc(struct inode *inode)
 	route->schema_hash = EBPFOS_FILE_SCHEMA_NATIVE;
 	route->visible_size = i_size_read(inode);
 	route->provider_kind = EBPFOS_PROVIDER_NATIVE;
+	route->graph = ebpfos_file_graph_alloc_combined(
+		route->provider_id, route->schema_hash, route->provider_kind,
+		route->epoch, route->last_sequence);
+	if (!route->graph) {
+		mutex_destroy(&route->op_lock);
+		kfree(route);
+		return NULL;
+	}
 	route->admission_gate = EBPFOS_FILE_ADMISSION_LEGACY;
 	route->state = EBPFOS_FILE_ROUTE_ACTIVATING;
 	atomic64_set(&route->rejected_calls, 0);
@@ -3759,6 +3810,8 @@ static int ebpfos_file_complete_recovery(
 	struct file *file)
 {
 	struct ebpfos_file_map_lease *old_map_lease = NULL;
+	struct ebpfos_file_graph *next_graph = NULL;
+	struct ebpfos_file_graph *old_graph = NULL;
 	struct ebpfos_file_recovery *recovery;
 	struct ebpfos_binding *old_binding = NULL;
 	struct ebpfos_file_transaction e4 = {};
@@ -3858,6 +3911,13 @@ static int ebpfos_file_complete_recovery(
 	recovery->e4_ready = true;
 	recovery->phase = EBPFOS_FILE_RECOVERY_READY_E4;
 	admitted = !!recovery->e4_admission;
+	next_graph = ebpfos_file_graph_alloc_combined(
+		recovery->e4_provider_id, recovery->e4_schema_hash,
+		EBPFOS_PROVIDER_BPF, recovery->e4_epoch, route->last_sequence);
+	if (!next_graph) {
+		error = -ENOMEM;
+		goto out_fail;
+	}
 
 	if (route->epoch == U64_MAX ||
 	    recovery->e4_epoch != route->epoch + 1 ||
@@ -3906,6 +3966,9 @@ static int ebpfos_file_complete_recovery(
 	}
 
 	spin_lock(&route->admission_lock);
+	old_graph = route->graph;
+	route->graph = next_graph;
+	next_graph = NULL;
 	old_map_lease = route->map_lease;
 	if (admitted) {
 		old_binding = route->binding;
@@ -3933,6 +3996,7 @@ static int ebpfos_file_complete_recovery(
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
 
+	kfree(old_graph);
 	ebpfos_file_map_lease_release(old_map_lease);
 	ebpfos_binding_put(old_binding);
 	if (!admitted) {
@@ -3949,6 +4013,7 @@ out_publish_fail:
 	ebpfos_file_recovery_fail_locked(route, error);
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
+	kfree(next_graph);
 	kvfree(expected);
 	kfree(ctx);
 	return error;
@@ -3957,6 +4022,7 @@ out_fail:
 	if (recovery)
 		ebpfos_file_recovery_fail_locked(route, error);
 	mutex_unlock(&route->op_lock);
+	kfree(next_graph);
 	kvfree(expected);
 	kfree(ctx);
 	return error;
@@ -3968,6 +4034,8 @@ static long ebpfos_file_replace_commit(
 {
 	struct ebpfos_file_transaction *txn = *txn_slot;
 	struct ebpfos_file_map_lease *old_map_lease = NULL;
+	struct ebpfos_file_graph *next_graph = NULL;
+	struct ebpfos_file_graph *old_graph = NULL;
 	struct ebpfos_binding *old_binding = NULL;
 	struct ebpfos_file_bpf_ctx *ctx;
 	struct bpf_prog *old_prog = NULL;
@@ -4217,6 +4285,13 @@ static long ebpfos_file_replace_commit(
 		goto fail_locked;
 	txn->candidate_validated_bytes = total_size;
 	txn->candidate_bytes_validated = true;
+	next_graph = ebpfos_file_graph_alloc_combined(
+		txn->provider_id, txn->target_schema_hash, EBPFOS_PROVIDER_BPF,
+		txn->target_epoch, txn->route->last_sequence);
+	if (!next_graph) {
+		error = -ENOMEM;
+		goto fail_locked;
+	}
 	mutex_unlock(&txn->route->op_lock);
 
 	/* Revalidate and publish under the policy/route linearization order. */
@@ -4269,6 +4344,9 @@ static long ebpfos_file_replace_commit(
 			goto out_publish_unlock;
 	}
 
+	old_graph = txn->route->graph;
+	txn->route->graph = next_graph;
+	next_graph = NULL;
 	if (txn->admitted) {
 		old_binding = txn->route->binding;
 		txn->route->binding = txn->binding;
@@ -4342,6 +4420,7 @@ static long ebpfos_file_replace_commit(
 	ebpfos_admission_gate_unlock();
 	if (wake)
 		wake_up_all(&txn->route->migration_wait);
+	kfree(old_graph);
 	ebpfos_file_map_lease_release(old_map_lease);
 	ebpfos_binding_put(old_binding);
 	if (!txn->admitted) {
@@ -4384,6 +4463,7 @@ fail_unlocked:
 	ebpfos_admission_gate_unlock();
 	if (wake)
 		wake_up_all(&txn->route->migration_wait);
+	kfree(next_graph);
 	kfree(ctx);
 	ebpfos_file_transaction_free(txn);
 	return error;
