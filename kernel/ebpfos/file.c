@@ -2448,14 +2448,45 @@ out_unlock:
 	return error;
 }
 
-static int ebpfos_file_source_export_locked(
-	struct ebpfos_file_transaction *txn, struct ebpfos_file_bpf_ctx *ctx,
-	u64 sequence, u64 offset, size_t count, u64 total_size, void *output)
+static int
+ebpfos_file_provider_export_locked(struct ebpfos_inode_route *route,
+				   struct file *file, struct bpf_prog *prog,
+				   struct ebpfos_file_bpf_ctx *ctx, u64 epoch,
+				   u64 sequence, u64 offset, size_t count,
+				   u64 total_size, void *output)
 {
-	struct ebpfos_inode_route *route = txn->route;
 	u64 expected = offset < total_size ?
 		min_t(u64, count, total_size - offset) : 0;
 	bool fence;
+	int error;
+
+	lockdep_assert_held(&route->op_lock);
+	if (!prog || (expected && !output))
+		return -EINVAL;
+	ebpfos_file_ctx_init(ctx, EBPFOS_FILE_OP_EXPORT_CHUNK,
+			     EBPFOS_FILE_F_SHADOW |
+			     EBPFOS_FILE_F_SOURCE_SNAPSHOT,
+			     route, ebpfos_file_cookie(file), epoch, sequence,
+			     offset, count, total_size);
+	error = ebpfos_file_run_provider(prog, ctx, &fence);
+	if (error)
+		return error;
+	if (ctx->result != expected || ctx->data_size != expected ||
+	    ctx->result_offset != offset + expected ||
+	    ctx->result_visible_size != total_size)
+		return -EREMOTEIO;
+	if (expected)
+		memcpy(output, ctx->data, expected);
+	return 0;
+}
+
+static int
+ebpfos_file_source_export_locked(struct ebpfos_file_transaction *txn,
+				 struct ebpfos_file_bpf_ctx *ctx,
+				 u64 sequence, u64 offset, size_t count,
+				 u64 total_size, void *output)
+{
+	struct ebpfos_inode_route *route = txn->route;
 	int error;
 
 	lockdep_assert_held(&route->op_lock);
@@ -2464,23 +2495,11 @@ static int ebpfos_file_source_export_locked(
 		error = -ECANCELED;
 		goto fail;
 	}
-	ebpfos_file_ctx_init(ctx, EBPFOS_FILE_OP_EXPORT_CHUNK,
-			     EBPFOS_FILE_F_SHADOW |
-			     EBPFOS_FILE_F_SOURCE_SNAPSHOT,
-			     route, ebpfos_file_cookie(txn->file),
-			     txn->source_epoch, sequence, offset, count,
-			     total_size);
-	error = ebpfos_file_run_provider(route->prog, ctx, &fence);
+	error = ebpfos_file_provider_export_locked(route, txn->file, route->prog,
+						   ctx, txn->source_epoch, sequence,
+		offset, count, total_size, output);
 	if (error)
 		goto fail;
-	if (ctx->result != expected || ctx->data_size != expected ||
-	    ctx->result_offset != offset + expected ||
-	    ctx->result_visible_size != total_size) {
-		error = -EREMOTEIO;
-		goto fail;
-	}
-	if (expected)
-		memcpy(output, ctx->data, expected);
 	return 0;
 
 fail:
@@ -4971,6 +4990,107 @@ ebpfos_file_split_route_validate_locked(const struct ebpfos_inode_route *route,
 	return 0;
 }
 
+static bool
+ebpfos_file_split_snapshot_stable_locked(const struct ebpfos_inode_route *route,
+					 const struct ebpfos_file_split_publish *request,
+					 const struct ebpfos_binding *implementation,
+					 u64 frontier, u64 size)
+{
+	lockdep_assert_held(&route->op_lock);
+	return ebpfos_policy_enforcing() && route->binding == implementation &&
+	       route->prog == ebpfos_binding_prog(implementation) &&
+	       route->map == ebpfos_binding_map(implementation) &&
+	       route->state == EBPFOS_FILE_ROUTE_ACTIVE && !route->migration &&
+	       !route->recovery &&
+	       route->admission_gate == EBPFOS_FILE_ADMISSION_DRAINING &&
+	       !atomic_read(&route->acquired_calls) &&
+	       !route->split_reader_binding && !route->split_writer_binding &&
+	       route->graph &&
+	       route->graph->shape == EBPFOS_FILE_GRAPH_COMBINED &&
+	       ebpfos_file_graph_matches_route(route, false) &&
+	       ebpfos_file_graph_matches_route(route, true) &&
+	       route->route_id == request->expected_route_id &&
+	       route->provider_id == request->expected_provider_id &&
+	       route->epoch == request->expected_epoch &&
+	       route->last_sequence == frontier && route->visible_size == size &&
+	       ebpfos_binding_content_matches(implementation,
+					      request->expected_active_content_digest);
+}
+
+static int
+ebpfos_file_split_capture_source(struct ebpfos_inode_route *route,
+				 struct file *file,
+				 const struct ebpfos_file_split_publish *request,
+				 struct ebpfos_binding *implementation,
+				 u64 frontier, u64 size, void *snapshot)
+{
+	struct ebpfos_file_bpf_ctx *ctx;
+	struct bpf_prog *prog = ebpfos_binding_prog(implementation);
+	u64 offset = 0;
+	int error = 0;
+
+	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	for (;;) {
+		bool at_end = offset == size;
+		size_t count = at_end ? 1 :
+			min_t(u64, EBPFOS_FILE_BPF_DATA_SIZE, size - offset);
+
+		mutex_lock(&route->op_lock);
+		if (!ebpfos_file_split_snapshot_stable_locked(route, request,
+							      implementation, frontier,
+							      size)) {
+			error = -ECANCELED;
+		} else {
+			error = ebpfos_file_provider_export_locked(route, file, prog,
+								   ctx,
+				route->epoch, frontier, offset, count, size,
+				at_end ? NULL : snapshot + offset);
+		}
+		mutex_unlock(&route->op_lock);
+		if (error || at_end)
+			break;
+		offset += count;
+		cond_resched();
+	}
+	kfree(ctx);
+	return error;
+}
+
+static int
+ebpfos_file_split_prepare_candidate(struct ebpfos_inode_route *route,
+				    struct file *file,
+				    struct ebpfos_binding *binding,
+				    void *snapshot, u64 epoch, u64 frontier,
+				    u64 size)
+{
+	struct ebpfos_file_transaction candidate = {
+		.route = route,
+		.file = file,
+		.prog = ebpfos_binding_prog(binding),
+		.snapshot = snapshot,
+		.target_epoch = epoch,
+		.snapshot_sequence = frontier,
+		.snapshot_size = size,
+	};
+	struct ebpfos_file_bpf_ctx *ctx;
+	int error;
+
+	if (!candidate.prog || !ebpfos_binding_map(binding))
+		return -EUCLEAN;
+	error = ebpfos_file_candidate_import(&candidate);
+	if (error)
+		return error;
+	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	error = ebpfos_file_validate_candidate_buffer(&candidate, ctx, snapshot,
+						      frontier, size);
+	kfree(ctx);
+	return error;
+}
+
 long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 {
 	struct ebpfos_file_split_publish request;
@@ -4978,6 +5098,7 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 	struct ebpfos_admission_identity_v1 writer_identity;
 	struct ebpfos_admission *reader = NULL;
 	struct ebpfos_admission *writer = NULL;
+	struct ebpfos_binding *implementation = NULL;
 	struct ebpfos_binding *reader_binding = NULL;
 	struct ebpfos_binding *writer_binding = NULL;
 	struct ebpfos_file_graph *next_graph = NULL;
@@ -4988,6 +5109,9 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 	u64 writer_provider_id;
 	u64 graph_epoch;
 	u64 schema_hash;
+	u64 snapshot_frontier = 0;
+	u64 snapshot_size = 0;
+	void *snapshot = NULL;
 	bool claimed = false;
 	bool reopen = false;
 	long error;
@@ -5095,7 +5219,7 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 		   !atomic_read(&route->acquired_calls) ||
 		   READ_ONCE(route->state) == EBPFOS_FILE_ROUTE_DEAD);
 
-	/* Snapshot the exact quiescent frontier before the irreversible publish. */
+	/* Fix the exact source frontier while both grants block policy rotation. */
 	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
 	error = ebpfos_file_split_route_validate_locked(route, &request,
@@ -5110,17 +5234,68 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 		error = ebpfos_admission_publish_validate_locked(writer,
 								 route->binding, false);
 	if (!error) {
-		next_graph->publish_frontier = route->last_sequence;
+		implementation = ebpfos_binding_get(route->binding);
+		snapshot_frontier = route->last_sequence;
+		snapshot_size = route->visible_size;
+	}
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (error)
+		goto out_burn;
+	if (snapshot_size) {
+		snapshot = kvmalloc(snapshot_size, GFP_KERNEL | __GFP_NOWARN);
+		if (!snapshot) {
+			error = -ENOMEM;
+			goto out_burn;
+		}
+	}
+	error = ebpfos_file_split_capture_source(route, file, &request,
+						 implementation, snapshot_frontier,
+		snapshot_size, snapshot);
+	if (!error)
+		error = ebpfos_file_split_prepare_candidate(route, file,
+							    reader_binding, snapshot,
+							    graph_epoch,
+			snapshot_frontier, snapshot_size);
+	if (!error)
+		error = ebpfos_file_split_prepare_candidate(route, file,
+							    writer_binding, snapshot,
+							    graph_epoch,
+			snapshot_frontier, snapshot_size);
+	if (error)
+		goto out_burn;
+
+	/* Revalidate the imported images before exposing the proposed graph. */
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	error = ebpfos_file_split_route_validate_locked(route, &request,
+							reader_binding, writer_binding,
+							EBPFOS_FILE_ADMISSION_DRAINING);
+	if (!error && !ebpfos_file_split_snapshot_stable_locked(route, &request,
+								implementation,
+								snapshot_frontier,
+			    snapshot_size))
+		error = -ECANCELED;
+	if (!error)
+		error = ebpfos_admission_publish_validate_locked(reader,
+								 route->binding, false);
+	if (!error)
+		error = ebpfos_admission_publish_validate_locked(writer,
+								 route->binding, false);
+	if (!error) {
+		next_graph->publish_frontier = snapshot_frontier;
 		ebpfos_admission_fill_identity_locked(reader, &reader_identity);
 		ebpfos_admission_fill_identity_locked(writer, &writer_identity);
 		if (reader_identity.admission_state != EBPFOS_ADMISSION_STAGED ||
-		    writer_identity.admission_state != EBPFOS_ADMISSION_STAGED) {
+		    writer_identity.admission_state != EBPFOS_ADMISSION_STAGED ||
+		    reader_identity.prog_id == writer_identity.prog_id ||
+		    reader_identity.map_id == writer_identity.map_id) {
 			error = -EUCLEAN;
 		} else {
 			request.route_id = route->route_id;
 			request.implementation_provider_id = route->provider_id;
 			request.graph_epoch = route->epoch;
-			request.publish_frontier = route->last_sequence;
+			request.publish_frontier = snapshot_frontier;
 			request.reader_provider_id = reader_provider_id;
 			request.writer_provider_id = writer_provider_id;
 			request.transition_id =
@@ -5157,8 +5332,10 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 	error = ebpfos_file_split_route_validate_locked(route, &request,
 							reader_binding, writer_binding,
 							EBPFOS_FILE_ADMISSION_DRAINING);
-	if (!error && (atomic_read(&route->acquired_calls) ||
-		       route->last_sequence != next_graph->publish_frontier))
+	if (!error && !ebpfos_file_split_snapshot_stable_locked(route, &request,
+								implementation,
+								snapshot_frontier,
+			    snapshot_size))
 		error = -ECANCELED;
 	if (!error)
 		error = ebpfos_admission_publish_validate_locked(reader,
@@ -5216,7 +5393,9 @@ out_burn:
 			wake_up_all(&route->migration_wait);
 	}
 out:
+	kvfree(snapshot);
 	kfree(next_graph);
+	ebpfos_binding_put(implementation);
 	ebpfos_binding_put(writer_binding);
 	ebpfos_binding_put(reader_binding);
 	ebpfos_admission_put(writer);
