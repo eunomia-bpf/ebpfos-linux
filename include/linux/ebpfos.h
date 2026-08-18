@@ -54,6 +54,7 @@ struct ebpfos_file_split_publish {
 #define EBPFOS_FILE_SPLIT_CONTROL_STATUS 0U
 #define EBPFOS_FILE_SPLIT_CONTROL_ARM_REPLAY_FAULT 1U
 #define EBPFOS_FILE_SPLIT_CONTROL_REPAIR_READER 2U
+#define EBPFOS_FILE_SPLIT_CONTROL_RETIRE_LINEAGE 3U
 #define EBPFOS_FILE_SPLIT_CONTROL_F_CORRUPT_IMPORT BIT(0)
 
 struct ebpfos_file_split_control {
@@ -77,10 +78,17 @@ struct ebpfos_file_split_control {
 	__u64 pending_digest;
 	__u64 visible_size;
 	__u64 repaired_bytes;
+	__u64 lineage_provider_id;
+	__u64 lineage_acquires;
+	__u64 lineage_acquires_at_retire;
 	__u32 route_state;
 	__u32 admission_gate;
 	__u32 repair_pending;
 	__u32 replay_fault_armed;
+	__u32 lineage_prog_id;
+	__u32 lineage_map_id;
+	__u32 lineage_retired;
+	__u32 reserved1;
 };
 
 #define EBPFOS_IOC_FILE_SPLIT_CONTROL_EXPERIMENTAL \
