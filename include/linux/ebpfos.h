@@ -12,6 +12,44 @@
 #define EBPFOS_COMPONENT_USE_SPLIT_WRITER 7U
 #define EBPFOS_COMPONENT_SPLIT_TRANSITION_ID 0x201ULL
 
+/*
+ * Kernel-private experiment ABI.  The split publication model is not frozen
+ * into uapi/linux/ebpfos.h until authority views survive the KVM gates.
+ */
+struct ebpfos_file_split_publish {
+	__s32 file_fd;
+	__s32 reader_admission_fd;
+	__s32 writer_admission_fd;
+	__u32 flags;
+	__u64 expected_route_id;
+	__u64 expected_provider_id;
+	__u64 expected_epoch;
+	__u8 expected_active_content_digest[32];
+	__u64 route_id;
+	__u64 implementation_provider_id;
+	__u64 graph_epoch;
+	__u64 publish_frontier;
+	__u64 reader_provider_id;
+	__u64 writer_provider_id;
+	__u64 transition_id;
+	__u64 reader_grant_id;
+	__u64 writer_grant_id;
+	__u32 graph_shape;
+	__u32 reader_state;
+	__u32 writer_state;
+	__u32 reserved0;
+	__u32 reader_prog_id;
+	__u32 reader_map_id;
+	__u32 writer_prog_id;
+	__u32 writer_map_id;
+	__u8 reader_content_digest[32];
+	__u8 writer_content_digest[32];
+};
+
+#define EBPFOS_IOC_FILE_SPLIT_PUBLISH_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x38, \
+	      struct ebpfos_file_split_publish)
+
 struct file;
 struct inode;
 struct iov_iter;
@@ -54,11 +92,16 @@ int ebpfos_admission_claim_locked(struct ebpfos_admission *admission,
 int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
 				       struct ebpfos_admission *e4,
 				       const struct ebpfos_binding *predecessor);
+int ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
+					       struct ebpfos_admission *writer,
+					       const struct ebpfos_binding *predecessor);
 int ebpfos_admission_publish_validate_locked(
 	struct ebpfos_admission *admission,
 	const struct ebpfos_binding *predecessor, bool recovery);
 int ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
 				    bool recovery);
+int ebpfos_admission_consume_pair_locked(struct ebpfos_admission *first,
+					 struct ebpfos_admission *second);
 int ebpfos_admission_recovery_e3_consume_locked(
 	struct ebpfos_admission *e3, struct ebpfos_admission *e4);
 void ebpfos_admission_burn_locked(struct ebpfos_admission *admission);
@@ -107,6 +150,7 @@ long ebpfos_file_recovery_abort_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_file_recovery_status_ioctl(void __user *argp);
 long ebpfos_file_recovery_retire_ioctl(void __user *argp);
 long ebpfos_file_admission_status_ioctl(void __user *argp);
+long ebpfos_file_split_publish_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
@@ -218,6 +262,14 @@ ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
 	return -EOPNOTSUPP;
 }
 
+static inline int
+ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
+					   struct ebpfos_admission *writer,
+					   const struct ebpfos_binding *predecessor)
+{
+	return -EOPNOTSUPP;
+}
+
 static inline int ebpfos_admission_publish_validate_locked(
 	struct ebpfos_admission *admission,
 	const struct ebpfos_binding *predecessor, bool recovery)
@@ -228,6 +280,13 @@ static inline int ebpfos_admission_publish_validate_locked(
 static inline int
 ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
 				bool recovery)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int
+ebpfos_admission_consume_pair_locked(struct ebpfos_admission *first,
+				     struct ebpfos_admission *second)
 {
 	return -EOPNOTSUPP;
 }
@@ -444,6 +503,12 @@ static inline long ebpfos_file_recovery_retire_ioctl(void __user *argp)
 }
 
 static inline long ebpfos_file_admission_status_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long
+ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
 }

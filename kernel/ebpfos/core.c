@@ -527,6 +527,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return result;
 	case EBPFOS_IOC_FILE_ADMISSION_STATUS:
 		return ebpfos_file_admission_status_ioctl(argp);
+	case EBPFOS_IOC_FILE_SPLIT_PUBLISH_EXPERIMENTAL:
+		return ebpfos_file_split_publish_experimental_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}

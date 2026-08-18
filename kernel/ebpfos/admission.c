@@ -1681,48 +1681,134 @@ int ebpfos_admission_claim_locked(struct ebpfos_admission *admission,
 	return error;
 }
 
-int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
-				       struct ebpfos_admission *e4,
-				       const struct ebpfos_binding *predecessor)
+static bool ebpfos_sibling_digest_matches(const u8 *reader, const u8 *writer,
+					  const u8 *predecessor)
+{
+	return !memcmp(reader, writer, SHA256_DIGEST_SIZE) &&
+	       !memcmp(reader, predecessor, SHA256_DIGEST_SIZE);
+}
+
+static bool
+ebpfos_sibling_implementation_matches(const struct ebpfos_admission *reader,
+				      const struct ebpfos_admission *writer,
+				      const struct ebpfos_binding *predecessor)
+{
+	const struct ebpfos_component_desc_v1 *reader_desc;
+	const struct ebpfos_component_desc_v1 *writer_desc;
+	const struct ebpfos_component_desc_v1 *predecessor_desc;
+
+	reader_desc = ebpfos_binding_descriptor(reader->binding);
+	writer_desc = ebpfos_binding_descriptor(writer->binding);
+	predecessor_desc = ebpfos_binding_descriptor(predecessor);
+	if (!reader_desc || !writer_desc || !predecessor_desc ||
+	    predecessor->kind != EBPFOS_ADMITTED_BINDING_BPF ||
+	    predecessor->use != EBPFOS_COMPONENT_USE_RECOVERY_E4 ||
+	    le64_to_cpu(reader_desc->transition_id) !=
+		    EBPFOS_COMPONENT_SPLIT_TRANSITION_ID ||
+	    le64_to_cpu(writer_desc->transition_id) !=
+		    EBPFOS_COMPONENT_SPLIT_TRANSITION_ID)
+		return false;
+	return ebpfos_sibling_digest_matches(reader_desc->contract_sha256,
+					     writer_desc->contract_sha256,
+					     predecessor_desc->contract_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->interface_sha256,
+					     writer_desc->interface_sha256,
+					     predecessor_desc->interface_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->authority_sha256,
+					     writer_desc->authority_sha256,
+					     predecessor_desc->authority_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->abstract_schema_sha256,
+					     writer_desc->abstract_schema_sha256,
+					     predecessor_desc->abstract_schema_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->concrete_schema_sha256,
+					     writer_desc->concrete_schema_sha256,
+					     predecessor_desc->concrete_schema_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->attested_elf_sha256,
+					     writer_desc->attested_elf_sha256,
+					     predecessor_desc->attested_elf_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->load_image_sha256,
+					     writer_desc->load_image_sha256,
+					     predecessor_desc->load_image_sha256) &&
+	       ebpfos_sibling_digest_matches(reader_desc->initial_map_sha256,
+					     writer_desc->initial_map_sha256,
+					     predecessor_desc->initial_map_sha256) &&
+	       !memcmp(&reader_desc->resource, &writer_desc->resource,
+		       sizeof(reader_desc->resource)) &&
+	       !memcmp(&reader_desc->resource, &predecessor_desc->resource,
+		       sizeof(reader_desc->resource));
+}
+
+static int
+ebpfos_admission_claim_pair_common_locked(struct ebpfos_admission *first,
+					  struct ebpfos_admission *second,
+					  const struct ebpfos_binding *predecessor,
+					  u32 first_use, u32 second_use,
+					  bool siblings)
 {
 	struct ebpfos_admission *low, *high;
 	int error;
 
 	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!e3 || !e4 || e3 == e4 || e3->grant_id == e4->grant_id ||
+	if (!first || !second || first == second ||
+	    first->grant_id == second->grant_id ||
 	    !predecessor)
 		return -EINVAL;
-	if (e3->binding->use != EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT ||
-	    e4->binding->use != EBPFOS_COMPONENT_USE_RECOVERY_E4)
+	if (first->binding->use != first_use ||
+	    second->binding->use != second_use)
 		return -EPROTOTYPE;
-	if (!ebpfos_admission_current_locked(e3) ||
-	    !ebpfos_admission_current_locked(e4))
+	if (!ebpfos_admission_current_locked(first) ||
+	    !ebpfos_admission_current_locked(second))
 		return -ESTALE;
-	if (!ebpfos_predecessor_matches(e3, predecessor) ||
-	    !ebpfos_predecessor_matches(e4, e3->binding))
+	if (!ebpfos_predecessor_matches(first, predecessor) ||
+	    !ebpfos_predecessor_matches(second,
+					 siblings ? predecessor : first->binding))
 		return -EXDEV;
-	error = ebpfos_admission_owner_recheck(e3, false);
+	if (siblings &&
+	    !ebpfos_sibling_implementation_matches(first, second, predecessor))
+		return -EXDEV;
+	error = ebpfos_admission_owner_recheck(first, false);
 	if (error)
 		return error;
-	error = ebpfos_admission_owner_recheck(e4, false);
+	error = ebpfos_admission_owner_recheck(second, false);
 	if (error)
 		return error;
 	if (ebpfos_staged_grants > U64_MAX - 2)
 		return -EOVERFLOW;
-	ebpfos_admission_lock_pair(e3, e4, &low, &high);
-	if (e3->state != EBPFOS_ADMISSION_FRESH ||
-	    e4->state != EBPFOS_ADMISSION_FRESH) {
-		error = e3->state == EBPFOS_ADMISSION_STAGED ||
-			e4->state == EBPFOS_ADMISSION_STAGED ? -EBUSY :
+	ebpfos_admission_lock_pair(first, second, &low, &high);
+	if (first->state != EBPFOS_ADMISSION_FRESH ||
+	    second->state != EBPFOS_ADMISSION_FRESH) {
+		error = first->state == EBPFOS_ADMISSION_STAGED ||
+			first->state == EBPFOS_ADMISSION_STAGED_RECOVERY ||
+			second->state == EBPFOS_ADMISSION_STAGED ||
+			second->state == EBPFOS_ADMISSION_STAGED_RECOVERY ? -EBUSY :
 			-EALREADY;
 	} else {
-		e3->state = EBPFOS_ADMISSION_STAGED;
-		e4->state = EBPFOS_ADMISSION_STAGED;
+		first->state = EBPFOS_ADMISSION_STAGED;
+		second->state = EBPFOS_ADMISSION_STAGED;
 		ebpfos_staged_grants += 2;
 		error = 0;
 	}
 	ebpfos_admission_unlock_pair(low, high);
 	return error;
+}
+
+int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
+				       struct ebpfos_admission *e4,
+				       const struct ebpfos_binding *predecessor)
+{
+	return ebpfos_admission_claim_pair_common_locked(e3, e4, predecessor,
+		EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT,
+		EBPFOS_COMPONENT_USE_RECOVERY_E4, false);
+}
+
+int
+ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
+					   struct ebpfos_admission *writer,
+					   const struct ebpfos_binding *predecessor)
+{
+	return ebpfos_admission_claim_pair_common_locked(reader, writer, predecessor,
+		EBPFOS_COMPONENT_USE_SPLIT_READER,
+		EBPFOS_COMPONENT_USE_SPLIT_WRITER, true);
 }
 
 int ebpfos_admission_publish_validate_locked(
@@ -1769,6 +1855,31 @@ int ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
 		ebpfos_staged_grants--;
 	}
 	spin_unlock(&admission->state_lock);
+	return error;
+}
+
+int ebpfos_admission_consume_pair_locked(struct ebpfos_admission *first,
+					 struct ebpfos_admission *second)
+{
+	struct ebpfos_admission *low, *high;
+	int error = 0;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!first || !second || first == second ||
+	    first->grant_id == second->grant_id)
+		return -EINVAL;
+	ebpfos_admission_lock_pair(first, second, &low, &high);
+	if (first->state != EBPFOS_ADMISSION_STAGED ||
+	    second->state != EBPFOS_ADMISSION_STAGED) {
+		error = -ESTALE;
+	} else if (ebpfos_staged_grants < 2) {
+		error = -EUCLEAN;
+	} else {
+		first->state = EBPFOS_ADMISSION_CONSUMED;
+		second->state = EBPFOS_ADMISSION_CONSUMED;
+		ebpfos_staged_grants -= 2;
+	}
+	ebpfos_admission_unlock_pair(low, high);
 	return error;
 }
 
