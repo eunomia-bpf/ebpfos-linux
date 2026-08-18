@@ -476,6 +476,8 @@ static int ebpfos_expected_map_tuple(u32 use, u32 *value_size,
 	case EBPFOS_COMPONENT_USE_RECOVERY_E2:
 	case EBPFOS_COMPONENT_USE_RECOVERY_E3_FAULT:
 	case EBPFOS_COMPONENT_USE_RECOVERY_E4:
+	case EBPFOS_COMPONENT_USE_SPLIT_READER:
+	case EBPFOS_COMPONENT_USE_SPLIT_WRITER:
 		*value_size = EBPFOS_FILE_V2_VALUE_SIZE;
 		*max_entries = EBPFOS_FILE_V2_MAX_ENTRIES;
 		*schema = EBPFOS_FILE_SCHEMA_V2;
@@ -537,6 +539,7 @@ static int ebpfos_validate_descriptor(
 	u32 value_size, max_entries;
 	u64 expected_provider_type;
 	u64 expected_transition;
+	u64 expected_capabilities = EBPFOS_CAP_FILE_ALL;
 	const u8 *expected_concrete_schema;
 	u64 expected_schema;
 	bool test_use;
@@ -594,6 +597,22 @@ static int ebpfos_validate_descriptor(
 		expected_concrete_schema =
 			ebpfos_file_v2_concrete_schema_sha256;
 		break;
+	case EBPFOS_COMPONENT_USE_SPLIT_READER:
+		expected_provider_type = 4;
+		expected_transition = EBPFOS_COMPONENT_SPLIT_TRANSITION_ID;
+		expected_capabilities = EBPFOS_CAP_FILE_READ |
+					EBPFOS_CAP_FILE_MIGRATE;
+		expected_concrete_schema =
+			ebpfos_file_v2_concrete_schema_sha256;
+		break;
+	case EBPFOS_COMPONENT_USE_SPLIT_WRITER:
+		expected_provider_type = 5;
+		expected_transition = EBPFOS_COMPONENT_SPLIT_TRANSITION_ID;
+		expected_capabilities = EBPFOS_CAP_FILE_APPEND |
+					EBPFOS_CAP_FILE_MIGRATE;
+		expected_concrete_schema =
+			ebpfos_file_v2_concrete_schema_sha256;
+		break;
 	default:
 		return -EPROTOTYPE;
 	}
@@ -644,7 +663,7 @@ static int ebpfos_validate_descriptor(
 	    le32_to_cpu(descriptor->context_size) !=
 		EBPFOS_FILE_PROVIDER_CONTEXT_SIZE ||
 	    le64_to_cpu(descriptor->runtime_schema_u64) != expected_schema ||
-	    le64_to_cpu(descriptor->capability_mask) != EBPFOS_CAP_FILE_ALL ||
+	    le64_to_cpu(descriptor->capability_mask) != expected_capabilities ||
 	    le64_to_cpu(descriptor->effect_mask) !=
 		EBPFOS_EFFECT_FILE_PROVIDER_ALL ||
 	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL ||

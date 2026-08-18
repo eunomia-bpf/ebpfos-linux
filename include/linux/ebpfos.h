@@ -7,6 +7,11 @@
 #include <linux/types.h>
 #include <uapi/linux/ebpfos.h>
 
+/* Internal experiment uses; do not freeze these into the UAPI yet. */
+#define EBPFOS_COMPONENT_USE_SPLIT_READER 6U
+#define EBPFOS_COMPONENT_USE_SPLIT_WRITER 7U
+#define EBPFOS_COMPONENT_SPLIT_TRANSITION_ID 0x201ULL
+
 struct file;
 struct inode;
 struct iov_iter;
