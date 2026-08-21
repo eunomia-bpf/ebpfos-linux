@@ -95,6 +95,24 @@ struct ebpfos_file_split_control {
 	__u32 lineage_map_id;
 	__u32 lineage_retired;
 	__u32 reserved1;
+	__u64 reader_provider_id;
+	__u64 writer_provider_id;
+	__u64 read_calls;
+	__u64 write_calls;
+	__u64 read_bytes;
+	__u64 write_bytes;
+	__u64 reader_dispatches;
+	__u64 writer_dispatches;
+	__u64 retired_reader_dispatches;
+	__u64 retired_writer_dispatches;
+	__u64 hot_publications;
+	__u64 publish_frontier;
+	__u32 reader_prog_id;
+	__u32 reader_map_id;
+	__u32 writer_prog_id;
+	__u32 writer_map_id;
+	__u32 acquired_calls;
+	__u32 last_publish_drained_calls;
 };
 
 #define EBPFOS_IOC_FILE_SPLIT_CONTROL_EXPERIMENTAL \
@@ -245,6 +263,48 @@ struct ebpfos_file_split_private_convert {
 #define EBPFOS_IOC_FILE_SPLIT_PRIVATE_CONVERT_EXPERIMENTAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x3e, \
 	      struct ebpfos_file_split_private_convert)
+
+#define EBPFOS_FILE_SPLIT_HOT_PUBLISH_F_FAIL_BEFORE_COMMIT BIT(0)
+#define EBPFOS_FILE_SPLIT_HOT_PUBLISH_F_ALL \
+	EBPFOS_FILE_SPLIT_HOT_PUBLISH_F_FAIL_BEFORE_COMMIT
+
+/*
+ * Input-only hot publication transaction.  The kernel refreshes the staged
+ * pair and checks both Alpha images before the sole graph linearization point;
+ * no fallible user copy follows a successful commit.
+ */
+struct ebpfos_file_split_hot_publish {
+	__s32 file_fd;
+	__s32 adapter_fd;
+	__s32 reader_admission_fd;
+	__s32 writer_admission_fd;
+	__u32 flags;
+	__u32 reserved0;
+	__u64 expected_route_id;
+	__u64 expected_graph_epoch;
+	__u64 minimum_frontier;
+	__u64 minimum_visible_size;
+	__u64 expected_target_epoch;
+	__u32 expected_source_reader_prog_id;
+	__u32 expected_source_reader_map_id;
+	__u32 expected_source_writer_prog_id;
+	__u32 expected_source_writer_map_id;
+	__u64 expected_reader_grant_id;
+	__u64 expected_writer_grant_id;
+	__u32 expected_reader_prog_id;
+	__u32 expected_reader_map_id;
+	__u32 expected_writer_prog_id;
+	__u32 expected_writer_map_id;
+	__u8 expected_adapter_content_digest[32];
+	__u8 expected_source_reader_content_digest[32];
+	__u8 expected_source_writer_content_digest[32];
+	__u8 expected_reader_content_digest[32];
+	__u8 expected_writer_content_digest[32];
+};
+
+#define EBPFOS_IOC_FILE_SPLIT_HOT_PUBLISH_EXPERIMENTAL \
+	_IOW(EBPFOS_IOC_MAGIC, 0x3f, \
+	     struct ebpfos_file_split_hot_publish)
 
 struct file;
 struct inode;
@@ -399,6 +459,7 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_control_experimental_ioctl(void __user *argp);
 long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_private_convert_experimental_ioctl(void __user *argp);
+long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);

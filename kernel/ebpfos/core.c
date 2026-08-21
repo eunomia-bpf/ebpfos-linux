@@ -457,6 +457,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_state_adapter_target_pair_ioctl(argp);
 	case EBPFOS_IOC_FILE_SPLIT_PRIVATE_CONVERT_EXPERIMENTAL:
 		return ebpfos_file_split_private_convert_experimental_ioctl(argp);
+	case EBPFOS_IOC_FILE_SPLIT_HOT_PUBLISH_EXPERIMENTAL:
+		return ebpfos_file_split_hot_publish_experimental_ioctl(argp);
 	case EBPFOS_IOC_OBJECT_CREATE:
 		return ebpfos_object_create_ioctl(argp);
 	case EBPFOS_IOC_FILE_ENROLL:
