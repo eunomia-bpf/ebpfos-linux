@@ -1811,6 +1811,115 @@ ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 		EBPFOS_COMPONENT_USE_SPLIT_WRITER, true);
 }
 
+static bool
+ebpfos_restore_admission_matches(const struct ebpfos_admission *admission,
+				 const struct ebpfos_admission_restore_pair *pair,
+				 const u8 expected_content_digest[32])
+{
+	const struct ebpfos_component_desc_v1 *descriptor;
+
+	if (!admission || !admission->binding ||
+	    admission->binding->kind != EBPFOS_ADMITTED_BINDING_BPF ||
+	    memcmp(admission->binding->content_digest, expected_content_digest,
+		   SHA256_DIGEST_SIZE))
+		return false;
+	descriptor = ebpfos_binding_descriptor(admission->binding);
+	return descriptor &&
+	       le64_to_cpu(descriptor->transition_id) ==
+		       EBPFOS_COMPONENT_SPLIT_TRANSITION_ID &&
+	       le64_to_cpu(descriptor->predecessor_policy_generation) ==
+		       pair->predecessor_policy_generation &&
+	       !memcmp(descriptor->predecessor_policy_digest,
+		       pair->predecessor_policy_digest, SHA256_DIGEST_SIZE) &&
+	       !memcmp(descriptor->predecessor_content_digest,
+		       pair->predecessor_content_digest, SHA256_DIGEST_SIZE);
+}
+
+static int
+ebpfos_admission_restore_identity_locked(struct ebpfos_admission_restore_pair *pair)
+{
+	struct ebpfos_admission *reader;
+	struct ebpfos_admission *writer;
+	int error;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!pair || !pair->predecessor_policy_digest ||
+	    !pair->predecessor_content_digest || !pair->reader_content_digest ||
+	    !pair->writer_content_digest)
+		return -EINVAL;
+	reader = pair->reader;
+	writer = pair->writer;
+	if (!reader || !writer || reader == writer ||
+	    reader->grant_id == writer->grant_id)
+		return -EINVAL;
+	if (!reader->binding || !writer->binding)
+		return -EUCLEAN;
+	if (reader->binding->use != EBPFOS_COMPONENT_USE_SPLIT_READER ||
+	    writer->binding->use != EBPFOS_COMPONENT_USE_SPLIT_WRITER)
+		return -EPROTOTYPE;
+	if (!ebpfos_restore_admission_matches(reader, pair,
+					      pair->reader_content_digest) ||
+	    !ebpfos_restore_admission_matches(writer, pair,
+					      pair->writer_content_digest))
+		return -EXDEV;
+	if (!ebpfos_admission_current_locked(reader) ||
+	    !ebpfos_admission_current_locked(writer))
+		return -ESTALE;
+	error = ebpfos_admission_owner_recheck(reader, false);
+	if (error)
+		return error;
+	return ebpfos_admission_owner_recheck(writer, false);
+}
+
+int
+ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair)
+{
+	struct ebpfos_admission *reader = pair ? pair->reader : NULL;
+	struct ebpfos_admission *writer = pair ? pair->writer : NULL;
+	struct ebpfos_admission *low, *high;
+	int error;
+
+	error = ebpfos_admission_restore_identity_locked(pair);
+	if (error)
+		return error;
+	if (ebpfos_staged_grants > U64_MAX - 2)
+		return -EOVERFLOW;
+	ebpfos_admission_lock_pair(reader, writer, &low, &high);
+	if (reader->state != EBPFOS_ADMISSION_FRESH ||
+	    writer->state != EBPFOS_ADMISSION_FRESH) {
+		error = reader->state == EBPFOS_ADMISSION_STAGED ||
+			reader->state == EBPFOS_ADMISSION_STAGED_RECOVERY ||
+			writer->state == EBPFOS_ADMISSION_STAGED ||
+			writer->state == EBPFOS_ADMISSION_STAGED_RECOVERY ?
+			-EBUSY : -EALREADY;
+	} else {
+		reader->state = EBPFOS_ADMISSION_STAGED;
+		writer->state = EBPFOS_ADMISSION_STAGED;
+		ebpfos_staged_grants += 2;
+		error = 0;
+	}
+	ebpfos_admission_unlock_pair(low, high);
+	return error;
+}
+
+int
+ebpfos_admission_restore_validate_locked(struct ebpfos_admission_restore_pair *pair)
+{
+	struct ebpfos_admission *reader = pair ? pair->reader : NULL;
+	struct ebpfos_admission *writer = pair ? pair->writer : NULL;
+	struct ebpfos_admission *low, *high;
+	int error;
+
+	error = ebpfos_admission_restore_identity_locked(pair);
+	if (error)
+		return error;
+	ebpfos_admission_lock_pair(reader, writer, &low, &high);
+	error = reader->state == EBPFOS_ADMISSION_STAGED &&
+		writer->state == EBPFOS_ADMISSION_STAGED ? 0 : -ESTALE;
+	ebpfos_admission_unlock_pair(low, high);
+	return error;
+}
+
 int ebpfos_admission_publish_validate_locked(
 	struct ebpfos_admission *admission,
 	const struct ebpfos_binding *predecessor, bool recovery)

@@ -377,7 +377,7 @@ static_assert(sizeof(struct ebpfos_file_split_publish) ==
 static_assert(sizeof(struct ebpfos_file_split_control) ==
 	      200);
 static_assert(sizeof(struct ebpfos_file_checkpoint_manifest_v1) == 300);
-static_assert(sizeof(struct ebpfos_file_checkpoint) == 432);
+static_assert(sizeof(struct ebpfos_file_checkpoint) == 448);
 static_assert(EBPFOS_FILE_COMMIT_TAIL <= EBPFOS_FILE_CATCHUP_BATCH);
 static_assert(EBPFOS_FILE_CATCHUP_BATCH <= EBPFOS_FILE_DELTA_CAPACITY);
 static_assert(offsetof(struct ebpfos_ioc_file_status, fatal_error) +
@@ -6299,6 +6299,8 @@ ebpfos_file_checkpoint_seal_ioctl(struct ebpfos_inode_route *route,
 	request->admission_gate = EBPFOS_FILE_ADMISSION_DRAINING;
 	request->checkpointed = 1;
 	request->reserved1 = 0;
+	request->graph_epoch = route->graph->epoch;
+	request->restore_generation = route->split_restore_generation;
 
 	/* A copied record is inert until the matching dormant route is published. */
 	if (route->visible_size &&
@@ -6356,11 +6358,338 @@ out_initial_unlock:
 	return error;
 }
 
+static int
+ebpfos_file_checkpoint_record_copy(const struct ebpfos_file_checkpoint *request,
+				   void __user *argp, void **image_out)
+{
+	struct ebpfos_file_checkpoint_manifest_v1 canonical;
+	u8 digest[SHA256_DIGEST_SIZE];
+	u64 image_size;
+	void *image = NULL;
+	int error;
+
+	if (memcmp(request->manifest.magic, EBPFOS_FILE_CHECKPOINT_MAGIC,
+		   sizeof(request->manifest.magic)) ||
+	    le16_to_cpu(request->manifest.format_version) !=
+		    EBPFOS_FILE_CHECKPOINT_FORMAT_V1 ||
+	    le16_to_cpu(request->manifest.manifest_size) !=
+		    sizeof(request->manifest))
+		return -EPROTO;
+	image_size = le64_to_cpu(request->manifest.visible_size);
+	if (image_size > EBPFOS_FILE_SNAPSHOT_MAX)
+		return -EFBIG;
+	error = ebpfos_file_checkpoint_copyout_validate(request, argp, image_size);
+	if (error)
+		return error;
+	if (image_size) {
+		image = kvmalloc(image_size, GFP_KERNEL | __GFP_NOWARN);
+		if (!image)
+			return -ENOMEM;
+		if (copy_from_user(image, u64_to_user_ptr(request->image),
+				   image_size)) {
+			error = -EFAULT;
+			goto out;
+		}
+	}
+	ebpfos_file_checkpoint_hash_image(image, image_size, digest);
+	if (memcmp(digest, request->manifest.image_sha256, sizeof(digest))) {
+		error = -EBADMSG;
+		goto out;
+	}
+	canonical = request->manifest;
+	memset(canonical.record_sha256, 0, sizeof(canonical.record_sha256));
+	ebpfos_file_checkpoint_hash_record(&canonical, image, image_size, digest);
+	if (memcmp(digest, request->manifest.record_sha256, sizeof(digest))) {
+		error = -EBADMSG;
+		goto out;
+	}
+	*image_out = image;
+	return 0;
+
+out:
+	kvfree(image);
+	return error;
+}
+
+static int
+ebpfos_file_restore_valid_locked(const struct ebpfos_inode_route *route,
+				 const struct ebpfos_file_checkpoint *request)
+{
+	const struct ebpfos_file_graph_slot *reader_slot;
+	const struct ebpfos_file_graph_slot *writer_slot;
+
+	lockdep_assert_held(&route->op_lock);
+	if (!route->split_checkpointed)
+		return -ESTALE;
+	if (!route->graph)
+		return -EUCLEAN;
+	if (memcmp(&request->manifest, &route->split_checkpoint,
+		   sizeof(request->manifest)) ||
+	    request->expected_route_id != route->route_id ||
+	    request->expected_graph_epoch != route->graph->epoch ||
+	    request->expected_frontier != route->split_reader_frontier ||
+	    request->expected_frontier != route->split_writer_frontier ||
+	    request->expected_visible_size != route->visible_size ||
+	    request->expected_lineage_acquires_at_retire !=
+		    route->split_lineage_acquires_at_retire)
+		return -ESTALE;
+	if (!ebpfos_policy_enforcing_locked() ||
+	    !ebpfos_file_graph_valid(route->graph) ||
+	    route->graph->shape != EBPFOS_FILE_GRAPH_SPLIT ||
+	    route->graph->epoch != route->epoch ||
+	    route->graph->publish_frontier > route->split_reader_frontier ||
+	    route->state != EBPFOS_FILE_ROUTE_ACTIVE || route->migration ||
+	    route->recovery ||
+	    route->admission_gate != EBPFOS_FILE_ADMISSION_DRAINING ||
+	    atomic_read(&route->acquired_calls) || route->binding || route->prog ||
+	    route->map || route->map_lease || route->split_reader_binding ||
+	    route->split_writer_binding || !route->split_lineage_retired ||
+	    route->split_reader_repair_pending || route->split_replay_fault_armed ||
+	    route->split_lineage_acquires !=
+		    route->split_lineage_acquires_at_retire ||
+	    le64_to_cpu(route->split_checkpoint.route_id) != route->route_id ||
+	    le64_to_cpu(route->split_checkpoint.source_graph_epoch) !=
+		    route->graph->epoch ||
+	    le64_to_cpu(route->split_checkpoint.restore_generation) !=
+		    route->split_restore_generation ||
+	    le64_to_cpu(route->split_checkpoint.provider_lineage_id) !=
+		    route->provider_id ||
+	    le64_to_cpu(route->split_checkpoint.schema_hash) != route->schema_hash ||
+	    le64_to_cpu(route->split_checkpoint.transition_id) !=
+		    route->split_transition_id ||
+	    le64_to_cpu(route->split_checkpoint.frontier) !=
+		    route->split_reader_frontier ||
+	    le64_to_cpu(route->split_checkpoint.visible_size) !=
+		    route->visible_size ||
+	    le64_to_cpu(route->split_checkpoint.last_sequence) !=
+		    route->last_sequence ||
+	    le64_to_cpu(route->split_checkpoint.lineage_acquires_at_retire) !=
+		    route->split_lineage_acquires_at_retire ||
+	    le64_to_cpu(route->split_checkpoint.lineage_policy_generation) !=
+		    route->split_lineage_policy_generation ||
+	    memcmp(route->split_checkpoint.lineage_policy_digest,
+		   route->split_lineage_policy_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(route->split_checkpoint.lineage_content_digest,
+		   route->split_lineage_content_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(route->split_checkpoint.reader_content_digest,
+		   route->split_reader_content_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(route->split_checkpoint.writer_content_digest,
+		   route->split_writer_content_digest, SHA256_DIGEST_SIZE) ||
+	    memchr_inv(&route->split_pending_delta, 0,
+		       sizeof(route->split_pending_delta)))
+		return -EUCLEAN;
+	reader_slot = ebpfos_file_graph_select(route->graph, false);
+	writer_slot = ebpfos_file_graph_select(route->graph, true);
+	if (!reader_slot || !writer_slot ||
+	    reader_slot->provider_id != route->split_reader_provider_id ||
+	    writer_slot->provider_id != route->split_writer_provider_id ||
+	    reader_slot->schema_hash != route->schema_hash ||
+	    writer_slot->schema_hash != route->schema_hash ||
+	    reader_slot->provider_kind != EBPFOS_PROVIDER_BPF ||
+	    writer_slot->provider_kind != EBPFOS_PROVIDER_BPF)
+		return -EUCLEAN;
+	return 0;
+}
+
+static long
+ebpfos_file_restore_ioctl(struct ebpfos_inode_route *route,
+			  struct file *file,
+			  struct ebpfos_file_checkpoint *request,
+			  void __user *argp, void *image)
+{
+	struct ebpfos_admission_identity_v1 reader_identity;
+	struct ebpfos_admission_identity_v1 writer_identity;
+	struct ebpfos_admission_restore_pair pair = {};
+	struct ebpfos_admission *reader = NULL;
+	struct ebpfos_admission *writer = NULL;
+	struct ebpfos_binding *reader_binding = NULL;
+	struct ebpfos_binding *writer_binding = NULL;
+	struct ebpfos_file_graph *next_graph = NULL;
+	struct ebpfos_file_graph *old_graph;
+	u64 reader_provider_id;
+	u64 writer_provider_id;
+	u64 restore_epoch;
+	u64 restore_generation;
+	u64 frontier = le64_to_cpu(request->manifest.frontier);
+	u64 image_size = le64_to_cpu(request->manifest.visible_size);
+	u64 schema_hash = le64_to_cpu(request->manifest.schema_hash);
+	bool claimed = false;
+	long error;
+
+	reader = ebpfos_admission_get_from_fd(request->reader_admission_fd);
+	if (IS_ERR(reader)) {
+		error = PTR_ERR(reader);
+		reader = NULL;
+		goto out;
+	}
+	writer = ebpfos_admission_get_from_fd(request->writer_admission_fd);
+	if (IS_ERR(writer)) {
+		error = PTR_ERR(writer);
+		writer = NULL;
+		goto out;
+	}
+	if (reader == writer) {
+		error = -EINVAL;
+		goto out;
+	}
+	reader_binding = ebpfos_admission_binding_get(reader);
+	writer_binding = ebpfos_admission_binding_get(writer);
+	if (!reader_binding || !writer_binding) {
+		error = -EUCLEAN;
+		goto out;
+	}
+
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	error = ebpfos_file_restore_valid_locked(route, request);
+	if (!error) {
+		pair.reader = reader;
+		pair.writer = writer;
+		pair.predecessor_policy_generation =
+			route->split_lineage_policy_generation;
+		pair.predecessor_policy_digest =
+			route->split_lineage_policy_digest;
+		pair.predecessor_content_digest =
+			route->split_lineage_content_digest;
+		pair.reader_content_digest = route->split_reader_content_digest;
+		pair.writer_content_digest = route->split_writer_content_digest;
+	}
+	if (!error &&
+	    (check_add_overflow(route->graph->epoch, 1ULL, &restore_epoch) ||
+	     check_add_overflow(route->split_restore_generation, 1ULL,
+				&restore_generation)))
+		error = -EOVERFLOW;
+	if (!error)
+		error = ebpfos_admission_restore_claim_locked(&pair);
+	if (!error)
+		claimed = true;
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (error)
+		goto out;
+
+	reader_provider_id = ebpfos_file_new_id(&ebpfos_next_file_provider_id);
+	writer_provider_id = ebpfos_file_new_id(&ebpfos_next_file_provider_id);
+	if (reader_provider_id == writer_provider_id) {
+		error = -EOVERFLOW;
+		goto out;
+	}
+	next_graph = ebpfos_file_graph_alloc_split(restore_epoch, frontier,
+						   reader_provider_id,
+						   writer_provider_id,
+						   schema_hash,
+						   EBPFOS_PROVIDER_BPF);
+	if (!next_graph) {
+		error = -ENOMEM;
+		goto out;
+	}
+	error = ebpfos_file_split_prepare_candidate(route, file, reader_binding,
+						    image, restore_epoch,
+						    frontier, image_size);
+	if (!error)
+		error = ebpfos_file_split_prepare_candidate(route, file,
+							    writer_binding,
+							    image, restore_epoch,
+							    frontier, image_size);
+	if (error)
+		goto out;
+
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	error = ebpfos_file_restore_valid_locked(route, request);
+	if (!error)
+		error = ebpfos_admission_restore_validate_locked(&pair);
+	if (!error) {
+		ebpfos_admission_fill_identity_locked(reader, &reader_identity);
+		ebpfos_admission_fill_identity_locked(writer, &writer_identity);
+		if (reader_identity.admission_state != EBPFOS_ADMISSION_STAGED ||
+		    writer_identity.admission_state != EBPFOS_ADMISSION_STAGED ||
+		    reader_identity.prog_id == writer_identity.prog_id ||
+		    reader_identity.map_id == writer_identity.map_id) {
+			error = -EUCLEAN;
+		} else {
+			request->reader_provider_id = reader_provider_id;
+			request->writer_provider_id = writer_provider_id;
+			request->reader_prog_id = reader_identity.prog_id;
+			request->reader_map_id = reader_identity.map_id;
+			request->writer_prog_id = writer_identity.prog_id;
+			request->writer_map_id = writer_identity.map_id;
+			request->route_state = EBPFOS_FILE_ROUTE_ACTIVE;
+			request->admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
+			request->checkpointed = 0;
+			request->reserved1 = 0;
+			request->graph_epoch = restore_epoch;
+			request->restore_generation = restore_generation;
+		}
+	}
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	if (error)
+		goto out;
+	if (copy_to_user(argp, request, sizeof(*request))) {
+		error = -EFAULT;
+		goto out;
+	}
+
+	ebpfos_admission_gate_lock();
+	mutex_lock(&route->op_lock);
+	error = ebpfos_file_restore_valid_locked(route, request);
+	if (!error)
+		error = ebpfos_admission_restore_validate_locked(&pair);
+	if (!error)
+		error = ebpfos_admission_consume_pair_locked(reader, writer);
+	if (error) {
+		mutex_unlock(&route->op_lock);
+		ebpfos_admission_gate_unlock();
+		goto out;
+	}
+	old_graph = route->graph;
+	spin_lock(&route->admission_lock);
+	route->graph = next_graph;
+	next_graph = NULL;
+	route->epoch = restore_epoch;
+	route->split_reader_binding = reader_binding;
+	reader_binding = NULL;
+	route->split_writer_binding = writer_binding;
+	writer_binding = NULL;
+	route->split_reader_provider_id = reader_provider_id;
+	route->split_writer_provider_id = writer_provider_id;
+	route->split_reader_frontier = frontier;
+	route->split_writer_frontier = frontier;
+	route->split_restore_generation = restore_generation;
+	memset(&route->split_checkpoint, 0, sizeof(route->split_checkpoint));
+	memset(&route->split_pending_delta, 0,
+	       sizeof(route->split_pending_delta));
+	WRITE_ONCE(route->split_checkpointed, false);
+	route->admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
+	spin_unlock(&route->admission_lock);
+	claimed = false;
+	mutex_unlock(&route->op_lock);
+	ebpfos_admission_gate_unlock();
+	kfree(old_graph);
+	wake_up_all(&route->migration_wait);
+	error = 0;
+
+out:
+	if (claimed) {
+		ebpfos_admission_gate_lock();
+		ebpfos_admission_burn_pair_locked(reader, writer);
+		ebpfos_admission_gate_unlock();
+	}
+	kfree(next_graph);
+	ebpfos_binding_put(writer_binding);
+	ebpfos_binding_put(reader_binding);
+	ebpfos_admission_put(writer);
+	ebpfos_admission_put(reader);
+	return error;
+}
+
 long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp)
 {
 	struct ebpfos_file_checkpoint request;
 	struct ebpfos_inode_route *route = NULL;
 	struct file *file = NULL;
+	void *image = NULL;
 	long error;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -6372,14 +6701,24 @@ long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp)
 	    (request.operation != EBPFOS_FILE_CHECKPOINT_SEAL &&
 	     request.operation != EBPFOS_FILE_CHECKPOINT_RESTORE))
 		return -EINVAL;
-	if (request.operation == EBPFOS_FILE_CHECKPOINT_RESTORE)
-		return -EOPNOTSUPP;
-	if (request.reader_admission_fd != -1 ||
-	    request.writer_admission_fd != -1)
+	if ((request.operation == EBPFOS_FILE_CHECKPOINT_SEAL &&
+	     (request.reader_admission_fd != -1 ||
+	      request.writer_admission_fd != -1)) ||
+	    (request.operation == EBPFOS_FILE_CHECKPOINT_RESTORE &&
+	     (request.reader_admission_fd < 0 ||
+	      request.writer_admission_fd < 0 ||
+	      request.reader_admission_fd == request.writer_admission_fd)))
 		return -EINVAL;
+	if (request.operation == EBPFOS_FILE_CHECKPOINT_RESTORE) {
+		error = ebpfos_file_checkpoint_record_copy(&request, argp, &image);
+		if (error)
+			return error;
+	}
 	file = fget(request.file_fd);
-	if (!file)
-		return -EBADF;
+	if (!file) {
+		error = -EBADF;
+		goto out;
+	}
 	if (!ebpfos_file_supported(file) ||
 	    !S_ISREG(file_inode(file)->i_mode)) {
 		error = -EOPNOTSUPP;
@@ -6390,11 +6729,18 @@ long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp)
 		error = -ENOENT;
 		goto out;
 	}
-	error = ebpfos_file_checkpoint_seal_ioctl(route, file, &request, argp);
+	if (request.operation == EBPFOS_FILE_CHECKPOINT_SEAL)
+		error = ebpfos_file_checkpoint_seal_ioctl(route, file,
+							  &request, argp);
+	else
+		error = ebpfos_file_restore_ioctl(route, file,
+						  &request, argp, image);
 out:
 	if (route)
 		ebpfos_inode_route_put(route);
-	fput(file);
+	if (file)
+		fput(file);
+	kvfree(image);
 	return error;
 }
 

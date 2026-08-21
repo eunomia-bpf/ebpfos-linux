@@ -153,6 +153,8 @@ struct ebpfos_file_checkpoint {
 	__u32 admission_gate;
 	__u32 checkpointed;
 	__u32 reserved1;
+	__u64 graph_epoch;
+	__u64 restore_generation;
 };
 
 #define EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL \
@@ -167,6 +169,16 @@ struct bpf_prog;
 struct ebpfos_admission;
 struct ebpfos_binding;
 struct ebpfos_prog_identity;
+
+struct ebpfos_admission_restore_pair {
+	struct ebpfos_admission *reader;
+	struct ebpfos_admission *writer;
+	u64 predecessor_policy_generation;
+	const u8 *predecessor_policy_digest;
+	const u8 *predecessor_content_digest;
+	const u8 *reader_content_digest;
+	const u8 *writer_content_digest;
+};
 
 typedef ssize_t (*ebpfos_file_iter_fn)(struct kiocb *iocb,
 				       struct iov_iter *iter);
@@ -203,6 +215,10 @@ int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
 int ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 					       struct ebpfos_admission *writer,
 					       const struct ebpfos_binding *predecessor);
+int
+ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair);
+int
+ebpfos_admission_restore_validate_locked(struct ebpfos_admission_restore_pair *pair);
 int ebpfos_admission_publish_validate_locked(
 	struct ebpfos_admission *admission,
 	const struct ebpfos_binding *predecessor, bool recovery);
@@ -376,6 +392,18 @@ static inline int
 ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 					   struct ebpfos_admission *writer,
 					   const struct ebpfos_binding *predecessor)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int
+ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int
+ebpfos_admission_restore_validate_locked(struct ebpfos_admission_restore_pair *pair)
 {
 	return -EOPNOTSUPP;
 }
