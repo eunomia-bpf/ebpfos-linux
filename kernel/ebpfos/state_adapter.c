@@ -20,6 +20,7 @@ static_assert(sizeof(struct ebpfos_state_adapter_program_v1) ==
 	      EBPFOS_STATE_ADAPTER_PROGRAM_V1_SIZE);
 static_assert(sizeof(struct ebpfos_state_adapter_record_v1) ==
 	      EBPFOS_STATE_ADAPTER_RECORD_V1_SIZE);
+static_assert(sizeof(struct ebpfos_state_adapter_target_pair) == 152);
 EBPFOS_ASSERT_OFFSET(ebpfos_state_adapter_record_v1, realm_id, 32);
 EBPFOS_ASSERT_OFFSET(ebpfos_state_adapter_record_v1, policy_generation, 48);
 EBPFOS_ASSERT_OFFSET(ebpfos_state_adapter_record_v1,
@@ -295,6 +296,161 @@ ebpfos_state_adapter_get_from_fd(int fd, struct file **file_out)
 	}
 	*file_out = file;
 	return file->private_data;
+}
+
+static int ebpfos_state_adapter_target_matches_locked(
+	const struct ebpfos_state_adapter *adapter,
+	struct ebpfos_admission *admission,
+	const struct ebpfos_state_adapter_role_v1 *expected_role,
+	u32 role, u32 use, const u8 source_content_digest[SHA256_DIGEST_SIZE],
+	struct ebpfos_admission_identity_v1 *identity)
+{
+	struct ebpfos_state_adapter_role_v1 actual_role = {};
+	const struct ebpfos_component_desc_v1 *descriptor;
+	struct ebpfos_binding *binding;
+	u8 role_digest[SHA256_DIGEST_SIZE];
+	int error = 0;
+
+	if (!adapter || !admission || !expected_role || !identity ||
+	    ebpfos_admission_state_locked(admission) != EBPFOS_ADMISSION_FRESH)
+		return -ESTALE;
+	binding = ebpfos_admission_binding_get(admission);
+	if (!binding)
+		return -EUCLEAN;
+	descriptor = ebpfos_binding_descriptor(binding);
+	if (!descriptor ||
+	    ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    ebpfos_binding_use(binding) != use) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
+	if (le64_to_cpu(descriptor->policy_generation) !=
+		le64_to_cpu(adapter->record.policy_generation) ||
+	    memcmp(descriptor->realm_id, adapter->record.realm_id,
+		   sizeof(descriptor->realm_id)) ||
+	    memcmp(descriptor->policy_record_digest,
+		   adapter->record.policy_record_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(descriptor->host_policy_sha256,
+		   adapter->record.host_policy_sha256, SHA256_DIGEST_SIZE) ||
+	    le64_to_cpu(descriptor->predecessor_policy_generation) !=
+		le64_to_cpu(adapter->record.policy_generation) ||
+	    memcmp(descriptor->predecessor_policy_digest,
+		   adapter->record.policy_record_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(descriptor->predecessor_content_digest,
+		   source_content_digest, SHA256_DIGEST_SIZE)) {
+		error = -EXDEV;
+		goto out;
+	}
+	actual_role.role = cpu_to_le32(role);
+	actual_role.provider_type_id = descriptor->provider_type_id;
+	actual_role.transition_id = descriptor->transition_id;
+	actual_role.runtime_schema_u64 = descriptor->runtime_schema_u64;
+	actual_role.capability_mask = descriptor->capability_mask;
+	ebpfos_state_adapter_role_digest(&actual_role, role_digest);
+	if (memcmp(&actual_role, expected_role,
+		   offsetof(struct ebpfos_state_adapter_role_v1, role_digest)) ||
+	    memcmp(role_digest, expected_role->role_digest,
+		   SHA256_DIGEST_SIZE)) {
+		error = -EKEYREJECTED;
+		goto out;
+	}
+	ebpfos_admission_fill_identity_locked(admission, identity);
+out:
+	ebpfos_binding_put(binding);
+	return error;
+}
+
+long ebpfos_state_adapter_target_pair_ioctl(void __user *argp)
+{
+	struct ebpfos_state_adapter_target_pair request;
+	struct ebpfos_admission_identity_v1 reader_identity;
+	struct ebpfos_admission_identity_v1 writer_identity;
+	struct ebpfos_state_adapter *adapter;
+	struct ebpfos_admission *reader = NULL;
+	struct ebpfos_admission *writer = NULL;
+	struct file *adapter_file = NULL;
+	int error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.flags)
+		return -EINVAL;
+	adapter = ebpfos_state_adapter_get_from_fd(request.adapter_fd,
+						    &adapter_file);
+	if (IS_ERR(adapter))
+		return PTR_ERR(adapter);
+	reader = ebpfos_admission_get_from_fd(request.reader_admission_fd);
+	if (IS_ERR(reader)) {
+		error = PTR_ERR(reader);
+		reader = NULL;
+		goto out;
+	}
+	writer = ebpfos_admission_get_from_fd(request.writer_admission_fd);
+	if (IS_ERR(writer)) {
+		error = PTR_ERR(writer);
+		writer = NULL;
+		goto out;
+	}
+	if (reader == writer) {
+		error = -EINVAL;
+		goto out;
+	}
+
+	ebpfos_admission_gate_lock();
+	error = ebpfos_policy_identity_validate_locked(
+		le64_to_cpu(adapter->record.policy_generation),
+		adapter->record.realm_id, adapter->record.policy_record_digest,
+		adapter->record.host_policy_sha256, EBPFOS_POLICY_F_TEST_ONLY);
+	if (!error)
+		error = ebpfos_state_adapter_target_matches_locked(
+			adapter, reader, &adapter->record.target_reader,
+			EBPFOS_STATE_ADAPTER_ROLE_READER,
+			EBPFOS_COMPONENT_USE_SPLIT_V2_READER,
+			adapter->record.source_reader_content_digest,
+			&reader_identity);
+	if (!error)
+		error = ebpfos_state_adapter_target_matches_locked(
+			adapter, writer, &adapter->record.target_writer,
+			EBPFOS_STATE_ADAPTER_ROLE_WRITER,
+			EBPFOS_COMPONENT_USE_SPLIT_V2_WRITER,
+			adapter->record.source_writer_content_digest,
+			&writer_identity);
+	if (!error &&
+	    (reader_identity.grant_id == writer_identity.grant_id ||
+	     reader_identity.prog_id == writer_identity.prog_id ||
+	     reader_identity.map_id == writer_identity.map_id ||
+	     !memcmp(reader_identity.content_digest,
+		     writer_identity.content_digest, SHA256_DIGEST_SIZE)))
+		error = -EUCLEAN;
+	if (!error) {
+		request.reader_state = reader_identity.admission_state;
+		request.writer_state = writer_identity.admission_state;
+		request.reader_grant_id = reader_identity.grant_id;
+		request.writer_grant_id = writer_identity.grant_id;
+		request.reader_prog_id = reader_identity.prog_id;
+		request.reader_map_id = reader_identity.map_id;
+		request.writer_prog_id = writer_identity.prog_id;
+		request.writer_map_id = writer_identity.map_id;
+		memcpy(request.adapter_content_digest, adapter->content_digest,
+		       sizeof(request.adapter_content_digest));
+		memcpy(request.reader_content_digest,
+		       reader_identity.content_digest,
+		       sizeof(request.reader_content_digest));
+		memcpy(request.writer_content_digest,
+		       writer_identity.content_digest,
+		       sizeof(request.writer_content_digest));
+	}
+	ebpfos_admission_gate_unlock();
+	if (!error && copy_to_user(argp, &request, sizeof(request)))
+		error = -EFAULT;
+out:
+	ebpfos_admission_put(writer);
+	ebpfos_admission_put(reader);
+	if (adapter_file)
+		fput(adapter_file);
+	return error;
 }
 
 long ebpfos_state_adapter_seal_ioctl(void __user *argp)

@@ -193,6 +193,11 @@ static_assert((u64)(EBPFOS_FILE_V2_KEY_SIZE +
 	      EBPFOS_FILE_V2_MAX_ENTRIES == 34736200ULL);
 static_assert((u64)ALIGN(EBPFOS_FILE_V2_VALUE_SIZE, 8) *
 	      EBPFOS_FILE_V2_MAX_ENTRIES == 34605120ULL);
+static_assert((u64)(EBPFOS_FILE_SPLIT_V2_KEY_SIZE +
+			    EBPFOS_FILE_SPLIT_V2_VALUE_SIZE) *
+	      EBPFOS_FILE_SPLIT_V2_MAX_ENTRIES == 34148424ULL);
+static_assert((u64)ALIGN(EBPFOS_FILE_SPLIT_V2_VALUE_SIZE, 8) *
+	      EBPFOS_FILE_SPLIT_V2_MAX_ENTRIES == 34082880ULL);
 
 static const u8 ebpfos_policy_domain[] = "eBPFOS-policy-v1";
 static const u8 ebpfos_admission_domain[] = "eBPFOS-admission-v1";
@@ -209,17 +214,17 @@ static const u8 ebpfos_kernel_abi_sha256[SHA256_DIGEST_SIZE] = {
 };
 
 static const u8 ebpfos_native_contract_sha256[SHA256_DIGEST_SIZE] = {
-	0x61, 0x52, 0xbc, 0x81, 0x29, 0x79, 0xb8, 0x30,
-	0x5a, 0xc3, 0x28, 0x22, 0xb2, 0x5c, 0x95, 0xae,
-	0x47, 0x76, 0x37, 0x02, 0x5e, 0xc7, 0x4c, 0x29,
-	0xf8, 0xc2, 0xee, 0x17, 0x5b, 0x2a, 0xb1, 0x19,
+	0x5a, 0x11, 0xaa, 0x22, 0x14, 0x06, 0x58, 0xdb,
+	0xe9, 0x22, 0x45, 0xe1, 0x1e, 0x53, 0xd6, 0x48,
+	0xf9, 0x3b, 0xe0, 0xd2, 0xad, 0x22, 0xbe, 0x19,
+	0x00, 0xf2, 0xcf, 0xd0, 0x56, 0x80, 0x4f, 0xe2,
 };
 
 static const u8 ebpfos_native_interface_sha256[SHA256_DIGEST_SIZE] = {
-	0x3d, 0x0b, 0xab, 0xb8, 0xfb, 0x73, 0x51, 0xd8,
-	0xce, 0xb4, 0x33, 0xfa, 0xc2, 0x3f, 0xdc, 0x91,
-	0x0f, 0xb8, 0x66, 0xcb, 0xe3, 0x8c, 0xb6, 0xe2,
-	0x40, 0x65, 0xe3, 0xda, 0x4b, 0xf7, 0xb6, 0x9a,
+	0x42, 0x3e, 0x5d, 0x15, 0x52, 0xd1, 0xb3, 0xa3,
+	0x82, 0x31, 0x85, 0x48, 0x1e, 0x74, 0x6e, 0x89,
+	0x68, 0xfa, 0x3c, 0x38, 0x67, 0x28, 0xf2, 0xe6,
+	0xbc, 0xdb, 0xcc, 0xc0, 0xb2, 0x90, 0x1b, 0xde,
 };
 
 static const u8 ebpfos_native_schema_sha256[SHA256_DIGEST_SIZE] = {
@@ -253,6 +258,13 @@ static const u8 ebpfos_file_v2_concrete_schema_sha256[SHA256_DIGEST_SIZE] = {
 	0x2e, 0x67, 0x82, 0x82, 0x30, 0x13, 0x52, 0x38,
 	0xeb, 0x0c, 0x0b, 0x72, 0xc3, 0xa8, 0x0e, 0xa7,
 	0xfe, 0x72, 0x66, 0x59, 0xa0, 0x3c, 0xf4, 0x1c,
+};
+
+static const u8 ebpfos_file_split_v2_concrete_schema_sha256[SHA256_DIGEST_SIZE] = {
+	0x3b, 0x11, 0xd4, 0xfc, 0xb8, 0x25, 0x55, 0xf1,
+	0xd1, 0x56, 0xc3, 0x87, 0x08, 0x12, 0xad, 0xba,
+	0x3b, 0x8d, 0x4b, 0x69, 0x0a, 0x86, 0x88, 0xa9,
+	0x9a, 0xb1, 0x43, 0xcc, 0x50, 0x03, 0x2c, 0xb1,
 };
 
 enum ebpfos_prog_seal_state {
@@ -497,6 +509,12 @@ static int ebpfos_expected_map_tuple(u32 use, u32 *value_size,
 		*max_entries = EBPFOS_FILE_V2_MAX_ENTRIES;
 		*schema = EBPFOS_FILE_SCHEMA_V2;
 		return 0;
+	case EBPFOS_COMPONENT_USE_SPLIT_V2_READER:
+	case EBPFOS_COMPONENT_USE_SPLIT_V2_WRITER:
+		*value_size = EBPFOS_FILE_SPLIT_V2_VALUE_SIZE;
+		*max_entries = EBPFOS_FILE_SPLIT_V2_MAX_ENTRIES;
+		*schema = EBPFOS_STATE_ADAPTER_SPLIT_V2_SCHEMA;
+		return 0;
 	default:
 		return -EPROTOTYPE;
 	}
@@ -627,6 +645,24 @@ static int ebpfos_validate_descriptor(
 					EBPFOS_CAP_FILE_MIGRATE;
 		expected_concrete_schema =
 			ebpfos_file_v2_concrete_schema_sha256;
+		break;
+	case EBPFOS_COMPONENT_USE_SPLIT_V2_READER:
+		expected_provider_type =
+			EBPFOS_STATE_ADAPTER_SPLIT_READER_PROVIDER_TYPE;
+		expected_transition = EBPFOS_COMPONENT_SPLIT_V2_TRANSITION_ID;
+		expected_capabilities = EBPFOS_CAP_FILE_READ |
+					EBPFOS_CAP_FILE_MIGRATE;
+		expected_concrete_schema =
+			ebpfos_file_split_v2_concrete_schema_sha256;
+		break;
+	case EBPFOS_COMPONENT_USE_SPLIT_V2_WRITER:
+		expected_provider_type =
+			EBPFOS_STATE_ADAPTER_SPLIT_WRITER_PROVIDER_TYPE;
+		expected_transition = EBPFOS_COMPONENT_SPLIT_V2_TRANSITION_ID;
+		expected_capabilities = EBPFOS_CAP_FILE_APPEND |
+					EBPFOS_CAP_FILE_MIGRATE;
+		expected_concrete_schema =
+			ebpfos_file_split_v2_concrete_schema_sha256;
 		break;
 	default:
 		return -EPROTOTYPE;

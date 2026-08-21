@@ -453,6 +453,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_state_adapter_seal_ioctl(argp);
 	case EBPFOS_IOC_STATE_ADAPTER_INFO:
 		return ebpfos_state_adapter_info_ioctl(argp);
+	case EBPFOS_IOC_STATE_ADAPTER_TARGET_PAIR_EXPERIMENTAL:
+		return ebpfos_state_adapter_target_pair_ioctl(argp);
 	case EBPFOS_IOC_OBJECT_CREATE:
 		return ebpfos_object_create_ioctl(argp);
 	case EBPFOS_IOC_FILE_ENROLL:

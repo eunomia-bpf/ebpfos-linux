@@ -352,6 +352,8 @@ struct bpf_map {
 #define BPF_EBPFOS_PROVIDER_V1_MAX_ENTRIES	131073U
 #define BPF_EBPFOS_PROVIDER_V2_VALUE_SIZE	1056U
 #define BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES	32770U
+#define BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE	2080U
+#define BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES	16386U
 
 static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 {
@@ -359,6 +361,9 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 		  map->max_entries == BPF_EBPFOS_PROVIDER_V1_MAX_ENTRIES;
 	bool v2 = map->value_size == BPF_EBPFOS_PROVIDER_V2_VALUE_SIZE &&
 		  map->max_entries == BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES;
+	bool split_v2 =
+		map->value_size == BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE &&
+		map->max_entries == BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES;
 
 	return IS_ENABLED(CONFIG_EBPFOS) &&
 	       map->map_type == BPF_MAP_TYPE_ARRAY &&
@@ -366,7 +371,7 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 	       !map->map_extra && !map->inner_map_meta && !map->btf &&
 	       !map->btf_key_type_id && !map->btf_value_type_id &&
 	       !map->btf_vmlinux_value_type_id && !map->record &&
-	       !map->excl && !map->excl_prog_sha && (v1 || v2);
+	       !map->excl && !map->excl_prog_sha && (v1 || v2 || split_v2);
 }
 
 static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,

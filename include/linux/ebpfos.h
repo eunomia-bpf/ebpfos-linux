@@ -11,7 +11,13 @@
 /* Internal experiment uses; do not freeze these into the UAPI yet. */
 #define EBPFOS_COMPONENT_USE_SPLIT_READER 6U
 #define EBPFOS_COMPONENT_USE_SPLIT_WRITER 7U
+#define EBPFOS_COMPONENT_USE_SPLIT_V2_READER 8U
+#define EBPFOS_COMPONENT_USE_SPLIT_V2_WRITER 9U
 #define EBPFOS_COMPONENT_SPLIT_TRANSITION_ID 0x201ULL
+#define EBPFOS_COMPONENT_SPLIT_V2_TRANSITION_ID 0x202ULL
+#define EBPFOS_FILE_SPLIT_V2_KEY_SIZE 4U
+#define EBPFOS_FILE_SPLIT_V2_VALUE_SIZE 2080U
+#define EBPFOS_FILE_SPLIT_V2_MAX_ENTRIES 16386U
 
 /*
  * Kernel-private experiment ABI.  The split publication model is not frozen
@@ -165,6 +171,29 @@ struct ebpfos_file_checkpoint {
 #define EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x3a, struct ebpfos_file_checkpoint)
 
+/* Read-only correspondence check for a sealed adapter and fresh targets. */
+struct ebpfos_state_adapter_target_pair {
+	__s32 adapter_fd;
+	__s32 reader_admission_fd;
+	__s32 writer_admission_fd;
+	__u32 flags;
+	__u32 reader_state;
+	__u32 writer_state;
+	__u64 reader_grant_id;
+	__u64 writer_grant_id;
+	__u32 reader_prog_id;
+	__u32 reader_map_id;
+	__u32 writer_prog_id;
+	__u32 writer_map_id;
+	__u8 adapter_content_digest[32];
+	__u8 reader_content_digest[32];
+	__u8 writer_content_digest[32];
+};
+
+#define EBPFOS_IOC_STATE_ADAPTER_TARGET_PAIR_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x3d, \
+	      struct ebpfos_state_adapter_target_pair)
+
 struct file;
 struct inode;
 struct iov_iter;
@@ -198,6 +227,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp);
 long ebpfos_admission_info_ioctl(void __user *argp);
 long ebpfos_state_adapter_seal_ioctl(void __user *argp);
 long ebpfos_state_adapter_info_ioctl(void __user *argp);
+long ebpfos_state_adapter_target_pair_ioctl(void __user *argp);
 
 /* The admission gate is outermost to every subsystem route/object lock. */
 void ebpfos_admission_gate_lock(void);

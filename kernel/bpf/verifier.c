@@ -18172,7 +18172,7 @@ static bool bpf_map_is_cgroup_storage(struct bpf_map *map)
 static int check_ebpfos_provider_map(struct bpf_verifier_env *env,
 				     struct bpf_map *map)
 {
-	bool v1, v2;
+	bool v1, v2, split_v2;
 
 	if (map->map_type != BPF_MAP_TYPE_ARRAY || bpf_map_is_offloaded(map)) {
 		verbose(env, "eBPFOS provider requires an ordinary ARRAY map\n");
@@ -18194,8 +18194,12 @@ static int check_ebpfos_provider_map(struct bpf_verifier_env *env,
 	     map->max_entries == BPF_EBPFOS_PROVIDER_V1_MAX_ENTRIES;
 	v2 = map->value_size == BPF_EBPFOS_PROVIDER_V2_VALUE_SIZE &&
 	     map->max_entries == BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES;
-	if (!v1 && !v2) {
-		verbose(env, "eBPFOS provider map does not match the V1 or V2 tuple\n");
+	split_v2 =
+		map->value_size == BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE &&
+		map->max_entries == BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES;
+	if (!v1 && !v2 && !split_v2) {
+		verbose(env,
+			"eBPFOS provider map does not match the V1, V2, or split-v2 tuple\n");
 		return -EINVAL;
 	}
 	if (!READ_ONCE(map->frozen)) {
