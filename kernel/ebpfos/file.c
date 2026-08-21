@@ -22,6 +22,7 @@
 #include <linux/uio.h>
 #include <linux/wait.h>
 
+#include "component_graph.h"
 #include "file_graph.h"
 
 #define EBPFOS_FILE_DIGEST_INITIAL 0xcbf29ce484222325ULL
@@ -6269,15 +6270,9 @@ ebpfos_file_split_hot_request_matches_locked(
 	const struct ebpfos_file_split_hot_publish *request,
 	const struct ebpfos_binding *source_reader,
 	const struct ebpfos_binding *source_writer,
-	const struct ebpfos_state_adapter *adapter,
-	const struct ebpfos_admission_identity_v1 *reader_identity,
-	const struct ebpfos_admission_identity_v1 *writer_identity,
-	u32 expected_gate)
+	const struct ebpfos_state_adapter *adapter, u32 expected_gate)
 {
-	struct ebpfos_admission_identity_v1 source_reader_identity = {};
-	struct ebpfos_admission_identity_v1 source_writer_identity = {};
 	u64 target_epoch;
-
 	lockdep_assert_held(&route->op_lock);
 	if (!ebpfos_policy_enforcing_locked() || !route->graph ||
 	    route->graph->shape != EBPFOS_FILE_GRAPH_SPLIT ||
@@ -6308,40 +6303,120 @@ ebpfos_file_split_hot_request_matches_locked(
 		   ebpfos_state_adapter_content_digest(adapter),
 		   SHA256_DIGEST_SIZE))
 		return -EKEYREJECTED;
-
-	ebpfos_binding_fill_identity(source_reader, &source_reader_identity);
-	ebpfos_binding_fill_identity(source_writer, &source_writer_identity);
-	if (source_reader_identity.prog_id !=
-			request->expected_source_reader_prog_id ||
-	    source_reader_identity.map_id !=
-			request->expected_source_reader_map_id ||
-	    source_writer_identity.prog_id !=
-			request->expected_source_writer_prog_id ||
-	    source_writer_identity.map_id !=
-			request->expected_source_writer_map_id ||
-	    memcmp(source_reader_identity.content_digest,
-		   request->expected_source_reader_content_digest,
-		   SHA256_DIGEST_SIZE) ||
-	    memcmp(source_writer_identity.content_digest,
-		   request->expected_source_writer_content_digest,
-		   SHA256_DIGEST_SIZE))
-		return -ESTALE;
-	if (reader_identity->admission_state != EBPFOS_ADMISSION_STAGED ||
-	    writer_identity->admission_state != EBPFOS_ADMISSION_STAGED ||
-	    reader_identity->grant_id != request->expected_reader_grant_id ||
-	    writer_identity->grant_id != request->expected_writer_grant_id ||
-	    reader_identity->prog_id != request->expected_reader_prog_id ||
-	    reader_identity->map_id != request->expected_reader_map_id ||
-	    writer_identity->prog_id != request->expected_writer_prog_id ||
-	    writer_identity->map_id != request->expected_writer_map_id ||
-	    memcmp(reader_identity->content_digest,
-		   request->expected_reader_content_digest,
-		   SHA256_DIGEST_SIZE) ||
-	    memcmp(writer_identity->content_digest,
-		   request->expected_writer_content_digest,
-		   SHA256_DIGEST_SIZE))
-		return -ESTALE;
 	return 0;
+}
+
+enum ebpfos_file_hot_role_index {
+	EBPFOS_FILE_HOT_READER,
+	EBPFOS_FILE_HOT_WRITER,
+	EBPFOS_FILE_HOT_ROLE_COUNT,
+};
+
+#define EBPFOS_FILE_HOT_ROLE_READ 1U
+#define EBPFOS_FILE_HOT_ROLE_APPEND 2U
+#define EBPFOS_FILE_HOT_CONTRACT_READ 1U
+#define EBPFOS_FILE_HOT_CONTRACT_APPEND 2U
+#define EBPFOS_FILE_HOT_READER_DISPATCHES 5U
+#define EBPFOS_FILE_HOT_WRITER_DISPATCHES 6U
+#define EBPFOS_FILE_HOT_COUNTER_COUNT 7U
+
+static void ebpfos_file_split_hot_snapshot_locked(
+	const struct ebpfos_inode_route *route, const void *image,
+	struct ebpfos_component_snapshot *snapshot)
+{
+	lockdep_assert_held(&route->op_lock);
+	*snapshot = (struct ebpfos_component_snapshot) {
+		.frontier = route->split_writer_frontier,
+		.visible_size = route->visible_size,
+		.counter_count = EBPFOS_FILE_HOT_COUNTER_COUNT,
+		.counters = { route->last_sequence, route->read_calls,
+			route->write_calls, route->read_bytes, route->write_bytes,
+			route->split_reader_dispatches,
+			route->split_writer_dispatches },
+	};
+	ebpfos_file_split_alpha_hash(image, route->visible_size,
+				     snapshot->alpha_digest);
+}
+
+static int ebpfos_file_split_hot_graph_validate(
+	const void *data, const struct ebpfos_component_graph_view *target,
+	const struct ebpfos_component_snapshot *snapshot)
+{
+	static const struct {
+		u64 role_type;
+		u64 contract_id;
+		u64 provider_type_id;
+		u32 implementation_type;
+	} expected[EBPFOS_FILE_HOT_ROLE_COUNT] = {
+		[EBPFOS_FILE_HOT_READER] = { EBPFOS_FILE_HOT_ROLE_READ,
+			EBPFOS_FILE_HOT_CONTRACT_READ,
+			EBPFOS_STATE_ADAPTER_SPLIT_READER_PROVIDER_TYPE,
+			EBPFOS_COMPONENT_USE_SPLIT_V2_READER },
+		[EBPFOS_FILE_HOT_WRITER] = { EBPFOS_FILE_HOT_ROLE_APPEND,
+			EBPFOS_FILE_HOT_CONTRACT_APPEND,
+			EBPFOS_STATE_ADAPTER_SPLIT_WRITER_PROVIDER_TYPE,
+			EBPFOS_COMPONENT_USE_SPLIT_V2_WRITER },
+	};
+	const struct ebpfos_file_graph *graph = data;
+	u32 role;
+
+	if (!target || !snapshot ||
+	    target->role_count != EBPFOS_FILE_HOT_ROLE_COUNT ||
+	    !ebpfos_file_graph_valid(graph) ||
+	    graph->shape != EBPFOS_FILE_GRAPH_SPLIT ||
+	    graph->epoch != target->epoch ||
+	    graph->publish_frontier != snapshot->frontier)
+		return -EPROTOTYPE;
+	for (role = 0; role < target->role_count; role++) {
+		const struct ebpfos_component_role_binding *binding =
+			&target->roles[role];
+		const struct ebpfos_file_graph_slot *slot =
+			ebpfos_file_graph_select(
+				graph, role == EBPFOS_FILE_HOT_WRITER);
+
+		if (binding->role_type != expected[role].role_type ||
+		    binding->contract_id != expected[role].contract_id ||
+		    binding->implementation_type !=
+				expected[role].implementation_type ||
+		    binding->provider_type_id != expected[role].provider_type_id ||
+		    slot->provider_id != binding->provider_id ||
+		    slot->schema_hash != binding->schema ||
+		    slot->provider_kind != EBPFOS_PROVIDER_BPF)
+			return -EPROTOTYPE;
+	}
+	return 0;
+}
+
+static void ebpfos_file_split_hot_apply(
+	struct ebpfos_component_publish_transaction *transaction,
+	const struct ebpfos_component_snapshot *snapshot, void *data)
+{
+	struct ebpfos_inode_route *route = data;
+	const struct ebpfos_component_role_binding *reader =
+		&transaction->target.roles[EBPFOS_FILE_HOT_READER];
+	const struct ebpfos_component_role_binding *writer =
+		&transaction->target.roles[EBPFOS_FILE_HOT_WRITER];
+
+	route->schema_hash = reader->schema;
+	route->split_reader_provider_id = reader->provider_id;
+	route->split_writer_provider_id = writer->provider_id;
+	route->split_transition_id = EBPFOS_COMPONENT_SPLIT_V2_TRANSITION_ID;
+	route->split_reader_frontier = snapshot->frontier;
+	route->split_writer_frontier = snapshot->frontier;
+	route->split_retired_reader_dispatches =
+		snapshot->counters[EBPFOS_FILE_HOT_READER_DISPATCHES];
+	route->split_retired_writer_dispatches =
+		snapshot->counters[EBPFOS_FILE_HOT_WRITER_DISPATCHES];
+	route->split_reader_dispatches = 0;
+	route->split_writer_dispatches = 0;
+	route->split_hot_publications++;
+	route->split_last_publish_drained_calls = transaction->drained_calls;
+	memcpy(route->split_reader_content_digest,
+	       reader->identity.content_digest,
+	       sizeof(route->split_reader_content_digest));
+	memcpy(route->split_writer_content_digest,
+	       writer->identity.content_digest,
+	       sizeof(route->split_writer_content_digest));
 }
 
 long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
@@ -6349,6 +6424,12 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 	struct ebpfos_file_split_hot_publish request;
 	struct ebpfos_admission_identity_v1 reader_identity = {};
 	struct ebpfos_admission_identity_v1 writer_identity = {};
+	struct ebpfos_component_publish_transaction *transaction;
+	struct ebpfos_component_role_transition
+		roles[EBPFOS_FILE_HOT_ROLE_COUNT] = {};
+	struct ebpfos_component_snapshot captured = {};
+	struct ebpfos_component_snapshot current_snapshot = {};
+	struct ebpfos_component_visibility visibility = {};
 	struct ebpfos_state_adapter *adapter;
 	struct ebpfos_admission *reader = NULL;
 	struct ebpfos_admission *writer = NULL;
@@ -6356,32 +6437,13 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 	struct ebpfos_binding *writer_binding = NULL;
 	struct ebpfos_binding *source_reader = NULL;
 	struct ebpfos_binding *source_writer = NULL;
-	struct ebpfos_binding *old_reader = NULL;
-	struct ebpfos_binding *old_writer = NULL;
-	struct ebpfos_file_graph *source_graph = NULL;
 	struct ebpfos_file_graph *next_graph = NULL;
-	struct ebpfos_file_graph *old_graph = NULL;
 	struct ebpfos_inode_route *route = NULL;
 	struct file *adapter_file = NULL;
 	struct file *file = NULL;
 	void *snapshot = NULL;
-	u64 source_epoch = 0;
-	u64 target_epoch = 0;
-	u64 frontier = 0;
-	u64 visible_size = 0;
-	u64 last_sequence = 0;
-	u64 read_calls = 0;
-	u64 write_calls = 0;
-	u64 read_bytes = 0;
-	u64 write_bytes = 0;
-	u64 reader_dispatches = 0;
-	u64 writer_dispatches = 0;
 	u64 reader_provider_id = 0;
 	u64 writer_provider_id = 0;
-	u64 target_schema;
-	u32 drained_calls = 0;
-	bool engaged = false;
-	bool reopen = false;
 	long error;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -6394,11 +6456,16 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 	    request.writer_admission_fd < 0 ||
 	    request.reader_admission_fd == request.writer_admission_fd)
 		return -EINVAL;
+	transaction = kzalloc_obj(*transaction, GFP_KERNEL);
+	if (!transaction)
+		return -ENOMEM;
 
 	adapter = ebpfos_state_adapter_get_from_fd(request.adapter_fd,
 						   &adapter_file);
-	if (IS_ERR(adapter))
-		return PTR_ERR(adapter);
+	if (IS_ERR(adapter)) {
+		error = PTR_ERR(adapter);
+		goto out;
+	}
 	reader = ebpfos_admission_get_from_fd(request.reader_admission_fd);
 	if (IS_ERR(reader)) {
 		error = PTR_ERR(reader);
@@ -6436,6 +6503,11 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 		error = -ENOENT;
 		goto out;
 	}
+	next_graph = kzalloc_obj(*next_graph, GFP_KERNEL);
+	if (!next_graph) {
+		error = -ENOMEM;
+		goto out;
+	}
 
 	/* Validate exact staged authority and close admission as one engagement. */
 	ebpfos_admission_gate_lock();
@@ -6452,7 +6524,6 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 	if (!error)
 		error = ebpfos_file_split_hot_request_matches_locked(
 			route, &request, source_reader, source_writer, adapter,
-			&reader_identity, &writer_identity,
 			EBPFOS_FILE_ADMISSION_BPF_OPEN);
 	if (!error && request.flags &&
 	    (!ebpfos_file_split_control_test_only_locked(route) ||
@@ -6461,58 +6532,118 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 		error = -EACCES;
 	if (error)
 		goto out_initial_unlock;
-	engaged = true;
-	source_graph = route->graph;
-	source_epoch = route->graph->epoch;
-	target_epoch = request.expected_target_epoch;
-	spin_lock(&route->admission_lock);
-	if (route->admission_gate != EBPFOS_FILE_ADMISSION_BPF_OPEN) {
-		error = -ECANCELED;
-	} else {
-		route->admission_gate = EBPFOS_FILE_ADMISSION_DRAINING;
-		drained_calls = atomic_read(&route->acquired_calls);
+	reader_provider_id = ebpfos_file_new_id(&ebpfos_next_file_provider_id);
+	writer_provider_id = ebpfos_file_new_id(&ebpfos_next_file_provider_id);
+	if (reader_provider_id == writer_provider_id) {
+		error = -EOVERFLOW;
+		goto out_initial_unlock;
 	}
-	spin_unlock(&route->admission_lock);
+	roles[EBPFOS_FILE_HOT_READER] =
+		(struct ebpfos_component_role_transition) {
+			.role_type = EBPFOS_FILE_HOT_ROLE_READ,
+			.contract_id = EBPFOS_FILE_HOT_CONTRACT_READ,
+			.source_provider_id = route->split_reader_provider_id,
+			.target_provider_id = reader_provider_id,
+			.source_binding = source_reader,
+			.target_binding = reader_binding,
+			.target_grant = reader,
+			.expected_source = {
+				.prog_id = request.expected_source_reader_prog_id,
+				.map_id = request.expected_source_reader_map_id,
+				.content_digest =
+					request.expected_source_reader_content_digest,
+			},
+			.expected_target = {
+				.grant_id = request.expected_reader_grant_id,
+				.prog_id = request.expected_reader_prog_id,
+				.map_id = request.expected_reader_map_id,
+				.content_digest = request.expected_reader_content_digest,
+			},
+		};
+	roles[EBPFOS_FILE_HOT_WRITER] =
+		(struct ebpfos_component_role_transition) {
+			.role_type = EBPFOS_FILE_HOT_ROLE_APPEND,
+			.contract_id = EBPFOS_FILE_HOT_CONTRACT_APPEND,
+			.source_provider_id = route->split_writer_provider_id,
+			.target_provider_id = writer_provider_id,
+			.source_binding = source_writer,
+			.target_binding = writer_binding,
+			.target_grant = writer,
+			.expected_source = {
+				.prog_id = request.expected_source_writer_prog_id,
+				.map_id = request.expected_source_writer_map_id,
+				.content_digest =
+					request.expected_source_writer_content_digest,
+			},
+			.expected_target = {
+				.grant_id = request.expected_writer_grant_id,
+				.prog_id = request.expected_writer_prog_id,
+				.map_id = request.expected_writer_map_id,
+				.content_digest = request.expected_writer_content_digest,
+			},
+		};
+	visibility.lock = &route->admission_lock;
+	visibility.waitq = &route->migration_wait;
+	visibility.acquired = &route->acquired_calls;
+	visibility.route_state = &route->state;
+	visibility.live_state = EBPFOS_FILE_ROUTE_ACTIVE;
+	visibility.dead_state = EBPFOS_FILE_ROUTE_DEAD;
+	visibility.gate = &route->admission_gate;
+	visibility.open_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
+	visibility.draining_gate = EBPFOS_FILE_ADMISSION_DRAINING;
+	visibility.failed_gate = EBPFOS_FILE_ADMISSION_FAILED;
+	visibility.graph_slot = &route->graph;
+	visibility.epoch_slot = &route->epoch;
+	visibility.role_slots[EBPFOS_FILE_HOT_READER] =
+		&route->split_reader_binding;
+	visibility.role_slots[EBPFOS_FILE_HOT_WRITER] =
+		&route->split_writer_binding;
+	visibility.validate_target_graph =
+		ebpfos_file_split_hot_graph_validate;
+	error = ebpfos_component_publish_transaction_init(
+		transaction, route->route_id, route->route_id, route->graph->epoch,
+		route->graph, next_graph, roles, ARRAY_SIZE(roles), &visibility);
+	if (error)
+		goto out_initial_unlock;
+	/*
+	 * Core adopts the explicit snapshot refs obtained above.  The active
+	 * source slots retain distinct refs; target refs transfer to those slots
+	 * only on commit, while target grants remain transaction-owned.
+	 */
+	reader = NULL;
+	writer = NULL;
+	reader_binding = NULL;
+	writer_binding = NULL;
+	source_reader = NULL;
+	source_writer = NULL;
+	error = ebpfos_component_publish_engage_locked(transaction);
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
 	if (error)
 		goto out_burn;
-	wake_up_all(&route->migration_wait);
-	wait_event(route->migration_wait,
-		   !atomic_read(&route->acquired_calls) ||
-		   READ_ONCE(route->state) == EBPFOS_FILE_ROUTE_DEAD);
+	error = ebpfos_component_publish_wait_drained(transaction);
+	if (error)
+		goto out_burn;
 
 	/* Capture the final old-epoch abstract state after all old calls drain. */
 	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
-	error = ebpfos_state_adapter_validate_target_pair_locked(
-		adapter, source_reader, source_writer, reader, writer,
-		&reader_identity, &writer_identity);
+	error = ebpfos_file_split_hot_request_matches_locked(
+		route, &request,
+		transaction->source.roles[EBPFOS_FILE_HOT_READER].binding,
+		transaction->source.roles[EBPFOS_FILE_HOT_WRITER].binding,
+		adapter, EBPFOS_FILE_ADMISSION_DRAINING);
 	if (!error)
-		error = ebpfos_file_split_hot_request_matches_locked(
-			route, &request, source_reader, source_writer, adapter,
-			&reader_identity, &writer_identity,
-			EBPFOS_FILE_ADMISSION_DRAINING);
-	if (!error && (route->graph != source_graph ||
-		       route->graph->epoch != source_epoch ||
-		       atomic_read(&route->acquired_calls)))
-		error = -ESTALE;
-	if (!error) {
-		frontier = route->split_writer_frontier;
-		visible_size = route->visible_size;
-		last_sequence = route->last_sequence;
-		read_calls = route->read_calls;
-		write_calls = route->write_calls;
-		read_bytes = route->read_bytes;
-		write_bytes = route->write_bytes;
-		reader_dispatches = route->split_reader_dispatches;
-		writer_dispatches = route->split_writer_dispatches;
 		error = ebpfos_file_split_capture_image_locked(route, file,
 							&snapshot);
-	}
 	if (!error)
 		error = ebpfos_file_split_validate_reader_image_locked(
 			route, file, snapshot);
+	if (!error) {
+		ebpfos_file_split_hot_snapshot_locked(route, snapshot, &captured);
+		error = ebpfos_component_publish_refresh_locked(
+			transaction, &captured);
+	}
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
 	if (error)
@@ -6520,19 +6651,41 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 
 	/* Refresh the same staged pair from the now-fixed source snapshot. */
 	error = ebpfos_file_split_private_prepare_target(
-		route, file, reader_binding, snapshot, target_epoch, frontier,
-		visible_size, false);
+		route, file,
+		transaction->target.roles[EBPFOS_FILE_HOT_READER].binding,
+		snapshot, transaction->target.epoch, captured.frontier,
+		captured.visible_size,
+		false);
 	if (!error)
 		error = ebpfos_file_split_private_prepare_target(
-			route, file, writer_binding, snapshot, target_epoch, frontier,
-			visible_size, false);
+			route, file,
+			transaction->target.roles[EBPFOS_FILE_HOT_WRITER].binding,
+			snapshot, transaction->target.epoch, captured.frontier,
+			captured.visible_size, false);
 	if (error)
 		goto out_burn;
-	next_graph = kzalloc_obj(*next_graph, GFP_KERNEL);
-	if (!next_graph) {
-		error = -ENOMEM;
-		goto out_burn;
+	{
+		const struct ebpfos_file_graph_slot reader_slot = {
+			.provider_id = reader_provider_id,
+			.schema_hash = transaction->target.roles[
+				EBPFOS_FILE_HOT_READER].schema,
+			.provider_kind = EBPFOS_PROVIDER_BPF,
+			.rights = EBPFOS_FILE_GRAPH_RIGHT_READ,
+		};
+		const struct ebpfos_file_graph_slot writer_slot = {
+			.provider_id = writer_provider_id,
+			.schema_hash = transaction->target.roles[
+				EBPFOS_FILE_HOT_WRITER].schema,
+			.provider_kind = EBPFOS_PROVIDER_BPF,
+			.rights = EBPFOS_FILE_GRAPH_RIGHT_APPEND,
+		};
+
+		error = ebpfos_file_graph_init_split(
+			next_graph, transaction->target.epoch, captured.frontier,
+			&reader_slot, &writer_slot);
 	}
+	if (error)
+		goto out_burn;
 
 	/*
 	 * Final exact recheck and sole linearizer.  No allocation, user copy, or
@@ -6540,28 +6693,11 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 	 */
 	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
-	error = ebpfos_state_adapter_validate_target_pair_locked(
-		adapter, source_reader, source_writer, reader, writer,
-		&reader_identity, &writer_identity);
-	if (!error)
-		error = ebpfos_file_split_hot_request_matches_locked(
-			route, &request, source_reader, source_writer, adapter,
-			&reader_identity, &writer_identity,
-			EBPFOS_FILE_ADMISSION_DRAINING);
-	if (!error && (route->graph != source_graph ||
-		       route->graph->epoch != source_epoch ||
-		       route->split_reader_frontier != frontier ||
-		       route->split_writer_frontier != frontier ||
-		       route->visible_size != visible_size ||
-		       route->last_sequence != last_sequence ||
-		       route->read_calls != read_calls ||
-		       route->write_calls != write_calls ||
-		       route->read_bytes != read_bytes ||
-		       route->write_bytes != write_bytes ||
-		       route->split_reader_dispatches != reader_dispatches ||
-		       route->split_writer_dispatches != writer_dispatches ||
-		       atomic_read(&route->acquired_calls)))
-		error = -ESTALE;
+	error = ebpfos_file_split_hot_request_matches_locked(
+		route, &request,
+		transaction->source.roles[EBPFOS_FILE_HOT_READER].binding,
+		transaction->source.roles[EBPFOS_FILE_HOT_WRITER].binding,
+		adapter, EBPFOS_FILE_ADMISSION_DRAINING);
 	if (!error)
 		error = ebpfos_file_split_validate_reader_image_locked(
 			route, file, snapshot);
@@ -6570,128 +6706,62 @@ long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp)
 			route, file, snapshot);
 	if (!error)
 		error = ebpfos_file_split_validate_binding_image_locked(
-			route, file, reader_binding, snapshot);
+			route, file,
+			transaction->target.roles[EBPFOS_FILE_HOT_READER].binding,
+			snapshot);
 	if (!error)
 		error = ebpfos_file_split_validate_binding_image_locked(
-			route, file, writer_binding, snapshot);
+			route, file,
+			transaction->target.roles[EBPFOS_FILE_HOT_WRITER].binding,
+			snapshot);
+	if (!error)
+		ebpfos_file_split_hot_snapshot_locked(route, snapshot,
+					      &current_snapshot);
 	if (!error && request.flags ==
 			EBPFOS_FILE_SPLIT_HOT_PUBLISH_F_FAIL_BEFORE_COMMIT)
 		error = -ECANCELED;
-	if (error) {
-		mutex_unlock(&route->op_lock);
-		ebpfos_admission_gate_unlock();
-		goto out_burn;
-	}
-
-	reader_provider_id =
-		ebpfos_file_new_id(&ebpfos_next_file_provider_id);
-	writer_provider_id =
-		ebpfos_file_new_id(&ebpfos_next_file_provider_id);
-	if (reader_provider_id == writer_provider_id)
-		error = -EOVERFLOW;
-	target_schema = ebpfos_state_adapter_target_schema(adapter);
-	if (!error) {
-		const struct ebpfos_file_graph_slot reader_slot = {
-			.provider_id = reader_provider_id,
-			.schema_hash = target_schema,
-			.provider_kind = EBPFOS_PROVIDER_BPF,
-			.rights = EBPFOS_FILE_GRAPH_RIGHT_READ,
-		};
-		const struct ebpfos_file_graph_slot writer_slot = {
-			.provider_id = writer_provider_id,
-			.schema_hash = target_schema,
-			.provider_kind = EBPFOS_PROVIDER_BPF,
-			.rights = EBPFOS_FILE_GRAPH_RIGHT_APPEND,
-		};
-
-		error = ebpfos_file_graph_init_split(
-			next_graph, target_epoch, frontier, &reader_slot,
-			&writer_slot);
-	}
 	if (!error && route->split_hot_publications == U64_MAX)
 		error = -EOVERFLOW;
 	if (!error)
-		error = ebpfos_admission_consume_pair_locked(reader, writer);
-	if (error) {
-		mutex_unlock(&route->op_lock);
-		ebpfos_admission_gate_unlock();
-		goto out_burn;
-	}
-
-	old_graph = route->graph;
-	old_reader = route->split_reader_binding;
-	old_writer = route->split_writer_binding;
-	spin_lock(&route->admission_lock);
-	route->graph = next_graph;
-	next_graph = NULL;
-	route->epoch = target_epoch;
-	route->schema_hash = target_schema;
-	route->split_reader_binding = reader_binding;
-	reader_binding = NULL;
-	route->split_writer_binding = writer_binding;
-	writer_binding = NULL;
-	route->split_reader_provider_id = reader_provider_id;
-	route->split_writer_provider_id = writer_provider_id;
-	route->split_transition_id = EBPFOS_COMPONENT_SPLIT_V2_TRANSITION_ID;
-	route->split_reader_frontier = frontier;
-	route->split_writer_frontier = frontier;
-	route->split_retired_reader_dispatches = reader_dispatches;
-	route->split_retired_writer_dispatches = writer_dispatches;
-	route->split_reader_dispatches = 0;
-	route->split_writer_dispatches = 0;
-	route->split_hot_publications++;
-	route->split_last_publish_drained_calls = drained_calls;
-	memcpy(route->split_reader_content_digest,
-	       reader_identity.content_digest,
-	       sizeof(route->split_reader_content_digest));
-	memcpy(route->split_writer_content_digest,
-	       writer_identity.content_digest,
-	       sizeof(route->split_writer_content_digest));
-	route->admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
-	spin_unlock(&route->admission_lock);
-	engaged = false;
+		error = ebpfos_component_publish_commit_locked(
+			transaction, &current_snapshot,
+			(void **)&next_graph, ebpfos_file_split_hot_apply, route);
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
-
-	kfree(old_graph);
-	ebpfos_binding_put(old_writer);
-	ebpfos_binding_put(old_reader);
-	wake_up_all(&route->migration_wait);
+	if (error)
+		goto out_burn;
 	error = 0;
 	goto out;
 
 out_initial_unlock:
 	mutex_unlock(&route->op_lock);
 	ebpfos_admission_gate_unlock();
-	if (engaged)
-		goto out_burn;
 	goto out;
 
 out_burn:
-	if (engaged) {
+	if (transaction->owns_snapshot_refs &&
+	    (transaction->state == EBPFOS_COMPONENT_PUBLISH_PREPARED ||
+	     transaction->state == EBPFOS_COMPONENT_PUBLISH_DRAINING ||
+	     transaction->state == EBPFOS_COMPONENT_PUBLISH_REFRESHED)) {
+		long abort_error;
+
 		ebpfos_admission_gate_lock();
 		mutex_lock(&route->op_lock);
-		ebpfos_admission_burn_pair_locked(reader, writer);
-		spin_lock(&route->admission_lock);
-		if (route->state == EBPFOS_FILE_ROUTE_ACTIVE &&
-		    route->admission_gate == EBPFOS_FILE_ADMISSION_DRAINING &&
-		    route->graph == source_graph &&
-		    route->graph->epoch == source_epoch &&
-		    route->split_reader_binding == source_reader &&
-		    route->split_writer_binding == source_writer) {
-			route->admission_gate = EBPFOS_FILE_ADMISSION_BPF_OPEN;
-			reopen = true;
-		}
-		spin_unlock(&route->admission_lock);
+		abort_error = ebpfos_component_publish_abort_locked(transaction);
 		mutex_unlock(&route->op_lock);
 		ebpfos_admission_gate_unlock();
-		if (reopen)
-			wake_up_all(&route->migration_wait);
+		if (abort_error && abort_error != -ESHUTDOWN)
+			error = abort_error;
 	}
 out:
 	/* Candidate programs/maps remain owned by user FDs until explicit close. */
 	kvfree(snapshot);
 	kfree(next_graph);
+	if (transaction->owns_snapshot_refs) {
+		kfree(transaction->retired_graph);
+		transaction->retired_graph = NULL;
+		ebpfos_component_publish_transaction_release(transaction);
+	}
 	ebpfos_binding_put(source_writer);
 	ebpfos_binding_put(source_reader);
 	ebpfos_binding_put(writer_binding);
@@ -6704,6 +6774,7 @@ out:
 		fput(file);
 	if (adapter_file)
 		fput(adapter_file);
+	kfree(transaction);
 	return error;
 }
 

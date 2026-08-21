@@ -46,3 +46,8 @@ config EBPFOS_DRIVER_HOOK
 	bool "eBPFOS driver probe component boundary"
 	depends on EBPFOS
 	default y
+
+config EBPFOS_KUNIT_TEST
+	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS
+	depends on EBPFOS && KUNIT
+	default KUNIT_ALL_TESTS

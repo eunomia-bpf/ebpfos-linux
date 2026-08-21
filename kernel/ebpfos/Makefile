@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-obj-y += admission.o admission_certificates.o state_adapter.o core.o object.o file.o ops.o dispatch.o
+obj-y += admission.o admission_certificates.o state_adapter.o component_graph.o core.o object.o file.o ops.o dispatch.o
 
 $(obj)/admission_certificates.o: $(obj)/ebpfos_x509_certificate_list
 

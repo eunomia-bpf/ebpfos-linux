@@ -21,8 +21,12 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/verification.h>
+#if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
+#include <kunit/test.h>
+#endif
 
 #include "admission_certificates.h"
+#include "component_graph.h"
 
 #define EBPFOS_FILE_PROVIDER_PROG_FLAGS 0x110U
 #define EBPFOS_FILE_PROVIDER_CONTEXT_SIZE 1152U
@@ -2083,25 +2087,81 @@ int ebpfos_admission_consume_locked(struct ebpfos_admission *admission,
 int ebpfos_admission_consume_pair_locked(struct ebpfos_admission *first,
 					 struct ebpfos_admission *second)
 {
-	struct ebpfos_admission *low, *high;
-	int error = 0;
+	struct ebpfos_admission *grants[] = { first, second };
+
+	return ebpfos_admission_consume_set_locked(grants, ARRAY_SIZE(grants));
+}
+
+static int ebpfos_admission_order_set(struct ebpfos_admission **grants,
+				      unsigned int count,
+				      struct ebpfos_admission **ordered)
+{
+	unsigned int index, position;
+
+	if (!grants || !count || count > EBPFOS_COMPONENT_GRAPH_MAX_ROLES)
+		return -EINVAL;
+	for (index = 0; index < count; index++) {
+		if (!grants[index] || !grants[index]->grant_id)
+			return -EINVAL;
+		for (position = 0; position < index; position++)
+			if (grants[index] == grants[position] ||
+			    grants[index]->grant_id == grants[position]->grant_id)
+				return -EINVAL;
+		position = index;
+		while (position &&
+		       ordered[position - 1]->grant_id > grants[index]->grant_id) {
+			ordered[position] = ordered[position - 1];
+			position--;
+		}
+		ordered[position] = grants[index];
+	}
+	return 0;
+}
+
+static void ebpfos_admission_lock_set(struct ebpfos_admission **ordered,
+				      unsigned int count)
+{
+	unsigned int index;
+
+	spin_lock(&ordered[0]->state_lock);
+	for (index = 1; index < count; index++)
+		spin_lock_nested(&ordered[index]->state_lock, index);
+}
+
+static void ebpfos_admission_unlock_set(struct ebpfos_admission **ordered,
+					unsigned int count)
+{
+	while (count)
+		spin_unlock(&ordered[--count]->state_lock);
+}
+
+int ebpfos_admission_consume_set_locked(struct ebpfos_admission **grants,
+					 unsigned int count)
+{
+	struct ebpfos_admission *ordered[EBPFOS_COMPONENT_GRAPH_MAX_ROLES] = {};
+	unsigned int index;
+	int error;
 
 	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!first || !second || first == second ||
-	    first->grant_id == second->grant_id)
-		return -EINVAL;
-	ebpfos_admission_lock_pair(first, second, &low, &high);
-	if (first->state != EBPFOS_ADMISSION_STAGED ||
-	    second->state != EBPFOS_ADMISSION_STAGED) {
-		error = -ESTALE;
-	} else if (ebpfos_staged_grants < 2) {
+	error = ebpfos_admission_order_set(grants, count, ordered);
+	if (error)
+		return error;
+	ebpfos_admission_lock_set(ordered, count);
+	for (index = 0; index < count; index++)
+		if (ordered[index]->state != EBPFOS_ADMISSION_STAGED) {
+			error = -ESTALE;
+			goto out;
+		}
+	if (ebpfos_staged_grants < count) {
 		error = -EUCLEAN;
-	} else {
-		first->state = EBPFOS_ADMISSION_CONSUMED;
-		second->state = EBPFOS_ADMISSION_CONSUMED;
-		ebpfos_staged_grants -= 2;
+		goto out;
 	}
-	ebpfos_admission_unlock_pair(low, high);
+	for (index = 0; index < count; index++)
+		ordered[index]->state = EBPFOS_ADMISSION_CONSUMED;
+	ebpfos_staged_grants -= count;
+	error = 0;
+out:
+	ebpfos_admission_unlock_set(ordered, count);
 	return error;
 }
 
@@ -2137,8 +2197,10 @@ void ebpfos_admission_burn_locked(struct ebpfos_admission *admission)
 	spin_lock(&admission->state_lock);
 	if (admission->state == EBPFOS_ADMISSION_STAGED ||
 	    admission->state == EBPFOS_ADMISSION_STAGED_RECOVERY) {
-		if (!WARN_ON_ONCE(!ebpfos_staged_grants)) {
-			admission->state = EBPFOS_ADMISSION_BURNED;
+		admission->state = EBPFOS_ADMISSION_BURNED;
+		if (WARN_ON_ONCE(!ebpfos_staged_grants)) {
+			/* Preserve the terminal grant state despite bad accounting. */
+		} else {
 			ebpfos_staged_grants--;
 		}
 	}
@@ -2148,36 +2210,27 @@ void ebpfos_admission_burn_locked(struct ebpfos_admission *admission)
 void ebpfos_admission_burn_pair_locked(struct ebpfos_admission *first,
 				       struct ebpfos_admission *second)
 {
-	struct ebpfos_admission *low, *high;
-	struct ebpfos_admission *items[2];
-	unsigned int i;
-	u64 staged = 0;
+	struct ebpfos_admission *grants[] = { first, second };
+
+	ebpfos_admission_burn_set_locked(grants, ARRAY_SIZE(grants));
+}
+
+void ebpfos_admission_burn_set_locked(struct ebpfos_admission **grants,
+				      unsigned int count)
+{
+	unsigned int index;
 
 	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!first || !second || first == second) {
-		ebpfos_admission_burn_locked(first);
+	if (!grants)
 		return;
-	}
-	ebpfos_admission_lock_pair(first, second, &low, &high);
-	items[0] = first;
-	items[1] = second;
-	for (i = 0; i < ARRAY_SIZE(items); i++) {
-		if (items[i]->state == EBPFOS_ADMISSION_STAGED ||
-		    items[i]->state == EBPFOS_ADMISSION_STAGED_RECOVERY)
-			staged++;
-	}
-	if (WARN_ON_ONCE(ebpfos_staged_grants < staged)) {
-		ebpfos_admission_unlock_pair(low, high);
-		return;
-	}
-	for (i = 0; i < ARRAY_SIZE(items); i++) {
-		if (items[i]->state != EBPFOS_ADMISSION_STAGED &&
-		    items[i]->state != EBPFOS_ADMISSION_STAGED_RECOVERY)
-			continue;
-		items[i]->state = EBPFOS_ADMISSION_BURNED;
-	}
-	ebpfos_staged_grants -= staged;
-	ebpfos_admission_unlock_pair(low, high);
+	/*
+	 * Cleanup is deliberately tolerant where consume is atomic and strict:
+	 * nulls, duplicate pointers, duplicate IDs, and a partially invalid set
+	 * must still drive every reachable staged grant to a terminal state.  A
+	 * grant is locked separately, so duplicates never cause recursive locks.
+	 */
+	for (index = 0; index < count; index++)
+		ebpfos_admission_burn_locked(grants[index]);
 }
 
 static int ebpfos_der_object_size(const u8 *der, size_t der_size,
@@ -2213,6 +2266,53 @@ static int ebpfos_der_object_size(const u8 *der, size_t der_size,
 		return -EOVERFLOW;
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
+static void ebpfos_admission_burn_cleanup_test(struct kunit *test)
+{
+	struct ebpfos_admission first = { .grant_id = 7 };
+	struct ebpfos_admission second = { .grant_id = 7 };
+	struct ebpfos_admission *partial[] = {
+		&first, NULL, &second, &first,
+	};
+	u64 baseline;
+
+	spin_lock_init(&first.state_lock);
+	spin_lock_init(&second.state_lock);
+	mutex_lock(&ebpfos_publish_gate);
+	baseline = ebpfos_staged_grants;
+	first.state = EBPFOS_ADMISSION_STAGED;
+	ebpfos_staged_grants++;
+	ebpfos_admission_burn_pair_locked(NULL, &first);
+	KUNIT_EXPECT_EQ(test, first.state, (u32)EBPFOS_ADMISSION_BURNED);
+	KUNIT_EXPECT_EQ(test, ebpfos_staged_grants, baseline);
+	first.state = EBPFOS_ADMISSION_STAGED;
+	ebpfos_staged_grants++;
+	ebpfos_admission_burn_pair_locked(&first, &first);
+	KUNIT_EXPECT_EQ(test, first.state, (u32)EBPFOS_ADMISSION_BURNED);
+	KUNIT_EXPECT_EQ(test, ebpfos_staged_grants, baseline);
+	first.state = second.state = EBPFOS_ADMISSION_STAGED;
+	ebpfos_staged_grants += 2;
+	ebpfos_admission_burn_set_locked(partial, ARRAY_SIZE(partial));
+	KUNIT_EXPECT_EQ(test, first.state, (u32)EBPFOS_ADMISSION_BURNED);
+	KUNIT_EXPECT_EQ(test, second.state, (u32)EBPFOS_ADMISSION_BURNED);
+	KUNIT_EXPECT_EQ(test, ebpfos_staged_grants, baseline);
+	ebpfos_staged_grants = baseline;
+	mutex_unlock(&ebpfos_publish_gate);
+}
+
+static struct kunit_case ebpfos_admission_cases[] = {
+	KUNIT_CASE(ebpfos_admission_burn_cleanup_test),
+	{},
+};
+
+static struct kunit_suite ebpfos_admission_suite = {
+	.name = "ebpfos-admission",
+	.test_cases = ebpfos_admission_cases,
+};
+
+kunit_test_suite(ebpfos_admission_suite);
+#endif
 
 static int __init ebpfos_admission_init(void)
 {
