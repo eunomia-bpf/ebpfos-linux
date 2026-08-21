@@ -196,12 +196,21 @@ long ebpfos_policy_activate_ioctl(void __user *argp);
 long ebpfos_policy_status_ioctl(void __user *argp);
 long ebpfos_admission_seal_ioctl(void __user *argp);
 long ebpfos_admission_info_ioctl(void __user *argp);
+long ebpfos_state_adapter_seal_ioctl(void __user *argp);
+long ebpfos_state_adapter_info_ioctl(void __user *argp);
 
 /* The admission gate is outermost to every subsystem route/object lock. */
 void ebpfos_admission_gate_lock(void);
 void ebpfos_admission_gate_unlock(void);
 bool ebpfos_policy_enforcing(void);
 bool ebpfos_policy_enforcing_locked(void);
+int ebpfos_policy_identity_validate_locked(
+	u64 generation, const u8 realm_id[16],
+	const u8 policy_digest[32], const u8 host_policy_digest[32],
+	u32 required_flags);
+int ebpfos_state_adapter_verify_signature(
+	const struct ebpfos_state_adapter_record_v1 *record,
+	const void *signature, size_t signature_size);
 int ebpfos_legacy_mutation_check_locked(void);
 int ebpfos_legacy_binding_add_locked(void);
 void ebpfos_legacy_binding_del_locked(void);

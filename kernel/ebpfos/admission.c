@@ -198,12 +198,14 @@ static const u8 ebpfos_policy_domain[] = "eBPFOS-policy-v1";
 static const u8 ebpfos_admission_domain[] = "eBPFOS-admission-v1";
 static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
 static const u8 ebpfos_native_domain[] = "eBPFOS-native-file-v1";
+static const u8 ebpfos_state_adapter_domain[] =
+	"eBPFOS-state-adapter-v1";
 
 static const u8 ebpfos_kernel_abi_sha256[SHA256_DIGEST_SIZE] = {
-	0xab, 0x32, 0xe5, 0x29, 0x8e, 0xc6, 0x6a, 0x78,
-	0x16, 0x21, 0x50, 0x86, 0xf2, 0xb0, 0x12, 0xe8,
-	0x58, 0xd9, 0x30, 0x7d, 0x8b, 0x2d, 0xce, 0x92,
-	0xac, 0x1e, 0x80, 0xbd, 0x72, 0x4f, 0x86, 0x71,
+	0x30, 0xfc, 0x01, 0x36, 0xde, 0x41, 0x9c, 0x62,
+	0xcf, 0x4a, 0x21, 0x25, 0x7c, 0x21, 0x88, 0xd3,
+	0x82, 0xaf, 0x4b, 0x02, 0xa1, 0x50, 0x68, 0x65,
+	0x88, 0x9a, 0x80, 0x89, 0x80, 0x3d, 0xf8, 0x3b,
 };
 
 static const u8 ebpfos_native_contract_sha256[SHA256_DIGEST_SIZE] = {
@@ -409,6 +411,19 @@ static int ebpfos_verify_signature(const u8 *domain, size_t domain_size,
 				       NULL);
 	kfree_sensitive(payload);
 	return error;
+}
+
+int ebpfos_state_adapter_verify_signature(
+	const struct ebpfos_state_adapter_record_v1 *record,
+	const void *signature, size_t signature_size)
+{
+	if (!record || !signature || !signature_size ||
+	    signature_size > EBPFOS_ADMISSION_MAX_SIGNATURE)
+		return -EINVAL;
+	return ebpfos_verify_signature(ebpfos_state_adapter_domain,
+				       sizeof(ebpfos_state_adapter_domain),
+				       record, sizeof(*record), signature,
+				       signature_size);
 }
 
 static int ebpfos_validate_policy_record(
@@ -762,6 +777,29 @@ static bool ebpfos_policy_matches_locked(
 	       !memcmp(ebpfos_policy.record.realm_id, realm_id,
 		       sizeof(ebpfos_policy.record.realm_id)) &&
 	       !memcmp(ebpfos_policy.digest, digest, SHA256_DIGEST_SIZE);
+}
+
+int ebpfos_policy_identity_validate_locked(
+	u64 generation, const u8 realm_id[16],
+	const u8 policy_digest[SHA256_DIGEST_SIZE],
+	const u8 host_policy_digest[SHA256_DIGEST_SIZE], u32 required_flags)
+{
+	u32 flags;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!ebpfos_trust_ready)
+		return -ENOKEY;
+	if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE)
+		return -EACCES;
+	if (!ebpfos_policy_matches_locked(generation, realm_id, policy_digest) ||
+	    memcmp(ebpfos_policy.record.host_policy_sha256,
+		   host_policy_digest, SHA256_DIGEST_SIZE))
+		return -ESTALE;
+	flags = le32_to_cpu(ebpfos_policy.record.flags);
+	if (required_flags & ~EBPFOS_POLICY_F_ALL ||
+	    (flags & required_flags) != required_flags)
+		return -EACCES;
+	return 0;
 }
 
 static struct ebpfos_prog_identity *

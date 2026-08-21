@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_UAPI_VERSION 9
+#define EBPFOS_UAPI_VERSION 10
 #define EBPFOS_IOC_MAGIC 0xe7
 #define EBPFOS_MAX_ARGS 6
 #define EBPFOS_MAX_STATE_SLOTS 16
@@ -758,11 +758,15 @@ struct ebpfos_ioc_file_recovery_status {
 #define EBPFOS_POLICY_RECORD_V1_SIZE 256U
 #define EBPFOS_RESOURCE_DESC_V1_SIZE 96U
 #define EBPFOS_COMPONENT_DESC_V1_SIZE 1024U
+#define EBPFOS_STATE_ADAPTER_ROLE_V1_SIZE 96U
+#define EBPFOS_STATE_ADAPTER_PROGRAM_V1_SIZE 56U
+#define EBPFOS_STATE_ADAPTER_RECORD_V1_SIZE 640U
 #define EBPFOS_ADMISSION_MAX_RESOURCES 1U
 #define EBPFOS_ADMISSION_MAX_SIGNATURE 16384U
 
 #define EBPFOS_POLICY_RECORD_V1_MAGIC "EBPFPOL1"
 #define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
+#define EBPFOS_STATE_ADAPTER_RECORD_V1_MAGIC "EBPFADP1"
 #define EBPFOS_ADMISSION_FORMAT_VERSION 1U
 
 #define EBPFOS_POLICY_F_ALLOW_NATIVE_BOOTSTRAP (1U << 0)
@@ -772,6 +776,9 @@ struct ebpfos_ioc_file_recovery_status {
 
 #define EBPFOS_COMPONENT_F_TEST_ONLY (1U << 0)
 #define EBPFOS_COMPONENT_F_ALL EBPFOS_COMPONENT_F_TEST_ONLY
+
+#define EBPFOS_STATE_ADAPTER_F_TEST_ONLY (1U << 0)
+#define EBPFOS_STATE_ADAPTER_F_ALL EBPFOS_STATE_ADAPTER_F_TEST_ONLY
 
 #define EBPFOS_RESOURCE_F_FROZEN_BEFORE_LOAD (1U << 0)
 #define EBPFOS_RESOURCE_F_EXCLUSIVE_PROGRAM_OWNER (1U << 1)
@@ -797,6 +804,15 @@ struct ebpfos_ioc_file_recovery_status {
 #define EBPFOS_EFFECT_FILE_PROVIDER_ALL \
 	(EBPFOS_EFFECT_MAP_LOOKUP | EBPFOS_EFFECT_MAP_UPDATE | \
 	 EBPFOS_EFFECT_OBJECT_READ | EBPFOS_EFFECT_OBJECT_WRITE | \
+	 EBPFOS_EFFECT_STATE_READ | EBPFOS_EFFECT_STATE_WRITE)
+
+#define EBPFOS_STATE_ADAPTER_SPLIT_V2_SCHEMA 0x303244deb5c78866ULL
+#define EBPFOS_STATE_ADAPTER_SPLIT_TRANSITION_ID 0x202ULL
+#define EBPFOS_STATE_ADAPTER_SPLIT_READER_PROVIDER_TYPE 6ULL
+#define EBPFOS_STATE_ADAPTER_SPLIT_WRITER_PROVIDER_TYPE 7ULL
+#define EBPFOS_STATE_ADAPTER_SPLIT_MAX_BYTES 33554432ULL
+#define EBPFOS_STATE_ADAPTER_MIGRATE_EFFECTS \
+	(EBPFOS_EFFECT_MAP_LOOKUP | EBPFOS_EFFECT_MAP_UPDATE | \
 	 EBPFOS_EFFECT_STATE_READ | EBPFOS_EFFECT_STATE_WRITE)
 
 enum ebpfos_policy_state {
@@ -847,6 +863,37 @@ enum ebpfos_admission_state {
 enum ebpfos_admitted_binding_kind {
 	EBPFOS_ADMITTED_BINDING_NATIVE = 1,
 	EBPFOS_ADMITTED_BINDING_BPF = 2,
+};
+
+enum ebpfos_state_adapter_kind {
+	EBPFOS_STATE_ADAPTER_BOUNDED_COPY = 1,
+};
+
+enum ebpfos_state_adapter_role {
+	EBPFOS_STATE_ADAPTER_ROLE_READER = 1,
+	EBPFOS_STATE_ADAPTER_ROLE_WRITER = 2,
+};
+
+enum ebpfos_state_adapter_program_format {
+	EBPFOS_STATE_ADAPTER_PROGRAM_BOUNDED_COPY_V1 = 1,
+};
+
+enum ebpfos_state_adapter_operation {
+	EBPFOS_STATE_ADAPTER_OP_COPY_INPUT = 1,
+};
+
+enum ebpfos_state_adapter_refinement_rule {
+	EBPFOS_STATE_ADAPTER_REFINES_VISIBLE_BYTES = 1,
+};
+
+enum ebpfos_state_adapter_abstraction {
+	EBPFOS_STATE_ADAPTER_ALPHA_VISIBLE_BYTES_V1 = 1,
+};
+
+enum ebpfos_state_adapter_state {
+	EBPFOS_STATE_ADAPTER_NONE = 0,
+	EBPFOS_STATE_ADAPTER_SEALED = 1,
+	EBPFOS_STATE_ADAPTER_STALE = 2,
 };
 
 struct ebpfos_policy_record_v1 {
@@ -940,6 +987,67 @@ struct ebpfos_component_desc_v1 {
 	__u8 reserved[352];
 };
 
+/*
+ * A role identity is hashed with role_digest cleared, under the
+ * eBPFOS-adapter-target-role-v1 domain.  It describes a future admitted role;
+ * it is not itself an executable component grant.
+ */
+struct ebpfos_state_adapter_role_v1 {
+	__le32 role;
+	__le32 reserved0;
+	__le64 provider_type_id;
+	__le64 transition_id;
+	__le64 runtime_schema_u64;
+	__le64 capability_mask;
+	__u8 role_digest[32];
+	__u8 reserved[24];
+};
+
+struct ebpfos_state_adapter_program_v1 {
+	__le32 format;
+	__le32 operation_count;
+	__le64 max_input_bytes;
+	__le64 max_output_bytes;
+	__le32 operation;
+	__le32 reserved0;
+	__le64 source_offset;
+	__le64 target_offset;
+	__le64 max_length;
+};
+
+/* Fixed, signed state-transition authority; all multi-byte fields are LE. */
+struct ebpfos_state_adapter_record_v1 {
+	__u8 magic[8];
+	__le16 format_version;
+	__le16 header_size;
+	__le32 total_size;
+	__le32 flags;
+	__le32 domain;
+	__le32 adapter_kind;
+	__le32 reserved0;
+	__u8 realm_id[16];
+	__le64 policy_generation;
+	__u8 policy_record_digest[32];
+	__u8 host_policy_sha256[32];
+	__u8 adapter_id[16];
+	__le64 adapter_version;
+	__le64 source_runtime_schema_u64;
+	__u8 source_reader_content_digest[32];
+	__u8 source_writer_content_digest[32];
+	__le64 target_runtime_schema_u64;
+	struct ebpfos_state_adapter_role_v1 target_reader;
+	struct ebpfos_state_adapter_role_v1 target_writer;
+	__le64 capability_mask;
+	__le64 effect_mask;
+	struct ebpfos_state_adapter_program_v1 program;
+	__u8 program_sha256[32];
+	__le32 refinement_rule;
+	__le32 source_abstraction;
+	__le32 target_abstraction;
+	__le32 reserved1;
+	__u8 reserved[104];
+};
+
 struct ebpfos_ioc_policy_activate {
 	struct ebpfos_policy_record_v1 record;
 	__aligned_u64 signature;
@@ -988,6 +1096,29 @@ struct ebpfos_ioc_admission_info {
 	__u8 program_digest[32];
 	__u8 map_digest[32];
 	struct ebpfos_component_desc_v1 descriptor;
+};
+
+struct ebpfos_ioc_state_adapter_seal {
+	__s32 source_reader_admission_fd;
+	__s32 source_writer_admission_fd;
+	__u32 flags;
+	__u32 signature_size;
+	__aligned_u64 signature;
+	struct ebpfos_state_adapter_record_v1 record;
+	__s32 adapter_fd;
+	__u32 adapter_state;
+	__u8 content_digest[32];
+	__u8 target_reader_role_digest[32];
+	__u8 target_writer_role_digest[32];
+};
+
+struct ebpfos_ioc_state_adapter_info {
+	__s32 adapter_fd;
+	__u32 flags;
+	__u32 adapter_state;
+	__u32 reserved0;
+	__u8 content_digest[32];
+	struct ebpfos_state_adapter_record_v1 record;
 };
 
 struct ebpfos_ioc_file_replace_begin_v2 {
@@ -1145,5 +1276,9 @@ struct ebpfos_ioc_file_admission_status {
 	_IOW(EBPFOS_IOC_MAGIC, 0x36, struct ebpfos_ioc_file_recovery_arm_v2)
 #define EBPFOS_IOC_FILE_ADMISSION_STATUS \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x37, struct ebpfos_ioc_file_admission_status)
+#define EBPFOS_IOC_STATE_ADAPTER_SEAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x3b, struct ebpfos_ioc_state_adapter_seal)
+#define EBPFOS_IOC_STATE_ADAPTER_INFO \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x3c, struct ebpfos_ioc_state_adapter_info)
 
 #endif /* _UAPI_EBPFOS_H */
