@@ -354,6 +354,7 @@ struct bpf_map {
 #define BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES	32770U
 #define BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE	2080U
 #define BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES	16386U
+#define BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE	6200U
 
 static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 {
@@ -364,6 +365,9 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 	bool split_v2 =
 		map->value_size == BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE &&
 		map->max_entries == BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES;
+	bool executor_root =
+		map->value_size == BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE &&
+		map->max_entries == 1;
 
 	return IS_ENABLED(CONFIG_EBPFOS) &&
 	       map->map_type == BPF_MAP_TYPE_ARRAY &&
@@ -371,7 +375,8 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 	       !map->map_extra && !map->inner_map_meta && !map->btf &&
 	       !map->btf_key_type_id && !map->btf_value_type_id &&
 	       !map->btf_vmlinux_value_type_id && !map->record &&
-	       !map->excl && !map->excl_prog_sha && (v1 || v2 || split_v2);
+	       !map->excl && !map->excl_prog_sha &&
+	       (v1 || v2 || split_v2 || executor_root);
 }
 
 static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
@@ -380,7 +385,7 @@ static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
 {
 	bool allowed = false;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (provider) {
 		if (!map->ebpfos_provider_owner && !map->ebpfos_prog_users &&
 		    !map->ebpfos_external_writers)
@@ -394,7 +399,7 @@ static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
 		map->ebpfos_prog_users++;
 		allowed = true;
 	}
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 
 	return allowed;
 }
@@ -402,7 +407,7 @@ static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
 static inline void bpf_ebpfos_map_prog_put(struct bpf_map *map,
 					   struct bpf_prog_aux *aux)
 {
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (WARN_ON_ONCE(!map->ebpfos_prog_users))
 		goto out;
 
@@ -413,30 +418,30 @@ static inline void bpf_ebpfos_map_prog_put(struct bpf_map *map,
 			map->ebpfos_provider_owner = NULL;
 	}
 out:
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 }
 
 static inline bool bpf_ebpfos_map_external_get(struct bpf_map *map)
 {
 	bool allowed = false;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (!map->ebpfos_provider_owner &&
 	    map->ebpfos_external_writers != U32_MAX) {
 		map->ebpfos_external_writers++;
 		allowed = true;
 	}
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 
 	return allowed;
 }
 
 static inline void bpf_ebpfos_map_external_put(struct bpf_map *map)
 {
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (!WARN_ON_ONCE(!map->ebpfos_external_writers))
 		map->ebpfos_external_writers--;
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 }
 
 static inline const char *btf_field_type_name(enum btf_field_type type)
@@ -1800,6 +1805,7 @@ struct bpf_prog_aux {
 	bool might_sleep;
 	bool kprobe_write_ctx;
 	bool ebpfos_provider;
+	bool ebpfos_meta;
 	u32 ebpfos_load_insn_cnt;
 	struct ebpfos_prog_identity *ebpfos_identity;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */

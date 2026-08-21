@@ -386,10 +386,93 @@ struct iov_iter;
 struct kiocb;
 struct bpf_map;
 struct bpf_prog;
+struct bpf_prog_aux;
 struct ebpfos_admission;
 struct ebpfos_binding;
 struct ebpfos_prog_identity;
 struct ebpfos_state_adapter;
+
+/*
+ * Generic executor root substrate.  The canonical BPF meta-component supplies
+ * only stable role names, admission FDs, and the epoch comparison.  Executable
+ * identities, authority, contracts, schemas, and live program/map references
+ * are derived from the sealed admissions by the substrate.
+ */
+#define EBPFOS_EXECUTOR_ROOT_ABI_ID 0x4558524f4f540001ULL
+#define EBPFOS_EXECUTOR_ROOT_ABI_VERSION 1U
+#define EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY (1ULL << 63)
+#define EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT (1ULL << 63)
+#define EBPFOS_EXECUTOR_ROOT_MAX_ROLES 64U
+#define EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE 7800U
+#define EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA 0x4558524d414e0001ULL
+#define EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT 2U
+#define EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK \
+	(1U << EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT)
+#define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER 10U
+#define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT 2U
+#define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK \
+	(1ULL << EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT)
+#define EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE 0x4558525055420001ULL
+#define EBPFOS_EXECUTOR_ROOT_F_TEST_FAIL_AFTER_STAGE (1U << 0)
+
+struct ebpfos_executor_root_manifest_role {
+	u64 role_type;
+	u64 provider_type_id;
+	u64 schema;
+	u64 authority;
+	u8 content_digest[32];
+	u8 contract_digest[32];
+};
+
+struct ebpfos_executor_root_manifest {
+	u32 version;
+	u32 role_count;
+	u64 object_id;
+	u64 authority_ceiling;
+	struct ebpfos_executor_root_manifest_role
+		roles[EBPFOS_EXECUTOR_ROOT_MAX_ROLES];
+	u8 platform_digest[32];
+};
+
+struct ebpfos_executor_root_role_request {
+	s32 admission_fd;
+	u32 reserved;
+	u64 role_type;
+};
+
+struct ebpfos_executor_root_publish_request {
+	u32 version;
+	u32 flags;
+	u64 object_id;
+	u64 expected_epoch;
+	u64 target_epoch;
+	u32 role_count;
+	u32 reserved;
+	struct ebpfos_executor_root_role_request roles[];
+};
+
+struct ebpfos_executor_root_role_snapshot {
+	u64 role_type;
+	u64 authority;
+	u64 provider_type_id;
+	u64 schema;
+	u32 prog_id;
+	u32 map_id;
+	u8 content_digest[32];
+	u8 contract_digest[32];
+};
+
+struct ebpfos_executor_root_snapshot {
+	u32 version;
+	u32 flags;
+	u64 object_id;
+	u64 epoch;
+	u64 authority;
+	u32 publisher_prog_id;
+	u32 role_count;
+	u8 publisher_digest[32];
+	struct ebpfos_executor_root_role_snapshot roles[];
+};
 
 struct ebpfos_admission_restore_pair {
 	struct ebpfos_admission *reader;
@@ -470,6 +553,18 @@ int ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 					       const struct ebpfos_binding *predecessor);
 int ebpfos_admission_claim_validated_pair_locked(
 	struct ebpfos_admission *first, struct ebpfos_admission *second);
+int ebpfos_admission_stage_bundle_locked(
+	struct ebpfos_admission **grants,
+	struct ebpfos_binding *const *predecessors, unsigned int count);
+int ebpfos_admission_consume_bundle_locked(
+	struct ebpfos_admission **grants, unsigned int count);
+void ebpfos_admission_burn_set_locked(struct ebpfos_admission **grants,
+				      unsigned int count);
+int ebpfos_admission_root_publisher_validate_locked(
+	struct bpf_prog_aux *aux, u32 *prog_id, u8 content_digest[32],
+	struct ebpfos_executor_root_manifest *manifest);
+bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog);
+bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
 int
 ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair);
 int
@@ -510,6 +605,8 @@ struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
 void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
 				  struct ebpfos_admission_identity_v1 *identity);
+struct ebpfos_binding *ebpfos_executor_root_binding_get(
+	u64 object_id, u64 role_type, u64 *epoch);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 
 long ebpfos_object_create_ioctl(void __user *argp);
@@ -685,6 +782,17 @@ static inline int ebpfos_admission_claim_validated_pair_locked(
 	struct ebpfos_admission *first, struct ebpfos_admission *second)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline bool
+ebpfos_admission_root_publisher_program(const struct bpf_prog *prog)
+{
+	return false;
+}
+
+static inline bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
+{
+	return false;
 }
 
 static inline int

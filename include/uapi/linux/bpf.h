@@ -1312,6 +1312,7 @@ enum bpf_perf_event_type {
 
 /* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
 #define BPF_F_EBPFOS_PROVIDER	(1U << 8)
+#define BPF_F_EBPFOS_META	(1U << 9)
 
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.

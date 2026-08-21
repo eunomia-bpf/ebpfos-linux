@@ -2496,7 +2496,7 @@ static bool __bpf_prog_map_compatible(struct bpf_map *map,
 	if (fp->kprobe_override)
 		return ret;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	/* There's no owner yet where we could check for compatibility. */
 	if (!map->owner) {
 		map->owner = bpf_map_owner_alloc(map);
@@ -2546,7 +2546,7 @@ static bool __bpf_prog_map_compatible(struct bpf_map *map,
 		}
 	}
 err:
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 	return ret;
 }
 

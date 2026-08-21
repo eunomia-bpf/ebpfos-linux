@@ -29,6 +29,7 @@
 #include "component_graph.h"
 
 #define EBPFOS_FILE_PROVIDER_PROG_FLAGS 0x110U
+#define EBPFOS_EXECUTOR_ROOT_PROG_FLAGS 0x210U
 #define EBPFOS_FILE_PROVIDER_CONTEXT_SIZE 1152U
 #define EBPFOS_FILE_PROVIDER_CALL_BYTES 1024U
 #define EBPFOS_FILE_PROVIDER_ABI_ID 0x46494c4541424901ULL
@@ -182,6 +183,18 @@ EBPFOS_ASSERT_OFFSET(ebpfos_ioc_file_admission_status,
 static_assert(BPF_PROG_TYPE_SYSCALL == 31);
 static_assert((BPF_F_EBPFOS_PROVIDER | BPF_F_SLEEPABLE) ==
 	      EBPFOS_FILE_PROVIDER_PROG_FLAGS);
+static_assert((BPF_F_EBPFOS_META | BPF_F_SLEEPABLE) ==
+	      EBPFOS_EXECUTOR_ROOT_PROG_FLAGS);
+static_assert(sizeof(struct ebpfos_executor_root_manifest) ==
+	      BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE);
+static_assert(EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ==
+	      sizeof(u32) * 2 +
+	      sizeof(struct ebpfos_executor_root_publish_request) +
+	      EBPFOS_EXECUTOR_ROOT_MAX_ROLES *
+	      sizeof(struct ebpfos_executor_root_role_request) +
+	      sizeof(struct ebpfos_executor_root_snapshot) +
+	      EBPFOS_EXECUTOR_ROOT_MAX_ROLES *
+	      sizeof(struct ebpfos_executor_root_role_snapshot));
 static_assert(EBPFOS_FILE_ADMISSION_LEGACY == 0);
 static_assert(EBPFOS_FILE_ADMISSION_FAILED == 4);
 static_assert(EBPFOS_FILE_ADMISSION_NATIVE_OPEN == 5);
@@ -247,6 +260,11 @@ static const u8 ebpfos_native_authority_sha256[SHA256_DIGEST_SIZE] = {
 
 static const u8 ebpfos_file_component_id[16] = {
 	0x01, 0x00, 0x00, 0x00, 0x45, 0x4c, 0x49, 0x46,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const u8 ebpfos_executor_root_component_id[16] = {
+	0x01, 0x00, 0x00, 0x00, 0x54, 0x4f, 0x4f, 0x52,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
@@ -447,6 +465,12 @@ static int ebpfos_validate_policy_record(
 {
 	u8 native_digest[SHA256_DIGEST_SIZE];
 	u32 flags = le32_to_cpu(record->flags);
+	u32 domains = le32_to_cpu(record->domain_mask);
+	u64 profiles = le64_to_cpu(record->verifier_profile_mask);
+	u64 capabilities = le64_to_cpu(record->capability_ceiling);
+	u64 effects = le64_to_cpu(record->effect_ceiling);
+	bool file_only;
+	bool executor_root;
 
 	if (memcmp(record->magic, EBPFOS_POLICY_RECORD_V1_MAGIC,
 		   sizeof(record->magic)) ||
@@ -455,14 +479,19 @@ static int ebpfos_validate_policy_record(
 	    le16_to_cpu(record->header_size) != sizeof(*record) ||
 	    le32_to_cpu(record->total_size) != sizeof(*record))
 		return -EPROTO;
-	if (flags & ~EBPFOS_POLICY_F_ALL ||
-	    le32_to_cpu(record->domain_mask) !=
-		EBPFOS_COMPONENT_DOMAIN_FILE_MASK ||
-	    le64_to_cpu(record->verifier_profile_mask) !=
-		EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK ||
-	    le64_to_cpu(record->capability_ceiling) != EBPFOS_CAP_FILE_ALL ||
-	    le64_to_cpu(record->effect_ceiling) !=
-		EBPFOS_EFFECT_FILE_PROVIDER_ALL)
+	file_only = domains == EBPFOS_COMPONENT_DOMAIN_FILE_MASK &&
+		profiles == EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK &&
+		capabilities == EBPFOS_CAP_FILE_ALL &&
+		effects == EBPFOS_EFFECT_FILE_PROVIDER_ALL;
+	executor_root = domains == (EBPFOS_COMPONENT_DOMAIN_FILE_MASK |
+				    EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK) &&
+		profiles == (EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK |
+			     EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK) &&
+		capabilities == (EBPFOS_CAP_FILE_ALL |
+				 EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) &&
+		effects == (EBPFOS_EFFECT_FILE_PROVIDER_ALL |
+			   EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT);
+	if (flags & ~EBPFOS_POLICY_F_ALL || (!file_only && !executor_root))
 		return -EACCES;
 	if (!le64_to_cpu(record->generation) ||
 	    !ebpfos_nonzero(record->realm_id, sizeof(record->realm_id)) ||
@@ -565,6 +594,130 @@ static int ebpfos_validate_resource(
 	return 0;
 }
 
+static int ebpfos_validate_executor_root_descriptor(
+	const struct ebpfos_component_desc_v1 *descriptor,
+	const struct ebpfos_policy_record_v1 *policy,
+	const u8 policy_digest[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
+	u32 context_size = le32_to_cpu(descriptor->context_size);
+	u64 logical_bytes = sizeof(u32) +
+			    sizeof(struct ebpfos_executor_root_manifest);
+	u64 canonical_bytes = round_up(
+		sizeof(struct ebpfos_executor_root_manifest), 8U);
+	u32 policy_flags = le32_to_cpu(policy->flags);
+	u32 flags = le32_to_cpu(descriptor->flags);
+
+	if (!(le32_to_cpu(policy->domain_mask) &
+	      EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK) ||
+	    !(le64_to_cpu(policy->verifier_profile_mask) &
+	      EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK) ||
+	    !(le64_to_cpu(policy->capability_ceiling) &
+	      EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) ||
+	    !(le64_to_cpu(policy->effect_ceiling) &
+	      EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT))
+		return -EACCES;
+	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
+	    !!(flags & EBPFOS_COMPONENT_F_TEST_ONLY) !=
+		!!(policy_flags & EBPFOS_POLICY_F_TEST_ONLY) ||
+	    le32_to_cpu(descriptor->domain) !=
+		EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT ||
+	    le32_to_cpu(descriptor->use) !=
+		EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER ||
+	    le32_to_cpu(descriptor->code_format) !=
+		EBPFOS_COMPONENT_CODE_BPF_ELF ||
+	    le32_to_cpu(descriptor->verifier_profile) !=
+		EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT ||
+	    le32_to_cpu(descriptor->reserved0))
+		return -EACCES;
+	if (memcmp(descriptor->realm_id, policy->realm_id,
+		   sizeof(descriptor->realm_id)) ||
+	    le64_to_cpu(descriptor->policy_generation) !=
+		le64_to_cpu(policy->generation) ||
+	    memcmp(descriptor->policy_record_digest, policy_digest,
+		   SHA256_DIGEST_SIZE) ||
+	    memcmp(descriptor->host_policy_sha256, policy->host_policy_sha256,
+		   SHA256_DIGEST_SIZE))
+		return -ESTALE;
+	if (memcmp(descriptor->component_id,
+		   ebpfos_executor_root_component_id,
+		   sizeof(descriptor->component_id)) ||
+	    le64_to_cpu(descriptor->component_version) != 1 ||
+	    le64_to_cpu(descriptor->provider_type_id) !=
+		EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE ||
+	    le64_to_cpu(descriptor->transition_id) != 1 ||
+	    !le64_to_cpu(descriptor->predecessor_policy_generation) ||
+	    !ebpfos_nonzero(descriptor->predecessor_policy_digest,
+			    SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->predecessor_content_digest,
+			    SHA256_DIGEST_SIZE))
+		return -EINVAL;
+	if (!ebpfos_nonzero(descriptor->contract_sha256, SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->interface_sha256, SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->authority_sha256, SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
+			    SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
+			    SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->attested_elf_sha256,
+			    SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->load_image_sha256,
+			    SHA256_DIGEST_SIZE) ||
+	    !ebpfos_nonzero(descriptor->initial_map_sha256,
+			    SHA256_DIGEST_SIZE))
+		return -EINVAL;
+	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_EXECUTOR_ROOT_ABI_ID ||
+	    le32_to_cpu(descriptor->abi_version) !=
+		EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
+	    context_size < sizeof(struct ebpfos_executor_root_publish_request) +
+			   sizeof(struct ebpfos_executor_root_role_request) ||
+	    context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
+	    le64_to_cpu(descriptor->runtime_schema_u64) !=
+		EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA ||
+	    le64_to_cpu(descriptor->capability_mask) !=
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY ||
+	    le64_to_cpu(descriptor->effect_mask) !=
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT ||
+	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL ||
+	    le32_to_cpu(descriptor->semantic_prog_flags) !=
+		EBPFOS_EXECUTOR_ROOT_PROG_FLAGS)
+		return -EPROTO;
+	if (!le32_to_cpu(descriptor->exact_insn_count) ||
+	    le32_to_cpu(descriptor->exact_insn_count) >
+		le32_to_cpu(policy->max_static_insns) ||
+	    !le32_to_cpu(descriptor->max_verified_insns) ||
+	    le32_to_cpu(descriptor->max_verified_insns) >
+		le32_to_cpu(policy->max_verified_insns) ||
+	    !le32_to_cpu(descriptor->max_stack_depth) ||
+	    le32_to_cpu(descriptor->max_stack_depth) >
+		le32_to_cpu(policy->max_stack_depth) ||
+	    context_size > le32_to_cpu(policy->max_context_size) ||
+	    le32_to_cpu(descriptor->max_ctx_offset) != context_size ||
+	    le32_to_cpu(descriptor->max_tail_calls) ||
+	    le32_to_cpu(descriptor->resource_count) != 1 ||
+	    le64_to_cpu(descriptor->max_call_bytes) != context_size ||
+	    context_size > le64_to_cpu(policy->max_call_bytes))
+		return -ERANGE;
+	if (le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP ||
+	    le32_to_cpu(resource->flags) != EBPFOS_RESOURCE_F_ALL ||
+	    le32_to_cpu(resource->map_type) != BPF_MAP_TYPE_ARRAY ||
+	    le32_to_cpu(resource->key_size) != sizeof(u32) ||
+	    le32_to_cpu(resource->value_size) !=
+		sizeof(struct ebpfos_executor_root_manifest) ||
+	    le32_to_cpu(resource->max_entries) != 1 ||
+	    le32_to_cpu(resource->map_flags) ||
+	    le32_to_cpu(resource->reserved0) ||
+	    le64_to_cpu(resource->map_extra) ||
+	    le64_to_cpu(resource->logical_bytes) != logical_bytes ||
+	    le64_to_cpu(resource->canonical_bytes) != canonical_bytes ||
+	    canonical_bytes > le64_to_cpu(policy->max_map_bytes) ||
+	    !ebpfos_all_zero(resource->reserved, sizeof(resource->reserved)) ||
+	    !ebpfos_all_zero(descriptor->reserved,
+			     sizeof(descriptor->reserved)))
+		return -EINVAL;
+	return 0;
+}
+
 static int ebpfos_validate_descriptor(
 	const struct ebpfos_component_desc_v1 *descriptor,
 	const struct ebpfos_policy_record_v1 *policy,
@@ -589,6 +742,10 @@ static int ebpfos_validate_descriptor(
 	    le16_to_cpu(descriptor->header_size) != sizeof(*descriptor) ||
 	    le32_to_cpu(descriptor->total_size) != sizeof(*descriptor))
 		return -EPROTO;
+	if (le32_to_cpu(descriptor->domain) ==
+	    EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT)
+		return ebpfos_validate_executor_root_descriptor(
+			descriptor, policy, policy_digest);
 	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
 	    !!(flags & EBPFOS_COMPONENT_F_TEST_ONLY) !=
 		!!(policy_flags & EBPFOS_POLICY_F_TEST_ONLY) ||
@@ -1113,14 +1270,14 @@ static bool ebpfos_map_owner_matches(struct bpf_prog *prog,
 {
 	bool matches;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	matches = map->ebpfos_provider_owner == prog->aux &&
 		  map->ebpfos_prog_users == 1 &&
 		  !map->ebpfos_external_writers &&
 		  !map->ebpfos_external_gp_refs &&
 		  !map->ebpfos_external_next_refs &&
 		  !map->ebpfos_external_gp_queued;
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 	return matches;
 }
 
@@ -1196,7 +1353,11 @@ static int ebpfos_measure_program(
 	struct ebpfos_prog_identity *expected_identity,
 	u8 map_digest[SHA256_DIGEST_SIZE])
 {
-	if (!prog->aux->ebpfos_provider ||
+	bool root = le32_to_cpu(descriptor->domain) ==
+		    EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT;
+
+	if ((root && !prog->aux->ebpfos_meta) ||
+	    (!root && !prog->aux->ebpfos_provider) ||
 	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable ||
 	    prog->aux->ebpfos_load_insn_cnt !=
 		le32_to_cpu(descriptor->exact_insn_count) ||
@@ -1699,6 +1860,215 @@ static int ebpfos_admission_owner_recheck(
 	    memcmp(map_digest, binding->map_digest, sizeof(map_digest)))
 		error = -EKEYREJECTED;
 	return error;
+}
+
+static bool ebpfos_executor_root_publisher_descriptor(
+	const struct ebpfos_component_desc_v1 *descriptor)
+{
+	return descriptor &&
+	       le32_to_cpu(descriptor->domain) ==
+		EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT &&
+	       le32_to_cpu(descriptor->use) ==
+		EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER &&
+	       le32_to_cpu(descriptor->verifier_profile) ==
+		EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT &&
+	       le64_to_cpu(descriptor->provider_type_id) ==
+		EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE &&
+	       le64_to_cpu(descriptor->abi_id) == EBPFOS_EXECUTOR_ROOT_ABI_ID &&
+	       le32_to_cpu(descriptor->abi_version) ==
+		EBPFOS_EXECUTOR_ROOT_ABI_VERSION &&
+	       le64_to_cpu(descriptor->runtime_schema_u64) ==
+		EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA &&
+	       le64_to_cpu(descriptor->capability_mask) ==
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY &&
+	       le64_to_cpu(descriptor->effect_mask) ==
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT;
+}
+
+bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog)
+{
+	struct ebpfos_prog_identity *identity;
+	bool allowed = false;
+
+	if (!prog || !prog->aux || !prog->aux->ebpfos_meta ||
+	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable)
+		return false;
+	mutex_lock(&ebpfos_publish_gate);
+	identity = READ_ONCE(prog->aux->ebpfos_identity);
+	if (identity && READ_ONCE(identity->seal_state) == EBPFOS_PROG_SEALED &&
+	    ebpfos_executor_root_publisher_descriptor(&identity->descriptor) &&
+	    ebpfos_policy_matches_locked(
+		le64_to_cpu(identity->descriptor.policy_generation),
+		identity->descriptor.realm_id,
+		identity->descriptor.policy_record_digest))
+		allowed = true;
+	mutex_unlock(&ebpfos_publish_gate);
+	return allowed;
+}
+
+int ebpfos_admission_root_publisher_validate_locked(
+	struct bpf_prog_aux *aux, u32 *prog_id, u8 content_digest[32],
+	struct ebpfos_executor_root_manifest *manifest)
+{
+	struct ebpfos_prog_identity *identity;
+	const struct ebpfos_component_desc_v1 *descriptor;
+	struct bpf_map *map;
+	const void *value;
+	u8 map_digest[SHA256_DIGEST_SIZE];
+	u64 authority = 0;
+	u32 index;
+	u32 key = 0;
+	int error;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!aux || !aux->prog || !aux->ebpfos_meta ||
+	    aux->prog->type != BPF_PROG_TYPE_SYSCALL || !aux->prog->sleepable ||
+	    aux->used_map_cnt != 1 ||
+	    !aux->used_maps[0] || !prog_id || !content_digest || !manifest)
+		return -EINVAL;
+	identity = READ_ONCE(aux->ebpfos_identity);
+	if (!identity || READ_ONCE(identity->seal_state) != EBPFOS_PROG_SEALED)
+		return -EKEYREJECTED;
+	descriptor = &identity->descriptor;
+	if (!ebpfos_executor_root_publisher_descriptor(descriptor) ||
+	    !ebpfos_policy_matches_locked(le64_to_cpu(descriptor->policy_generation),
+					   descriptor->realm_id,
+					   descriptor->policy_record_digest))
+		return -EACCES;
+	map = aux->used_maps[0];
+	error = ebpfos_measure_map(aux->prog, map, descriptor,
+				   identity, true, map_digest);
+	if (error)
+		return error;
+	if (memcmp(map_digest, identity->map_digest, sizeof(map_digest)))
+		return -EKEYREJECTED;
+	rcu_read_lock();
+	value = map->ops->map_lookup_elem(map, &key);
+	if (value)
+		memcpy(manifest, value, sizeof(*manifest));
+	rcu_read_unlock();
+	if (!value || manifest->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
+	    !manifest->object_id || !manifest->authority_ceiling ||
+	    !manifest->role_count ||
+	    manifest->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
+	    !ebpfos_nonzero(manifest->platform_digest,
+			    sizeof(manifest->platform_digest)))
+		return -EPROTO;
+	for (index = 0; index < EBPFOS_EXECUTOR_ROOT_MAX_ROLES; index++) {
+		const struct ebpfos_executor_root_manifest_role *role =
+			&manifest->roles[index];
+
+		if (index < manifest->role_count) {
+			if (!role->role_type || !role->provider_type_id ||
+			    !role->schema || !role->authority ||
+			    !ebpfos_nonzero(role->content_digest,
+					    sizeof(role->content_digest)) ||
+			    !ebpfos_nonzero(role->contract_digest,
+					    sizeof(role->contract_digest)) ||
+			    role->authority & ~manifest->authority_ceiling ||
+			    (index && manifest->roles[index - 1].role_type >=
+				      role->role_type))
+				return -EPROTO;
+			authority |= role->authority;
+		} else if (memchr_inv(role, 0, sizeof(*role))) {
+			return -EPROTO;
+		}
+	}
+	if (authority != manifest->authority_ceiling)
+		return -EPROTO;
+	*prog_id = aux->id;
+	memcpy(content_digest, identity->content_digest, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+int ebpfos_admission_stage_bundle_locked(
+	struct ebpfos_admission **grants,
+	struct ebpfos_binding *const *predecessors, unsigned int count)
+{
+	unsigned int index, prior;
+	u64 staged_grants;
+	bool replacing;
+	int error;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!grants || !predecessors || !count ||
+	    count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
+		return -EINVAL;
+	replacing = !!predecessors[0];
+	for (index = 0; index < count; index++) {
+		struct ebpfos_admission *grant = grants[index];
+		u32 state;
+
+		if (!grant || !grant->grant_id || !grant->binding ||
+		    !grant->binding->prog_id || !grant->binding->map_id ||
+		    (!!predecessors[index] != replacing))
+			return -EINVAL;
+		for (prior = 0; prior < index; prior++)
+			if (grant == grants[prior] ||
+			    grant->grant_id == grants[prior]->grant_id ||
+			    grant->binding == grants[prior]->binding ||
+			    grant->binding->prog_id == grants[prior]->binding->prog_id ||
+			    grant->binding->map_id == grants[prior]->binding->map_id)
+				return -EUCLEAN;
+		if (!ebpfos_admission_current_locked(grant))
+			return -ESTALE;
+		if (replacing &&
+		    !ebpfos_predecessor_matches(grant, predecessors[index]))
+			return -EXDEV;
+		error = ebpfos_admission_owner_recheck(grant, true);
+		if (error)
+			return error;
+		spin_lock(&grant->state_lock);
+		state = grant->state;
+		spin_unlock(&grant->state_lock);
+		if (state != EBPFOS_ADMISSION_FRESH)
+			return state == EBPFOS_ADMISSION_STAGED ? -EBUSY : -EALREADY;
+	}
+	if (check_add_overflow(ebpfos_staged_grants, (u64)count,
+			       &staged_grants))
+		return -EOVERFLOW;
+	ebpfos_staged_grants = staged_grants;
+	/*
+	 * The admission gate excludes every state transition, so after the full
+	 * validation pass these individual state locks cannot expose a partial
+	 * bundle to another admission operation.
+	 */
+	for (index = 0; index < count; index++) {
+		spin_lock(&grants[index]->state_lock);
+		WARN_ON_ONCE(grants[index]->state != EBPFOS_ADMISSION_FRESH);
+		grants[index]->state = EBPFOS_ADMISSION_STAGED;
+		spin_unlock(&grants[index]->state_lock);
+	}
+	return 0;
+}
+
+int ebpfos_admission_consume_bundle_locked(
+	struct ebpfos_admission **grants, unsigned int count)
+{
+	unsigned int index;
+	u32 state;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!grants || !count || count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
+		return -EINVAL;
+	for (index = 0; index < count; index++) {
+		if (!grants[index])
+			return -EINVAL;
+		spin_lock(&grants[index]->state_lock);
+		state = grants[index]->state;
+		spin_unlock(&grants[index]->state_lock);
+		if (state != EBPFOS_ADMISSION_STAGED)
+			return -ESTALE;
+	}
+	if (ebpfos_staged_grants < count)
+		return -EUCLEAN;
+	for (index = 0; index < count; index++) {
+		spin_lock(&grants[index]->state_lock);
+		grants[index]->state = EBPFOS_ADMISSION_CONSUMED;
+		spin_unlock(&grants[index]->state_lock);
+	}
+	ebpfos_staged_grants -= count;
+	return 0;
 }
 
 static void ebpfos_admission_lock_pair(struct ebpfos_admission *first,

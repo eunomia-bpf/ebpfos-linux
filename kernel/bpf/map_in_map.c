@@ -124,13 +124,13 @@ static void bpf_ebpfos_map_external_put_rcu(struct rcu_head *rcu)
 	u32 refs;
 	bool requeue = false;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	refs = map->ebpfos_external_gp_refs;
 	if (WARN_ON_ONCE(!refs || map->ebpfos_external_writers < refs)) {
 		map->ebpfos_external_gp_refs = 0;
 		map->ebpfos_external_next_refs = 0;
 		map->ebpfos_external_gp_queued = false;
-		spin_unlock(&map->owner_lock);
+		spin_unlock_bh(&map->owner_lock);
 		return;
 	}
 	map->ebpfos_external_writers -= refs;
@@ -142,7 +142,7 @@ static void bpf_ebpfos_map_external_put_rcu(struct rcu_head *rcu)
 		map->ebpfos_external_gp_refs = 0;
 		map->ebpfos_external_gp_queued = false;
 	}
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 
 	while (refs--)
 		bpf_map_put(map);
@@ -159,9 +159,9 @@ static void bpf_ebpfos_map_external_put_deferred(struct bpf_map *map)
 	 * reader that could have observed the removed inner-map pointer drains.
 	 * Tasks-trace RCU also covers non-sleepable BPF readers.
 	 */
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (WARN_ON_ONCE(!map->ebpfos_external_writers)) {
-		spin_unlock(&map->owner_lock);
+		spin_unlock_bh(&map->owner_lock);
 		return;
 	}
 	if (!map->ebpfos_external_gp_queued) {
@@ -171,7 +171,7 @@ static void bpf_ebpfos_map_external_put_deferred(struct bpf_map *map)
 	} else {
 		map->ebpfos_external_next_refs++;
 	}
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 
 	if (queue)
 		call_rcu_tasks_trace(&map->ebpfos_external_rcu,

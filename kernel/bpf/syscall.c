@@ -41,7 +41,7 @@
 #include <linux/overflow.h>
 #include <linux/cookie.h>
 #include <linux/verification.h>
-#include <uapi/linux/ebpfos.h>
+#include <linux/ebpfos.h>
 
 #include <net/netfilter/nf_bpf_link.h>
 #include <net/netkit.h>
@@ -1026,12 +1026,12 @@ static void bpf_map_show_fdinfo(struct seq_file *m, struct file *filp)
 	struct bpf_map *map = filp->private_data;
 	u32 type = 0, jited = 0;
 
-	spin_lock(&map->owner_lock);
+	spin_lock_bh(&map->owner_lock);
 	if (map->owner) {
 		type  = map->owner->type;
 		jited = map->owner->jited;
 	}
-	spin_unlock(&map->owner_lock);
+	spin_unlock_bh(&map->owner_lock);
 
 	seq_printf(m,
 		   "map_type:\t%u\n"
@@ -2927,6 +2927,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_XDP_DEV_BOUND_ONLY |
 				 BPF_F_TEST_REG_INVARIANTS |
 				 BPF_F_EBPFOS_PROVIDER |
+				 BPF_F_EBPFOS_META |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
@@ -2936,7 +2937,15 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))
 		return -EOPNOTSUPP;
-	if ((attr->prog_flags & BPF_F_EBPFOS_PROVIDER) &&
+	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
+	    (type != BPF_PROG_TYPE_SYSCALL ||
+	     attr->prog_flags != (BPF_F_EBPFOS_META | BPF_F_SLEEPABLE)))
+		return -EINVAL;
+	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
+	    !IS_ENABLED(CONFIG_EBPFOS))
+		return -EOPNOTSUPP;
+	if ((attr->prog_flags &
+	     (BPF_F_EBPFOS_PROVIDER | BPF_F_EBPFOS_META)) &&
 	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->prog_btf_fd || attr->func_info_rec_size ||
 	     attr->func_info || attr->func_info_cnt ||
@@ -3058,6 +3067,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->expected_attach_type = attr->expected_attach_type;
 	prog->sleepable = !!(attr->prog_flags & BPF_F_SLEEPABLE);
 	prog->aux->ebpfos_provider = !!(attr->prog_flags & BPF_F_EBPFOS_PROVIDER);
+	prog->aux->ebpfos_meta = !!(attr->prog_flags & BPF_F_EBPFOS_META);
 	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
@@ -4806,7 +4816,9 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	prog = bpf_prog_get(attr->test.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->ebpfos_provider) {
+	if (prog->aux->ebpfos_provider ||
+	    (prog->aux->ebpfos_meta &&
+	     !ebpfos_admission_root_publisher_program(prog))) {
 		ret = -EPERM;
 		goto out_put;
 	}
@@ -6181,7 +6193,7 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 	prog = bpf_prog_get(attr->prog_bind_map.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->ebpfos_provider) {
+	if (prog->aux->ebpfos_provider || prog->aux->ebpfos_meta) {
 		ret = -EPERM;
 		goto out_prog_put;
 	}
@@ -6546,7 +6558,9 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 		prog = bpf_prog_get_type(attr->test.prog_fd, BPF_PROG_TYPE_SYSCALL);
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
-		if (prog->aux->ebpfos_provider) {
+		if (prog->aux->ebpfos_provider ||
+		    (prog->aux->ebpfos_meta &&
+		     !ebpfos_admission_root_publisher_program(prog))) {
 			bpf_prog_put(prog);
 			return -EPERM;
 		}
@@ -6638,7 +6652,7 @@ static const struct bpf_func_proto bpf_kallsyms_lookup_name_proto = {
 static const struct bpf_func_proto *
 syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (prog->aux->ebpfos_provider)
+	if (prog->aux->ebpfos_provider || prog->aux->ebpfos_meta)
 		return func_id == BPF_FUNC_map_lookup_elem ?
 		       &bpf_map_lookup_elem_proto : NULL;
 

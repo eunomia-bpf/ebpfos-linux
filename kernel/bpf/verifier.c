@@ -30,7 +30,7 @@
 #include <net/xdp.h>
 #include <linux/trace_events.h>
 #include <linux/kallsyms.h>
-#include <uapi/linux/ebpfos.h>
+#include <linux/ebpfos.h>
 
 #include "disasm.h"
 
@@ -3001,7 +3001,9 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
 	int err;
 
 	prog_aux = env->prog->aux;
-	if (prog_aux->ebpfos_provider) {
+	if (prog_aux->ebpfos_provider ||
+	    (prog_aux->ebpfos_meta &&
+	     !ebpfos_executor_root_kfunc_allowed(func_id))) {
 		verbose(env, "eBPFOS provider programs cannot call kernel functions\n");
 		return -EACCES;
 	}
@@ -3109,7 +3111,8 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 		if (!bpf_pseudo_func(insn) && !bpf_pseudo_call(insn) &&
 		    !bpf_pseudo_kfunc_call(insn))
 			continue;
-		if (env->prog->aux->ebpfos_provider &&
+		if ((env->prog->aux->ebpfos_provider ||
+		     env->prog->aux->ebpfos_meta) &&
 		    !bpf_pseudo_kfunc_call(insn)) {
 			verbose(env, "eBPFOS provider programs cannot call BPF functions\n");
 			return -EACCES;
@@ -3138,7 +3141,8 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	 * marked using BTF decl tag to serve as the exception callback.
 	 */
 	if (ex_cb_insn) {
-		if (env->prog->aux->ebpfos_provider) {
+		if (env->prog->aux->ebpfos_provider ||
+		    env->prog->aux->ebpfos_meta) {
 			verbose(env,
 				"eBPFOS provider programs cannot define exception callbacks\n");
 			return -EACCES;
@@ -18210,16 +18214,39 @@ static int check_ebpfos_provider_map(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static int check_ebpfos_meta_map(struct bpf_verifier_env *env,
+				  struct bpf_map *map)
+{
+	if (map->map_type != BPF_MAP_TYPE_ARRAY || bpf_map_is_offloaded(map) ||
+	    map->key_size != sizeof(u32) ||
+	    map->value_size != BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE ||
+	    map->max_entries != 1 || map->map_flags || map->map_extra ||
+	    map->inner_map_meta || map->btf || map->btf_key_type_id ||
+	    map->btf_value_type_id || map->btf_vmlinux_value_type_id ||
+	    map->record || map->excl || map->excl_prog_sha) {
+		verbose(env,
+			"eBPFOS meta-component requires the exact ordinary root-manifest ARRAY map\n");
+		return -EINVAL;
+	}
+	if (!READ_ONCE(map->frozen)) {
+		verbose(env,
+			"eBPFOS meta-component map must be frozen before program load\n");
+		return -EPERM;
+	}
+	return 0;
+}
+
 static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 {
 	struct bpf_prog_aux *aux = env->prog->aux;
 
-	if (!aux->ebpfos_provider)
+	if (!aux->ebpfos_provider && !aux->ebpfos_meta)
 		return 0;
 	if (aux->btf || aux->func_info || aux->func_info_aux ||
 	    aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
 	    aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
-	    aux->used_btf_cnt || aux->kfunc_tab || aux->kfunc_btf_tab) {
+	    aux->used_btf_cnt || aux->kfunc_btf_tab ||
+	    (aux->ebpfos_provider && aux->kfunc_tab)) {
 		verbose(env, "eBPFOS provider cannot carry BTF or attach metadata\n");
 		return -EINVAL;
 	}
@@ -18232,7 +18259,9 @@ static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 		return -EINVAL;
 	}
 
-	return check_ebpfos_provider_map(env, env->used_maps[0]);
+	return aux->ebpfos_meta ?
+		check_ebpfos_meta_map(env, env->used_maps[0]) :
+		check_ebpfos_provider_map(env, env->used_maps[0]);
 }
 
 static int check_map_prog_compatibility(struct bpf_verifier_env *env,
@@ -18343,6 +18372,8 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 {
 	bool provider = env->prog->aux->ebpfos_provider;
+	bool meta = env->prog->aux->ebpfos_meta;
+	bool component = provider || meta;
 	int i, err;
 
 	/* check whether we recorded this map already */
@@ -18355,12 +18386,13 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 			MAX_USED_MAPS);
 		return -E2BIG;
 	}
-	if (provider) {
+	if (component) {
 		if (env->used_map_cnt) {
 			verbose(env, "eBPFOS provider cannot reference more than one map\n");
 			return -EINVAL;
 		}
-		err = check_ebpfos_provider_map(env, map);
+		err = meta ? check_ebpfos_meta_map(env, map) :
+			     check_ebpfos_provider_map(env, map);
 		if (err)
 			return err;
 	}
@@ -18368,7 +18400,7 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)
 		return err;
-	if (!bpf_ebpfos_map_prog_get(map, env->prog->aux, provider)) {
+	if (!bpf_ebpfos_map_prog_get(map, env->prog->aux, component)) {
 		verbose(env, "map is exclusively owned by another BPF program\n");
 		return -EBUSY;
 	}
@@ -18650,7 +18682,8 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 				goto next_insn;
 
 			if (insn[0].src_reg == BPF_PSEUDO_BTF_ID) {
-				if (env->prog->aux->ebpfos_provider) {
+				if (env->prog->aux->ebpfos_provider ||
+				    env->prog->aux->ebpfos_meta) {
 					verbose(env,
 						"eBPFOS provider cannot use BPF_PSEUDO_BTF_ID\n");
 					return -EACCES;
@@ -19349,7 +19382,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 	long addr = 0;
 	struct module *mod = NULL;
 
-	if (tgt_prog && tgt_prog->aux->ebpfos_provider) {
+	if (tgt_prog && (tgt_prog->aux->ebpfos_provider ||
+			 tgt_prog->aux->ebpfos_meta)) {
 		bpf_log(log, "eBPFOS provider programs cannot be attach targets\n");
 		return -EPERM;
 	}
