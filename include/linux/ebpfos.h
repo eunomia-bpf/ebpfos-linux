@@ -95,6 +95,69 @@ struct ebpfos_file_split_control {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x39, \
 	      struct ebpfos_file_split_control)
 
+#define EBPFOS_FILE_CHECKPOINT_MAGIC "EBPFSCP1"
+#define EBPFOS_FILE_CHECKPOINT_FORMAT_V1 1U
+#define EBPFOS_FILE_CHECKPOINT_SEAL 1U
+#define EBPFOS_FILE_CHECKPOINT_RESTORE 2U
+
+/*
+ * Canonical little-endian record copied after its separately addressed image.
+ * This remains a kernel-private experiment ABI until cold restore passes KVM.
+ */
+struct ebpfos_file_checkpoint_manifest_v1 {
+	__u8 magic[8];
+	__le16 format_version;
+	__le16 manifest_size;
+	__le64 checkpoint_id;
+	__le64 route_id;
+	__le64 source_graph_epoch;
+	__le64 restore_generation;
+	__le64 provider_lineage_id;
+	__le64 schema_hash;
+	__le64 transition_id;
+	__le64 frontier;
+	__le64 visible_size;
+	__le64 last_sequence;
+	__le64 lineage_acquires_at_retire;
+	__le64 lineage_policy_generation;
+	__u8 lineage_policy_digest[32];
+	__u8 lineage_content_digest[32];
+	__u8 reader_content_digest[32];
+	__u8 writer_content_digest[32];
+	__u8 image_sha256[32];
+	__u8 record_sha256[32];
+} __packed;
+
+struct ebpfos_file_checkpoint {
+	__s32 file_fd;
+	__s32 reader_admission_fd;
+	__s32 writer_admission_fd;
+	__u32 operation;
+	__u32 flags;
+	__u32 reserved0;
+	__u64 expected_route_id;
+	__u64 expected_graph_epoch;
+	__u64 expected_frontier;
+	__u64 expected_visible_size;
+	__u64 expected_lineage_acquires_at_retire;
+	__aligned_u64 image;
+	__u64 image_capacity;
+	struct ebpfos_file_checkpoint_manifest_v1 manifest;
+	__u64 reader_provider_id;
+	__u64 writer_provider_id;
+	__u32 reader_prog_id;
+	__u32 reader_map_id;
+	__u32 writer_prog_id;
+	__u32 writer_map_id;
+	__u32 route_state;
+	__u32 admission_gate;
+	__u32 checkpointed;
+	__u32 reserved1;
+};
+
+#define EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x3a, struct ebpfos_file_checkpoint)
+
 struct file;
 struct inode;
 struct iov_iter;
@@ -197,6 +260,7 @@ long ebpfos_file_recovery_retire_ioctl(void __user *argp);
 long ebpfos_file_admission_status_ioctl(void __user *argp);
 long ebpfos_file_split_publish_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_control_experimental_ioctl(void __user *argp);
+long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
@@ -561,6 +625,12 @@ ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 
 static inline long
 ebpfos_file_split_control_experimental_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long
+ebpfos_file_checkpoint_experimental_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
 }

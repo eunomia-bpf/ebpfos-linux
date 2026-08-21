@@ -531,6 +531,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_file_split_publish_experimental_ioctl(argp);
 	case EBPFOS_IOC_FILE_SPLIT_CONTROL_EXPERIMENTAL:
 		return ebpfos_file_split_control_experimental_ioctl(argp);
+	case EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL:
+		return ebpfos_file_checkpoint_experimental_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}
