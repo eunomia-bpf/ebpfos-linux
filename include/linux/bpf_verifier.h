@@ -1499,6 +1499,8 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset);
 int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			       const struct bpf_kop *kop,
 			       const struct bpf_insn *insns, u32 count);
+int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
+				  const struct bpf_insn *insns, u32 count);
 int bpf_verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 count);
 int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			 struct bpf_insn *insn_buf, int insn_idx, int *cnt);

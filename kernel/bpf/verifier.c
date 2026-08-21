@@ -3149,11 +3149,31 @@ bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog)
 	return false;
 }
 
+bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
+{
+	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+	u32 i;
+
+	if (!tab)
+		return false;
+	for (i = 0; i < tab->nr_descs; i++)
+		if (tab->descs[i].kop)
+			return true;
+	return false;
+}
+
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
 	u32 cap = env->kop_call_cnt;
 	int i, err;
+
+	if (cap) {
+		err = bpf_validate_kop_single_entry(env, env->prog->insnsi,
+						  env->prog->len);
+		if (err)
+			return err;
+	}
 
 	kvfree(env->kop_regions);
 	env->kop_regions = NULL;

@@ -2667,8 +2667,15 @@ struct bpf_prog *__bpf_prog_select_runtime(struct bpf_verifier_env *env, struct 
 	if (fp->bpf_func)
 		goto finalize;
 
+	/* A native KOperation pair is never an interpreter instruction.  Its
+	 * descriptor remains in aux->kfunc_tab after proof verification, so a
+	 * later JIT failure must reject the load instead of exposing the restored
+	 * pseudo-call to ___bpf_prog_run.  The current non-JIT path is likewise
+	 * rejected by bpf_fixup_call_args(); proof verification is not an
+	 * interpreter fallback until descriptor retirement is implemented.
+	 */
 	if (IS_ENABLED(CONFIG_BPF_JIT_ALWAYS_ON) ||
-	    bpf_prog_has_kfunc_call(fp))
+	    bpf_prog_has_kfunc_call(fp) || bpf_prog_has_kop_call(fp))
 		jit_needed = true;
 
 	if (!bpf_prog_select_interpreter(fp))

@@ -3194,6 +3194,7 @@ const struct bpf_func_proto *bpf_base_func_proto(enum bpf_func_id func_id,
 void bpf_task_storage_free(struct task_struct *task);
 void bpf_cgrp_storage_free(struct cgroup *cgroup);
 bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog);
+bool bpf_prog_has_kop_call(const struct bpf_prog *prog);
 const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn);
@@ -3481,6 +3482,11 @@ static inline void bpf_task_storage_free(struct task_struct *task)
 }
 
 static inline bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog)
+{
+	return false;
+}
+
+static inline bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
 {
 	return false;
 }

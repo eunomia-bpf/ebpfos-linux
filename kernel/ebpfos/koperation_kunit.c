@@ -15,9 +15,12 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include <linux/bpf_verifier.h>
 #include <kunit/test.h>
 
 #define EBPFOS_KOP_TEST_FORM_IMMEDIATE 2U
+#define EBPFOS_KOP_TEST_FORM_FORWARD_ESCAPE 3U
+#define EBPFOS_KOP_TEST_FORM_BACKWARD_ESCAPE 4U
 #define EBPFOS_KOP_TEST_SCRATCH0 BPF_REG_6
 #define EBPFOS_KOP_TEST_SCRATCH1 BPF_REG_7
 #define EBPFOS_KOP_TEST_SCRATCH0_OFF (-40)
@@ -28,6 +31,8 @@ struct ebpfos_kop_test_rotate {
 	u8 src;
 	u8 shift;
 };
+
+static atomic64_t ebpfos_kop_test_emit_attempts = ATOMIC64_INIT(0);
 
 static int ebpfos_kop_test_decode(u64 payload,
 				  struct ebpfos_kop_test_rotate *rotate)
@@ -50,6 +55,22 @@ static int ebpfos_kop_test_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	struct ebpfos_kop_test_rotate rotate;
 	int err;
+	u8 form = payload & 0xf;
+
+	if (form == EBPFOS_KOP_TEST_FORM_FORWARD_ESCAPE) {
+		if (payload >> 4)
+			return -EINVAL;
+		insns[0] = BPF_JMP_A(1);
+		insns[1] = BPF_MOV64_IMM(BPF_REG_0, 1);
+		return 2;
+	}
+	if (form == EBPFOS_KOP_TEST_FORM_BACKWARD_ESCAPE) {
+		if (payload >> 4)
+			return -EINVAL;
+		insns[0] = BPF_JMP_A(-2);
+		insns[1] = BPF_MOV64_IMM(BPF_REG_0, 1);
+		return 2;
+	}
 
 	err = ebpfos_kop_test_decode(payload, &rotate);
 	if (err)
@@ -120,6 +141,7 @@ static int ebpfos_kop_test_emit_x86(u8 *image, u32 *off, bool emit,
 	(void)final_ip;
 	if (!off || (emit && !image))
 		return -EINVAL;
+	atomic64_inc(&ebpfos_kop_test_emit_attempts);
 	err = ebpfos_kop_test_decode(payload, &rotate);
 	if (err)
 		return err;
@@ -140,11 +162,19 @@ static int ebpfos_kop_test_emit_x86(u8 *image, u32 *off, bool emit,
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kop_test_rol64(void) { }
+__bpf_kfunc u64 bpf_ebpfos_kop_test_emit_attempts(void)
+{
+	return atomic64_read(&ebpfos_kop_test_emit_attempts);
+}
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kop_test_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_test_rol64)
 BTF_KFUNCS_END(ebpfos_kop_test_ids)
+
+BTF_KFUNCS_START(ebpfos_kop_test_counter_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_test_emit_attempts)
+BTF_KFUNCS_END(ebpfos_kop_test_counter_ids)
 
 static const struct bpf_kop ebpfos_kop_test_rol64 = {
 	.max_insn_cnt = 10,
@@ -163,10 +193,21 @@ static const struct btf_kfunc_id_set ebpfos_kop_test_set = {
 	.kop_descs = ebpfos_kop_test_descs,
 };
 
+static const struct btf_kfunc_id_set ebpfos_kop_test_counter_set = {
+	.owner = THIS_MODULE,
+	.set = &ebpfos_kop_test_counter_ids,
+};
+
 static int __init ebpfos_kop_test_register(void)
 {
+	int err;
+
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SOCKET_FILTER,
+					       &ebpfos_kop_test_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SOCKET_FILTER,
-					 &ebpfos_kop_test_set);
+					 &ebpfos_kop_test_counter_set);
 }
 late_initcall(ebpfos_kop_test_register);
 
@@ -201,8 +242,81 @@ static void ebpfos_kop_descriptor_test(struct kunit *test)
 		-EINVAL);
 }
 
+static struct bpf_insn ebpfos_kop_test_sidecar(void)
+{
+	return (struct bpf_insn) {
+		.code = BPF_ALU64 | BPF_MOV | BPF_K,
+		.src_reg = BPF_PSEUDO_KOP_SIDECAR,
+	};
+}
+
+static void ebpfos_kop_proof_cfg_test(struct kunit *test)
+{
+	const struct bpf_kop kop = { .max_insn_cnt = 3 };
+	struct bpf_insn forward_boundary[] = {
+		BPF_JMP_A(1), BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_MOV64_IMM(BPF_REG_0, 1),
+	};
+	struct bpf_insn forward_escape[] = {
+		BPF_JMP_A(1), BPF_MOV64_IMM(BPF_REG_0, 0),
+	};
+	struct bpf_insn backward_boundary[] = {
+		BPF_MOV64_IMM(BPF_REG_0, 0), BPF_JMP_A(-2),
+	};
+	struct bpf_insn backward_escape[] = {
+		BPF_JMP_A(-2), BPF_MOV64_IMM(BPF_REG_0, 0),
+	};
+	struct bpf_insn jump_to_sidecar[] = {
+		BPF_MOV64_IMM(BPF_REG_0, 0), BPF_JMP_A(0),
+		ebpfos_kop_test_sidecar(),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
+			     0, 1),
+		BPF_EXIT_INSN(),
+	};
+	struct bpf_insn jump_to_call[] = {
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+		ebpfos_kop_test_sidecar(),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
+			     0, 1),
+		BPF_EXIT_INSN(),
+	};
+	struct bpf_kfunc_desc_tab *tab;
+	struct bpf_prog_aux *aux;
+	struct bpf_prog prog = {};
+
+	tab = kunit_kzalloc(test, sizeof(*tab), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tab);
+	aux = kunit_kzalloc(test, sizeof(*aux), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aux);
+	tab->nr_descs = 1;
+	tab->descs[0].kop = &kop;
+	aux->kfunc_tab = tab;
+	prog.aux = aux;
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_proof_seq(
+		NULL, &kop, forward_boundary, ARRAY_SIZE(forward_boundary)), 0);
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_proof_seq(
+		NULL, &kop, forward_escape, ARRAY_SIZE(forward_escape)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_proof_seq(
+		NULL, &kop, backward_boundary, ARRAY_SIZE(backward_boundary)), 0);
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_proof_seq(
+		NULL, &kop, backward_escape, ARRAY_SIZE(backward_escape)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_single_entry(
+		NULL, jump_to_sidecar, ARRAY_SIZE(jump_to_sidecar)), 0);
+	KUNIT_EXPECT_EQ(test, bpf_validate_kop_single_entry(
+		NULL, jump_to_call, ARRAY_SIZE(jump_to_call)), -EINVAL);
+	/* This is the config-independent fail-closed predicate used when a
+	 * requested native JIT later fails: the descriptor remains recorded and
+	 * the pseudo-call cannot fall back to the interpreter.  The current
+	 * non-JIT path rejects the load; it does not retire the descriptor and
+	 * execute an expanded proof.
+	 */
+	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(&prog));
+}
+
 static struct kunit_case ebpfos_kop_test_cases[] = {
 	KUNIT_CASE(ebpfos_kop_descriptor_test),
+	KUNIT_CASE(ebpfos_kop_proof_cfg_test),
 	{}
 };
 
