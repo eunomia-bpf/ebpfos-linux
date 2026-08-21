@@ -313,10 +313,15 @@ struct ebpfos_file_split_hot_publish {
  */
 #define EBPFOS_KOPERATION_ABI_VERSION 1U
 #define EBPFOS_KOPERATION_PAGE_TABLE_READ_CR3_ROOT 1U
+#define EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT 2U
 
 #define EBPFOS_KOPERATION_STATUS_STAGED 1U
 #define EBPFOS_KOPERATION_STATUS_COMPLETE 2U
 #define EBPFOS_KOPERATION_STATUS_BURNED 3U
+
+#define EBPFOS_KOPERATION_ARCH_CR4_PCIDE (1ULL << 0)
+#define EBPFOS_KOPERATION_ARCH_CR4_PGE (1ULL << 1)
+#define EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH (1ULL << 2)
 
 struct ebpfos_koperation_prepare {
 	__u32 version;
@@ -341,6 +346,10 @@ struct ebpfos_koperation_execute {
 	__u32 flags;
 	__u64 transaction_id;
 	__u64 expected_shadow;
+	__u8 expected_semantic_sha256[32];
+	__u8 expected_proof_template_sha256[32];
+	__u8 expected_native_sha256[32];
+	__u8 expected_equivalence_sha256[32];
 };
 
 struct ebpfos_koperation_result {
@@ -351,6 +360,10 @@ struct ebpfos_koperation_result {
 	__u64 transaction_id;
 	__u64 staged_shadow;
 	__u64 native_result;
+	__u64 native_operand_before;
+	__u64 architecture_flags;
+	__u32 cpu_before;
+	__u32 cpu_after;
 	__u8 semantic_sha256[32];
 	__u8 proof_program_sha256[32];
 	__u8 native_sha256[32];

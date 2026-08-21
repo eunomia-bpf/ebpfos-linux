@@ -32,15 +32,87 @@
           "op": "clear-low-bits"
         }
       },
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
       "proof_ir": [
         {
           "op": "load-staged-u64"
+        },
+        {
+          "effect": "page_table.root.observe",
+          "op": "commit-effect"
         },
         {
           "op": "return"
         }
       ],
       "result": "page-table-root-physical-address",
+      "shadow_source": "current-mm-pgd"
+    },
+    {
+      "capabilities": [
+        "cpu.cr3.read",
+        "cpu.cr3.write"
+      ],
+      "effects": [
+        "page_table.root.preserve",
+        "tlb.current-hardware-cr3-context.non-global.invalidate"
+      ],
+      "id": 2,
+      "name": "page-table.reload-cr3-root",
+      "native_ir": [
+        {
+          "op": "read-control-register",
+          "register": "cr3"
+        },
+        {
+          "op": "write-control-register",
+          "register": "cr3",
+          "source": "value"
+        },
+        {
+          "op": "read-control-register",
+          "register": "cr3"
+        },
+        {
+          "bits": 12,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 12,
+          "input": "hardware.cr3",
+          "op": "clear-low-bits"
+        }
+      },
+      "postcondition": {
+        "left": "hardware.cr3.root-after",
+        "right": "staged-u64"
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "page_table.root.preserve",
+          "op": "commit-effect"
+        },
+        {
+          "effect": "tlb.current-hardware-cr3-context.non-global.invalidate",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "same-page-table-root-after-local-tlb-invalidation",
       "shadow_source": "current-mm-pgd"
     }
   ]

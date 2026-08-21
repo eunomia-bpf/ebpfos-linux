@@ -2,25 +2,28 @@
 obj-y += admission.o admission_certificates.o state_adapter.o component_graph.o core.o object.o file.o ops.o dispatch.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o koperation-generated.o
 
+EBPFOS_KOPERATION_GENERATOR ?= $(srctree)/scripts/ebpfos-koperation-gen.py
+
 quiet_cmd_ebpfos_koperation_gen = KOPGEN  $@
       cmd_ebpfos_koperation_gen = \
-	$(PYTHON3) $(srctree)/scripts/ebpfos-koperation-gen.py \
+	$(PYTHON3) $(EBPFOS_KOPERATION_GENERATOR) \
 		--spec $(src)/koperation-operations.json \
 		--header $(obj)/koperation-generated.h \
 		--assembly $(obj)/koperation-generated.S \
-		--certificate $(obj)/koperation-certificate.json
+		--certificate $(obj)/koperation-certificate.json \
+		--userspace-header $(obj)/koperation-commitments.h
 
 $(obj)/koperation-generated.h $(obj)/koperation-generated.S \
-$(obj)/koperation-certificate.json &: \
+	$(obj)/koperation-certificate.json $(obj)/koperation-commitments.h &: \
 		$(src)/koperation-operations.json \
-		$(srctree)/scripts/ebpfos-koperation-gen.py FORCE
+	$(EBPFOS_KOPERATION_GENERATOR) FORCE
 	$(call if_changed,ebpfos_koperation_gen)
 
 $(obj)/koperation.o: $(obj)/koperation-generated.h
 $(obj)/koperation-generated.o: $(obj)/koperation-generated.S
 
 targets += koperation-generated.h koperation-generated.S \
-	   koperation-certificate.json
+	   koperation-certificate.json koperation-commitments.h
 always-y += koperation-certificate.json
 
 $(obj)/admission_certificates.o: $(obj)/ebpfos_x509_certificate_list

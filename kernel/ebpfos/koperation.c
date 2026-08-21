@@ -7,6 +7,7 @@
 #include <linux/err.h>
 #include <linux/filter.h>
 #include <linux/mm.h>
+#include <linux/preempt.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -14,14 +15,17 @@
 
 #include <asm/page.h>
 #include <asm/processor-flags.h>
+#include <asm/special_insns.h>
 
 struct ebpfos_koperation_descriptor {
 	u32 operation_id;
+	u32 architecture_requirements;
 	const struct bpf_insn *proof_insns;
 	u32 proof_insn_count;
 	u32 proof_imm64_insn;
 	u32 shadow_source;
 	u64 (*native_emit)(void);
+	const u32 *native_body_end_delta;
 	u32 native_body_size;
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 	u8 proof_template_sha256[SHA256_DIGEST_SIZE];
@@ -30,6 +34,7 @@ struct ebpfos_koperation_descriptor {
 };
 
 #define EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD 1U
+#define EBPFOS_KOPERATION_REQUIRE_CR3_NOFLUSH_CLEAR (1U << 0)
 
 #include "koperation-generated.h"
 
@@ -38,6 +43,10 @@ struct ebpfos_koperation_txn {
 	u64 transaction_id;
 	u64 staged_shadow;
 	u64 native_result;
+	u64 native_operand_before;
+	u64 architecture_flags;
+	u32 cpu_before;
+	u32 cpu_after;
 	u32 status;
 	int error;
 	u8 proof_program_sha256[SHA256_DIGEST_SIZE];
@@ -98,10 +107,20 @@ static bool ebpfos_koperation_native_matches(
 {
 	u8 actual[SHA256_DIGEST_SIZE];
 	const u8 *start = (const u8 *)descriptor->native_emit;
+	unsigned long end;
+	unsigned long start_address = (unsigned long)start;
+	u32 linker_size;
 	size_t size;
 
 	size = descriptor->native_body_size;
-	if (!size || size > 64)
+	if (!size || !descriptor->native_body_end_delta)
+		return false;
+	linker_size = READ_ONCE(*descriptor->native_body_end_delta);
+	if (linker_size != size || size > ULONG_MAX - start_address)
+		return false;
+	end = start_address + size;
+	if (!core_kernel_text(start_address) ||
+	    !core_kernel_text(end - 1))
 		return false;
 	sha256(start, size, actual);
 	return !memcmp(actual, descriptor->native_sha256, sizeof(actual));
@@ -212,6 +231,7 @@ long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot)
 	struct bpf_prog *prog;
 	u64 trusted_shadow;
 	u64 native_result;
+	unsigned long cr4;
 	int error;
 
 	if (copy_from_user(&request, argp, sizeof(request)))
@@ -227,6 +247,25 @@ long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot)
 	    request.expected_shadow != txn->staged_shadow) {
 		ebpfos_koperation_burn(txn, -ESTALE);
 		return -ESTALE;
+	}
+	/*
+	 * These commitments come from the independently generated component
+	 * manifest embedded in the boot image, never from PREPARE's reply.
+	 */
+	if (memcmp(request.expected_semantic_sha256,
+		   txn->descriptor->semantic_sha256,
+		   sizeof(request.expected_semantic_sha256)) ||
+	    memcmp(request.expected_proof_template_sha256,
+		   txn->descriptor->proof_template_sha256,
+		   sizeof(request.expected_proof_template_sha256)) ||
+	    memcmp(request.expected_native_sha256,
+		   txn->descriptor->native_sha256,
+		   sizeof(request.expected_native_sha256)) ||
+	    memcmp(request.expected_equivalence_sha256,
+		   txn->descriptor->equivalence_sha256,
+		   sizeof(request.expected_equivalence_sha256))) {
+		ebpfos_koperation_burn(txn, -EKEYREJECTED);
+		return -EKEYREJECTED;
 	}
 	error = ebpfos_koperation_shadow(txn->descriptor, &trusted_shadow);
 	if (error || trusted_shadow != txn->staged_shadow) {
@@ -262,8 +301,32 @@ long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot)
 	 * Unique execution point: the exact verifier-admitted expansion and the
 	 * generated text hash have passed.  No fallible user copy follows it.
 	 */
+	preempt_disable();
+	txn->cpu_before = raw_smp_processor_id();
+	txn->native_operand_before = __read_cr3();
+	cr4 = __read_cr4();
+	if (cr4 & X86_CR4_PCIDE)
+		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PCIDE;
+	if (cr4 & X86_CR4_PGE)
+		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PGE;
+	if (txn->native_operand_before & (1ULL << 63))
+		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH;
+	/*
+	 * All generated architectural preconditions must close before attempts
+	 * changes and before native_emit.  A post-execution check cannot restore
+	 * an architectural side effect.
+	 */
+	if ((txn->descriptor->architecture_requirements &
+	     EBPFOS_KOPERATION_REQUIRE_CR3_NOFLUSH_CLEAR) &&
+	    (txn->architecture_flags & EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH)) {
+		preempt_enable();
+		ebpfos_koperation_burn(txn, -EOPNOTSUPP);
+		return -EOPNOTSUPP;
+	}
 	atomic64_inc(&ebpfos_koperation_attempts);
 	native_result = txn->descriptor->native_emit();
+	txn->cpu_after = raw_smp_processor_id();
+	preempt_enable();
 	txn->native_result = native_result;
 	if (native_result != txn->staged_shadow) {
 		ebpfos_koperation_burn(txn, -EREMOTEIO);
@@ -289,6 +352,10 @@ long ebpfos_koperation_result_ioctl(void __user *argp, void **txn_slot)
 	result.transaction_id = txn->transaction_id;
 	result.staged_shadow = txn->staged_shadow;
 	result.native_result = txn->native_result;
+	result.native_operand_before = txn->native_operand_before;
+	result.architecture_flags = txn->architecture_flags;
+	result.cpu_before = txn->cpu_before;
+	result.cpu_after = txn->cpu_after;
 	memcpy(result.semantic_sha256, txn->descriptor->semantic_sha256,
 	       sizeof(result.semantic_sha256));
 	memcpy(result.proof_program_sha256, txn->proof_program_sha256,
