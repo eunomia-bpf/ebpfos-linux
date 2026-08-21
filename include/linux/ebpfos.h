@@ -306,6 +306,67 @@ struct ebpfos_file_split_hot_publish {
 	_IOW(EBPFOS_IOC_MAGIC, 0x3f, \
 	     struct ebpfos_file_split_hot_publish)
 
+/*
+ * Kernel-private generated KOperation experiment ABI.  PREPARE publishes no
+ * operation: its fallible reply is copied before the transaction is staged.
+ * EXECUTE is input-only, so no user copy can fail after native execution.
+ */
+#define EBPFOS_KOPERATION_ABI_VERSION 1U
+#define EBPFOS_KOPERATION_PAGE_TABLE_READ_CR3_ROOT 1U
+
+#define EBPFOS_KOPERATION_STATUS_STAGED 1U
+#define EBPFOS_KOPERATION_STATUS_COMPLETE 2U
+#define EBPFOS_KOPERATION_STATUS_BURNED 3U
+
+struct ebpfos_koperation_prepare {
+	__u32 version;
+	__u32 operation_id;
+	__u32 flags;
+	__u32 reserved0;
+	__u64 transaction_id;
+	__u64 staged_shadow;
+	__u8 semantic_sha256[32];
+	__u8 proof_template_sha256[32];
+	__u8 native_sha256[32];
+	__u8 equivalence_sha256[32];
+	__u64 attempts;
+	__u64 commits;
+	__u64 rejects;
+};
+
+struct ebpfos_koperation_execute {
+	__u32 version;
+	__u32 operation_id;
+	__s32 proof_prog_fd;
+	__u32 flags;
+	__u64 transaction_id;
+	__u64 expected_shadow;
+};
+
+struct ebpfos_koperation_result {
+	__u32 version;
+	__u32 operation_id;
+	__u32 status;
+	__s32 error;
+	__u64 transaction_id;
+	__u64 staged_shadow;
+	__u64 native_result;
+	__u8 semantic_sha256[32];
+	__u8 proof_program_sha256[32];
+	__u8 native_sha256[32];
+	__u8 equivalence_sha256[32];
+	__u64 attempts;
+	__u64 commits;
+	__u64 rejects;
+};
+
+#define EBPFOS_IOC_KOPERATION_PREPARE_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x40, struct ebpfos_koperation_prepare)
+#define EBPFOS_IOC_KOPERATION_EXECUTE_EXPERIMENTAL \
+	_IOW(EBPFOS_IOC_MAGIC, 0x41, struct ebpfos_koperation_execute)
+#define EBPFOS_IOC_KOPERATION_RESULT_EXPERIMENTAL \
+	_IOR(EBPFOS_IOC_MAGIC, 0x42, struct ebpfos_koperation_result)
+
 struct file;
 struct inode;
 struct iov_iter;
@@ -461,6 +522,34 @@ long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_private_convert_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_hot_publish_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
+#ifdef CONFIG_EBPFOS_KOPERATION
+long ebpfos_koperation_prepare_ioctl(void __user *argp, void **txn_slot);
+long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot);
+long ebpfos_koperation_result_ioctl(void __user *argp, void **txn_slot);
+void ebpfos_koperation_release(void **txn_slot);
+#else
+static inline long ebpfos_koperation_prepare_ioctl(void __user *argp,
+						    void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_koperation_execute_ioctl(void __user *argp,
+						    void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_koperation_result_ioctl(void __user *argp,
+						   void **txn_slot)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void ebpfos_koperation_release(void **txn_slot)
+{
+}
+#endif
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
 bool ebpfos_inode_reject_managed(struct inode *inode);

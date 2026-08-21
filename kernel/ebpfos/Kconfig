@@ -47,6 +47,15 @@ config EBPFOS_DRIVER_HOOK
 	depends on EBPFOS
 	default y
 
+config EBPFOS_KOPERATION
+	bool "eBPFOS generated x86-64 KOperation executor"
+	depends on EBPFOS && X86_64
+	default y
+	help
+	  Build the generic verifier-to-native KOperation executor and its
+	  generated operation table.  Individual operations are declarative data;
+	  they do not add verifier hooks or native fallback implementations.
+
 config EBPFOS_KUNIT_TEST
 	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS
 	depends on EBPFOS && KUNIT

@@ -1,0 +1,47 @@
+{
+  "architecture": "x86_64",
+  "format_version": 1,
+  "operations": [
+    {
+      "capabilities": [
+        "cpu.cr3.read"
+      ],
+      "effects": [
+        "page_table.root.observe"
+      ],
+      "id": 1,
+      "name": "page-table.read-cr3-root",
+      "native_ir": [
+        {
+          "op": "read-control-register",
+          "register": "cr3"
+        },
+        {
+          "bits": 12,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 12,
+          "input": "hardware.cr3",
+          "op": "clear-low-bits"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "page-table-root-physical-address",
+      "shadow_source": "current-mm-pgd"
+    }
+  ]
+}

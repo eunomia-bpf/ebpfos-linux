@@ -36,6 +36,9 @@ struct ebpfos_file {
 	/* Serializes the one file-replacement transaction owned by this FD. */
 	struct mutex file_txn_lock;
 	void *file_txn;
+	/* Independent generated KOperation proof/native transaction. */
+	struct mutex koperation_txn_lock;
+	void *koperation_txn;
 };
 
 static DEFINE_MUTEX(ebpfos_graph_lock);
@@ -192,6 +195,7 @@ static int ebpfos_open(struct inode *inode, struct file *file)
 	if (!state)
 		return -ENOMEM;
 	mutex_init(&state->file_txn_lock);
+	mutex_init(&state->koperation_txn_lock);
 	file->private_data = state;
 	return 0;
 }
@@ -202,7 +206,9 @@ static int ebpfos_release(struct inode *inode, struct file *file)
 
 	if (state) {
 		ebpfos_file_replace_release(&state->file_txn);
+		ebpfos_koperation_release(&state->koperation_txn);
 		ebpfos_graph_put(state->pending);
+		mutex_destroy(&state->koperation_txn_lock);
 		mutex_destroy(&state->file_txn_lock);
 		kfree(state);
 	}
@@ -543,6 +549,24 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_file_split_control_experimental_ioctl(argp);
 	case EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL:
 		return ebpfos_file_checkpoint_experimental_ioctl(argp);
+	case EBPFOS_IOC_KOPERATION_PREPARE_EXPERIMENTAL:
+		mutex_lock(&state->koperation_txn_lock);
+		result = ebpfos_koperation_prepare_ioctl(
+			argp, &state->koperation_txn);
+		mutex_unlock(&state->koperation_txn_lock);
+		return result;
+	case EBPFOS_IOC_KOPERATION_EXECUTE_EXPERIMENTAL:
+		mutex_lock(&state->koperation_txn_lock);
+		result = ebpfos_koperation_execute_ioctl(
+			argp, &state->koperation_txn);
+		mutex_unlock(&state->koperation_txn_lock);
+		return result;
+	case EBPFOS_IOC_KOPERATION_RESULT_EXPERIMENTAL:
+		mutex_lock(&state->koperation_txn_lock);
+		result = ebpfos_koperation_result_ioctl(
+			argp, &state->koperation_txn);
+		mutex_unlock(&state->koperation_txn_lock);
+		return result;
 	default:
 		return -ENOTTY;
 	}
