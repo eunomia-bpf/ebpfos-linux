@@ -808,6 +808,12 @@ struct bpf_scc_info {
 
 struct bpf_liveness;
 
+struct bpf_kop_region {
+	u32 start;
+	u32 proof_len;
+	struct bpf_insn orig[2];
+};
+
 /* single container for all structs
  * one verifier_env per bpf_check() call
  */
@@ -923,6 +929,10 @@ struct bpf_verifier_env {
 	u32 scc_cnt;
 	struct bpf_iarray *succ;
 	struct bpf_iarray *gotox_tmp_buf;
+	struct bpf_kop_region *kop_regions;
+	u32 kop_call_cnt;
+	u32 kop_region_cnt;
+	u32 kop_region_cap;
 };
 
 static inline struct bpf_func_info_aux *subprog_aux(struct bpf_verifier_env *env, int subprog)
@@ -957,6 +967,12 @@ static inline bool bpf_pseudo_kfunc_call(const struct bpf_insn *insn)
 {
 	return insn->code == (BPF_JMP | BPF_CALL) &&
 	       insn->src_reg == BPF_PSEUDO_KFUNC_CALL;
+}
+
+static inline bool bpf_pseudo_kop_call(const struct bpf_insn *insn)
+{
+	return insn->code == (BPF_JMP | BPF_CALL) &&
+	       insn->src_reg == BPF_PSEUDO_KOP_CALL;
 }
 
 __printf(2, 0) void bpf_verifier_vlog(struct bpf_verifier_log *log,
@@ -1073,6 +1089,9 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    const struct bpf_prog *tgt_prog,
 			    u32 btf_id,
 			    struct bpf_attach_target_info *tgt_info);
+const struct bpf_kop *
+btf_kfunc_kop_desc(const struct btf *btf, u32 kfunc_btf_id,
+		   const struct bpf_prog *prog);
 void bpf_free_kfunc_btf_tab(struct bpf_kfunc_btf_tab *tab);
 
 int mark_chain_precision(struct bpf_verifier_env *env, int regno);
@@ -1453,6 +1472,7 @@ enum bpf_reg_arg_type {
 
 struct bpf_kfunc_desc {
 	struct btf_func_model func_model;
+	const struct bpf_kop *kop;
 	u32 func_id;
 	s32 imm;
 	u16 offset;
@@ -1476,6 +1496,10 @@ void bpf_mark_subprog_exc_cb(struct bpf_verifier_env *env, int subprog);
 bool bpf_allow_tail_call_in_subprogs(struct bpf_verifier_env *env);
 bool bpf_verifier_inlines_helper_call(struct bpf_verifier_env *env, s32 imm);
 int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset);
+int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
+			       const struct bpf_kop *kop,
+			       const struct bpf_insn *insns, u32 count);
+int bpf_verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 count);
 int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			 struct bpf_insn *insn_buf, int insn_idx, int *cnt);
 

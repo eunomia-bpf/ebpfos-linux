@@ -1386,6 +1386,15 @@ enum {
  * bpf_call->imm == btf_id of a BTF_KIND_FUNC in the running kernel
  */
 #define BPF_PSEUDO_KFUNC_CALL	2
+/* when bpf_mov->src_reg == BPF_PSEUDO_KOP_SIDECAR,
+ * the instruction carries packed kop metadata for the immediately
+ * following kop call.
+ */
+#define BPF_PSEUDO_KOP_SIDECAR 3
+/* when bpf_call->src_reg == BPF_PSEUDO_KOP_CALL,
+ * bpf_call->imm == btf_id of a BTF_KIND_FUNC kop stub
+ */
+#define BPF_PSEUDO_KOP_CALL	4
 
 enum bpf_addr_space_cast {
 	BPF_ADDR_SPACE_CAST = 1,

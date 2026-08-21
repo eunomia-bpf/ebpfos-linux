@@ -576,6 +576,39 @@ static int emit_call(u8 **pprog, void *func, void *ip)
 	return emit_patch(pprog, func, ip, 0xE8);
 }
 
+static int emit_kop_desc_call(u8 **pprog,
+			      const struct bpf_prog *bpf_prog,
+			      const struct bpf_insn *insn, bool emit,
+			      const u8 *final_ip)
+{
+	const struct bpf_kop *kop;
+	u8 scratch[BPF_MAX_INSN_SIZE];
+	u8 *prog = *pprog;
+	u32 off = 0;
+	u64 payload;
+	int ret;
+
+	ret = bpf_jit_get_kop_payload(bpf_prog, insn, &kop, &payload);
+	if (ret)
+		return ret;
+	if (!kop || !kop->emit_x86)
+		return -EOPNOTSUPP;
+	if (kop->max_emit_bytes > BPF_MAX_INSN_SIZE)
+		return -E2BIG;
+
+	ret = kop->emit_x86(scratch, &off, emit, payload, bpf_prog,
+			      final_ip);
+	if (ret < 0)
+		return ret;
+	if (ret != off || ret > kop->max_emit_bytes)
+		return -EFAULT;
+	if (emit)
+		memcpy(prog, scratch, off);
+
+	*pprog = prog + off;
+	return 0;
+}
+
 static int emit_rsb_call(u8 **pprog, void *func, void *ip)
 {
 	OPTIMIZER_HIDE_VAR(func);
@@ -1501,8 +1534,8 @@ bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
 	return true;
 }
 
-static void detect_reg_usage(struct bpf_insn *insn, int insn_cnt,
-			     bool *regs_used)
+static void detect_insn_reg_usage(const struct bpf_insn *insn, int insn_cnt,
+				  bool *regs_used)
 {
 	int i;
 
@@ -1516,6 +1549,56 @@ static void detect_reg_usage(struct bpf_insn *insn, int insn_cnt,
 		if (insn->dst_reg == BPF_REG_9 || insn->src_reg == BPF_REG_9)
 			regs_used[3] = true;
 	}
+}
+
+static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
+{
+	const struct bpf_insn *insn = bpf_prog->insnsi;
+	int insn_cnt = bpf_prog->len;
+	int i;
+
+	detect_insn_reg_usage(insn, insn_cnt, regs_used);
+
+	for (i = 0; i < insn_cnt; i++) {
+		const struct bpf_kop *kop;
+		const struct bpf_insn *call;
+		struct bpf_insn *proof_buf;
+		u64 payload;
+		int cnt;
+		int err;
+
+		if (!bpf_kop_is_sidecar_insn(&insn[i]))
+			continue;
+		if (i + 1 >= insn_cnt)
+			continue;
+
+		call = &insn[i + 1];
+		if (call->code != (BPF_JMP | BPF_CALL) ||
+		    call->src_reg != BPF_PSEUDO_KOP_CALL)
+			continue;
+
+		err = bpf_jit_get_kop_payload(bpf_prog, call, &kop, &payload);
+		if (err)
+			return err;
+		if (!kop || !kop->instantiate_insn || !kop->max_insn_cnt)
+			return -EINVAL;
+
+		proof_buf = kvcalloc(kop->max_insn_cnt, sizeof(*proof_buf),
+				     GFP_KERNEL);
+		if (!proof_buf)
+			return -ENOMEM;
+
+		cnt = kop->instantiate_insn(payload, proof_buf);
+		if (cnt <= 0 || cnt > kop->max_insn_cnt) {
+			kvfree(proof_buf);
+			return cnt ? -EFAULT : -EINVAL;
+		}
+
+		detect_insn_reg_usage(proof_buf, cnt, regs_used);
+		kvfree(proof_buf);
+	}
+
+	return 0;
 }
 
 /* emit the 3-byte VEX prefix
@@ -1677,7 +1760,9 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	arena_vm_start = bpf_arena_get_kern_vm_start(bpf_prog->aux->arena);
 	user_vm_start = bpf_arena_get_user_vm_start(bpf_prog->aux->arena);
 
-	detect_reg_usage(insn, insn_cnt, callee_regs_used);
+	err = detect_reg_usage(bpf_prog, callee_regs_used);
+	if (err)
+		return err;
 
 	emit_prologue(&prog, image, stack_depth,
 		      bpf_prog_was_classic(bpf_prog), tail_call_reachable,
@@ -1870,6 +1955,8 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 
 		case BPF_ALU64 | BPF_MOV | BPF_K:
 		case BPF_ALU | BPF_MOV | BPF_K:
+			if (bpf_kop_is_sidecar_insn(insn))
+				break;
 			emit_mov_imm32(&prog, BPF_CLASS(insn->code) == BPF_ALU64,
 				       dst_reg, imm32);
 			break;
@@ -2443,9 +2530,17 @@ populate_extable:
 				return err;
 			goto populate_extable;
 
-			/* call */
+		/* call */
 		case BPF_JMP | BPF_CALL: {
 			func = (u8 *) __bpf_call_base + imm32;
+			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				err = emit_kop_desc_call(&prog, bpf_prog,
+							 insn, !!rw_image,
+							 image ? ip : NULL);
+				if (err)
+					return err;
+				break;
+			}
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
 				LOAD_TAIL_CALL_CNT_PTR(stack_depth);
 				ip += 7;

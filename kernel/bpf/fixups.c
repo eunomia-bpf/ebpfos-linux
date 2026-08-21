@@ -71,18 +71,83 @@ const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn)
 {
-	const struct bpf_kfunc_desc desc = {
+	const struct bpf_kfunc_desc key = {
 		.imm = insn->imm,
 		.offset = insn->off,
 	};
-	const struct bpf_kfunc_desc *res;
+	const struct bpf_kfunc_desc *desc;
 	struct bpf_kfunc_desc_tab *tab;
 
 	tab = prog->aux->kfunc_tab;
-	res = bsearch(&desc, tab->descs, tab->nr_descs,
-		      sizeof(tab->descs[0]), kfunc_desc_cmp_by_imm_off);
+	if (!tab)
+		return NULL;
+	desc = bsearch(&key, tab->descs, tab->nr_descs,
+		       sizeof(tab->descs[0]), kfunc_desc_cmp_by_imm_off);
 
-	return res ? &res->func_model : NULL;
+	return desc && !desc->kop ? &desc->func_model : NULL;
+}
+
+int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
+			    const struct bpf_insn *insn,
+			    const struct bpf_kop **kop, u64 *payload)
+{
+	const struct bpf_kfunc_desc *desc;
+	ptrdiff_t insn_index = insn - prog->insnsi;
+	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+	u32 i;
+
+	if (!tab)
+		return -ENOENT;
+	desc = NULL;
+	for (i = 0; i < tab->nr_descs; i++) {
+		if (tab->descs[i].func_id == insn->imm &&
+		    tab->descs[i].offset == insn->off && tab->descs[i].kop) {
+			desc = &tab->descs[i];
+			break;
+		}
+	}
+	if (!desc)
+		return -ENOENT;
+	if (insn_index <= 0 || !bpf_kop_is_sidecar_insn(insn - 1))
+		return -EINVAL;
+	if (kop)
+		*kop = desc->kop;
+	if (payload)
+		*payload = bpf_kop_sidecar_payload(insn - 1);
+	return 0;
+}
+
+int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
+			       const struct bpf_kop *kop,
+			       const struct bpf_insn *insns, u32 count)
+{
+	u32 index;
+
+	if (!count || count > kop->max_insn_cnt)
+		return -EINVAL;
+	for (index = 0; index < count; index++) {
+		const struct bpf_insn *insn = &insns[index];
+		u8 class = BPF_CLASS(insn->code);
+
+		if (bpf_kop_is_sidecar_insn(insn)) {
+			verbose(env, "kop proof sequence cannot contain sidecar pseudo-insns\n");
+			return -EINVAL;
+		}
+		if (class == BPF_JMP || class == BPF_JMP32) {
+			u8 operation = BPF_OP(insn->code);
+
+			if (operation == BPF_CALL || operation == BPF_EXIT) {
+				verbose(env, "kop proof sequence cannot contain calls or exits\n");
+				return -EINVAL;
+			}
+		}
+		if (class == BPF_LD && BPF_MODE(insn->code) == BPF_IMM &&
+		    insn->src_reg) {
+			verbose(env, "kop proof sequence cannot contain pseudo ldimm64\n");
+			return -EINVAL;
+		}
+	}
+	return 0;
 }
 
 static int set_kfunc_desc_imm(struct bpf_verifier_env *env, struct bpf_kfunc_desc *desc)
@@ -107,14 +172,21 @@ static int set_kfunc_desc_imm(struct bpf_verifier_env *env, struct bpf_kfunc_des
 static int sort_kfunc_descs_by_imm_off(struct bpf_verifier_env *env)
 {
 	struct bpf_kfunc_desc_tab *tab;
-	int i, err;
+	int i;
 
 	tab = env->prog->aux->kfunc_tab;
 	if (!tab)
 		return 0;
 
 	for (i = 0; i < tab->nr_descs; i++) {
-		err = set_kfunc_desc_imm(env, &tab->descs[i]);
+		struct bpf_kfunc_desc *desc = &tab->descs[i];
+		int err;
+
+		if (desc->kop) {
+			desc->imm = desc->func_id;
+			continue;
+		}
+		err = set_kfunc_desc_imm(env, desc);
 		if (err)
 			return err;
 	}
@@ -485,6 +557,11 @@ static int verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 cnt)
 		sizeof(*aux_data) * (orig_prog_len - off - cnt));
 
 	return 0;
+}
+
+int bpf_verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 count)
+{
+	return verifier_remove_insns(env, off, count);
 }
 
 static const struct bpf_insn NOP = BPF_JMP_IMM(BPF_JA, 0, 0, 0);
@@ -1377,7 +1454,8 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 #ifndef CONFIG_BPF_JIT_ALWAYS_ON
 	struct bpf_prog *prog = env->prog;
 	struct bpf_insn *insn = prog->insnsi;
-	bool has_kfunc_call = bpf_prog_has_kfunc_call(prog);
+	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+	bool has_kfunc_call = false, has_kop_call = false;
 	int i, depth;
 #endif
 	int err = 0;
@@ -1391,8 +1469,20 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 			return err;
 	}
 #ifndef CONFIG_BPF_JIT_ALWAYS_ON
+	if (tab) {
+		for (i = 0; i < tab->nr_descs; i++) {
+			if (tab->descs[i].kop)
+				has_kop_call = true;
+			else
+				has_kfunc_call = true;
+		}
+	}
 	if (has_kfunc_call) {
 		verbose(env, "calling kernel functions are not allowed in non-JITed programs\n");
+		return -EINVAL;
+	}
+	if (has_kop_call) {
+		verbose(env, "KOperation calls are not allowed in non-JITed programs\n");
 		return -EINVAL;
 	}
 	if (env->subprog_cnt > 1 && env->prog->aux->tail_call_reachable) {
@@ -1495,6 +1585,53 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 	}
 
 	for (i = 0; i < insn_cnt;) {
+		if (bpf_kop_is_sidecar_insn(insn)) {
+			const struct bpf_insn *call = insn + 1;
+			const struct bpf_kop *kop;
+			struct bpf_insn *proof;
+			u64 payload;
+
+			if (i + 1 >= insn_cnt || !bpf_pseudo_kop_call(call)) {
+				verbose(env, "orphan KOperation payload sidecar\n");
+				return -EINVAL;
+			}
+			ret = bpf_jit_get_kop_payload(env->prog, call, &kop, &payload);
+			if (ret)
+				return ret;
+			if (prog->jit_requested && bpf_kop_has_native_emit(kop))
+				goto next_insn;
+
+			proof = kvcalloc(kop->max_insn_cnt, sizeof(*proof),
+					 GFP_KERNEL_ACCOUNT);
+			if (!proof)
+				return -ENOMEM;
+			cnt = kop->instantiate_insn(payload, proof);
+			if (cnt <= 0) {
+				ret = cnt ?: -EINVAL;
+				goto out_free_kop_proof;
+			}
+			ret = bpf_validate_kop_proof_seq(env, kop, proof, cnt);
+			if (ret)
+				goto out_free_kop_proof;
+			ret = bpf_verifier_remove_insns(env, i + delta + 1, 1);
+			if (ret)
+				goto out_free_kop_proof;
+			new_prog = bpf_patch_insn_data(env, i + delta, proof, cnt);
+			kvfree(proof);
+			if (!new_prog)
+				return -ENOMEM;
+			delta += cnt - 2;
+			env->prog = new_prog;
+			prog = new_prog;
+			insn = new_prog->insnsi + i + delta;
+			i++;
+			goto next_insn;
+
+out_free_kop_proof:
+			kvfree(proof);
+			return ret;
+		}
+
 		if (insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) && insn->imm) {
 			if ((insn->off == BPF_ADDR_SPACE_CAST && insn->imm == 1) ||
 			    (((struct bpf_map *)env->prog->aux->arena)->map_flags & BPF_F_NO_USER_CONV)) {
@@ -1803,6 +1940,8 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 		if (insn->code != (BPF_JMP | BPF_CALL))
 			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_CALL)
+			goto next_insn;
+		if (insn->src_reg == BPF_PSEUDO_KOP_CALL)
 			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL) {
 			ret = bpf_fixup_kfunc_call(env, insn, insn_buf, i + delta, &cnt);
@@ -2572,4 +2711,3 @@ int bpf_remove_fastcall_spills_fills(struct bpf_verifier_env *env)
 
 	return 0;
 }
-

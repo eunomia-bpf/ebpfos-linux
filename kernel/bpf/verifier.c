@@ -255,6 +255,7 @@ struct bpf_call_arg_meta {
 struct bpf_kfunc_meta {
 	struct btf *btf;
 	const struct btf_type *proto;
+	const struct bpf_kop *kop;
 	const char *name;
 	const u32 *flags;
 	s32 id;
@@ -2982,6 +2983,7 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 	memset(kfunc, 0, sizeof(*kfunc));
 	kfunc->btf = btf;
 	kfunc->id = func_id;
+	kfunc->kop = btf_kfunc_kop_desc(btf, func_id, env->prog);
 	kfunc->name = func_name;
 	kfunc->proto = func_proto;
 	kfunc->flags = kfunc_flags;
@@ -2989,7 +2991,8 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 	return 0;
 }
 
-int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
+static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
+			      u16 offset, bool kop_call)
 {
 	struct bpf_kfunc_btf_tab *btf_tab;
 	struct btf_func_model func_model;
@@ -3001,9 +3004,10 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
 	int err;
 
 	prog_aux = env->prog->aux;
-	if (prog_aux->ebpfos_provider ||
-	    (prog_aux->ebpfos_meta &&
-	     !ebpfos_executor_root_kfunc_allowed(func_id))) {
+	if (!kop_call &&
+	    (prog_aux->ebpfos_provider ||
+	     (prog_aux->ebpfos_meta &&
+	      !ebpfos_executor_root_kfunc_allowed(func_id)))) {
 		verbose(env, "eBPFOS provider programs cannot call kernel functions\n");
 		return -EACCES;
 	}
@@ -3012,21 +3016,22 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
 	btf_tab = prog_aux->kfunc_btf_tab;
 	if (!tab) {
 		if (!btf_vmlinux) {
-			verbose(env, "calling kernel function is not supported without CONFIG_DEBUG_INFO_BTF\n");
+			verbose(env,
+				"kernel functions and KOperations require CONFIG_DEBUG_INFO_BTF\n");
 			return -ENOTSUPP;
 		}
 
-		if (!env->prog->jit_requested) {
+		if (!kop_call && !env->prog->jit_requested) {
 			verbose(env, "JIT is required for calling kernel function\n");
 			return -ENOTSUPP;
 		}
 
-		if (!bpf_jit_supports_kfunc_call()) {
+		if (!kop_call && !bpf_jit_supports_kfunc_call()) {
 			verbose(env, "JIT does not support calling kernel function\n");
 			return -ENOTSUPP;
 		}
 
-		if (!env->prog->gpl_compatible) {
+		if (!kop_call && !env->prog->gpl_compatible) {
 			verbose(env, "cannot call kernel function from non-GPL compatible program\n");
 			return -EINVAL;
 		}
@@ -3043,7 +3048,7 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
 	 * loaded from userspace.  It is also required that offset be untouched
 	 * for such calls.
 	 */
-	if (!func_id && !offset)
+	if (!kop_call && !func_id && !offset)
 		return 0;
 
 	if (!btf_tab && offset) {
@@ -3053,47 +3058,241 @@ int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
 		prog_aux->kfunc_btf_tab = btf_tab;
 	}
 
-	if (find_kfunc_desc(env->prog, func_id, offset))
+	desc = find_kfunc_desc(env->prog, func_id, offset);
+	if (desc) {
+		if (!!desc->kop != kop_call) {
+			verbose(env, "btf_id %u cannot be both a kernel function and KOperation\n",
+				func_id);
+			return -EINVAL;
+		}
 		return 0;
+	}
 
 	if (tab->nr_descs == MAX_KFUNC_DESCS) {
-		verbose(env, "too many different kernel function calls\n");
+		verbose(env, "too many different kernel %s calls\n",
+			kop_call ? "KOperation" : "function");
 		return -E2BIG;
 	}
 
 	err = fetch_kfunc_meta(env, func_id, offset, &kfunc);
 	if (err)
 		return err;
-
-	addr = kallsyms_lookup_name(kfunc.name);
-	if (!addr) {
-		verbose(env, "cannot find address for kernel function %s\n", kfunc.name);
-		return -EINVAL;
+	if (!kop_call && kfunc.kop) {
+		verbose(env, "KOperation btf_id %u cannot be called as a kernel function\n",
+			func_id);
+		return -EACCES;
 	}
-
-	if (bpf_dev_bound_kfunc_id(func_id)) {
-		err = bpf_dev_bound_kfunc_check(&env->log, prog_aux);
-		if (err)
-			return err;
-	}
-
-	err = btf_distill_func_proto(&env->log, kfunc.btf, kfunc.proto, kfunc.name, &func_model);
-	if (err)
-		return err;
 
 	desc = &tab->descs[tab->nr_descs++];
+	memset(desc, 0, sizeof(*desc));
 	desc->func_id = func_id;
 	desc->offset = offset;
-	desc->addr = addr;
-	desc->func_model = func_model;
+	if (kop_call) {
+		if (!kfunc.kop) {
+			verbose(env, "kfunc btf_id %u is not registered as a KOperation\n",
+				func_id);
+			err = -ENOENT;
+			goto err_remove_desc;
+		}
+		if (!kfunc.kop->instantiate_insn || !kfunc.kop->max_insn_cnt) {
+			verbose(env, "KOperation btf_id %u has no proof expansion\n",
+				func_id);
+			err = -EINVAL;
+			goto err_remove_desc;
+		}
+		desc->imm = func_id;
+		desc->kop = kfunc.kop;
+	} else {
+		addr = kallsyms_lookup_name(kfunc.name);
+		if (!addr) {
+			verbose(env, "cannot find address for kernel function %s\n",
+				kfunc.name);
+			err = -EINVAL;
+			goto err_remove_desc;
+		}
+		if (bpf_dev_bound_kfunc_id(func_id)) {
+			err = bpf_dev_bound_kfunc_check(&env->log, prog_aux);
+			if (err)
+				goto err_remove_desc;
+		}
+		err = btf_distill_func_proto(&env->log, kfunc.btf, kfunc.proto,
+					     kfunc.name, &func_model);
+		if (err)
+			goto err_remove_desc;
+		desc->addr = addr;
+		desc->func_model = func_model;
+	}
 	sort(tab->descs, tab->nr_descs, sizeof(tab->descs[0]),
 	     kfunc_desc_cmp_by_id_off, NULL);
 	return 0;
+
+err_remove_desc:
+	tab->nr_descs--;
+	return err;
+}
+
+int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset)
+{
+	return bpf_add_kfunc_desc(env, func_id, offset, false);
 }
 
 bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog)
 {
-	return !!prog->aux->kfunc_tab;
+	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+	u32 i;
+
+	if (!tab)
+		return false;
+	for (i = 0; i < tab->nr_descs; i++)
+		if (!tab->descs[i].kop)
+			return true;
+	return false;
+}
+
+static int lower_kop_proof_regions(struct bpf_verifier_env *env)
+{
+	struct bpf_insn *proof = NULL;
+	u32 cap = env->kop_call_cnt;
+	int i, err;
+
+	kvfree(env->kop_regions);
+	env->kop_regions = NULL;
+	env->kop_region_cnt = 0;
+	env->kop_region_cap = cap;
+	if (cap) {
+		env->kop_regions = kvcalloc(cap, sizeof(*env->kop_regions),
+					    GFP_KERNEL_ACCOUNT);
+		if (!env->kop_regions)
+			return -ENOMEM;
+	}
+
+	for (i = env->prog->len - 1; i >= 0; i--) {
+		struct bpf_kfunc_desc *desc;
+		struct bpf_kop_region *region;
+		struct bpf_prog *new_prog;
+		struct bpf_insn *call;
+		const struct bpf_insn *sidecar;
+		u64 payload;
+		int count;
+
+		call = &env->prog->insnsi[i];
+		if (!bpf_pseudo_kop_call(call))
+			continue;
+		if (!i || !bpf_kop_is_sidecar_insn(call - 1)) {
+			verbose(env, "KOperation call must be preceded by a payload sidecar\n");
+			return -EINVAL;
+		}
+		sidecar = call - 1;
+		{
+			u32 j;
+
+			for (j = 1; j < env->subprog_cnt; j++) {
+				if (env->subprog_info[j].start == i) {
+					verbose(env,
+						"KOperation sidecar crosses a subprogram boundary\n");
+					return -EINVAL;
+				}
+			}
+		}
+
+		desc = find_kfunc_desc(env->prog, call->imm, call->off);
+		if (!desc || !desc->kop)
+			return -ENOENT;
+		payload = bpf_kop_sidecar_payload(sidecar);
+		proof = kvcalloc(desc->kop->max_insn_cnt, sizeof(*proof),
+				 GFP_KERNEL_ACCOUNT);
+		if (!proof)
+			return -ENOMEM;
+		count = desc->kop->instantiate_insn(payload, proof);
+		if (count <= 0) {
+			err = count ?: -EINVAL;
+			goto err_free_proof;
+		}
+		err = bpf_validate_kop_proof_seq(env, desc->kop, proof, count);
+		if (err)
+			goto err_free_proof;
+		if (env->kop_region_cnt == env->kop_region_cap) {
+			verbose(env, "too many KOperation proof regions\n");
+			err = -E2BIG;
+			goto err_free_proof;
+		}
+
+		region = &env->kop_regions[env->kop_region_cnt++];
+		region->start = i - 1;
+		region->proof_len = count;
+		region->orig[0] = *sidecar;
+		region->orig[1] = *call;
+
+		err = bpf_verifier_remove_insns(env, i - 1, 1);
+		if (err)
+			goto err_free_proof;
+		new_prog = bpf_patch_insn_data(env, i - 1, proof, count);
+		kvfree(proof);
+		proof = NULL;
+		if (!new_prog)
+			return -ENOMEM;
+		env->prog = new_prog;
+
+		if (count != 2) {
+			u32 j;
+
+			for (j = 0; j + 1 < env->kop_region_cnt; j++) {
+				struct bpf_kop_region *prior = &env->kop_regions[j];
+				s32 start;
+
+				if (prior->start <= region->start)
+					continue;
+				start = (s32)prior->start + count - 2;
+				if (WARN_ON_ONCE(start < 0))
+					start = 0;
+				prior->start = start;
+			}
+		}
+	}
+	return 0;
+
+err_free_proof:
+	kvfree(proof);
+	return err;
+}
+
+static int restore_kop_proof_regions(struct bpf_verifier_env *env)
+{
+	u32 i;
+
+	for (i = 0; i < env->kop_region_cnt; i++) {
+		struct bpf_kop_region *region = &env->kop_regions[i];
+		struct bpf_insn_aux_data *aux;
+		struct bpf_prog *new_prog;
+		int err;
+
+		new_prog = bpf_patch_insn_data(env, region->start,
+					       region->orig, ARRAY_SIZE(region->orig));
+		if (!new_prog)
+			return -ENOMEM;
+		env->prog = new_prog;
+		if (region->proof_len > 1) {
+			u32 remove = region->proof_len - 1;
+
+			err = bpf_verifier_remove_insns(env, region->start + 2, remove);
+			if (err)
+				return err;
+		}
+
+		aux = env->insn_aux_data;
+		kvfree(aux[region->start].jt);
+		kvfree(aux[region->start + 1].jt);
+		aux[region->start] = (struct bpf_insn_aux_data) {
+			.seen = max(aux[region->start].seen,
+				    aux[region->start + 1].seen),
+			.orig_idx = aux[region->start].orig_idx,
+		};
+		aux[region->start + 1] = (struct bpf_insn_aux_data) {
+			.seen = aux[region->start].seen,
+			.orig_idx = aux[region->start + 1].orig_idx,
+		};
+	}
+	return 0;
 }
 
 static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
@@ -3103,17 +3302,18 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	struct bpf_insn *insn = env->prog->insnsi;
 
 	/* Add entry function. */
+	env->kop_call_cnt = 0;
 	ret = add_subprog(env, 0);
 	if (ret)
 		return ret;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
 		if (!bpf_pseudo_func(insn) && !bpf_pseudo_call(insn) &&
-		    !bpf_pseudo_kfunc_call(insn))
+		    !bpf_pseudo_kfunc_call(insn) && !bpf_pseudo_kop_call(insn))
 			continue;
 		if ((env->prog->aux->ebpfos_provider ||
 		     env->prog->aux->ebpfos_meta) &&
-		    !bpf_pseudo_kfunc_call(insn)) {
+		    !bpf_pseudo_kfunc_call(insn) && !bpf_pseudo_kop_call(insn)) {
 			verbose(env, "eBPFOS provider programs cannot call BPF functions\n");
 			return -EACCES;
 		}
@@ -3123,10 +3323,14 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 			return -EPERM;
 		}
 
-		if (bpf_pseudo_func(insn) || bpf_pseudo_call(insn))
+		if (bpf_pseudo_func(insn) || bpf_pseudo_call(insn)) {
 			ret = add_subprog(env, i + insn->imm + 1);
-		else
+		} else if (bpf_pseudo_kfunc_call(insn)) {
 			ret = bpf_add_kfunc_call(env, insn->imm, insn->off);
+		} else {
+			env->kop_call_cnt++;
+			ret = bpf_add_kfunc_desc(env, insn->imm, insn->off, true);
+		}
 
 		if (ret < 0)
 			return ret;
@@ -3604,7 +3808,8 @@ static const char *disasm_kfunc_name(void *data, const struct bpf_insn *insn)
 	const struct btf_type *func;
 	struct btf *desc_btf;
 
-	if (insn->src_reg != BPF_PSEUDO_KFUNC_CALL)
+	if (insn->src_reg != BPF_PSEUDO_KFUNC_CALL &&
+	    insn->src_reg != BPF_PSEUDO_KOP_CALL)
 		return NULL;
 
 	desc_btf = find_kfunc_desc_btf(data, insn->off);
@@ -20231,6 +20436,18 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 		env->test_state_freq = attr->prog_flags & BPF_F_TEST_STATE_FREQ;
 	env->test_reg_invariants = attr->prog_flags & BPF_F_TEST_REG_INVARIANTS;
 
+	ret = bpf_check_btf_info_early(env, attr, uattr);
+	if (ret < 0)
+		goto skip_full_check;
+
+	ret = add_subprog_and_kfunc(env);
+	if (ret < 0)
+		goto skip_full_check;
+
+	ret = lower_kop_proof_regions(env);
+	if (ret < 0)
+		goto skip_full_check;
+
 	env->explored_states = kvzalloc_objs(struct list_head,
 					     state_htab_size(env),
 					     GFP_KERNEL_ACCOUNT);
@@ -20241,14 +20458,6 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	for (i = 0; i < state_htab_size(env); i++)
 		INIT_LIST_HEAD(&env->explored_states[i]);
 	INIT_LIST_HEAD(&env->free_list);
-
-	ret = bpf_check_btf_info_early(env, attr, uattr);
-	if (ret < 0)
-		goto skip_full_check;
-
-	ret = add_subprog_and_kfunc(env);
-	if (ret < 0)
-		goto skip_full_check;
 
 	ret = check_subprogs(env);
 	if (ret < 0)
@@ -20320,6 +20529,10 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 
 skip_full_check:
 	kvfree(env->explored_states);
+	env->explored_states = NULL;
+
+	if (ret == 0)
+		ret = restore_kop_proof_regions(env);
 
 	/* might decrease stack depth, keep it before passes that
 	 * allocate additional slots.
@@ -20454,6 +20667,7 @@ err_free_env:
 	kvfree(env->scc_info);
 	kvfree(env->succ);
 	kvfree(env->gotox_tmp_buf);
+	kvfree(env->kop_regions);
 	vfree(env->insn_aux_data);
 	kvfree(env);
 	return ret;
