@@ -1885,6 +1885,45 @@ ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 		EBPFOS_COMPONENT_USE_SPLIT_WRITER, true);
 }
 
+int ebpfos_admission_claim_validated_pair_locked(
+	struct ebpfos_admission *first, struct ebpfos_admission *second)
+{
+	struct ebpfos_admission *low, *high;
+	int error;
+
+	lockdep_assert_held(&ebpfos_publish_gate);
+	if (!first || !second || first == second ||
+	    first->grant_id == second->grant_id)
+		return -EINVAL;
+	if (!ebpfos_admission_current_locked(first) ||
+	    !ebpfos_admission_current_locked(second))
+		return -ESTALE;
+	error = ebpfos_admission_owner_recheck(first, false);
+	if (error)
+		return error;
+	error = ebpfos_admission_owner_recheck(second, false);
+	if (error)
+		return error;
+	if (ebpfos_staged_grants > U64_MAX - 2)
+		return -EOVERFLOW;
+	ebpfos_admission_lock_pair(first, second, &low, &high);
+	if (first->state != EBPFOS_ADMISSION_FRESH ||
+	    second->state != EBPFOS_ADMISSION_FRESH) {
+		error = first->state == EBPFOS_ADMISSION_STAGED ||
+			first->state == EBPFOS_ADMISSION_STAGED_RECOVERY ||
+			second->state == EBPFOS_ADMISSION_STAGED ||
+			second->state == EBPFOS_ADMISSION_STAGED_RECOVERY ?
+			-EBUSY : -EALREADY;
+	} else {
+		first->state = EBPFOS_ADMISSION_STAGED;
+		second->state = EBPFOS_ADMISSION_STAGED;
+		ebpfos_staged_grants += 2;
+		error = 0;
+	}
+	ebpfos_admission_unlock_pair(low, high);
+	return error;
+}
+
 static bool
 ebpfos_restore_admission_matches(const struct ebpfos_admission *admission,
 				 const struct ebpfos_admission_restore_pair *pair,

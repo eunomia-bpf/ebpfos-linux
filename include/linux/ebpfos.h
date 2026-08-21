@@ -194,6 +194,58 @@ struct ebpfos_state_adapter_target_pair {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x3d, \
 	      struct ebpfos_state_adapter_target_pair)
 
+#define EBPFOS_FILE_SPLIT_CONVERT_F_FAIL_AFTER_READER_CHUNK BIT(0)
+#define EBPFOS_FILE_SPLIT_CONVERT_F_FAIL_AFTER_WRITER_CHUNK BIT(1)
+#define EBPFOS_FILE_SPLIT_CONVERT_F_ALL \
+	(EBPFOS_FILE_SPLIT_CONVERT_F_FAIL_AFTER_READER_CHUNK | \
+	 EBPFOS_FILE_SPLIT_CONVERT_F_FAIL_AFTER_WRITER_CHUNK)
+
+/*
+ * Execute one sealed adapter into private target maps.  Success stages, but
+ * does not consume, either grant and cannot publish a graph.
+ */
+struct ebpfos_file_split_private_convert {
+	__s32 file_fd;
+	__s32 adapter_fd;
+	__s32 reader_admission_fd;
+	__s32 writer_admission_fd;
+	__u32 flags;
+	__u32 reader_state;
+	__u32 writer_state;
+	__u32 adapter_state;
+	__u32 graph_shape;
+	__u32 reserved0;
+	__u64 expected_route_id;
+	__u64 expected_graph_epoch;
+	__u64 expected_frontier;
+	__u64 expected_visible_size;
+	__u64 route_id;
+	__u64 graph_epoch;
+	__u64 target_epoch;
+	__u64 frontier;
+	__u64 visible_size;
+	__u64 reader_grant_id;
+	__u64 writer_grant_id;
+	__u32 source_reader_prog_id;
+	__u32 source_reader_map_id;
+	__u32 source_writer_prog_id;
+	__u32 source_writer_map_id;
+	__u32 reader_prog_id;
+	__u32 reader_map_id;
+	__u32 writer_prog_id;
+	__u32 writer_map_id;
+	__u64 source_schema;
+	__u64 target_schema;
+	__u64 alpha_size;
+	__u64 alpha_sequence;
+	__u8 alpha_sha256[32];
+	__u8 adapter_content_digest[32];
+};
+
+#define EBPFOS_IOC_FILE_SPLIT_PRIVATE_CONVERT_EXPERIMENTAL \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x3e, \
+	      struct ebpfos_file_split_private_convert)
+
 struct file;
 struct inode;
 struct iov_iter;
@@ -203,6 +255,7 @@ struct bpf_prog;
 struct ebpfos_admission;
 struct ebpfos_binding;
 struct ebpfos_prog_identity;
+struct ebpfos_state_adapter;
 
 struct ebpfos_admission_restore_pair {
 	struct ebpfos_admission *reader;
@@ -228,6 +281,28 @@ long ebpfos_admission_info_ioctl(void __user *argp);
 long ebpfos_state_adapter_seal_ioctl(void __user *argp);
 long ebpfos_state_adapter_info_ioctl(void __user *argp);
 long ebpfos_state_adapter_target_pair_ioctl(void __user *argp);
+struct ebpfos_state_adapter *
+ebpfos_state_adapter_get_from_fd(int fd, struct file **file_out);
+const u8 *ebpfos_state_adapter_content_digest(
+	const struct ebpfos_state_adapter *adapter);
+u64 ebpfos_state_adapter_source_schema(
+	const struct ebpfos_state_adapter *adapter);
+u64 ebpfos_state_adapter_target_schema(
+	const struct ebpfos_state_adapter *adapter);
+int ebpfos_state_adapter_claim_target_pair_locked(
+	const struct ebpfos_state_adapter *adapter,
+	const struct ebpfos_binding *source_reader,
+	const struct ebpfos_binding *source_writer,
+	struct ebpfos_admission *reader, struct ebpfos_admission *writer,
+	struct ebpfos_admission_identity_v1 *reader_identity,
+	struct ebpfos_admission_identity_v1 *writer_identity);
+int ebpfos_state_adapter_validate_target_pair_locked(
+	const struct ebpfos_state_adapter *adapter,
+	const struct ebpfos_binding *source_reader,
+	const struct ebpfos_binding *source_writer,
+	struct ebpfos_admission *reader, struct ebpfos_admission *writer,
+	struct ebpfos_admission_identity_v1 *reader_identity,
+	struct ebpfos_admission_identity_v1 *writer_identity);
 
 /* The admission gate is outermost to every subsystem route/object lock. */
 void ebpfos_admission_gate_lock(void);
@@ -259,6 +334,8 @@ int ebpfos_admission_claim_pair_locked(struct ebpfos_admission *e3,
 int ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 					       struct ebpfos_admission *writer,
 					       const struct ebpfos_binding *predecessor);
+int ebpfos_admission_claim_validated_pair_locked(
+	struct ebpfos_admission *first, struct ebpfos_admission *second);
 int
 ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair);
 int
@@ -321,6 +398,7 @@ long ebpfos_file_admission_status_ioctl(void __user *argp);
 long ebpfos_file_split_publish_experimental_ioctl(void __user *argp);
 long ebpfos_file_split_control_experimental_ioctl(void __user *argp);
 long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp);
+long ebpfos_file_split_private_convert_experimental_ioctl(void __user *argp);
 void ebpfos_file_replace_release(void **txn_slot);
 void ebpfos_inode_route_init(struct inode *inode);
 void ebpfos_inode_route_destroy(struct inode *inode);
@@ -436,6 +514,12 @@ static inline int
 ebpfos_admission_claim_sibling_pair_locked(struct ebpfos_admission *reader,
 					   struct ebpfos_admission *writer,
 					   const struct ebpfos_binding *predecessor)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ebpfos_admission_claim_validated_pair_locked(
+	struct ebpfos_admission *first, struct ebpfos_admission *second)
 {
 	return -EOPNOTSUPP;
 }
