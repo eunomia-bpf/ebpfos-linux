@@ -5220,7 +5220,7 @@ ebpfos_file_split_prepare_candidate(struct ebpfos_inode_route *route,
 				    struct file *file,
 				    struct ebpfos_binding *binding,
 				    void *snapshot, u64 epoch, u64 frontier,
-				    u64 size)
+				    u64 size, bool fail_after_import)
 {
 	struct ebpfos_file_transaction candidate = {
 		.route = route,
@@ -5239,6 +5239,8 @@ ebpfos_file_split_prepare_candidate(struct ebpfos_inode_route *route,
 	error = ebpfos_file_candidate_import(&candidate);
 	if (error)
 		return error;
+	if (fail_after_import)
+		return -ECANCELED;
 	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
@@ -5414,12 +5416,12 @@ long ebpfos_file_split_publish_experimental_ioctl(void __user *argp)
 		error = ebpfos_file_split_prepare_candidate(route, file,
 							    reader_binding, snapshot,
 							    graph_epoch,
-			snapshot_frontier, snapshot_size);
+			snapshot_frontier, snapshot_size, false);
 	if (!error)
 		error = ebpfos_file_split_prepare_candidate(route, file,
 							    writer_binding, snapshot,
 							    graph_epoch,
-			snapshot_frontier, snapshot_size);
+			snapshot_frontier, snapshot_size, false);
 	if (error)
 		goto out_burn;
 
@@ -6538,6 +6540,12 @@ ebpfos_file_restore_ioctl(struct ebpfos_inode_route *route,
 		error = -EUCLEAN;
 		goto out;
 	}
+	if (request->flags &&
+	    (!ebpfos_file_split_binding_test_only(reader_binding) ||
+	     !ebpfos_file_split_binding_test_only(writer_binding))) {
+		error = -EACCES;
+		goto out;
+	}
 
 	ebpfos_admission_gate_lock();
 	mutex_lock(&route->op_lock);
@@ -6585,12 +6593,15 @@ ebpfos_file_restore_ioctl(struct ebpfos_inode_route *route,
 	}
 	error = ebpfos_file_split_prepare_candidate(route, file, reader_binding,
 						    image, restore_epoch,
-						    frontier, image_size);
+						    frontier, image_size,
+		request->flags ==
+			EBPFOS_FILE_CHECKPOINT_F_FAIL_AFTER_READER_IMPORT);
 	if (!error)
 		error = ebpfos_file_split_prepare_candidate(route, file,
 							    writer_binding,
 							    image, restore_epoch,
-							    frontier, image_size);
+							    frontier, image_size,
+							    false);
 	if (error)
 		goto out;
 
@@ -6628,6 +6639,11 @@ ebpfos_file_restore_ioctl(struct ebpfos_inode_route *route,
 		goto out;
 	if (copy_to_user(argp, request, sizeof(*request))) {
 		error = -EFAULT;
+		goto out;
+	}
+	if (request->flags ==
+	    EBPFOS_FILE_CHECKPOINT_F_FAIL_AFTER_REPLY_COPYOUT) {
+		error = -ECANCELED;
 		goto out;
 	}
 
@@ -6696,7 +6712,14 @@ long ebpfos_file_checkpoint_experimental_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || request.reserved0 || request.reserved1 ||
+	if ((request.flags & ~EBPFOS_FILE_CHECKPOINT_F_ALL) ||
+	    (request.flags &&
+	     request.flags !=
+		     EBPFOS_FILE_CHECKPOINT_F_FAIL_AFTER_READER_IMPORT &&
+	     request.flags !=
+		     EBPFOS_FILE_CHECKPOINT_F_FAIL_AFTER_REPLY_COPYOUT) ||
+	    (request.operation != EBPFOS_FILE_CHECKPOINT_RESTORE &&
+	     request.flags) || request.reserved0 || request.reserved1 ||
 	    request.file_fd < 0 ||
 	    (request.operation != EBPFOS_FILE_CHECKPOINT_SEAL &&
 	     request.operation != EBPFOS_FILE_CHECKPOINT_RESTORE))
