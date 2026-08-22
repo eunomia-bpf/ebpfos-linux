@@ -13,6 +13,7 @@
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
+#include <linux/ebpfos.h>
 #include <linux/filter.h>
 #include <linux/init.h>
 #include <linux/bpf_verifier.h>
@@ -314,9 +315,103 @@ static void ebpfos_kop_proof_cfg_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(&prog));
 }
 
+static void ebpfos_kop_component_identity_test(struct kunit *test)
+{
+	const struct bpf_kop first = {
+		.capability_mask = BIT_ULL(3),
+		.effect_mask = BIT_ULL(6),
+		.semantic_sha256 = { 1 },
+	};
+	const struct bpf_kop second = {
+		.capability_mask = BIT_ULL(4),
+		.effect_mask = BIT_ULL(7),
+		.semantic_sha256 = { 2 },
+	};
+	const struct bpf_kop unbound = {};
+	struct bpf_kfunc_desc_tab *tab;
+	struct bpf_prog_aux *aux;
+	struct bpf_prog prog = {};
+	u8 one[SHA256_DIGEST_SIZE];
+	u8 two[SHA256_DIGEST_SIZE];
+	u64 capabilities;
+	u64 effects;
+
+	tab = kunit_kzalloc(test, sizeof(*tab), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tab);
+	aux = kunit_kzalloc(test, sizeof(*aux), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aux);
+	aux->kfunc_tab = tab;
+	prog.aux = aux;
+
+	tab->nr_descs = 1;
+	tab->descs[0].kop = &first;
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		&prog, &capabilities, &effects, one), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6));
+
+	tab->nr_descs = 2;
+	tab->descs[1].kop = &second;
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		&prog, &capabilities, &effects, two), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3) | BIT_ULL(4));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6) | BIT_ULL(7));
+	KUNIT_EXPECT_MEMNEQ(test, one, two, sizeof(one));
+
+	/* JIT completion frees kfunc_tab.  Admission must still observe the
+	 * exact verifier-sealed identity and the presence of KOperations.
+	 */
+	aux->ebpfos_kop_count = tab->nr_descs;
+	aux->ebpfos_kop_capability_mask = capabilities;
+	aux->ebpfos_kop_effect_mask = effects;
+	memcpy(aux->ebpfos_kop_semantic_set_sha256, two, sizeof(two));
+	aux->ebpfos_kop_requirements_valid = true;
+	aux->kfunc_tab = NULL;
+	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(&prog));
+	memset(one, 0, sizeof(one));
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		&prog, &capabilities, &effects, one), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3) | BIT_ULL(4));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6) | BIT_ULL(7));
+	KUNIT_EXPECT_MEMEQ(test, one, two, sizeof(one));
+	aux->kfunc_tab = tab;
+	aux->ebpfos_kop_requirements_valid = false;
+
+	tab->descs[1].kop = &unbound;
+	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
+		&prog, &capabilities, &effects, two), -EPROTO);
+	tab->descs[1].kop = NULL;
+	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
+		&prog, &capabilities, &effects, two), -EACCES);
+}
+
+static void ebpfos_kop_domain_filter_test(struct kunit *test)
+{
+	struct bpf_prog_aux *aux;
+	struct bpf_prog prog = {};
+
+	aux = kunit_kzalloc(test, sizeof(*aux), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, aux);
+	prog.aux = aux;
+
+	/* A hook filter must not affect kfunc IDs owned by another set. */
+	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, false), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
+	aux->ebpfos_provider = true;
+	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
+	aux->ebpfos_provider = false;
+	aux->ebpfos_meta = true;
+	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
+	aux->ebpfos_meta = false;
+	aux->ebpfos_component = true;
+	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 0);
+}
+
 static struct kunit_case ebpfos_kop_test_cases[] = {
 	KUNIT_CASE(ebpfos_kop_descriptor_test),
 	KUNIT_CASE(ebpfos_kop_proof_cfg_test),
+	KUNIT_CASE(ebpfos_kop_component_identity_test),
+	KUNIT_CASE(ebpfos_kop_domain_filter_test),
 	{}
 };
 

@@ -1079,6 +1079,14 @@ struct bpf_kop {
 	struct module *owner; /* NULL for built-in/vmlinux descriptors */
 	u16 max_insn_cnt;
 	u16 max_emit_bytes;
+	/*
+	 * Sealed component admission binds this verifier-visible operation
+	 * identity before its native emitter can become reachable.  These fields
+	 * describe one canonical eBPF semantic operation, not a native fallback.
+	 */
+	u64 capability_mask;
+	u64 effect_mask;
+	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 
 	int (*instantiate_insn)(u64 payload, struct bpf_insn *insn_buf);
 
@@ -1855,6 +1863,12 @@ struct bpf_prog_aux {
 	bool ebpfos_meta;
 	bool ebpfos_component;
 	u32 ebpfos_load_insn_cnt;
+	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
+	bool ebpfos_kop_requirements_valid;
+	u32 ebpfos_kop_count;
+	u64 ebpfos_kop_capability_mask;
+	u64 ebpfos_kop_effect_mask;
+	u8 ebpfos_kop_semantic_set_sha256[SHA256_DIGEST_SIZE];
 	struct ebpfos_prog_identity *ebpfos_identity;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
@@ -3200,6 +3214,9 @@ void bpf_task_storage_free(struct task_struct *task);
 void bpf_cgrp_storage_free(struct cgroup *cgroup);
 bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog);
 bool bpf_prog_has_kop_call(const struct bpf_prog *prog);
+int bpf_prog_kop_requirements(const struct bpf_prog *prog,
+			      u64 *capability_mask, u64 *effect_mask,
+			      u8 semantic_set_sha256[SHA256_DIGEST_SIZE]);
 const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn);
@@ -3494,6 +3511,14 @@ static inline bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog)
 static inline bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
 {
 	return false;
+}
+
+static inline int
+bpf_prog_kop_requirements(const struct bpf_prog *prog,
+			  u64 *capability_mask, u64 *effect_mask,
+			  u8 semantic_set_sha256[SHA256_DIGEST_SIZE])
+{
+	return -EOPNOTSUPP;
 }
 
 static inline const struct btf_func_model *

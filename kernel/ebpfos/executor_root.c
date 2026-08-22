@@ -78,6 +78,7 @@ static int ebpfos_executor_root_request_size(
 	const struct ebpfos_executor_root_publish_request *request,
 	u32 request_size, size_t *expected_size)
 {
+	size_t capacity_size;
 	size_t roles_size;
 
 	if (!request || !expected_size ||
@@ -94,8 +95,44 @@ static int ebpfos_executor_root_request_size(
 	if (check_mul_overflow((size_t)request->role_count,
 			       sizeof(request->roles[0]), &roles_size) ||
 	    check_add_overflow(sizeof(*request), roles_size, expected_size) ||
-	    *expected_size != request_size)
+	    request_size < *expected_size)
 		return -E2BIG;
+	capacity_size = request_size - sizeof(*request);
+	if (capacity_size % sizeof(request->roles[0]) ||
+	    capacity_size / sizeof(request->roles[0]) >
+		EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
+	    memchr_inv((const u8 *)request + *expected_size, 0,
+		       request_size - *expected_size))
+		return -E2BIG;
+	return 0;
+}
+
+static int ebpfos_executor_root_snapshot_size(u32 role_count,
+					       u32 snapshot_size,
+					       size_t *expected_size)
+{
+	size_t capacity_size;
+	size_t roles_size;
+
+	if (!role_count || role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
+	    !expected_size || snapshot_size <
+		sizeof(struct ebpfos_executor_root_snapshot))
+		return -EINVAL;
+	if (check_mul_overflow((size_t)role_count,
+			       sizeof(struct ebpfos_executor_root_role_snapshot),
+			       &roles_size) ||
+	    check_add_overflow(sizeof(struct ebpfos_executor_root_snapshot),
+			       roles_size, expected_size) ||
+	    snapshot_size < *expected_size)
+		return -ENOSPC;
+	capacity_size = snapshot_size -
+		sizeof(struct ebpfos_executor_root_snapshot);
+	if (capacity_size %
+			sizeof(struct ebpfos_executor_root_role_snapshot) ||
+	    capacity_size /
+			sizeof(struct ebpfos_executor_root_role_snapshot) >
+		EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
+		return -ENOSPC;
 	return 0;
 }
 
@@ -493,7 +530,7 @@ noinline int bpf_ebpfos_executor_root_read_impl(
 {
 	struct ebpfos_executor_root_snapshot *snapshot = snapshot_data;
 	struct ebpfos_executor_root_bundle *bundle;
-	size_t expected_size, roles_size;
+	size_t expected_size;
 	u32 role;
 	int error = 0;
 
@@ -508,14 +545,12 @@ noinline int bpf_ebpfos_executor_root_read_impl(
 		error = -ENOENT;
 		goto out_unlock;
 	}
-	if (check_mul_overflow((size_t)bundle->role_count,
-			       sizeof(snapshot->roles[0]), &roles_size) ||
-	    check_add_overflow(sizeof(*snapshot), roles_size, &expected_size) ||
-	    snapshot_data__sz != expected_size) {
-		error = -ENOSPC;
+	error = ebpfos_executor_root_snapshot_size(bundle->role_count,
+						 snapshot_data__sz,
+						 &expected_size);
+	if (error)
 		goto out_unlock;
-	}
-	memset(snapshot, 0, sizeof(*snapshot));
+	memset(snapshot, 0, snapshot_data__sz);
 	snapshot->version = EBPFOS_EXECUTOR_ROOT_ABI_VERSION;
 	snapshot->object_id = bundle->object_id;
 	snapshot->epoch = bundle->epoch;
@@ -902,7 +937,12 @@ static void ebpfos_executor_root_retained_binding_test(struct kunit *test)
 static void ebpfos_executor_root_request_test(struct kunit *test)
 {
 	struct ebpfos_executor_root_publish_request *request;
-	size_t request_size = sizeof(*request) + sizeof(request->roles[0]);
+	size_t request_size = sizeof(*request) + 2 * sizeof(request->roles[0]);
+	size_t live_size = sizeof(*request) + sizeof(request->roles[0]);
+	size_t snapshot_size = sizeof(struct ebpfos_executor_root_snapshot) +
+		2 * sizeof(struct ebpfos_executor_root_role_snapshot);
+	size_t live_snapshot_size = sizeof(struct ebpfos_executor_root_snapshot) +
+		sizeof(struct ebpfos_executor_root_role_snapshot);
 	size_t expected_size = 0;
 
 	request = kunit_kzalloc(test, request_size, GFP_KERNEL);
@@ -912,8 +952,22 @@ static void ebpfos_executor_root_request_test(struct kunit *test)
 	request->target_epoch = 1;
 	request->role_count = 1;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
+		request, live_size, &expected_size), 0);
+	KUNIT_EXPECT_EQ(test, expected_size, live_size);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), 0);
-	KUNIT_EXPECT_EQ(test, expected_size, request_size);
+	KUNIT_EXPECT_EQ(test, expected_size, live_size);
+	request->roles[1].role_type = 2;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
+		request, request_size, &expected_size), -E2BIG);
+	request->roles[1].role_type = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
+		1, snapshot_size, &expected_size), 0);
+	KUNIT_EXPECT_EQ(test, expected_size, live_snapshot_size);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
+		2, live_snapshot_size, &expected_size), -ENOSPC);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
+		1, snapshot_size - 1, &expected_size), -ENOSPC);
 	request->role_count = EBPFOS_EXECUTOR_ROOT_MAX_ROLES + 1;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), -EINVAL);

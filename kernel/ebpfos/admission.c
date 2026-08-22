@@ -591,6 +591,8 @@ static int ebpfos_validate_policy_record(
 	u64 profiles = le64_to_cpu(record->verifier_profile_mask);
 	u64 capabilities = le64_to_cpu(record->capability_ceiling);
 	u64 effects = le64_to_cpu(record->effect_ceiling);
+	u64 component_capabilities;
+	u64 component_effects;
 	bool file_only;
 	bool executor_root;
 	bool component_root;
@@ -614,6 +616,14 @@ static int ebpfos_validate_policy_record(
 				 EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) &&
 		effects == (EBPFOS_EFFECT_FILE_PROVIDER_ALL |
 			   EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT);
+	component_capabilities = EBPFOS_CAP_FILE_ALL |
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY;
+	component_effects = EBPFOS_EFFECT_FILE_PROVIDER_ALL |
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT;
+	if (flags & EBPFOS_POLICY_F_TEST_ONLY) {
+		component_capabilities |= EBPFOS_CAP_KPROG_MACHINE_ROOT;
+		component_effects |= EBPFOS_EFFECT_KPROG_MACHINE_STATE;
+	}
 	component_root =
 		domains == (EBPFOS_COMPONENT_DOMAIN_FILE_MASK |
 			    EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK |
@@ -621,10 +631,8 @@ static int ebpfos_validate_policy_record(
 		profiles == (EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK |
 			     EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK |
 			     EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL_MASK) &&
-		capabilities == (EBPFOS_CAP_FILE_ALL |
-				 EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) &&
-		effects == (EBPFOS_EFFECT_FILE_PROVIDER_ALL |
-			    EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT);
+		capabilities == component_capabilities &&
+		effects == component_effects;
 	if (flags & ~EBPFOS_POLICY_F_ALL ||
 	    (!file_only && !executor_root && !component_root))
 		return -EACCES;
@@ -1724,6 +1732,20 @@ static int ebpfos_measure_program(
 		return ebpfos_measure_map(prog, map, descriptor,
 					  expected_identity, calculate_hash,
 					  map_digest);
+	{
+		u8 semantic_set[SHA256_DIGEST_SIZE];
+		u64 capabilities, effects;
+
+		error = bpf_prog_kop_requirements(prog, &capabilities, &effects,
+						  semantic_set);
+		if (error || capabilities !=
+				le64_to_cpu(descriptor->capability_mask) ||
+		    effects != le64_to_cpu(descriptor->effect_mask) ||
+		    (bpf_prog_has_kop_call(prog) &&
+		     memcmp(semantic_set, descriptor->authority_sha256,
+			    SHA256_DIGEST_SIZE)))
+			return error ?: -EKEYREJECTED;
+	}
 	if (map)
 		return -EXDEV;
 	mutex_lock(&prog->aux->used_maps_mutex);
@@ -3577,6 +3599,65 @@ static void ebpfos_component_call_descriptor_test(struct kunit *test)
 		&descriptor, &policy, policy_digest), -EPROTO);
 }
 
+static void ebpfos_kprog_policy_ceiling_test(struct kunit *test)
+{
+	struct ebpfos_policy_record_v1 policy = {};
+	u64 base_capabilities = EBPFOS_CAP_FILE_ALL |
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY;
+	u64 base_effects = EBPFOS_EFFECT_FILE_PROVIDER_ALL |
+		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT;
+
+	memcpy(policy.magic, EBPFOS_POLICY_RECORD_V1_MAGIC,
+	       sizeof(policy.magic));
+	policy.format_version = cpu_to_le16(EBPFOS_ADMISSION_FORMAT_VERSION);
+	policy.header_size = cpu_to_le16(sizeof(policy));
+	policy.total_size = cpu_to_le32(sizeof(policy));
+	policy.flags = cpu_to_le32(EBPFOS_POLICY_F_TEST_ONLY);
+	policy.domain_mask = cpu_to_le32(
+		EBPFOS_COMPONENT_DOMAIN_FILE_MASK |
+		EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK |
+		EBPFOS_COMPONENT_DOMAIN_COMPONENT_MASK);
+	policy.verifier_profile_mask = cpu_to_le64(
+		EBPFOS_VERIFIER_PROFILE_FILE_PROVIDER_MASK |
+		EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK |
+		EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL_MASK);
+	policy.capability_ceiling = cpu_to_le64(
+		base_capabilities | EBPFOS_CAP_KPROG_MACHINE_ROOT);
+	policy.effect_ceiling = cpu_to_le64(
+		base_effects | EBPFOS_EFFECT_KPROG_MACHINE_STATE);
+	policy.generation = cpu_to_le64(1);
+	policy.realm_id[0] = 1;
+	policy.host_policy_sha256[0] = 1;
+	policy.max_static_insns = cpu_to_le32(64);
+	policy.max_verified_insns = cpu_to_le32(128);
+	policy.max_stack_depth = cpu_to_le32(MAX_BPF_STACK);
+	policy.max_context_size = cpu_to_le32(EBPFOS_FILE_PROVIDER_CONTEXT_SIZE);
+	policy.max_resources = cpu_to_le32(EBPFOS_ADMISSION_MAX_RESOURCES);
+	policy.max_map_bytes = cpu_to_le64(1);
+	policy.max_call_bytes = cpu_to_le64(EBPFOS_FILE_PROVIDER_CALL_BYTES);
+	memcpy(policy.kernel_abi_sha256, ebpfos_kernel_abi_sha256,
+	       SHA256_DIGEST_SIZE);
+	ebpfos_native_bootstrap_digest(&policy,
+		policy.native_bootstrap_sha256);
+
+	KUNIT_EXPECT_EQ(test, ebpfos_validate_policy_record(&policy), 0);
+	policy.capability_ceiling = cpu_to_le64(base_capabilities);
+	KUNIT_EXPECT_EQ(test, ebpfos_validate_policy_record(&policy), -EACCES);
+	policy.capability_ceiling = cpu_to_le64(
+		base_capabilities | EBPFOS_CAP_KPROG_MACHINE_ROOT);
+	policy.effect_ceiling = cpu_to_le64(base_effects);
+	KUNIT_EXPECT_EQ(test, ebpfos_validate_policy_record(&policy), -EACCES);
+	policy.effect_ceiling = cpu_to_le64(
+		base_effects | EBPFOS_EFFECT_KPROG_MACHINE_STATE | BIT_ULL(7));
+	KUNIT_EXPECT_EQ(test, ebpfos_validate_policy_record(&policy), -EACCES);
+	policy.flags = 0;
+	policy.capability_ceiling = cpu_to_le64(base_capabilities);
+	policy.effect_ceiling = cpu_to_le64(base_effects);
+	ebpfos_native_bootstrap_digest(&policy,
+		policy.native_bootstrap_sha256);
+	KUNIT_EXPECT_EQ(test, ebpfos_validate_policy_record(&policy), 0);
+}
+
 static void ebpfos_executor_root_bottom_authority_test(struct kunit *test)
 {
 	struct ebpfos_executor_root_manifest *manifest;
@@ -3613,6 +3694,7 @@ static struct kunit_case ebpfos_admission_cases[] = {
 	KUNIT_CASE(ebpfos_binding_invocation_counter_test),
 	KUNIT_CASE(ebpfos_executor_import_manifest_test),
 	KUNIT_CASE(ebpfos_component_call_descriptor_test),
+	KUNIT_CASE(ebpfos_kprog_policy_ceiling_test),
 	KUNIT_CASE(ebpfos_executor_root_bottom_authority_test),
 	{},
 };

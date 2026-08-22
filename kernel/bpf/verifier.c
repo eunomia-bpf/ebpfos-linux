@@ -31,6 +31,7 @@
 #include <linux/trace_events.h>
 #include <linux/kallsyms.h>
 #include <linux/ebpfos.h>
+#include <crypto/sha2.h>
 
 #include "disasm.h"
 
@@ -3156,11 +3157,70 @@ bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
 	u32 i;
 
 	if (!tab)
-		return false;
+		return prog->aux->ebpfos_kop_requirements_valid &&
+		       prog->aux->ebpfos_kop_count;
 	for (i = 0; i < tab->nr_descs; i++)
 		if (tab->descs[i].kop)
 			return true;
 	return false;
+}
+
+int bpf_prog_kop_requirements(const struct bpf_prog *prog,
+			      u64 *capability_mask, u64 *effect_mask,
+			      u8 semantic_set_sha256[SHA256_DIGEST_SIZE])
+{
+	static const u8 domain[] = "eBPFOS-kprog-semantic-set-v1";
+	struct bpf_kfunc_desc_tab *tab;
+	struct sha256_ctx state;
+	u64 capabilities = 0;
+	u64 effects = 0;
+	u32 count = 0;
+	u32 index;
+
+	if (!prog || !capability_mask || !effect_mask || !semantic_set_sha256)
+		return -EINVAL;
+	tab = prog->aux->kfunc_tab;
+	if (!tab && prog->aux->ebpfos_kop_requirements_valid) {
+		*capability_mask = prog->aux->ebpfos_kop_capability_mask;
+		*effect_mask = prog->aux->ebpfos_kop_effect_mask;
+		memcpy(semantic_set_sha256,
+		       prog->aux->ebpfos_kop_semantic_set_sha256,
+		       SHA256_DIGEST_SIZE);
+		return 0;
+	}
+	sha256_init(&state);
+	sha256_update(&state, domain, sizeof(domain));
+	for (index = 0; tab && index < tab->nr_descs; index++) {
+		const struct bpf_kop *kop = tab->descs[index].kop;
+		__le64 capability;
+		__le64 effect;
+
+		if (!kop)
+			return -EACCES;
+		if (!kop->capability_mask || !kop->effect_mask ||
+		    !memchr_inv(kop->semantic_sha256, 0,
+				 sizeof(kop->semantic_sha256)))
+			return -EPROTO;
+		capabilities |= kop->capability_mask;
+		effects |= kop->effect_mask;
+		capability = cpu_to_le64(kop->capability_mask);
+		effect = cpu_to_le64(kop->effect_mask);
+		sha256_update(&state, (const u8 *)&capability,
+			      sizeof(capability));
+		sha256_update(&state, (const u8 *)&effect, sizeof(effect));
+		sha256_update(&state, kop->semantic_sha256,
+			      sizeof(kop->semantic_sha256));
+		count++;
+	}
+	{
+		__le32 le_count = cpu_to_le32(count);
+
+		sha256_update(&state, (const u8 *)&le_count, sizeof(le_count));
+	}
+	sha256_final(&state, semantic_set_sha256);
+	*capability_mask = capabilities;
+	*effect_mask = effects;
+	return 0;
 }
 
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
@@ -18520,12 +18580,31 @@ static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 	    aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
 	    aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
 	    aux->used_btf_cnt || aux->kfunc_btf_tab ||
-	    ((aux->ebpfos_provider || aux->ebpfos_component) &&
-	     aux->kfunc_tab)) {
+	    (aux->ebpfos_provider && aux->kfunc_tab) ||
+	    (aux->ebpfos_component && bpf_prog_has_kfunc_call(env->prog))) {
 		verbose(env, "eBPFOS provider cannot carry BTF or attach metadata\n");
 		return -EINVAL;
 	}
 	if (aux->ebpfos_component) {
+		u8 semantic_set[SHA256_DIGEST_SIZE];
+		u64 capabilities, effects;
+		int error;
+
+		error = bpf_prog_kop_requirements(env->prog, &capabilities,
+						  &effects, semantic_set);
+		if (error) {
+			verbose(env,
+				"eBPFOS component has an unbound KOperation descriptor\n");
+			return error;
+		}
+		aux->ebpfos_kop_count = aux->kfunc_tab ?
+			aux->kfunc_tab->nr_descs : 0;
+		aux->ebpfos_kop_capability_mask = capabilities;
+		aux->ebpfos_kop_effect_mask = effects;
+		memcpy(aux->ebpfos_kop_semantic_set_sha256, semantic_set,
+		       sizeof(aux->ebpfos_kop_semantic_set_sha256));
+		/* Publish the immutable verifier snapshot last. */
+		aux->ebpfos_kop_requirements_valid = true;
 		if (env->used_map_cnt) {
 			verbose(env,
 				"eBPFOS stateless component provider cannot reference maps\n");

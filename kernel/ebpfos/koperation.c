@@ -3,14 +3,19 @@
 #include <crypto/sha2.h>
 #include <linux/atomic.h>
 #include <linux/bpf.h>
+#include <linux/btf.h>
+#include <linux/btf_ids.h>
 #include <linux/ebpfos.h>
 #include <linux/err.h>
 #include <linux/filter.h>
+#include <linux/init.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
 #include <linux/uaccess.h>
 
 #include <asm/page.h>
@@ -37,6 +42,221 @@ struct ebpfos_koperation_descriptor {
 #define EBPFOS_KOPERATION_REQUIRE_CR3_NOFLUSH_CLEAR (1U << 0)
 
 #include "koperation-generated.h"
+
+static const struct ebpfos_koperation_descriptor *
+ebpfos_koperation_find(u32 operation_id);
+
+/*
+ * Donor structure: bpf-benchmark@5b130b6ec8c44006fd7768acb7b2c8b506ea038b
+ * module/include/kop_common.h and module/include/kop_x86_emit.h.  The payload
+ * decoder, descriptor callbacks, and bounded byte emitter are mechanically
+ * adapted here.  The benchmark loader and bpf_x86_native_lab.c verifier
+ * bypass are deliberately excluded.
+ */
+#define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
+#define EBPFOS_KPROG_CONTROL_CR3 3U
+#define EBPFOS_KPROG_ACTION_RELOAD 1U
+
+static bool ebpfos_kprog_payload_escaped(u64 payload)
+{
+	u8 marker = payload & 0xf;
+	u8 original_low = (payload >> 4) & 0xf;
+
+	return marker == BPF_REG_10 && original_low >= 11 && original_low <= 15;
+}
+
+static u64 ebpfos_kprog_payload_decode(u64 payload)
+{
+	if (!ebpfos_kprog_payload_escaped(payload))
+		return payload;
+	return ((payload >> 8) << 4) | ((payload >> 4) & 0xf);
+}
+
+struct ebpfos_kprog_control_payload {
+	u8 input_reg;
+	u8 output_reg;
+	u8 control_register;
+	u8 action;
+};
+
+static int ebpfos_kprog_control_decode(
+	u64 payload, struct ebpfos_kprog_control_payload *decoded)
+{
+	payload = ebpfos_kprog_payload_decode(payload);
+	if ((payload & 0xf) != EBPFOS_KPROG_FORM_CONTROL_REGISTER ||
+	    payload >> 20)
+		return -EINVAL;
+	decoded->input_reg = (payload >> 4) & 0xf;
+	decoded->output_reg = (payload >> 8) & 0xf;
+	decoded->control_register = (payload >> 12) & 0xf;
+	decoded->action = (payload >> 16) & 0xf;
+	if (decoded->input_reg < BPF_REG_6 ||
+	    decoded->input_reg > BPF_REG_9 ||
+	    decoded->output_reg != BPF_REG_0 ||
+	    decoded->control_register != EBPFOS_KPROG_CONTROL_CR3 ||
+	    decoded->action != EBPFOS_KPROG_ACTION_RELOAD)
+		return -EINVAL;
+	return 0;
+}
+
+static int ebpfos_kprog_control_instantiate(u64 payload,
+					    struct bpf_insn *insns)
+{
+	const struct ebpfos_koperation_descriptor *operation;
+	struct ebpfos_kprog_control_payload decoded;
+	u32 effect_tag;
+	int error;
+
+	if (!insns)
+		return -EINVAL;
+	error = ebpfos_kprog_control_decode(payload, &decoded);
+	if (error)
+		return error;
+	operation = ebpfos_koperation_find(
+		EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
+	if (!operation)
+		return -ENOENT;
+	/* The canonical BPF model preserves the declared root while committing
+	 * the effect identity twice so the full 64-bit result remains exact. */
+	effect_tag = get_unaligned_le32(operation->semantic_sha256) & S32_MAX;
+	insns[0] = BPF_MOV64_REG(decoded.output_reg, decoded.input_reg);
+	insns[1] = BPF_ALU64_IMM(BPF_XOR, decoded.output_reg, effect_tag);
+	insns[2] = BPF_ALU64_IMM(BPF_XOR, decoded.output_reg, effect_tag);
+	return 3;
+}
+
+static u8 ebpfos_kprog_x86_reg_code(u8 reg)
+{
+	static const u8 codes[] = {
+		[BPF_REG_6] = 3, /* RBX */
+		[BPF_REG_7] = 5, /* R13 */
+		[BPF_REG_8] = 6, /* R14 */
+		[BPF_REG_9] = 7, /* R15 */
+	};
+
+	return reg < ARRAY_SIZE(codes) ? codes[reg] : 0xff;
+}
+
+static bool ebpfos_kprog_x86_reg_extended(u8 reg)
+{
+	return reg == BPF_REG_7 || reg == BPF_REG_8 || reg == BPF_REG_9;
+}
+
+static int ebpfos_kprog_control_emit_x86(
+	u8 *image, u32 *offset, bool emit, u64 payload,
+	const struct bpf_prog *prog, const u8 *final_ip)
+{
+	struct ebpfos_kprog_control_payload decoded;
+	u8 code[64];
+	u8 *cursor = code;
+	u8 *first_mismatch;
+	u8 *second_mismatch;
+	u8 *success_jump;
+	u8 input_code;
+	u32 size;
+	int error;
+
+	(void)prog;
+	(void)final_ip;
+	if (!offset || (emit && !image))
+		return -EINVAL;
+	error = ebpfos_kprog_control_decode(payload, &decoded);
+	if (error)
+		return error;
+	input_code = ebpfos_kprog_x86_reg_code(decoded.input_reg);
+	if (input_code == 0xff)
+		return -EINVAL;
+#define EMIT(_byte) (*cursor++ = (_byte))
+	/* raw CR3 -> R11; normalized root -> BPF R0/RAX */
+	EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
+	EMIT(0x49); EMIT(0x89); EMIT(0xc3);
+	EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
+	EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+	EMIT(0x39); EMIT(0xc0 | (input_code << 3));
+	EMIT(0x75); first_mismatch = cursor++;
+	/* Clear CR3.NOFLUSH before the unique privileged write. */
+	EMIT(0x49); EMIT(0x0f); EMIT(0xba); EMIT(0xf3); EMIT(0x3f);
+	EMIT(0x41); EMIT(0x0f); EMIT(0x22); EMIT(0xdb);
+	/* Read back and require the same normalized root. */
+	EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
+	EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
+	EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+	EMIT(0x39); EMIT(0xc0 | (input_code << 3));
+	EMIT(0x75); second_mismatch = cursor++;
+	EMIT(0xeb); success_jump = cursor++;
+	/* -ESTALE is a fail-closed precondition/readback result. */
+	*first_mismatch = cursor - (first_mismatch + 1);
+	*second_mismatch = cursor - (second_mismatch + 1);
+	EMIT(0x48); EMIT(0xc7); EMIT(0xc0);
+	EMIT(0x8c); EMIT(0xff); EMIT(0xff); EMIT(0xff);
+	*success_jump = cursor - (success_jump + 1);
+#undef EMIT
+	size = cursor - code;
+	if (size > sizeof(code))
+		return -E2BIG;
+	if (emit)
+		memcpy(image + *offset, code, size);
+	*offset += size;
+	return size;
+}
+
+__bpf_kfunc_start_defs();
+__bpf_kfunc void bpf_ebpfos_kprog_control_register(void) { }
+__bpf_kfunc_end_defs();
+
+BTF_KFUNCS_START(ebpfos_kprog_control_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kprog_control_register)
+BTF_KFUNCS_END(ebpfos_kprog_control_ids)
+
+static struct bpf_kop ebpfos_kprog_control = {
+	.max_insn_cnt = 3,
+	.max_emit_bytes = 64,
+	.capability_mask = EBPFOS_CAP_KPROG_MACHINE_ROOT,
+	.effect_mask = EBPFOS_EFFECT_KPROG_MACHINE_STATE,
+	.instantiate_insn = ebpfos_kprog_control_instantiate,
+	.emit_x86 = ebpfos_kprog_control_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_control_descs[] = {
+	&ebpfos_kprog_control,
+};
+
+int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
+			       bool own_koperation_id)
+{
+	if (!own_koperation_id)
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component;
+}
+
+static int ebpfos_kprog_filter(const struct bpf_prog *prog, u32 kfunc_id)
+{
+	/* Hook filters are shared by every kfunc set for the program type. */
+	return ebpfos_kprog_domain_filter(
+		prog, btf_id_set8_contains(&ebpfos_kprog_control_ids, kfunc_id));
+}
+
+static const struct btf_kfunc_id_set ebpfos_kprog_control_set = {
+	.set = &ebpfos_kprog_control_ids,
+	.filter = ebpfos_kprog_filter,
+	.kop_descs = ebpfos_kprog_control_descs,
+};
+
+static int __init ebpfos_kprog_register(void)
+{
+	const struct ebpfos_koperation_descriptor *reload =
+		ebpfos_koperation_find(
+			EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
+
+	if (!reload)
+		return -ENOENT;
+	memcpy(ebpfos_kprog_control.semantic_sha256,
+	       reload->semantic_sha256,
+	       sizeof(ebpfos_kprog_control.semantic_sha256));
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_kprog_control_set);
+}
+late_initcall(ebpfos_kprog_register);
 
 struct ebpfos_koperation_txn {
 	const struct ebpfos_koperation_descriptor *descriptor;

@@ -458,6 +458,13 @@ struct ebpfos_binding {
 #define EBPFOS_COMPONENT_CALL_INPUT_SIZE 128U
 #define EBPFOS_COMPONENT_CALL_OUTPUT_SIZE 128U
 
+/* Generic capability/effect lattice cells for verifier-admitted kprog. */
+#define EBPFOS_CAP_KPROG_MACHINE_ROOT BIT_ULL(3)
+#define EBPFOS_EFFECT_KPROG_MACHINE_STATE BIT_ULL(6)
+
+int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
+			       bool own_koperation_id);
+
 struct ebpfos_component_call_frame {
 	u32 version;
 	u32 flags;
