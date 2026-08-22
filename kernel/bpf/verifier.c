@@ -3006,6 +3006,7 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	prog_aux = env->prog->aux;
 	if (!kop_call &&
 	    (prog_aux->ebpfos_provider ||
+	     prog_aux->ebpfos_component ||
 	     (prog_aux->ebpfos_meta &&
 	      !ebpfos_executor_root_kfunc_allowed(func_id)))) {
 		verbose(env, "eBPFOS provider programs cannot call kernel functions\n");
@@ -3366,7 +3367,8 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	 */
 	if (ex_cb_insn) {
 		if (env->prog->aux->ebpfos_provider ||
-		    env->prog->aux->ebpfos_meta) {
+		    env->prog->aux->ebpfos_meta ||
+		    env->prog->aux->ebpfos_component) {
 			verbose(env,
 				"eBPFOS provider programs cannot define exception callbacks\n");
 			return -EACCES;
@@ -5190,7 +5192,11 @@ static bool is_var_ctx_off_allowed(struct bpf_prog *prog)
 
 static u32 syscall_ctx_access_size(const struct bpf_prog *prog)
 {
-	return prog->aux->ebpfos_provider ? EBPFOS_FILE_BPF_CTX_SIZE : U16_MAX;
+	if (prog->aux->ebpfos_provider)
+		return EBPFOS_FILE_BPF_CTX_SIZE;
+	if (prog->aux->ebpfos_component)
+		return EBPFOS_COMPONENT_CALL_CONTEXT_SIZE;
+	return U16_MAX;
 }
 
 #define EBPFOS_PROVIDER_CTX_INPUT_END \
@@ -5215,6 +5221,18 @@ static bool ebpfos_provider_ctx_access_ok(u64 start, u64 end,
 	return false;
 }
 
+static bool ebpfos_component_ctx_access_ok(u64 start, u64 end,
+					   enum bpf_access_type type)
+{
+	u64 output_start = offsetof(struct ebpfos_component_call_frame, status);
+
+	if (start < output_start && end <= output_start)
+		return type == BPF_READ;
+	if (start >= output_start && end <= EBPFOS_COMPONENT_CALL_CONTEXT_SIZE)
+		return type == BPF_READ || type == BPF_WRITE;
+	return false;
+}
+
 static int check_ebpfos_provider_ctx_range(struct bpf_verifier_env *env,
 					   u32 regno, int off, int size,
 					   enum bpf_access_type type)
@@ -5230,13 +5248,18 @@ static int check_ebpfos_provider_ctx_range(struct bpf_verifier_env *env,
 	if (min_start < 0 || max_start < min_start)
 		goto denied;
 	end = (u64)max_start + size;
-	if (!ebpfos_provider_ctx_access_ok(min_start, end, type))
+	if (env->prog->aux->ebpfos_provider) {
+		if (!ebpfos_provider_ctx_access_ok(min_start, end, type))
+			goto denied;
+	} else if (!env->prog->aux->ebpfos_component ||
+		   !ebpfos_component_ctx_access_ok(min_start, end, type)) {
 		goto denied;
+	}
 	return 0;
 
 denied:
 	verbose(env,
-		"eBPFOS provider context range crosses a forbidden or differently-permissioned region\n");
+		"eBPFOS component context range crosses a forbidden or differently-permissioned region\n");
 	return -EACCES;
 }
 
@@ -5294,7 +5317,8 @@ static int check_ctx_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		err = __check_ptr_off_reg(env, reg, regno, fixed_off_ok);
 	if (err)
 		return err;
-	if (env->prog->aux->ebpfos_provider) {
+	if (env->prog->aux->ebpfos_provider ||
+	    env->prog->aux->ebpfos_component) {
 		err = check_ebpfos_provider_ctx_range(env, regno, off,
 						      access_size, t);
 		if (err)
@@ -6649,7 +6673,9 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	if (size < 0)
 		return size;
 
-	if (reg->type == PTR_TO_CTX && env->prog->aux->ebpfos_provider)
+	if (reg->type == PTR_TO_CTX &&
+	    (env->prog->aux->ebpfos_provider ||
+	     env->prog->aux->ebpfos_component))
 		strict_alignment_once = true;
 	err = check_ptr_alignment(env, reg, off, size, strict_alignment_once);
 	if (err)
@@ -7348,7 +7374,8 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 							  ctx_size, zero_size_allowed);
 			if (err)
 				return err;
-			if (env->prog->aux->ebpfos_provider) {
+			if (env->prog->aux->ebpfos_provider ||
+			    env->prog->aux->ebpfos_component) {
 				err = check_ebpfos_provider_ctx_range(env, regno, 0, access_size,
 								      access_type);
 				if (err)
@@ -18482,15 +18509,30 @@ static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 {
 	struct bpf_prog_aux *aux = env->prog->aux;
 
-	if (!aux->ebpfos_provider && !aux->ebpfos_meta)
+	if (!aux->ebpfos_provider && !aux->ebpfos_meta &&
+	    !aux->ebpfos_component)
 		return 0;
 	if (aux->btf || aux->func_info || aux->func_info_aux ||
 	    aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
 	    aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
 	    aux->used_btf_cnt || aux->kfunc_btf_tab ||
-	    (aux->ebpfos_provider && aux->kfunc_tab)) {
+	    ((aux->ebpfos_provider || aux->ebpfos_component) &&
+	     aux->kfunc_tab)) {
 		verbose(env, "eBPFOS provider cannot carry BTF or attach metadata\n");
 		return -EINVAL;
+	}
+	if (aux->ebpfos_component) {
+		if (env->used_map_cnt) {
+			verbose(env,
+				"eBPFOS stateless component provider cannot reference maps\n");
+			return -EINVAL;
+		}
+		if (env->used_btf_cnt) {
+			verbose(env,
+				"eBPFOS component provider cannot reference BTF objects\n");
+			return -EINVAL;
+		}
+		return 0;
 	}
 	if (env->used_map_cnt != 1) {
 		verbose(env, "eBPFOS provider must reference exactly one map\n");
@@ -18615,8 +18657,15 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 {
 	bool provider = env->prog->aux->ebpfos_provider;
 	bool meta = env->prog->aux->ebpfos_meta;
-	bool component = provider || meta;
+	bool call_component = env->prog->aux->ebpfos_component;
+	bool component = provider || meta || call_component;
 	int i, err;
+
+	if (call_component) {
+		verbose(env,
+			"eBPFOS stateless component provider cannot reference maps\n");
+		return -EACCES;
+	}
 
 	/* check whether we recorded this map already */
 	for (i = 0; i < env->used_map_cnt; i++)
@@ -18925,7 +18974,8 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 
 			if (insn[0].src_reg == BPF_PSEUDO_BTF_ID) {
 				if (env->prog->aux->ebpfos_provider ||
-				    env->prog->aux->ebpfos_meta) {
+				    env->prog->aux->ebpfos_meta ||
+				    env->prog->aux->ebpfos_component) {
 					verbose(env,
 						"eBPFOS provider cannot use BPF_PSEUDO_BTF_ID\n");
 					return -EACCES;
@@ -19625,7 +19675,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 	struct module *mod = NULL;
 
 	if (tgt_prog && (tgt_prog->aux->ebpfos_provider ||
-			 tgt_prog->aux->ebpfos_meta)) {
+			 tgt_prog->aux->ebpfos_meta ||
+			 tgt_prog->aux->ebpfos_component)) {
 		bpf_log(log, "eBPFOS provider programs cannot be attach targets\n");
 		return -EPERM;
 	}

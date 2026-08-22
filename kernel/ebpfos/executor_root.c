@@ -107,6 +107,8 @@ static int ebpfos_executor_root_role_fill(
 	struct ebpfos_admission_identity_v1 identity = {};
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
+	bool component;
+	bool file;
 
 	if (!role || !request || request->admission_fd < 0 ||
 	    request->reserved || !request->role_type)
@@ -120,13 +122,17 @@ static int ebpfos_executor_root_role_fill(
 		return -EUCLEAN;
 	}
 	descriptor = ebpfos_binding_descriptor(binding);
-	if (!descriptor ||
-	    le32_to_cpu(descriptor->resource_count) != 1 ||
-	    le32_to_cpu(descriptor->resource.kind) !=
-		EBPFOS_RESOURCE_ARRAY_MAP ||
-	    ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
-	    !ebpfos_binding_prog(binding) || !ebpfos_binding_map(binding) ||
-	    !ebpfos_binding_prog(binding)->aux->ebpfos_provider) {
+	file = descriptor && le32_to_cpu(descriptor->resource_count) == 1 &&
+	       le32_to_cpu(descriptor->resource.kind) ==
+		EBPFOS_RESOURCE_ARRAY_MAP && ebpfos_binding_map(binding) &&
+	       ebpfos_binding_prog(binding) &&
+	       ebpfos_binding_prog(binding)->aux->ebpfos_provider;
+	component = descriptor &&
+		le32_to_cpu(descriptor->resource_count) == 0 &&
+		!ebpfos_binding_map(binding) && ebpfos_binding_prog(binding) &&
+		ebpfos_binding_prog(binding)->aux->ebpfos_component;
+	if (ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
+	    (!file && !component)) {
 		ebpfos_binding_put(binding);
 		ebpfos_admission_put(grant);
 		return -EOPNOTSUPP;
@@ -644,7 +650,8 @@ retry_lookup:
 	descriptor = ebpfos_binding_descriptor(binding);
 	provider = ebpfos_binding_prog(binding);
 	if (!descriptor || !provider || !provider->aux ||
-	    !provider->aux->ebpfos_provider ||
+	    (!provider->aux->ebpfos_provider &&
+	     !provider->aux->ebpfos_component) ||
 	    provider->type != BPF_PROG_TYPE_SYSCALL || !provider->sleepable) {
 		error = -EOPNOTSUPP;
 		goto out_put;

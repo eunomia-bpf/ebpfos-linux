@@ -1853,6 +1853,7 @@ struct bpf_prog_aux {
 	bool kprobe_write_ctx;
 	bool ebpfos_provider;
 	bool ebpfos_meta;
+	bool ebpfos_component;
 	u32 ebpfos_load_insn_cnt;
 	struct ebpfos_prog_identity *ebpfos_identity;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */

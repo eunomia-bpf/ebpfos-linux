@@ -440,11 +440,40 @@ struct ebpfos_binding {
 	(1U << EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT)
 #define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER 10U
 #define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER 11U
+#define EBPFOS_COMPONENT_USE_CALL_PROVIDER 12U
 #define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT 2U
 #define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK \
 	(1ULL << EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT)
 #define EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE 0x4558525055420001ULL
 #define EBPFOS_EXECUTOR_ROOT_F_TEST_FAIL_AFTER_STAGE (1U << 0)
+
+/*
+ * First generic component invocation profile.  This profile is deliberately
+ * stateless and sleepable: immutable imports live in the caller identity and
+ * mutable component state will use separately typed arenas.  It is not an
+ * atomic/IRQ execution contract.
+ */
+#define EBPFOS_COMPONENT_CALL_ABI_ID 0x454243414c4c0001ULL
+#define EBPFOS_COMPONENT_CALL_ABI_VERSION 1U
+#define EBPFOS_COMPONENT_CALL_INPUT_SIZE 128U
+#define EBPFOS_COMPONENT_CALL_OUTPUT_SIZE 128U
+
+struct ebpfos_component_call_frame {
+	u32 version;
+	u32 flags;
+	u64 method_id;
+	u64 object_id;
+	u64 epoch;
+	u32 input_size;
+	u32 output_capacity;
+	u8 input[EBPFOS_COMPONENT_CALL_INPUT_SIZE];
+	s32 status;
+	u32 output_size;
+	u8 output[EBPFOS_COMPONENT_CALL_OUTPUT_SIZE];
+};
+
+#define EBPFOS_COMPONENT_CALL_CONTEXT_SIZE \
+	((u32)sizeof(struct ebpfos_component_call_frame))
 
 /*
  * A caller identity binds this explicit, frozen import resource.  The map is
