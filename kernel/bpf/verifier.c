@@ -5258,8 +5258,12 @@ static int check_ebpfos_provider_ctx_range(struct bpf_verifier_env *env,
 	return 0;
 
 denied:
-	verbose(env,
-		"eBPFOS component context range crosses a forbidden or differently-permissioned region\n");
+	if (env->prog->aux->ebpfos_provider)
+		verbose(env,
+			"eBPFOS provider context range crosses a forbidden or differently-permissioned region\n");
+	else
+		verbose(env,
+			"eBPFOS component context range crosses a forbidden or differently-permissioned region\n");
 	return -EACCES;
 }
 
