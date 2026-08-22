@@ -243,11 +243,14 @@ static void ebpfos_kop_descriptor_test(struct kunit *test)
 		-EINVAL);
 }
 
-static struct bpf_insn ebpfos_kop_test_sidecar(void)
+static struct bpf_insn ebpfos_kop_test_sidecar(u64 payload)
 {
 	return (struct bpf_insn) {
 		.code = BPF_ALU64 | BPF_MOV | BPF_K,
 		.src_reg = BPF_PSEUDO_KOP_SIDECAR,
+		.dst_reg = payload & 0xf,
+		.off = (payload >> 4) & 0xffff,
+		.imm = payload >> 20,
 	};
 }
 
@@ -269,7 +272,7 @@ static void ebpfos_kop_proof_cfg_test(struct kunit *test)
 	};
 	struct bpf_insn jump_to_sidecar[] = {
 		BPF_MOV64_IMM(BPF_REG_0, 0), BPF_JMP_A(0),
-		ebpfos_kop_test_sidecar(),
+		ebpfos_kop_test_sidecar(0),
 		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
 			     0, 1),
 		BPF_EXIT_INSN(),
@@ -277,7 +280,7 @@ static void ebpfos_kop_proof_cfg_test(struct kunit *test)
 	struct bpf_insn jump_to_call[] = {
 		BPF_MOV64_IMM(BPF_REG_0, 0),
 		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
-		ebpfos_kop_test_sidecar(),
+		ebpfos_kop_test_sidecar(0),
 		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
 			     0, 1),
 		BPF_EXIT_INSN(),
@@ -315,6 +318,19 @@ static void ebpfos_kop_proof_cfg_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(&prog));
 }
 
+static int ebpfos_kop_test_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	if (payload != 1 && payload != 2)
+		return -EINVAL;
+	*capability_mask = BIT_ULL(payload + 2);
+	*effect_mask = BIT_ULL(payload + 5);
+	memset(semantic_sha256, 0, SHA256_DIGEST_SIZE);
+	semantic_sha256[0] = payload;
+	return 0;
+}
+
 static void ebpfos_kop_component_identity_test(struct kunit *test)
 {
 	const struct bpf_kop first = {
@@ -328,9 +344,20 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 		.semantic_sha256 = { 2 },
 	};
 	const struct bpf_kop unbound = {};
+	const struct bpf_kop dynamic = {
+		.requirements = ebpfos_kop_test_requirements,
+	};
+	struct bpf_insn insns[] = {
+		ebpfos_kop_test_sidecar(1),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
+			     0, 1),
+		ebpfos_kop_test_sidecar(2),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KOP_CALL,
+			     0, 2),
+	};
 	struct bpf_kfunc_desc_tab *tab;
 	struct bpf_prog_aux *aux;
-	struct bpf_prog prog = {};
+	struct bpf_prog *prog;
 	u8 one[SHA256_DIGEST_SIZE];
 	u8 two[SHA256_DIGEST_SIZE];
 	u64 capabilities;
@@ -340,20 +367,27 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, tab);
 	aux = kunit_kzalloc(test, sizeof(*aux), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, aux);
+	prog = kunit_kzalloc(test, sizeof(*prog) + sizeof(insns), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, prog);
 	aux->kfunc_tab = tab;
-	prog.aux = aux;
+	memcpy(prog->insnsi, insns, sizeof(insns));
+	prog->len = 2;
+	prog->aux = aux;
 
 	tab->nr_descs = 1;
+	tab->descs[0].func_id = 1;
 	tab->descs[0].kop = &first;
 	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
-		&prog, &capabilities, &effects, one), 0);
+		prog, &capabilities, &effects, one), 0);
 	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3));
 	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6));
 
 	tab->nr_descs = 2;
+	tab->descs[1].func_id = 2;
 	tab->descs[1].kop = &second;
+	prog->len = ARRAY_SIZE(insns);
 	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
-		&prog, &capabilities, &effects, two), 0);
+		prog, &capabilities, &effects, two), 0);
 	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3) | BIT_ULL(4));
 	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6) | BIT_ULL(7));
 	KUNIT_EXPECT_MEMNEQ(test, one, two, sizeof(one));
@@ -361,16 +395,25 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 	/* JIT completion frees kfunc_tab.  Admission must still observe the
 	 * exact verifier-sealed identity and the presence of KOperations.
 	 */
-	aux->ebpfos_kop_count = tab->nr_descs;
+	aux->ebpfos_kop_count = 2;
 	aux->ebpfos_kop_capability_mask = capabilities;
 	aux->ebpfos_kop_effect_mask = effects;
 	memcpy(aux->ebpfos_kop_semantic_set_sha256, two, sizeof(two));
 	aux->ebpfos_kop_requirements_valid = true;
-	aux->kfunc_tab = NULL;
-	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(&prog));
+	/* Proof verification temporarily replaces the original pairs while the
+	 * kfunc table still exists; the sealed snapshot remains authoritative.
+	 */
+	prog->len = 0;
 	memset(one, 0, sizeof(one));
 	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
-		&prog, &capabilities, &effects, one), 0);
+		prog, &capabilities, &effects, one), 0);
+	KUNIT_EXPECT_MEMEQ(test, one, two, sizeof(one));
+	prog->len = ARRAY_SIZE(insns);
+	aux->kfunc_tab = NULL;
+	KUNIT_EXPECT_TRUE(test, bpf_prog_has_kop_call(prog));
+	memset(one, 0, sizeof(one));
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		prog, &capabilities, &effects, one), 0);
 	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3) | BIT_ULL(4));
 	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6) | BIT_ULL(7));
 	KUNIT_EXPECT_MEMEQ(test, one, two, sizeof(one));
@@ -379,10 +422,24 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 
 	tab->descs[1].kop = &unbound;
 	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
-		&prog, &capabilities, &effects, two), -EPROTO);
+		prog, &capabilities, &effects, two), -EPROTO);
 	tab->descs[1].kop = NULL;
 	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
-		&prog, &capabilities, &effects, two), -EACCES);
+		prog, &capabilities, &effects, two), -EACCES);
+
+	/* One kfunc descriptor may resolve a finite payload family.  Exact call
+	 * instances, including repeated descriptors, are aggregated in order.
+	 */
+	tab->nr_descs = 1;
+	tab->descs[0].kop = &dynamic;
+	prog->insnsi[3].imm = 1;
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		prog, &capabilities, &effects, two), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3) | BIT_ULL(4));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6) | BIT_ULL(7));
+	prog->insnsi[2] = ebpfos_kop_test_sidecar(3);
+	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
+		prog, &capabilities, &effects, two), -EINVAL);
 }
 
 static void ebpfos_kop_domain_filter_test(struct kunit *test)

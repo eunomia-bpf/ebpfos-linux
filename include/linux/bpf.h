@@ -1087,6 +1087,15 @@ struct bpf_kop {
 	u64 capability_mask;
 	u64 effect_mask;
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
+	/*
+	 * A descriptor may cover a finite declarative payload family.  When
+	 * present, requirements() resolves the exact sidecar instance to the
+	 * verifier-visible authority/effect/semantic identity.  The fixed fields
+	 * above remain the compatibility path for one-identity descriptors.
+	 */
+	int (*requirements)(u64 payload, u64 *capability_mask,
+			    u64 *effect_mask,
+			    u8 semantic_sha256[SHA256_DIGEST_SIZE]);
 
 	int (*instantiate_insn)(u64 payload, struct bpf_insn *insn_buf);
 

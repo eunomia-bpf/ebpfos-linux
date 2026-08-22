@@ -3180,7 +3180,7 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 	if (!prog || !capability_mask || !effect_mask || !semantic_set_sha256)
 		return -EINVAL;
 	tab = prog->aux->kfunc_tab;
-	if (!tab && prog->aux->ebpfos_kop_requirements_valid) {
+	if (prog->aux->ebpfos_kop_requirements_valid) {
 		*capability_mask = prog->aux->ebpfos_kop_capability_mask;
 		*effect_mask = prog->aux->ebpfos_kop_effect_mask;
 		memcpy(semantic_set_sha256,
@@ -3190,26 +3190,54 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 	}
 	sha256_init(&state);
 	sha256_update(&state, domain, sizeof(domain));
-	for (index = 0; tab && index < tab->nr_descs; index++) {
-		const struct bpf_kop *kop = tab->descs[index].kop;
+	for (index = 0; index < prog->len; index++) {
+		const struct bpf_insn *call = &prog->insnsi[index];
+		const struct bpf_kfunc_desc *desc;
+		const struct bpf_kop *kop;
+		u8 semantic_sha256[SHA256_DIGEST_SIZE];
+		u64 capability_mask;
+		u64 effect_mask;
+		u64 payload;
 		__le64 capability;
 		__le64 effect;
+		int error;
 
-		if (!kop)
-			return -EACCES;
-		if (!kop->capability_mask || !kop->effect_mask ||
-		    !memchr_inv(kop->semantic_sha256, 0,
-				 sizeof(kop->semantic_sha256)))
+		if (!bpf_pseudo_kop_call(call))
+			continue;
+		if (!index || !bpf_kop_is_sidecar_insn(call - 1))
 			return -EPROTO;
-		capabilities |= kop->capability_mask;
-		effects |= kop->effect_mask;
-		capability = cpu_to_le64(kop->capability_mask);
-		effect = cpu_to_le64(kop->effect_mask);
+		if (!tab)
+			return -EACCES;
+		desc = find_kfunc_desc(prog, call->imm, call->off);
+		if (!desc || !desc->kop)
+			return -EACCES;
+		kop = desc->kop;
+		payload = bpf_kop_sidecar_payload(call - 1);
+		if (kop->requirements) {
+			error = kop->requirements(payload, &capability_mask,
+						  &effect_mask,
+						  semantic_sha256);
+			if (error)
+				return error;
+		} else {
+			capability_mask = kop->capability_mask;
+			effect_mask = kop->effect_mask;
+			memcpy(semantic_sha256, kop->semantic_sha256,
+			       sizeof(semantic_sha256));
+		}
+
+		if (!capability_mask || !effect_mask ||
+		    !memchr_inv(semantic_sha256, 0, sizeof(semantic_sha256)))
+			return -EPROTO;
+		capabilities |= capability_mask;
+		effects |= effect_mask;
+		capability = cpu_to_le64(capability_mask);
+		effect = cpu_to_le64(effect_mask);
 		sha256_update(&state, (const u8 *)&capability,
 			      sizeof(capability));
 		sha256_update(&state, (const u8 *)&effect, sizeof(effect));
-		sha256_update(&state, kop->semantic_sha256,
-			      sizeof(kop->semantic_sha256));
+		sha256_update(&state, semantic_sha256,
+			      sizeof(semantic_sha256));
 		count++;
 	}
 	{
@@ -3226,10 +3254,20 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
+	u8 semantic_set[SHA256_DIGEST_SIZE];
+	u64 capabilities = 0;
+	u64 effects = 0;
 	u32 cap = env->kop_call_cnt;
 	int i, err;
 
 	if (cap) {
+		/* The proof expansion temporarily removes the payload/call pairs.
+		 * Seal their exact requirements before that verifier-only rewrite.
+		 */
+		err = bpf_prog_kop_requirements(env->prog, &capabilities,
+						&effects, semantic_set);
+		if (err)
+			return err;
 		err = bpf_validate_kop_single_entry(env, env->prog->insnsi,
 						  env->prog->len);
 		if (err)
@@ -3329,6 +3367,15 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 				prior->start = start;
 			}
 		}
+	}
+	if (cap) {
+		env->prog->aux->ebpfos_kop_count = cap;
+		env->prog->aux->ebpfos_kop_capability_mask = capabilities;
+		env->prog->aux->ebpfos_kop_effect_mask = effects;
+		memcpy(env->prog->aux->ebpfos_kop_semantic_set_sha256,
+		       semantic_set, sizeof(semantic_set));
+		/* Publish the immutable verifier snapshot last. */
+		env->prog->aux->ebpfos_kop_requirements_valid = true;
 	}
 	return 0;
 
@@ -18597,14 +18644,16 @@ static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 				"eBPFOS component has an unbound KOperation descriptor\n");
 			return error;
 		}
-		aux->ebpfos_kop_count = aux->kfunc_tab ?
-			aux->kfunc_tab->nr_descs : 0;
-		aux->ebpfos_kop_capability_mask = capabilities;
-		aux->ebpfos_kop_effect_mask = effects;
-		memcpy(aux->ebpfos_kop_semantic_set_sha256, semantic_set,
-		       sizeof(aux->ebpfos_kop_semantic_set_sha256));
-		/* Publish the immutable verifier snapshot last. */
-		aux->ebpfos_kop_requirements_valid = true;
+		if (!aux->ebpfos_kop_requirements_valid) {
+			aux->ebpfos_kop_count = env->kop_call_cnt;
+			aux->ebpfos_kop_capability_mask = capabilities;
+			aux->ebpfos_kop_effect_mask = effects;
+			memcpy(aux->ebpfos_kop_semantic_set_sha256,
+			       semantic_set,
+			       sizeof(aux->ebpfos_kop_semantic_set_sha256));
+			/* Publish the immutable verifier snapshot last. */
+			aux->ebpfos_kop_requirements_valid = true;
+		}
 		if (env->used_map_cnt) {
 			verbose(env,
 				"eBPFOS stateless component provider cannot reference maps\n");

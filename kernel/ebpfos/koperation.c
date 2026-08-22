@@ -125,6 +125,30 @@ static int ebpfos_kprog_control_instantiate(u64 payload,
 	return 3;
 }
 
+static int ebpfos_kprog_control_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_koperation_descriptor *operation;
+	struct ebpfos_kprog_control_payload decoded;
+	int error;
+
+	if (!capability_mask || !effect_mask || !semantic_sha256)
+		return -EINVAL;
+	error = ebpfos_kprog_control_decode(payload, &decoded);
+	if (error)
+		return error;
+	operation = ebpfos_koperation_find(
+		EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
+	if (!operation)
+		return -ENOENT;
+	*capability_mask = EBPFOS_CAP_KPROG_MACHINE_ROOT;
+	*effect_mask = EBPFOS_EFFECT_KPROG_MACHINE_STATE;
+	memcpy(semantic_sha256, operation->semantic_sha256,
+	       SHA256_DIGEST_SIZE);
+	return 0;
+}
+
 static u8 ebpfos_kprog_x86_reg_code(u8 reg)
 {
 	static const u8 codes[] = {
@@ -213,6 +237,7 @@ static struct bpf_kop ebpfos_kprog_control = {
 	.max_emit_bytes = 64,
 	.capability_mask = EBPFOS_CAP_KPROG_MACHINE_ROOT,
 	.effect_mask = EBPFOS_EFFECT_KPROG_MACHINE_STATE,
+	.requirements = ebpfos_kprog_control_requirements,
 	.instantiate_insn = ebpfos_kprog_control_instantiate,
 	.emit_x86 = ebpfos_kprog_control_emit_x86,
 };
