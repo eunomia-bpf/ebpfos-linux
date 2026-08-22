@@ -17,6 +17,7 @@
 #include <linux/overflow.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/seqlock.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -150,6 +151,14 @@ EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, grant_id, 1056);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, content_digest, 1072);
 static_assert(sizeof(struct ebpfos_ioc_admission_info) == 1152);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_info, descriptor, 128);
+static_assert(sizeof(struct ebpfos_ioc_admission_runtime_info) == 96);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, map_rehashes, 24);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
+			     invocation_entries, 32);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, content_digest, 40);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, retired_epoch, 72);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
+		     entries_at_publication, 80);
 static_assert(sizeof(struct ebpfos_ioc_file_replace_begin_v2) == 160);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_file_replace_begin_v2,
 		     expected_active_content_digest, 32);
@@ -187,6 +196,8 @@ static_assert((BPF_F_EBPFOS_META | BPF_F_SLEEPABLE) ==
 	      EBPFOS_EXECUTOR_ROOT_PROG_FLAGS);
 static_assert(sizeof(struct ebpfos_executor_root_manifest) ==
 	      BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE);
+static_assert(sizeof(struct ebpfos_executor_import_manifest) ==
+	      BPF_EBPFOS_EXECUTOR_IMPORT_MANIFEST_VALUE_SIZE);
 static_assert(EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ==
 	      sizeof(u32) * 2 +
 	      sizeof(struct ebpfos_executor_root_publish_request) +
@@ -298,32 +309,10 @@ struct ebpfos_prog_identity {
 	refcount_t refs;
 	u32 seal_state;
 	struct ebpfos_component_desc_v1 descriptor;
+	struct ebpfos_executor_import_manifest *imports;
 	u8 content_digest[SHA256_DIGEST_SIZE];
 	u8 program_digest[SHA256_DIGEST_SIZE];
 	u8 map_digest[SHA256_DIGEST_SIZE];
-};
-
-struct ebpfos_binding {
-	refcount_t refs;
-	struct bpf_prog *prog;
-	struct bpf_map *map;
-	struct ebpfos_prog_identity *prog_identity;
-	u64 grant_id;
-	u64 policy_generation;
-	u64 runtime_schema;
-	u32 kind;
-	u32 use;
-	u32 prog_id;
-	u32 map_id;
-	u8 realm_id[16];
-	u8 policy_digest[SHA256_DIGEST_SIZE];
-	u8 content_digest[SHA256_DIGEST_SIZE];
-	u8 program_digest[SHA256_DIGEST_SIZE];
-	u8 map_digest[SHA256_DIGEST_SIZE];
-	u8 contract_sha256[SHA256_DIGEST_SIZE];
-	u8 abstract_schema_sha256[SHA256_DIGEST_SIZE];
-	u8 concrete_schema_sha256[SHA256_DIGEST_SIZE];
-	u8 authority_sha256[SHA256_DIGEST_SIZE];
 };
 
 struct ebpfos_admission {
@@ -351,6 +340,9 @@ static u64 ebpfos_staged_grants;
 static u64 ebpfos_legacy_bindings;
 static DEFINE_SPINLOCK(ebpfos_grant_id_lock);
 static u64 ebpfos_next_grant_id;
+static u64 ebpfos_active_policy_generation;
+static seqcount_mutex_t ebpfos_policy_epoch_seq =
+	SEQCNT_MUTEX_ZERO(ebpfos_policy_epoch_seq, &ebpfos_publish_gate);
 
 static const struct file_operations ebpfos_admission_fops;
 
@@ -362,6 +354,125 @@ static bool ebpfos_all_zero(const void *data, size_t size)
 static bool ebpfos_nonzero(const void *data, size_t size)
 {
 	return !!memchr_inv(data, 0, size);
+}
+
+static u64 ebpfos_discriminator_width_mask(u32 size)
+{
+	switch (size) {
+	case 1:
+		return U8_MAX;
+	case 2:
+		return U16_MAX;
+	case 4:
+		return U32_MAX;
+	case 8:
+		return U64_MAX;
+	default:
+		return 0;
+	}
+}
+
+static int ebpfos_executor_import_manifest_validate(
+	const struct ebpfos_executor_import_manifest *manifest,
+	const struct ebpfos_component_desc_v1 *caller)
+{
+	u64 authority = 0, effects = 0;
+	u64 prior_object = 0, prior_role = 0;
+	u32 prior_method = 0;
+	u32 index;
+
+	if (!manifest || !caller ||
+	    manifest->version != EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION ||
+	    !manifest->import_count ||
+	    manifest->import_count > EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES ||
+	    manifest->flags || manifest->reserved ||
+	    !ebpfos_nonzero(manifest->provenance_digest,
+			    sizeof(manifest->provenance_digest)))
+		return -EPROTO;
+	for (index = 0; index < EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES; index++) {
+		const struct ebpfos_executor_import *entry =
+			&manifest->imports[index];
+
+		if (index >= manifest->import_count) {
+			if (memchr_inv(entry, 0, sizeof(*entry)))
+				return -EPROTO;
+			continue;
+		}
+		if (!entry->object_id || !entry->role_type ||
+		    !entry->provider_type_id || !entry->runtime_schema ||
+		    !entry->call_abi_id || !entry->context_size ||
+		    entry->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
+		    entry->flags || !entry->method_id || entry->reserved ||
+		    (entry->discriminator_size != 1 &&
+		     entry->discriminator_size != 2 &&
+		     entry->discriminator_size != 4 &&
+		     entry->discriminator_size != 8) ||
+		    entry->discriminator_offset > entry->context_size ||
+		    entry->discriminator_size > entry->context_size -
+			entry->discriminator_offset ||
+		    !entry->discriminator_mask ||
+		    entry->discriminator_mask &
+			~ebpfos_discriminator_width_mask(entry->discriminator_size) ||
+		    entry->discriminator_value & ~entry->discriminator_mask ||
+		    !ebpfos_nonzero(entry->contract_digest,
+				    sizeof(entry->contract_digest)) ||
+		    !ebpfos_nonzero(entry->prototype_digest,
+				    sizeof(entry->prototype_digest)) ||
+		    entry->authority_ceiling & ~manifest->authority_ceiling ||
+		    entry->effect_ceiling & ~manifest->effect_ceiling ||
+		    (index && (entry->object_id < prior_object ||
+			       (entry->object_id == prior_object &&
+				(entry->role_type < prior_role ||
+				 (entry->role_type == prior_role &&
+				  entry->method_id <= prior_method))))))
+			return -EPROTO;
+		authority |= entry->authority_ceiling;
+		effects |= entry->effect_ceiling;
+		prior_object = entry->object_id;
+		prior_role = entry->role_type;
+		prior_method = entry->method_id;
+	}
+	if (authority != manifest->authority_ceiling ||
+	    effects != manifest->effect_ceiling ||
+	    authority & ~le64_to_cpu(caller->capability_mask) ||
+	    effects & ~le64_to_cpu(caller->effect_mask))
+		return -EACCES;
+	return 0;
+}
+
+static int ebpfos_executor_import_manifest_copy(
+	struct bpf_map *map, const struct ebpfos_component_desc_v1 *descriptor,
+	struct ebpfos_executor_import_manifest **result)
+{
+	struct ebpfos_executor_import_manifest *copy;
+	const void *value;
+	u32 key = 0;
+	int error;
+
+	if (le32_to_cpu(descriptor->use) !=
+	    EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER) {
+		*result = NULL;
+		return 0;
+	}
+	copy = kmalloc_obj(*copy, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	rcu_read_lock();
+	value = map->ops->map_lookup_elem(map, &key);
+	if (value)
+		memcpy(copy, value, sizeof(*copy));
+	rcu_read_unlock();
+	if (!value) {
+		kfree(copy);
+		return -EPROTO;
+	}
+	error = ebpfos_executor_import_manifest_validate(copy, descriptor);
+	if (error) {
+		kfree(copy);
+		return error;
+	}
+	*result = copy;
+	return 0;
 }
 
 static void ebpfos_hash_parts(const u8 *domain, size_t domain_size,
@@ -601,29 +712,32 @@ static int ebpfos_validate_executor_root_descriptor(
 {
 	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
 	u32 context_size = le32_to_cpu(descriptor->context_size);
-	u64 logical_bytes = sizeof(u32) +
-			    sizeof(struct ebpfos_executor_root_manifest);
-	u64 canonical_bytes = round_up(
-		sizeof(struct ebpfos_executor_root_manifest), 8U);
+	u32 use = le32_to_cpu(descriptor->use);
+	u32 value_size;
+	u64 logical_bytes;
+	u64 canonical_bytes;
 	u32 policy_flags = le32_to_cpu(policy->flags);
 	u32 flags = le32_to_cpu(descriptor->flags);
+	u64 capability_mask = le64_to_cpu(descriptor->capability_mask);
+	u64 effect_mask = le64_to_cpu(descriptor->effect_mask);
+	bool publisher = use == EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER;
+	bool caller = use == EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER;
 
 	if (!(le32_to_cpu(policy->domain_mask) &
 	      EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK) ||
 	    !(le64_to_cpu(policy->verifier_profile_mask) &
 	      EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK) ||
-	    !(le64_to_cpu(policy->capability_ceiling) &
-	      EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) ||
-	    !(le64_to_cpu(policy->effect_ceiling) &
-	      EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT))
+	    (!publisher && !caller))
+		return -EACCES;
+	if (capability_mask & ~le64_to_cpu(policy->capability_ceiling) ||
+	    effect_mask & ~le64_to_cpu(policy->effect_ceiling))
 		return -EACCES;
 	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
 	    !!(flags & EBPFOS_COMPONENT_F_TEST_ONLY) !=
 		!!(policy_flags & EBPFOS_POLICY_F_TEST_ONLY) ||
 	    le32_to_cpu(descriptor->domain) !=
 		EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT ||
-	    le32_to_cpu(descriptor->use) !=
-		EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER ||
+	    le32_to_cpu(descriptor->use) != use ||
 	    le32_to_cpu(descriptor->code_format) !=
 		EBPFOS_COMPONENT_CODE_BPF_ELF ||
 	    le32_to_cpu(descriptor->verifier_profile) !=
@@ -639,13 +753,18 @@ static int ebpfos_validate_executor_root_descriptor(
 	    memcmp(descriptor->host_policy_sha256, policy->host_policy_sha256,
 		   SHA256_DIGEST_SIZE))
 		return -ESTALE;
-	if (memcmp(descriptor->component_id,
-		   ebpfos_executor_root_component_id,
-		   sizeof(descriptor->component_id)) ||
-	    le64_to_cpu(descriptor->component_version) != 1 ||
-	    le64_to_cpu(descriptor->provider_type_id) !=
-		EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE ||
-	    le64_to_cpu(descriptor->transition_id) != 1 ||
+	if ((publisher && memcmp(descriptor->component_id,
+				 ebpfos_executor_root_component_id,
+				 sizeof(descriptor->component_id))) ||
+	    (caller && !ebpfos_nonzero(descriptor->component_id,
+				      sizeof(descriptor->component_id))) ||
+	    (publisher && le64_to_cpu(descriptor->component_version) != 1) ||
+	    (caller && !le64_to_cpu(descriptor->component_version)) ||
+	    (publisher && le64_to_cpu(descriptor->provider_type_id) !=
+			  EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE) ||
+	    (caller && !le64_to_cpu(descriptor->provider_type_id)) ||
+	    (publisher && le64_to_cpu(descriptor->transition_id) != 1) ||
+	    (caller && !le64_to_cpu(descriptor->transition_id)) ||
 	    !le64_to_cpu(descriptor->predecessor_policy_generation) ||
 	    !ebpfos_nonzero(descriptor->predecessor_policy_digest,
 			    SHA256_DIGEST_SIZE) ||
@@ -666,18 +785,21 @@ static int ebpfos_validate_executor_root_descriptor(
 	    !ebpfos_nonzero(descriptor->initial_map_sha256,
 			    SHA256_DIGEST_SIZE))
 		return -EINVAL;
-	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_EXECUTOR_ROOT_ABI_ID ||
-	    le32_to_cpu(descriptor->abi_version) !=
-		EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
-	    context_size < sizeof(struct ebpfos_executor_root_publish_request) +
-			   sizeof(struct ebpfos_executor_root_role_request) ||
+	if (le64_to_cpu(descriptor->abi_id) !=
+			(publisher ? EBPFOS_EXECUTOR_ROOT_ABI_ID :
+			 EBPFOS_EXECUTOR_IMPORT_ABI_ID) ||
+	    le32_to_cpu(descriptor->abi_version) != 1 ||
+	    context_size < (publisher ?
+			   sizeof(struct ebpfos_executor_root_publish_request) +
+			   sizeof(struct ebpfos_executor_root_role_request) :
+			   sizeof(struct ebpfos_executor_call)) ||
 	    context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
 	    le64_to_cpu(descriptor->runtime_schema_u64) !=
-		EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA ||
-	    le64_to_cpu(descriptor->capability_mask) !=
-		EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY ||
-	    le64_to_cpu(descriptor->effect_mask) !=
-		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT ||
+		(publisher ? EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA :
+		 EBPFOS_EXECUTOR_IMPORT_MANIFEST_SCHEMA) ||
+	    (publisher && capability_mask !=
+			  EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY) ||
+	    (publisher && effect_mask != EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT) ||
 	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL ||
 	    le32_to_cpu(descriptor->semantic_prog_flags) !=
 		EBPFOS_EXECUTOR_ROOT_PROG_FLAGS)
@@ -698,12 +820,15 @@ static int ebpfos_validate_executor_root_descriptor(
 	    le64_to_cpu(descriptor->max_call_bytes) != context_size ||
 	    context_size > le64_to_cpu(policy->max_call_bytes))
 		return -ERANGE;
+	value_size = publisher ? sizeof(struct ebpfos_executor_root_manifest) :
+			       sizeof(struct ebpfos_executor_import_manifest);
+	logical_bytes = sizeof(u32) + value_size;
+	canonical_bytes = round_up(value_size, 8U);
 	if (le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP ||
 	    le32_to_cpu(resource->flags) != EBPFOS_RESOURCE_F_ALL ||
 	    le32_to_cpu(resource->map_type) != BPF_MAP_TYPE_ARRAY ||
 	    le32_to_cpu(resource->key_size) != sizeof(u32) ||
-	    le32_to_cpu(resource->value_size) !=
-		sizeof(struct ebpfos_executor_root_manifest) ||
+	    le32_to_cpu(resource->value_size) != value_size ||
 	    le32_to_cpu(resource->max_entries) != 1 ||
 	    le32_to_cpu(resource->map_flags) ||
 	    le32_to_cpu(resource->reserved0) ||
@@ -732,7 +857,7 @@ static int ebpfos_validate_descriptor(
 	u64 expected_capabilities = EBPFOS_CAP_FILE_ALL;
 	const u8 *expected_concrete_schema;
 	u64 expected_schema;
-	bool test_use;
+	bool test_use = use >= EBPFOS_COMPONENT_USE_RECOVERY_E2;
 	int error;
 
 	if (memcmp(descriptor->magic, EBPFOS_COMPONENT_DESC_V1_MAGIC,
@@ -828,7 +953,6 @@ static int ebpfos_validate_descriptor(
 	default:
 		return -EPROTOTYPE;
 	}
-	test_use = use >= EBPFOS_COMPONENT_USE_RECOVERY_E2;
 	if (!!(policy_flags & EBPFOS_POLICY_F_TEST_ONLY) != test_use)
 		return -EACCES;
 	if (memcmp(descriptor->realm_id, policy->realm_id,
@@ -842,7 +966,8 @@ static int ebpfos_validate_descriptor(
 		return -ESTALE;
 	if (memcmp(descriptor->component_id, ebpfos_file_component_id,
 		   sizeof(descriptor->component_id)) ||
-	    le64_to_cpu(descriptor->component_version) != 1 ||
+	    (!test_use && le64_to_cpu(descriptor->component_version) != 1) ||
+	    (test_use && !le64_to_cpu(descriptor->component_version)) ||
 	    le64_to_cpu(descriptor->provider_type_id) !=
 		expected_provider_type ||
 	    le64_to_cpu(descriptor->transition_id) != expected_transition ||
@@ -1009,8 +1134,10 @@ ebpfos_prog_identity_get(struct ebpfos_prog_identity *identity)
 
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity)
 {
-	if (identity && refcount_dec_and_test(&identity->refs))
+	if (identity && refcount_dec_and_test(&identity->refs)) {
+		kfree(identity->imports);
 		kfree(identity);
+	}
 }
 
 struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding)
@@ -1030,6 +1157,92 @@ void ebpfos_binding_put(struct ebpfos_binding *binding)
 		bpf_map_put(binding->map);
 	ebpfos_prog_identity_put(binding->prog_identity);
 	kfree(binding);
+}
+
+#define EBPFOS_BINDING_ACTIVE_BITS 16
+#define EBPFOS_BINDING_ACTIVE_MASK ((1ULL << EBPFOS_BINDING_ACTIVE_BITS) - 1)
+#define EBPFOS_BINDING_ENTRY_ONE (1ULL << EBPFOS_BINDING_ACTIVE_BITS)
+#define EBPFOS_BINDING_ENTRY_BITS 47
+#define EBPFOS_BINDING_ENTRY_MASK \
+	(((1ULL << EBPFOS_BINDING_ENTRY_BITS) - 1) << \
+	 EBPFOS_BINDING_ACTIVE_BITS)
+#define EBPFOS_BINDING_RETIRED BIT_ULL(63)
+
+static void ebpfos_binding_decode_invocation_state(u64 state, u32 *active,
+						   u64 *entries)
+{
+	*active = (u32)(state & EBPFOS_BINDING_ACTIVE_MASK);
+	*entries = (state & EBPFOS_BINDING_ENTRY_MASK) >>
+		EBPFOS_BINDING_ACTIVE_BITS;
+}
+
+int ebpfos_binding_invocation_enter(struct ebpfos_binding *binding)
+{
+	u64 old, new;
+
+	if (!binding)
+		return -EINVAL;
+	do {
+		old = atomic64_read(&binding->invocation_state);
+		if (old & EBPFOS_BINDING_RETIRED)
+			return -ESHUTDOWN;
+		if ((old & EBPFOS_BINDING_ACTIVE_MASK) ==
+		    EBPFOS_BINDING_ACTIVE_MASK ||
+		    (old & EBPFOS_BINDING_ENTRY_MASK) ==
+		    EBPFOS_BINDING_ENTRY_MASK)
+			return -EOVERFLOW;
+		new = old + EBPFOS_BINDING_ENTRY_ONE + 1;
+	} while (atomic64_cmpxchg(&binding->invocation_state, old, new) != old);
+	return 0;
+}
+
+void ebpfos_binding_invocation_exit(struct ebpfos_binding *binding)
+{
+	u64 old, new;
+
+	if (!binding)
+		return;
+	do {
+		old = atomic64_read(&binding->invocation_state);
+		if (WARN_ON_ONCE(!(old & EBPFOS_BINDING_ACTIVE_MASK)))
+			return;
+		new = old - 1;
+	} while (atomic64_cmpxchg(&binding->invocation_state, old, new) != old);
+}
+
+u32 ebpfos_binding_active_invocations(const struct ebpfos_binding *binding)
+{
+	return binding ? (u32)(atomic64_read(&binding->invocation_state) &
+			       EBPFOS_BINDING_ACTIVE_MASK) : 0;
+}
+
+u64 ebpfos_binding_invocation_entries(const struct ebpfos_binding *binding)
+{
+	return binding ? (atomic64_read(&binding->invocation_state) &
+		EBPFOS_BINDING_ENTRY_MASK) >> EBPFOS_BINDING_ACTIVE_BITS : 0;
+}
+
+bool ebpfos_binding_is_retired(const struct ebpfos_binding *binding)
+{
+	return binding && (atomic64_read(&binding->invocation_state) &
+			   EBPFOS_BINDING_RETIRED);
+}
+
+void ebpfos_binding_retire(struct ebpfos_binding *binding, u64 epoch)
+{
+	u64 old, new;
+
+	if (!binding || !epoch)
+		return;
+	do {
+		old = atomic64_read(&binding->invocation_state);
+		if (WARN_ON_ONCE(old & EBPFOS_BINDING_RETIRED))
+			return;
+		new = old | EBPFOS_BINDING_RETIRED;
+	} while (atomic64_cmpxchg(&binding->invocation_state, old, new) != old);
+	/* One immutable pre-retirement word backs both decoded UAPI fields. */
+	WRITE_ONCE(binding->retirement_snapshot, old);
+	smp_store_release(&binding->retired_epoch, epoch);
 }
 
 static void ebpfos_admission_release_kref(struct kref *ref)
@@ -1094,6 +1307,8 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map *map,
 	if (!binding)
 		return NULL;
 	refcount_set(&binding->refs, 1);
+	atomic64_set(&binding->invocation_state, 0);
+	atomic64_set(&binding->map_rehashes, 0);
 	binding->prog = prog;
 	binding->map = map;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
@@ -1143,6 +1358,7 @@ int ebpfos_native_binding_create_locked(struct ebpfos_binding **result)
 	if (!binding)
 		return -ENOMEM;
 	refcount_set(&binding->refs, 1);
+	atomic64_set(&binding->invocation_state, 0);
 	binding->policy_generation =
 		le64_to_cpu(ebpfos_policy.record.generation);
 	binding->runtime_schema = EBPFOS_FILE_SCHEMA_NATIVE;
@@ -1444,9 +1660,12 @@ long ebpfos_policy_activate_ioctl(void __user *argp)
 		if (error)
 			goto out_unlock;
 	}
+	write_seqcount_begin(&ebpfos_policy_epoch_seq);
 	ebpfos_policy.record = request.record;
 	memcpy(ebpfos_policy.digest, digest, sizeof(ebpfos_policy.digest));
+	WRITE_ONCE(ebpfos_active_policy_generation, generation);
 	WRITE_ONCE(ebpfos_policy.state, EBPFOS_POLICY_ACTIVE);
+	write_seqcount_end(&ebpfos_policy_epoch_seq);
 	error = 0;
 out_unlock:
 	mutex_unlock(&ebpfos_publish_gate);
@@ -1560,6 +1779,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct ebpfos_prog_identity *identity = NULL;
 	struct ebpfos_admission *admission = NULL;
 	struct ebpfos_binding *binding = NULL;
+	struct ebpfos_executor_import_manifest *imports = NULL;
 	struct bpf_prog *prog = NULL;
 	struct bpf_map *map = NULL;
 	struct file *admission_file = NULL;
@@ -1613,17 +1833,23 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		error = -EKEYREJECTED;
 		goto out_put_map;
 	}
+	error = ebpfos_executor_import_manifest_copy(map, &request.descriptor,
+						     &imports);
+	if (error)
+		goto out_put_map;
 	ebpfos_descriptor_content_digest(&request.descriptor, content_digest);
 	error = ebpfos_grant_id_alloc(&grant_id);
 	if (error)
-		goto out_put_map;
+		goto out_free_imports;
 	identity = ebpfos_prog_identity_alloc(&request.descriptor,
 					      content_digest, prog->digest,
 					      map_digest);
 	if (!identity) {
 		error = -ENOMEM;
-		goto out_put_map;
+		goto out_free_imports;
 	}
+	identity->imports = imports;
+	imports = NULL;
 	binding = ebpfos_binding_alloc_bpf(prog, map, identity, grant_id);
 	if (!binding) {
 		error = -ENOMEM;
@@ -1729,6 +1955,8 @@ out_put_binding:
 	ebpfos_binding_put(binding);
 out_put_identity:
 	ebpfos_prog_identity_put(identity);
+out_free_imports:
+	kfree(imports);
 out_put_map:
 	if (map)
 		bpf_map_put(map);
@@ -1817,6 +2045,56 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
+long ebpfos_admission_runtime_info_ioctl(void __user *argp)
+{
+	struct ebpfos_ioc_admission_runtime_info request;
+	struct ebpfos_admission *admission;
+	struct ebpfos_binding *binding;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_ADMISSION_RUNTIME_INFO_VERSION ||
+	    request.flags || request.prog_id || request.map_id ||
+	    request.active_invocations || request.map_rehashes ||
+	    request.invocation_entries ||
+	    memchr_inv(request.content_digest, 0, sizeof(request.content_digest)) ||
+	    request.retired_epoch || request.entries_at_publication ||
+	    request.active_at_publication ||
+	    request.reserved2)
+		return -EINVAL;
+	admission = ebpfos_admission_get_from_fd(request.admission_fd);
+	if (IS_ERR(admission))
+		return PTR_ERR(admission);
+	binding = admission->binding;
+	request.prog_id = binding->prog_id;
+	request.map_id = binding->map_id;
+	request.map_rehashes = atomic64_read(&binding->map_rehashes);
+	/* Both values are decoded from one atomic snapshot. */
+	{
+		u64 state = atomic64_read(&binding->invocation_state);
+
+		ebpfos_binding_decode_invocation_state(
+			state, &request.active_invocations,
+			&request.invocation_entries);
+	}
+	memcpy(request.content_digest, binding->content_digest,
+	       sizeof(request.content_digest));
+	request.retired_epoch = smp_load_acquire(&binding->retired_epoch);
+	if (request.retired_epoch) {
+		u64 snapshot = READ_ONCE(binding->retirement_snapshot);
+
+		request.active_at_publication =
+			(u32)(snapshot & EBPFOS_BINDING_ACTIVE_MASK);
+		request.entries_at_publication =
+			(snapshot & EBPFOS_BINDING_ENTRY_MASK) >>
+			EBPFOS_BINDING_ACTIVE_BITS;
+	}
+	ebpfos_admission_put(admission);
+	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
+}
+
 static bool ebpfos_admission_current_locked(
 	const struct ebpfos_admission *admission)
 {
@@ -1852,6 +2130,8 @@ static int ebpfos_admission_owner_recheck(
 	if (READ_ONCE(binding->prog_identity->seal_state) !=
 	    EBPFOS_PROG_SEALED)
 		return -EKEYREJECTED;
+	if (calculate_hash)
+		atomic64_inc(&binding->map_rehashes);
 	error = ebpfos_measure_map(binding->prog, binding->map,
 				   &binding->prog_identity->descriptor,
 				   binding->prog_identity, calculate_hash,
@@ -1885,6 +2165,22 @@ static bool ebpfos_executor_root_publisher_descriptor(
 		EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT;
 }
 
+static bool ebpfos_executor_import_caller_descriptor(
+	const struct ebpfos_component_desc_v1 *descriptor)
+{
+	return descriptor &&
+	       le32_to_cpu(descriptor->domain) ==
+		EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT &&
+	       le32_to_cpu(descriptor->use) ==
+		EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER &&
+	       le32_to_cpu(descriptor->verifier_profile) ==
+		EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT &&
+	       le64_to_cpu(descriptor->abi_id) == EBPFOS_EXECUTOR_IMPORT_ABI_ID &&
+	       le32_to_cpu(descriptor->abi_version) == 1 &&
+	       le64_to_cpu(descriptor->runtime_schema_u64) ==
+		EBPFOS_EXECUTOR_IMPORT_MANIFEST_SCHEMA;
+}
+
 bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog)
 {
 	struct ebpfos_prog_identity *identity;
@@ -1897,6 +2193,28 @@ bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog)
 	identity = READ_ONCE(prog->aux->ebpfos_identity);
 	if (identity && READ_ONCE(identity->seal_state) == EBPFOS_PROG_SEALED &&
 	    ebpfos_executor_root_publisher_descriptor(&identity->descriptor) &&
+	    ebpfos_policy_matches_locked(
+		le64_to_cpu(identity->descriptor.policy_generation),
+		identity->descriptor.realm_id,
+		identity->descriptor.policy_record_digest))
+		allowed = true;
+	mutex_unlock(&ebpfos_publish_gate);
+	return allowed;
+}
+
+bool ebpfos_admission_meta_program(const struct bpf_prog *prog)
+{
+	struct ebpfos_prog_identity *identity;
+	bool allowed = false;
+
+	if (!prog || !prog->aux || !prog->aux->ebpfos_meta ||
+	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable)
+		return false;
+	mutex_lock(&ebpfos_publish_gate);
+	identity = READ_ONCE(prog->aux->ebpfos_identity);
+	if (identity && READ_ONCE(identity->seal_state) == EBPFOS_PROG_SEALED &&
+	    (ebpfos_executor_root_publisher_descriptor(&identity->descriptor) ||
+	     ebpfos_executor_import_caller_descriptor(&identity->descriptor)) &&
 	    ebpfos_policy_matches_locked(
 		le64_to_cpu(identity->descriptor.policy_generation),
 		identity->descriptor.realm_id,
@@ -1981,6 +2299,129 @@ int ebpfos_admission_root_publisher_validate_locked(
 	return 0;
 }
 
+static int ebpfos_executor_import_manifest_find(
+	const struct ebpfos_executor_import_manifest *manifest,
+	u64 object_id, u64 role_type, u32 method_id,
+	struct ebpfos_executor_import *matched)
+{
+	u32 low = 0, high;
+
+	if (!manifest || !matched)
+		return -EINVAL;
+	high = manifest->import_count;
+	while (low < high) {
+		const struct ebpfos_executor_import *entry;
+		u32 middle = low + (high - low) / 2;
+
+		entry = &manifest->imports[middle];
+		if (entry->object_id < object_id ||
+		    (entry->object_id == object_id &&
+		     (entry->role_type < role_type ||
+		      (entry->role_type == role_type &&
+		       entry->method_id < method_id)))) {
+			low = middle + 1;
+			continue;
+		}
+		if (entry->object_id > object_id ||
+		    (entry->object_id == object_id &&
+		     (entry->role_type > role_type ||
+		      (entry->role_type == role_type &&
+		       entry->method_id > method_id)))) {
+			high = middle;
+			continue;
+		}
+		*matched = *entry;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+static int ebpfos_executor_import_provider_validate(
+	const struct ebpfos_executor_import *import,
+	const struct ebpfos_component_desc_v1 *caller,
+	const struct ebpfos_component_desc_v1 *provider,
+	const struct ebpfos_executor_root_role_snapshot *role)
+{
+	u64 capabilities;
+
+	if (!import || !caller || !provider || !role)
+		return -EINVAL;
+	if (le64_to_cpu(provider->policy_generation) !=
+		le64_to_cpu(caller->policy_generation) ||
+	    memcmp(provider->realm_id, caller->realm_id,
+		   sizeof(provider->realm_id)) ||
+	    memcmp(provider->policy_record_digest,
+		   caller->policy_record_digest, SHA256_DIGEST_SIZE) ||
+	    memcmp(provider->host_policy_sha256,
+		   caller->host_policy_sha256, SHA256_DIGEST_SIZE))
+		return -ESTALE;
+	capabilities = le64_to_cpu(provider->capability_mask);
+	if (role->provider_type_id != import->provider_type_id ||
+	    role->schema != import->runtime_schema ||
+	    memcmp(role->contract_digest, import->contract_digest,
+		   SHA256_DIGEST_SIZE) ||
+	    le64_to_cpu(provider->provider_type_id) != import->provider_type_id ||
+	    le64_to_cpu(provider->runtime_schema_u64) != import->runtime_schema ||
+	    le64_to_cpu(provider->abi_id) != import->call_abi_id ||
+	    le32_to_cpu(provider->context_size) != import->context_size ||
+	    memcmp(provider->contract_sha256, import->contract_digest,
+		   SHA256_DIGEST_SIZE) ||
+	    memcmp(provider->interface_sha256, import->prototype_digest,
+		   SHA256_DIGEST_SIZE))
+		return -EPROTOTYPE;
+	if (role->authority != capabilities ||
+	    capabilities & ~import->authority_ceiling ||
+	    le64_to_cpu(provider->effect_mask) & ~import->effect_ceiling)
+		return -EACCES;
+	return 0;
+}
+
+int ebpfos_admission_import_validate(
+	struct bpf_prog_aux *aux, u64 object_id, u64 role_type, u32 method_id,
+	const struct ebpfos_component_desc_v1 *provider,
+	const struct ebpfos_executor_root_role_snapshot *role,
+	struct ebpfos_executor_import *matched)
+{
+	struct ebpfos_prog_identity *identity;
+	const struct ebpfos_executor_import_manifest *manifest;
+	const struct ebpfos_component_desc_v1 *caller;
+	u64 active_generation;
+	u32 policy_state;
+	unsigned int sequence;
+	int error;
+
+	if (!aux || !aux->prog || !provider || !role || !matched ||
+	    !object_id || !role_type || !method_id)
+		return -EINVAL;
+	if (!aux->ebpfos_meta || aux->prog->type != BPF_PROG_TYPE_SYSCALL ||
+	    !aux->prog->sleepable)
+		return -EACCES;
+	identity = READ_ONCE(aux->ebpfos_identity);
+	if (!identity || READ_ONCE(identity->seal_state) != EBPFOS_PROG_SEALED ||
+	    !identity->imports)
+		return -EKEYREJECTED;
+	caller = &identity->descriptor;
+	do {
+		sequence = read_seqcount_begin(&ebpfos_policy_epoch_seq);
+		policy_state = READ_ONCE(ebpfos_policy.state);
+		active_generation = READ_ONCE(ebpfos_active_policy_generation);
+	} while (read_seqcount_retry(&ebpfos_policy_epoch_seq, sequence));
+	if (!ebpfos_executor_import_caller_descriptor(caller) ||
+	    policy_state != EBPFOS_POLICY_ACTIVE ||
+	    active_generation != le64_to_cpu(caller->policy_generation))
+		return -EACCES;
+	manifest = identity->imports;
+	error = ebpfos_executor_import_manifest_find(
+		manifest, object_id, role_type, method_id, matched);
+	if (error)
+		return error;
+	error = ebpfos_executor_import_provider_validate(
+		matched, caller, provider, role);
+	if (error)
+		return error;
+	return 0;
+}
+
 int ebpfos_admission_stage_bundle_locked(
 	struct ebpfos_admission **grants,
 	struct ebpfos_binding *const *predecessors, unsigned int count)
@@ -2015,14 +2456,21 @@ int ebpfos_admission_stage_bundle_locked(
 		if (replacing &&
 		    !ebpfos_predecessor_matches(grant, predecessors[index]))
 			return -EXDEV;
-		error = ebpfos_admission_owner_recheck(grant, true);
-		if (error)
-			return error;
 		spin_lock(&grant->state_lock);
 		state = grant->state;
 		spin_unlock(&grant->state_lock);
 		if (state != EBPFOS_ADMISSION_FRESH)
 			return state == EBPFOS_ADMISSION_STAGED ? -EBUSY : -EALREADY;
+		/*
+		 * Seal measured the frozen map once.  A FRESH grant cannot have
+		 * entered an executor root, provider TEST_RUN is denied, and the
+		 * verifier's sole-owner rule excludes another program or external
+		 * writer.  Recheck that identity, tuple, sole owner, and reachability
+		 * without rereading tens of MiB on the commit path.
+		 */
+		error = ebpfos_admission_owner_recheck(grant, false);
+		if (error)
+			return error;
 	}
 	if (check_add_overflow(ebpfos_staged_grants, (u64)count,
 			       &staged_grants))
@@ -2671,8 +3119,195 @@ static void ebpfos_admission_burn_cleanup_test(struct kunit *test)
 	mutex_unlock(&ebpfos_publish_gate);
 }
 
+static void ebpfos_binding_invocation_counter_test(struct kunit *test)
+{
+	struct ebpfos_binding binding = {};
+	struct ebpfos_binding idle = {};
+	struct ebpfos_binding rollback = {};
+	u64 decoded_entries;
+	u32 decoded_active;
+
+	atomic64_set(&binding.invocation_state, 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 0U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 0ULL);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&binding), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&binding), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 2U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 2ULL);
+	ebpfos_binding_retire(&binding, 4);
+	KUNIT_EXPECT_EQ(test, smp_load_acquire(&binding.retired_epoch), 4ULL);
+	KUNIT_EXPECT_EQ(test,
+		(binding.retirement_snapshot & EBPFOS_BINDING_ENTRY_MASK) >>
+		EBPFOS_BINDING_ACTIVE_BITS, 2ULL);
+	KUNIT_EXPECT_EQ(test, (u32)(binding.retirement_snapshot &
+		EBPFOS_BINDING_ACTIVE_MASK), 2U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&binding),
+		-ESHUTDOWN);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 2ULL);
+	ebpfos_binding_invocation_exit(&binding);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 1U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 2ULL);
+	ebpfos_binding_invocation_exit(&binding);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 0U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 2ULL);
+	KUNIT_EXPECT_TRUE(test, ebpfos_binding_is_retired(&binding));
+	ebpfos_binding_decode_invocation_state(
+		atomic64_read(&binding.invocation_state), &decoded_active,
+		&decoded_entries);
+	KUNIT_EXPECT_EQ(test, decoded_active, 0U);
+	KUNIT_EXPECT_EQ(test, decoded_entries, 2ULL);
+
+	atomic64_set(&idle.invocation_state, 7ULL << EBPFOS_BINDING_ACTIVE_BITS);
+	ebpfos_binding_retire(&idle, 5);
+	KUNIT_EXPECT_EQ(test, smp_load_acquire(&idle.retired_epoch), 5ULL);
+	KUNIT_EXPECT_EQ(test, idle.retirement_snapshot, 7ULL << 16);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&idle), -ESHUTDOWN);
+
+	/* A precommit rollback never closes or observes its candidate binding. */
+	KUNIT_EXPECT_FALSE(test, ebpfos_binding_is_retired(&rollback));
+	KUNIT_EXPECT_EQ(test, READ_ONCE(rollback.retired_epoch), 0ULL);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(rollback.retirement_snapshot), 0ULL);
+
+	atomic64_set(&rollback.invocation_state, EBPFOS_BINDING_ACTIVE_MASK);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&rollback),
+		-EOVERFLOW);
+	atomic64_set(&rollback.invocation_state, EBPFOS_BINDING_ENTRY_MASK);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&rollback),
+		-EOVERFLOW);
+}
+
+static void ebpfos_executor_import_manifest_test(struct kunit *test)
+{
+	struct ebpfos_executor_import_manifest *manifest;
+	struct ebpfos_component_desc_v1 *caller;
+	struct ebpfos_component_desc_v1 *provider;
+	struct ebpfos_executor_root_role_snapshot role = {};
+	struct ebpfos_executor_import matched;
+	struct ebpfos_executor_import *first, *second;
+
+	manifest = kunit_kzalloc(test, sizeof(*manifest), GFP_KERNEL);
+	caller = kunit_kzalloc(test, sizeof(*caller), GFP_KERNEL);
+	provider = kunit_kzalloc(test, sizeof(*provider), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, manifest);
+	KUNIT_ASSERT_NOT_NULL(test, caller);
+	KUNIT_ASSERT_NOT_NULL(test, provider);
+	manifest->version = EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION;
+	manifest->import_count = 2;
+	manifest->authority_ceiling = 3;
+	manifest->effect_ceiling = 5;
+	manifest->provenance_digest[0] = 1;
+	caller->capability_mask = cpu_to_le64(7);
+	caller->effect_mask = cpu_to_le64(7);
+	first = &manifest->imports[0];
+	second = &manifest->imports[1];
+	first->object_id = second->object_id = 7;
+	first->role_type = second->role_type = 9;
+	first->provider_type_id = second->provider_type_id = 11;
+	first->runtime_schema = second->runtime_schema = 12;
+	first->call_abi_id = second->call_abi_id = 13;
+	first->context_size = second->context_size = 64;
+	first->method_id = 1;
+	second->method_id = 2;
+	first->discriminator_size = second->discriminator_size = 4;
+	first->discriminator_mask = second->discriminator_mask = U32_MAX;
+	first->discriminator_value = 1;
+	second->discriminator_value = 2;
+	first->contract_digest[0] = second->contract_digest[0] = 0xaa;
+	first->prototype_digest[0] = second->prototype_digest[0] = 0xbb;
+	second->authority_ceiling = manifest->authority_ceiling;
+	second->effect_ceiling = manifest->effect_ceiling;
+
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_find(
+		manifest, 7, 9, 2, &matched), 0);
+	KUNIT_EXPECT_EQ(test, matched.method_id, 2U);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_find(
+		manifest, 7, 9, 3, &matched), -ENOENT);
+	second->method_id = first->method_id;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->method_id = 2;
+	second->discriminator_size = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->discriminator_size = 4;
+	second->discriminator_offset = second->context_size - 2;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->discriminator_offset = 0;
+	second->discriminator_size = 1;
+	second->discriminator_mask = 0x100;
+	second->discriminator_value = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->discriminator_mask = 0x101;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->discriminator_size = 4;
+	second->discriminator_mask = U32_MAX;
+	second->discriminator_value = 2;
+	manifest->flags = 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	manifest->flags = 0;
+	second->authority_ceiling = 4;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EPROTO);
+	second->authority_ceiling = manifest->authority_ceiling;
+	caller->effect_mask = cpu_to_le64(1);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_manifest_validate(
+		manifest, caller), -EACCES);
+	caller->effect_mask = cpu_to_le64(7);
+
+	provider->provider_type_id = cpu_to_le64(second->provider_type_id);
+	caller->policy_generation = cpu_to_le64(3);
+	provider->policy_generation = caller->policy_generation;
+	caller->realm_id[0] = provider->realm_id[0] = 1;
+	caller->policy_record_digest[0] =
+		provider->policy_record_digest[0] = 2;
+	caller->host_policy_sha256[0] = provider->host_policy_sha256[0] = 3;
+	provider->runtime_schema_u64 = cpu_to_le64(second->runtime_schema);
+	provider->abi_id = cpu_to_le64(second->call_abi_id);
+	provider->context_size = cpu_to_le32(second->context_size);
+	provider->capability_mask = cpu_to_le64(second->authority_ceiling);
+	provider->effect_mask = cpu_to_le64(second->effect_ceiling);
+	memcpy(provider->contract_sha256, second->contract_digest,
+	       SHA256_DIGEST_SIZE);
+	memcpy(provider->interface_sha256, second->prototype_digest,
+	       SHA256_DIGEST_SIZE);
+	role.provider_type_id = second->provider_type_id;
+	role.schema = second->runtime_schema;
+	role.authority = second->authority_ceiling;
+	memcpy(role.contract_digest, second->contract_digest,
+	       SHA256_DIGEST_SIZE);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), 0);
+	provider->policy_generation = cpu_to_le64(4);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), -ESTALE);
+	provider->policy_generation = caller->policy_generation;
+	role.schema++;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), -EPROTOTYPE);
+	role.schema--;
+	provider->interface_sha256[0]++;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), -EPROTOTYPE);
+	provider->interface_sha256[0]--;
+	provider->effect_mask = cpu_to_le64(second->effect_ceiling | 8);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), -EACCES);
+	provider->effect_mask = cpu_to_le64(second->effect_ceiling);
+	role.authority++;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_import_provider_validate(
+		second, caller, provider, &role), -EACCES);
+}
+
 static struct kunit_case ebpfos_admission_cases[] = {
 	KUNIT_CASE(ebpfos_admission_burn_cleanup_test),
+	KUNIT_CASE(ebpfos_binding_invocation_counter_test),
+	KUNIT_CASE(ebpfos_executor_import_manifest_test),
 	{},
 };
 

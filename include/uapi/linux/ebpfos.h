@@ -1098,6 +1098,24 @@ struct ebpfos_ioc_admission_info {
 	struct ebpfos_component_desc_v1 descriptor;
 };
 
+#define EBPFOS_ADMISSION_RUNTIME_INFO_VERSION 1U
+
+struct ebpfos_ioc_admission_runtime_info {
+	__s32 admission_fd;
+	__u32 version;
+	__u32 flags;
+	__u32 prog_id;
+	__u32 map_id;
+	__u32 active_invocations;
+	__u64 map_rehashes;
+	__u64 invocation_entries;
+	__u8 content_digest[32];
+	__u64 retired_epoch;
+	__u64 entries_at_publication;
+	__u32 active_at_publication;
+	__u32 reserved2;
+};
+
 struct ebpfos_ioc_state_adapter_seal {
 	__s32 source_reader_admission_fd;
 	__s32 source_writer_admission_fd;
@@ -1276,6 +1294,8 @@ struct ebpfos_ioc_file_admission_status {
 	_IOW(EBPFOS_IOC_MAGIC, 0x36, struct ebpfos_ioc_file_recovery_arm_v2)
 #define EBPFOS_IOC_FILE_ADMISSION_STATUS \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x37, struct ebpfos_ioc_file_admission_status)
+#define EBPFOS_IOC_ADMISSION_RUNTIME_INFO \
+	_IOWR(EBPFOS_IOC_MAGIC, 0x38, struct ebpfos_ioc_admission_runtime_info)
 #define EBPFOS_IOC_STATE_ADAPTER_SEAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x3b, struct ebpfos_ioc_state_adapter_seal)
 #define EBPFOS_IOC_STATE_ADAPTER_INFO \

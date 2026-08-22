@@ -4818,7 +4818,7 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 		return PTR_ERR(prog);
 	if (prog->aux->ebpfos_provider ||
 	    (prog->aux->ebpfos_meta &&
-	     !ebpfos_admission_root_publisher_program(prog))) {
+	     !ebpfos_admission_meta_program(prog))) {
 		ret = -EPERM;
 		goto out_put;
 	}
@@ -6560,7 +6560,7 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 			return PTR_ERR(prog);
 		if (prog->aux->ebpfos_provider ||
 		    (prog->aux->ebpfos_meta &&
-		     !ebpfos_admission_root_publisher_program(prog))) {
+		     !ebpfos_admission_meta_program(prog))) {
 			bpf_prog_put(prog);
 			return -EPERM;
 		}

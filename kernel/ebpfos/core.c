@@ -455,6 +455,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_admission_seal_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_INFO:
 		return ebpfos_admission_info_ioctl(argp);
+	case EBPFOS_IOC_ADMISSION_RUNTIME_INFO:
+		return ebpfos_admission_runtime_info_ioctl(argp);
 	case EBPFOS_IOC_STATE_ADAPTER_SEAL:
 		return ebpfos_state_adapter_seal_ioctl(argp);
 	case EBPFOS_IOC_STATE_ADAPTER_INFO:

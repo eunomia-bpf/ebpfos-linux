@@ -4637,6 +4637,12 @@ static int check_map_access_type(struct bpf_verifier_env *env, u32 regno,
 	struct bpf_map *map = reg->map_ptr;
 	u32 cap = bpf_map_flags_to_cap(map);
 
+	if (type == BPF_WRITE && env->prog->aux->ebpfos_meta) {
+		verbose(env,
+			"eBPFOS meta-component manifest map values are verifier read-only\n");
+		return -EACCES;
+	}
+
 	if (type == BPF_WRITE && !(cap & BPF_MAP_CAN_WRITE)) {
 		verbose(env, "write into map forbidden, value_size=%d off=%lld size=%d\n",
 			map->value_size, reg->smin_value + off, size);
@@ -10616,6 +10622,12 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 	/* find function prototype */
 	func_id = insn->imm;
+	if (env->prog->aux->ebpfos_meta &&
+	    func_id != BPF_FUNC_map_lookup_elem) {
+		verbose(env,
+			"eBPFOS meta-component manifests are immutable after admission\n");
+		return -EACCES;
+	}
 	err = bpf_get_helper_proto(env, insn->imm, &fn);
 	if (err == -ERANGE) {
 		verbose(env, "invalid func %s#%d\n", func_id_name(func_id), func_id);
@@ -18442,15 +18454,20 @@ static int check_ebpfos_provider_map(struct bpf_verifier_env *env,
 static int check_ebpfos_meta_map(struct bpf_verifier_env *env,
 				  struct bpf_map *map)
 {
+	bool root_manifest =
+		map->value_size == BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE;
+	bool import_manifest =
+		map->value_size == BPF_EBPFOS_EXECUTOR_IMPORT_MANIFEST_VALUE_SIZE;
+
 	if (map->map_type != BPF_MAP_TYPE_ARRAY || bpf_map_is_offloaded(map) ||
 	    map->key_size != sizeof(u32) ||
-	    map->value_size != BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE ||
+	    (!root_manifest && !import_manifest) ||
 	    map->max_entries != 1 || map->map_flags || map->map_extra ||
 	    map->inner_map_meta || map->btf || map->btf_key_type_id ||
 	    map->btf_value_type_id || map->btf_vmlinux_value_type_id ||
 	    map->record || map->excl || map->excl_prog_sha) {
 		verbose(env,
-			"eBPFOS meta-component requires the exact ordinary root-manifest ARRAY map\n");
+			"eBPFOS meta-component requires an exact ordinary root or import-manifest ARRAY map\n");
 		return -EINVAL;
 	}
 	if (!READ_ONCE(map->frozen)) {

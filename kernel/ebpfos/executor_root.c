@@ -5,11 +5,13 @@
 #include <crypto/sha2.h>
 #include <linux/ebpfos.h>
 #include <linux/errno.h>
+#include <linux/filter.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
 #include <kunit/test.h>
@@ -123,7 +125,8 @@ static int ebpfos_executor_root_role_fill(
 	    le32_to_cpu(descriptor->resource.kind) !=
 		EBPFOS_RESOURCE_ARRAY_MAP ||
 	    ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
-	    !ebpfos_binding_prog(binding) || !ebpfos_binding_map(binding)) {
+	    !ebpfos_binding_prog(binding) || !ebpfos_binding_map(binding) ||
+	    !ebpfos_binding_prog(binding)->aux->ebpfos_provider) {
 		ebpfos_binding_put(binding);
 		ebpfos_admission_put(grant);
 		return -EOPNOTSUPP;
@@ -277,6 +280,59 @@ static bool ebpfos_executor_root_active_matches_locked(
 		(active && active->epoch == expected_epoch));
 }
 
+static bool ebpfos_executor_root_retains_binding(
+	const struct ebpfos_executor_root_bundle *target,
+	const struct ebpfos_binding *binding)
+{
+	u32 role;
+
+	for (role = 0; target && role < target->role_count; role++)
+		if (target->roles[role].binding == binding)
+			return true;
+	return false;
+}
+
+static bool ebpfos_executor_root_binding_seen(
+	const struct ebpfos_executor_root_bundle *source, u32 role)
+{
+	u32 previous;
+
+	for (previous = 0; previous < role; previous++)
+		if (source->roles[previous].binding ==
+		    source->roles[role].binding)
+			return true;
+	return false;
+}
+
+static bool ebpfos_executor_root_can_retire(
+	const struct ebpfos_executor_root_bundle *source,
+	const struct ebpfos_executor_root_bundle *target)
+{
+	u32 role;
+
+	for (role = 0; source && role < source->role_count; role++)
+		if (!ebpfos_executor_root_binding_seen(source, role) &&
+		    !ebpfos_executor_root_retains_binding(
+				target, source->roles[role].binding) &&
+		    ebpfos_binding_is_retired(source->roles[role].binding))
+			return false;
+	return true;
+}
+
+static void ebpfos_executor_root_retire_removed(
+	const struct ebpfos_executor_root_bundle *source,
+	const struct ebpfos_executor_root_bundle *target)
+{
+	u32 role;
+
+	for (role = 0; source && role < source->role_count; role++)
+		if (!ebpfos_executor_root_binding_seen(source, role) &&
+		    !ebpfos_executor_root_retains_binding(
+				target, source->roles[role].binding))
+			ebpfos_binding_retire(source->roles[role].binding,
+					      target->epoch);
+}
+
 static int ebpfos_executor_root_commit(
 	struct ebpfos_executor_root_slot *slot,
 	const struct ebpfos_executor_root_publish_request *request,
@@ -292,12 +348,24 @@ static int ebpfos_executor_root_commit(
 		error = -ESTALE;
 		goto out_unlock;
 	}
+	if (!ebpfos_executor_root_can_retire(source, target)) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
 	error = ebpfos_admission_consume_bundle_locked(grants,
 						       target->role_count);
 	if (error)
 		goto out_unlock;
 	/* Unique linearization point: one immutable finite-role bundle pointer. */
 	rcu_assign_pointer(slot->active, target);
+	/*
+	 * While still holding the root lock, atomically close each removed old
+	 * binding.  The pre-close word is the exact active/entry observation at
+	 * publication: enter-before-close drains normally, close-before-enter
+	 * rejects without advancing the entry sequence.  Retained bindings stay
+	 * open.  No rollback reaches either the pointer store or these closes.
+	 */
+	ebpfos_executor_root_retire_removed(source, target);
 	error = 0;
 out_unlock:
 	spin_unlock(&slot->lock);
@@ -323,6 +391,9 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	u32 role;
 	int error;
 
+	/* Reject non-publisher meta programs before parsing request-owned FDs. */
+	if (!aux || !ebpfos_admission_root_publisher_program(aux->prog))
+		return -EACCES;
 	error = ebpfos_executor_root_request_size(request, request_data__sz,
 						  &expected_size);
 	if (error)
@@ -410,8 +481,9 @@ __bpf_kfunc int bpf_ebpfos_executor_root_publish(
 						     request_data__sz, aux);
 }
 
-__bpf_kfunc int bpf_ebpfos_executor_root_read(
-	u64 object_id, void *snapshot_data, u32 snapshot_data__sz)
+noinline int bpf_ebpfos_executor_root_read_impl(
+	u64 object_id, void *snapshot_data, u32 snapshot_data__sz,
+	struct bpf_prog_aux *aux)
 {
 	struct ebpfos_executor_root_snapshot *snapshot = snapshot_data;
 	struct ebpfos_executor_root_bundle *bundle;
@@ -419,6 +491,8 @@ __bpf_kfunc int bpf_ebpfos_executor_root_read(
 	u32 role;
 	int error = 0;
 
+	if (!aux || !ebpfos_admission_root_publisher_program(aux->prog))
+		return -EACCES;
 	if (!object_id || !snapshot ||
 	    snapshot_data__sz < sizeof(*snapshot))
 		return -EINVAL;
@@ -451,37 +525,219 @@ out_unlock:
 	return error;
 }
 
-__bpf_kfunc_end_defs();
+__bpf_kfunc int bpf_ebpfos_executor_root_read(
+	u64 object_id, void *snapshot_data, u32 snapshot_data__sz,
+	struct bpf_prog_aux *aux)
+{
+	return bpf_ebpfos_executor_root_read_impl(object_id, snapshot_data,
+						 snapshot_data__sz, aux);
+}
 
-struct ebpfos_binding *ebpfos_executor_root_binding_get(
-	u64 object_id, u64 role_type, u64 *epoch)
+static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
+				     u32 call_data__sz)
+{
+	size_t expected_size;
+
+	if (!call || call_data__sz < sizeof(*call) ||
+	    call->version != EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION ||
+	    call->flags & ~EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH ||
+	    !call->method_id || !call->object_id || !call->role_type ||
+	    !call->context_size ||
+	    call->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
+	    (!(call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH) &&
+	     call->expected_epoch) ||
+	    check_add_overflow(sizeof(*call), (size_t)call->context_size,
+			       &expected_size) || expected_size != call_data__sz)
+		return -EINVAL;
+	return 0;
+}
+
+static struct ebpfos_binding *ebpfos_executor_root_role_get(
+	u64 object_id, u64 role_type, u64 *epoch,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_binding *binding = NULL;
 	u32 role;
 
-	if (!object_id || !role_type)
-		return NULL;
 	rcu_read_lock();
 	bundle = rcu_dereference(ebpfos_executor_root.active);
 	if (!bundle || bundle->object_id != object_id)
 		goto out;
-	for (role = 0; role < bundle->role_count; role++)
-		if (bundle->roles[role].snapshot.role_type == role_type) {
-			binding = ebpfos_binding_get(bundle->roles[role].binding);
-			if (epoch)
-				*epoch = bundle->epoch;
+	for (role = 0; role < bundle->role_count; role++) {
+		if (bundle->roles[role].snapshot.role_type < role_type)
+			continue;
+		if (bundle->roles[role].snapshot.role_type != role_type)
 			break;
+		binding = ebpfos_binding_get(bundle->roles[role].binding);
+		if (binding) {
+			*epoch = bundle->epoch;
+			*snapshot = bundle->roles[role].snapshot;
 		}
+		break;
+	}
 out:
 	rcu_read_unlock();
 	return binding;
 }
 
+static int ebpfos_executor_method_validate(
+	const struct ebpfos_executor_call *call,
+	const struct ebpfos_executor_import *import)
+{
+	const u8 *value;
+	u64 discriminator;
+
+	if (!call || !import || call->method_id != import->method_id ||
+	    import->discriminator_offset > call->context_size ||
+	    import->discriminator_size > call->context_size -
+		import->discriminator_offset)
+		return -EPROTO;
+	value = call->context + import->discriminator_offset;
+	switch (import->discriminator_size) {
+	case 1:
+		discriminator = *value;
+		break;
+	case 2:
+		discriminator = get_unaligned_le16(value);
+		break;
+	case 4:
+		discriminator = get_unaligned_le32(value);
+		break;
+	case 8:
+		discriminator = get_unaligned_le64(value);
+		break;
+	default:
+		return -EPROTO;
+	}
+	return (discriminator & import->discriminator_mask) ==
+		import->discriminator_value ? 0 : -EACCES;
+}
+
+noinline int bpf_ebpfos_executor_root_call_impl(
+	void *call_data, u32 call_data__sz, struct bpf_prog_aux *aux)
+{
+	struct ebpfos_executor_call *call = call_data;
+	struct ebpfos_executor_root_role_snapshot role = {};
+	struct ebpfos_executor_import import = {};
+	struct bpf_tramp_run_ctx run_ctx = {};
+	const struct ebpfos_component_desc_v1 *descriptor;
+	struct ebpfos_binding *binding;
+	struct bpf_prog *provider;
+	u64 epoch = 0;
+	u32 status;
+	u64 start;
+	bool retried = false;
+	int error;
+
+	error = ebpfos_executor_call_size(call, call_data__sz);
+	if (error)
+		return error;
+	call->observed_epoch = 0;
+	call->provider_prog_id = 0;
+	call->provider_status = 0;
+retry_lookup:
+	binding = ebpfos_executor_root_role_get(call->object_id,
+						call->role_type, &epoch, &role);
+	if (!binding)
+		return -ENOENT;
+	descriptor = ebpfos_binding_descriptor(binding);
+	provider = ebpfos_binding_prog(binding);
+	if (!descriptor || !provider || !provider->aux ||
+	    !provider->aux->ebpfos_provider ||
+	    provider->type != BPF_PROG_TYPE_SYSCALL || !provider->sleepable) {
+		error = -EOPNOTSUPP;
+		goto out_put;
+	}
+	if (provider->aux == aux) {
+		error = -ELOOP;
+		goto out_put;
+	}
+	error = ebpfos_admission_import_validate(aux, call->object_id,
+					 call->role_type, call->method_id, descriptor,
+					 &role, &import);
+	if (error)
+		goto out_put;
+	if ((call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH) &&
+	    call->expected_epoch != epoch) {
+		error = -ESTALE;
+		goto out_put;
+	}
+	if (call->context_size != import.context_size) {
+		error = -EMSGSIZE;
+		goto out_put;
+	}
+	error = ebpfos_executor_method_validate(call, &import);
+	if (error)
+		goto out_put;
+	/*
+	 * The binding reference is the in-flight epoch pin.  Publication may
+	 * replace and RCU-retire the old immutable bundle concurrently, but its
+	 * program remains alive until this exact invocation has returned.
+	 */
+	start = __bpf_prog_enter_sleepable_recur(provider, &run_ctx);
+	if (!start) {
+		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+		error = -EBUSY;
+		goto out_put;
+	}
+	error = ebpfos_binding_invocation_enter(binding);
+	if (error) {
+		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+		if (error == -ESHUTDOWN) {
+			ebpfos_binding_put(binding);
+			if (call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH)
+				return -ESTALE;
+			if (!retried) {
+				retried = true;
+				goto retry_lookup;
+			}
+			error = -EAGAIN;
+			binding = NULL;
+		}
+		goto out_put;
+	}
+	status = bpf_prog_run(provider, call->context);
+	__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+	ebpfos_binding_invocation_exit(binding);
+	call->observed_epoch = epoch;
+	call->provider_prog_id = role.prog_id;
+	call->provider_status = status;
+	error = 0;
+out_put:
+	ebpfos_binding_put(binding);
+	return error;
+}
+
+__bpf_kfunc int bpf_ebpfos_executor_root_call(
+	void *call_data, u32 call_data__sz, struct bpf_prog_aux *aux)
+{
+	return bpf_ebpfos_executor_root_call_impl(call_data, call_data__sz, aux);
+}
+
+__bpf_kfunc_end_defs();
+
+struct ebpfos_binding *ebpfos_executor_root_binding_get(
+	u64 object_id, u64 role_type, u64 *epoch)
+{
+	struct ebpfos_executor_root_role_snapshot snapshot;
+	u64 observed_epoch;
+
+	if (!object_id || !role_type)
+		return NULL;
+	if (!epoch)
+		epoch = &observed_epoch;
+	return ebpfos_executor_root_role_get(object_id, role_type, epoch,
+					     &snapshot);
+}
+
 BTF_KFUNCS_START(ebpfos_executor_root_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_publish,
 		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_read)
+BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_read,
+		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_call,
+		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_executor_root_kfunc_ids)
 
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
@@ -588,6 +844,54 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	rcu_read_unlock();
 }
 
+static void ebpfos_executor_root_retained_binding_test(struct kunit *test)
+{
+	struct ebpfos_executor_root_bundle *source;
+	struct ebpfos_executor_root_bundle *target;
+	struct ebpfos_executor_root_bundle *already_closed;
+	struct ebpfos_binding retained = {};
+	struct ebpfos_binding removed = {};
+	struct ebpfos_binding rollback = {};
+
+	source = kunit_kzalloc(test, struct_size(source, roles, 3), GFP_KERNEL);
+	target = kunit_kzalloc(test, struct_size(target, roles, 1), GFP_KERNEL);
+	already_closed = kunit_kzalloc(
+		test, struct_size(already_closed, roles, 1), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, source);
+	KUNIT_ASSERT_NOT_NULL(test, target);
+	KUNIT_ASSERT_NOT_NULL(test, already_closed);
+	source->role_count = 3;
+	target->role_count = 1;
+	target->epoch = 9;
+	source->roles[0].binding = &retained;
+	source->roles[1].binding = &removed;
+	source->roles[2].binding = &removed;
+	target->roles[0].binding = &retained;
+	KUNIT_ASSERT_EQ(test, ebpfos_binding_invocation_enter(&removed), 0);
+	KUNIT_EXPECT_TRUE(test,
+		ebpfos_executor_root_retains_binding(target, &retained));
+	KUNIT_EXPECT_FALSE(test,
+		ebpfos_executor_root_retains_binding(target, &removed));
+	KUNIT_EXPECT_TRUE(test, ebpfos_executor_root_can_retire(source, target));
+	ebpfos_executor_root_retire_removed(source, target);
+	KUNIT_EXPECT_FALSE(test, ebpfos_binding_is_retired(&retained));
+	KUNIT_EXPECT_TRUE(test, ebpfos_binding_is_retired(&removed));
+	KUNIT_EXPECT_EQ(test, READ_ONCE(removed.retired_epoch), 9ULL);
+	KUNIT_EXPECT_EQ(test, removed.retirement_snapshot, (1ULL << 16) | 1);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&removed),
+		-ESHUTDOWN);
+	ebpfos_binding_invocation_exit(&removed);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&removed), 0U);
+
+	already_closed->role_count = 1;
+	already_closed->roles[0].binding = &removed;
+	KUNIT_EXPECT_FALSE(test,
+		ebpfos_executor_root_can_retire(already_closed, NULL));
+	/* A precommit rollback leaves its never-published candidate open. */
+	KUNIT_EXPECT_FALSE(test, ebpfos_binding_is_retired(&rollback));
+	KUNIT_EXPECT_EQ(test, READ_ONCE(rollback.retired_epoch), 0ULL);
+}
+
 static void ebpfos_executor_root_request_test(struct kunit *test)
 {
 	struct ebpfos_executor_root_publish_request *request;
@@ -610,6 +914,61 @@ static void ebpfos_executor_root_request_test(struct kunit *test)
 	request->expected_epoch = U64_MAX;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), -EINVAL);
+}
+
+static void ebpfos_executor_root_call_size_test(struct kunit *test)
+{
+	struct ebpfos_executor_call *call;
+	size_t size = sizeof(*call) + 64;
+
+	call = kunit_kzalloc(test, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, call);
+	call->version = EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION;
+	call->object_id = 7;
+	call->role_type = 9;
+	call->method_id = 1;
+	call->context_size = 64;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size - 1), -EINVAL);
+	call->flags = EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH;
+	call->expected_epoch = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), 0);
+	call->flags = 2;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+	call->flags = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+}
+
+static void ebpfos_executor_method_test(struct kunit *test)
+{
+	struct ebpfos_executor_import import = {
+		.method_id = 5,
+		.context_size = 16,
+		.discriminator_offset = 3,
+		.discriminator_size = 4,
+		.discriminator_value = 0x11223344,
+		.discriminator_mask = U32_MAX,
+	};
+	struct ebpfos_executor_call *call;
+	size_t size = sizeof(*call) + import.context_size;
+
+	call = kunit_kzalloc(test, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, call);
+	call->method_id = import.method_id;
+	call->context_size = import.context_size;
+	put_unaligned_le32(import.discriminator_value, call->context + 3);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import), 0);
+	call->context[3]++;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
+			-EACCES);
+	call->context[3]--;
+	import.discriminator_size = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
+			-EPROTO);
+	import.discriminator_size = 4;
+	import.discriminator_offset = 14;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
+			-EPROTO);
 }
 
 static void ebpfos_executor_root_manifest_test(struct kunit *test)
@@ -665,7 +1024,10 @@ static void ebpfos_executor_root_manifest_test(struct kunit *test)
 
 static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_compare_test),
+	KUNIT_CASE(ebpfos_executor_root_retained_binding_test),
 	KUNIT_CASE(ebpfos_executor_root_request_test),
+	KUNIT_CASE(ebpfos_executor_root_call_size_test),
+	KUNIT_CASE(ebpfos_executor_method_test),
 	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
 };

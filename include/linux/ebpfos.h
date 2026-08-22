@@ -3,8 +3,10 @@
 #define _LINUX_EBPFOS_H
 
 #include <linux/bits.h>
+#include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/err.h>
+#include <linux/refcount.h>
 #include <linux/types.h>
 #include <uapi/linux/ebpfos.h>
 
@@ -388,9 +390,37 @@ struct bpf_map;
 struct bpf_prog;
 struct bpf_prog_aux;
 struct ebpfos_admission;
-struct ebpfos_binding;
 struct ebpfos_prog_identity;
 struct ebpfos_state_adapter;
+
+struct ebpfos_binding {
+	refcount_t refs;
+	/* Bit 63: retired; bits 16..62: entries; bits 0..15: active. */
+	atomic64_t invocation_state;
+	/* Content re-hashes after the initial sealed measurement. */
+	atomic64_t map_rehashes;
+	u64 retired_epoch;
+	u64 retirement_snapshot;
+	struct bpf_prog *prog;
+	struct bpf_map *map;
+	struct ebpfos_prog_identity *prog_identity;
+	u64 grant_id;
+	u64 policy_generation;
+	u64 runtime_schema;
+	u32 kind;
+	u32 use;
+	u32 prog_id;
+	u32 map_id;
+	u8 realm_id[16];
+	u8 policy_digest[32];
+	u8 content_digest[32];
+	u8 program_digest[32];
+	u8 map_digest[32];
+	u8 contract_sha256[32];
+	u8 abstract_schema_sha256[32];
+	u8 concrete_schema_sha256[32];
+	u8 authority_sha256[32];
+};
 
 /*
  * Generic executor root substrate.  The canonical BPF meta-component supplies
@@ -409,11 +439,67 @@ struct ebpfos_state_adapter;
 #define EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK \
 	(1U << EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT)
 #define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER 10U
+#define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER 11U
 #define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT 2U
 #define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK \
 	(1ULL << EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT)
 #define EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE 0x4558525055420001ULL
 #define EBPFOS_EXECUTOR_ROOT_F_TEST_FAIL_AFTER_STAGE (1U << 0)
+
+/*
+ * A caller identity binds this explicit, frozen import resource.  The map is
+ * content-addressed by admission; request bytes never confer authority.
+ */
+#define EBPFOS_EXECUTOR_IMPORT_ABI_ID 0x4558494d504f0001ULL
+#define EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION 1U
+#define EBPFOS_EXECUTOR_IMPORT_MANIFEST_SCHEMA 0x4558494d414e0001ULL
+#define EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES 64U
+#define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH (1U << 0)
+
+struct ebpfos_executor_import {
+	u64 object_id;
+	u64 role_type;
+	u64 provider_type_id;
+	u64 runtime_schema;
+	u64 authority_ceiling;
+	u64 effect_ceiling;
+	u64 call_abi_id;
+	u32 context_size;
+	u32 flags;
+	u32 method_id;
+	u32 discriminator_offset;
+	u32 discriminator_size;
+	u32 reserved;
+	u64 discriminator_value;
+	u64 discriminator_mask;
+	u8 contract_digest[32];
+	u8 prototype_digest[32];
+};
+
+struct ebpfos_executor_import_manifest {
+	u32 version;
+	u32 import_count;
+	u32 flags;
+	u32 reserved;
+	u64 authority_ceiling;
+	u64 effect_ceiling;
+	u8 provenance_digest[32];
+	struct ebpfos_executor_import imports[EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES];
+};
+
+struct ebpfos_executor_call {
+	u32 version;
+	u32 flags;
+	u64 object_id;
+	u64 role_type;
+	u64 expected_epoch;
+	u64 observed_epoch;
+	u32 provider_prog_id;
+	u32 provider_status;
+	u32 context_size;
+	u32 method_id;
+	u8 context[];
+};
 
 struct ebpfos_executor_root_manifest_role {
 	u64 role_type;
@@ -495,6 +581,7 @@ long ebpfos_policy_activate_ioctl(void __user *argp);
 long ebpfos_policy_status_ioctl(void __user *argp);
 long ebpfos_admission_seal_ioctl(void __user *argp);
 long ebpfos_admission_info_ioctl(void __user *argp);
+long ebpfos_admission_runtime_info_ioctl(void __user *argp);
 long ebpfos_state_adapter_seal_ioctl(void __user *argp);
 long ebpfos_state_adapter_info_ioctl(void __user *argp);
 long ebpfos_state_adapter_target_pair_ioctl(void __user *argp);
@@ -564,6 +651,12 @@ int ebpfos_admission_root_publisher_validate_locked(
 	struct bpf_prog_aux *aux, u32 *prog_id, u8 content_digest[32],
 	struct ebpfos_executor_root_manifest *manifest);
 bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog);
+bool ebpfos_admission_meta_program(const struct bpf_prog *prog);
+int ebpfos_admission_import_validate(
+	struct bpf_prog_aux *aux, u64 object_id, u64 role_type, u32 method_id,
+	const struct ebpfos_component_desc_v1 *provider,
+	const struct ebpfos_executor_root_role_snapshot *role,
+	struct ebpfos_executor_import *matched);
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
 int
 ebpfos_admission_restore_claim_locked(struct ebpfos_admission_restore_pair *pair);
@@ -591,6 +684,12 @@ struct ebpfos_binding *ebpfos_admission_binding_get(
 int ebpfos_native_binding_create_locked(struct ebpfos_binding **binding);
 struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding);
 void ebpfos_binding_put(struct ebpfos_binding *binding);
+int ebpfos_binding_invocation_enter(struct ebpfos_binding *binding);
+void ebpfos_binding_invocation_exit(struct ebpfos_binding *binding);
+u32 ebpfos_binding_active_invocations(const struct ebpfos_binding *binding);
+u64 ebpfos_binding_invocation_entries(const struct ebpfos_binding *binding);
+bool ebpfos_binding_is_retired(const struct ebpfos_binding *binding);
+void ebpfos_binding_retire(struct ebpfos_binding *binding, u64 epoch);
 int ebpfos_binding_acquire_current_locked(struct ebpfos_binding *binding);
 bool ebpfos_binding_content_matches(const struct ebpfos_binding *binding,
 				    const u8 digest[32]);
@@ -704,6 +803,11 @@ static inline long ebpfos_admission_seal_ioctl(void __user *argp)
 }
 
 static inline long ebpfos_admission_info_ioctl(void __user *argp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
 }
@@ -875,6 +979,39 @@ ebpfos_binding_get(struct ebpfos_binding *binding)
 }
 
 static inline void ebpfos_binding_put(struct ebpfos_binding *binding)
+{
+}
+
+static inline int
+ebpfos_binding_invocation_enter(struct ebpfos_binding *binding)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void
+ebpfos_binding_invocation_exit(struct ebpfos_binding *binding)
+{
+}
+
+static inline u32
+ebpfos_binding_active_invocations(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline u64
+ebpfos_binding_invocation_entries(const struct ebpfos_binding *binding)
+{
+	return 0;
+}
+
+static inline bool ebpfos_binding_is_retired(const struct ebpfos_binding *binding)
+{
+	return false;
+}
+
+static inline void ebpfos_binding_retire(struct ebpfos_binding *binding,
+					 u64 epoch)
 {
 }
 
