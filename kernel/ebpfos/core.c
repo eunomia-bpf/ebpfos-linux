@@ -17,6 +17,9 @@ struct ebpfos_file {
 	void *koperation_txn;
 };
 
+/* Retiring the legacy hook fields does not change the version query wire. */
+static_assert(sizeof(struct ebpfos_ioc_version) == 8);
+
 static int ebpfos_open(struct inode *inode, struct file *file)
 {
 	struct ebpfos_file *state;
@@ -48,7 +51,7 @@ static long ebpfos_ioctl_version(void __user *argp)
 {
 	struct ebpfos_ioc_version version = {
 		.uapi_version = EBPFOS_UAPI_VERSION,
-		.hook_count = 0,
+		.feature_flags = 0,
 	};
 
 	return copy_to_user(argp, &version, sizeof(version)) ? -EFAULT : 0;

@@ -1261,15 +1261,4 @@ ebpfos_file_write_iter(struct kiocb *iocb, struct iov_iter *from,
 }
 #endif
 
-static inline bool ebpfos_action_is(u32 action, enum ebpfos_verdict verdict)
-{
-	return EBPFOS_ACTION_VERDICT(action) == verdict;
-}
-
-static inline int ebpfos_action_error(u32 action)
-{
-	u32 error = EBPFOS_ACTION_PAYLOAD(action);
-
-	return error ? -(int)error : -EPERM;
-}
 #endif
