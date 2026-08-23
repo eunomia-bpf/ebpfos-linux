@@ -3226,8 +3226,15 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 			       sizeof(semantic_sha256));
 		}
 
-		if (!capability_mask || !effect_mask ||
-		    !memchr_inv(semantic_sha256, 0, sizeof(semantic_sha256)))
+		/* Legacy/unsealed KOperations are verifier/JIT operations, not
+		 * admitted components, and predate component authority metadata.
+		 * A sealed component, however, must bind every exact payload to a
+		 * non-bottom capability/effect/semantic identity before native emit
+		 * can become reachable through the component root.
+		 */
+		if (prog->aux->ebpfos_component &&
+		    (!capability_mask || !effect_mask ||
+		     !memchr_inv(semantic_sha256, 0, sizeof(semantic_sha256))))
 			return -EPROTO;
 		capabilities |= capability_mask;
 		effects |= effect_mask;

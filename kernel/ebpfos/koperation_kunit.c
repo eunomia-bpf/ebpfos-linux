@@ -421,8 +421,14 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 	aux->ebpfos_kop_requirements_valid = false;
 
 	tab->descs[1].kop = &unbound;
+	aux->ebpfos_component = true;
 	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
 		prog, &capabilities, &effects, two), -EPROTO);
+	aux->ebpfos_component = false;
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		prog, &capabilities, &effects, two), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6));
 	tab->descs[1].kop = NULL;
 	KUNIT_EXPECT_EQ(test, bpf_prog_kop_requirements(
 		prog, &capabilities, &effects, two), -EACCES);
