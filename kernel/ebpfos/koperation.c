@@ -27,7 +27,8 @@ struct ebpfos_koperation_descriptor {
 	u32 architecture_requirements;
 	u8 kprog_control_register;
 	u8 kprog_control_action;
-	u16 reserved0;
+	u8 kprog_normalize_bits;
+	u8 reserved0;
 	const struct bpf_insn *proof_insns;
 	u32 proof_insn_count;
 	u32 proof_imm64_insn;
@@ -42,6 +43,7 @@ struct ebpfos_koperation_descriptor {
 };
 
 #define EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD 1U
+#define EBPFOS_KOPERATION_SHADOW_CURRENT_CR4 2U
 #define EBPFOS_KOPERATION_REQUIRE_CR3_NOFLUSH_CLEAR (1U << 0)
 
 #include "koperation-generated.h"
@@ -58,6 +60,7 @@ ebpfos_koperation_find(u32 operation_id);
  */
 #define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
 #define EBPFOS_KPROG_CONTROL_CR3 3U
+#define EBPFOS_KPROG_CONTROL_CR4 4U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
 #define EBPFOS_KPROG_ACTION_OBSERVE 2U
 
@@ -97,7 +100,8 @@ static int ebpfos_kprog_control_decode(
 	if (decoded->input_reg < BPF_REG_6 ||
 	    decoded->input_reg > BPF_REG_9 ||
 	    decoded->output_reg != BPF_REG_0 ||
-	    decoded->control_register != EBPFOS_KPROG_CONTROL_CR3 ||
+	    (decoded->control_register != EBPFOS_KPROG_CONTROL_CR3 &&
+	     decoded->control_register != EBPFOS_KPROG_CONTROL_CR4) ||
 	    (decoded->action != EBPFOS_KPROG_ACTION_RELOAD &&
 	     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))
 		return -EINVAL;
@@ -192,6 +196,7 @@ static int ebpfos_kprog_control_emit_x86(
 	u8 *image, u32 *offset, bool emit, u64 payload,
 	const struct bpf_prog *prog, const u8 *final_ip)
 {
+	const struct ebpfos_koperation_descriptor *operation;
 	struct ebpfos_kprog_control_payload decoded;
 	u8 code[64];
 	u8 *cursor = code;
@@ -199,6 +204,7 @@ static int ebpfos_kprog_control_emit_x86(
 	u8 *second_mismatch = NULL;
 	u8 *success_jump;
 	u8 input_code;
+	s32 normalize_mask;
 	u32 size;
 	int error;
 
@@ -209,6 +215,10 @@ static int ebpfos_kprog_control_emit_x86(
 	error = ebpfos_kprog_control_decode(payload, &decoded);
 	if (error)
 		return error;
+	operation = ebpfos_koperation_find_control(decoded.control_register,
+						     decoded.action);
+	if (!operation || operation->kprog_normalize_bits > 31)
+		return -ENOENT;
 	input_code = ebpfos_kprog_x86_reg_code(decoded.input_reg);
 	if (input_code == 0xff)
 		return -EINVAL;
@@ -216,12 +226,16 @@ static int ebpfos_kprog_control_emit_x86(
 	/* The descriptor table selects the action; the payload only supplies
 	 * verifier-visible registers.  Both actions first observe and validate
 	 * the exact normalized hardware root. */
-	EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
+	EMIT(0x0f); EMIT(0x20);
+	EMIT(0xc0 | (decoded.control_register << 3));
 	if (decoded.action == EBPFOS_KPROG_ACTION_RELOAD) {
 		/* Preserve raw CR3, including PCID, for the same-root reload. */
 		EMIT(0x49); EMIT(0x89); EMIT(0xc3);
 	}
-	EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
+	normalize_mask = (s32)(~0U << operation->kprog_normalize_bits);
+	EMIT(0x48); EMIT(0x25);
+	put_unaligned_le32((u32)normalize_mask, cursor);
+	cursor += sizeof(normalize_mask);
 	EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
 	EMIT(0x39); EMIT(0xc0 | (input_code << 3));
 	EMIT(0x75); first_mismatch = cursor++;
@@ -302,6 +316,8 @@ static int __init ebpfos_kprog_register(void)
 	if (!ebpfos_koperation_find_control(EBPFOS_KPROG_CONTROL_CR3,
 					    EBPFOS_KPROG_ACTION_RELOAD) ||
 	    !ebpfos_koperation_find_control(EBPFOS_KPROG_CONTROL_CR3,
+					    EBPFOS_KPROG_ACTION_OBSERVE) ||
+	    !ebpfos_koperation_find_control(EBPFOS_KPROG_CONTROL_CR4,
 					    EBPFOS_KPROG_ACTION_OBSERVE))
 		return -ENOENT;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
@@ -348,13 +364,20 @@ ebpfos_koperation_shadow(const struct ebpfos_koperation_descriptor *descriptor,
 {
 	/*
 	 * This is donor-observed input state, not the operation implementation.
-	 * The generated native sequence independently reads hardware CR3.
+	 * The generated native sequence independently reads the bound register.
 	 */
-	if (descriptor->shadow_source !=
-	    EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD || !current->mm)
+	switch (descriptor->shadow_source) {
+	case EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD:
+		if (!current->mm)
+			return -EOPNOTSUPP;
+		*shadow = __pa(current->mm->pgd) & CR3_ADDR_MASK;
+		return 0;
+	case EBPFOS_KOPERATION_SHADOW_CURRENT_CR4:
+		*shadow = __read_cr4();
+		return 0;
+	default:
 		return -EOPNOTSUPP;
-	*shadow = __pa(current->mm->pgd) & CR3_ADDR_MASK;
-	return 0;
+	}
 }
 
 static void ebpfos_koperation_counters(u64 *attempts, u64 *commits,
@@ -574,14 +597,19 @@ long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot)
 	 */
 	preempt_disable();
 	txn->cpu_before = raw_smp_processor_id();
-	txn->native_operand_before = __read_cr3();
-	cr4 = __read_cr4();
-	if (cr4 & X86_CR4_PCIDE)
-		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PCIDE;
-	if (cr4 & X86_CR4_PGE)
-		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PGE;
-	if (txn->native_operand_before & (1ULL << 63))
-		txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH;
+	if (txn->descriptor->shadow_source ==
+	    EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD) {
+		txn->native_operand_before = __read_cr3();
+		cr4 = __read_cr4();
+		if (cr4 & X86_CR4_PCIDE)
+			txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PCIDE;
+		if (cr4 & X86_CR4_PGE)
+			txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR4_PGE;
+		if (txn->native_operand_before & (1ULL << 63))
+			txn->architecture_flags |= EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH;
+	} else {
+		txn->native_operand_before = trusted_shadow;
+	}
 	/*
 	 * All generated architectural preconditions must close before attempts
 	 * changes and before native_emit.  A post-execution check cannot restore

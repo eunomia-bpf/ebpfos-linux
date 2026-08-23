@@ -114,6 +114,55 @@
       ],
       "result": "same-page-table-root-after-local-tlb-invalidation",
       "shadow_source": "current-mm-pgd"
+    },
+    {
+      "capabilities": [
+        "cpu.cr4.read"
+      ],
+      "effects": [
+        "cpu.control-state.observe"
+      ],
+      "id": 3,
+      "name": "cpu.read-cr4-control",
+      "native_ir": [
+        {
+          "op": "read-control-register",
+          "register": "cr4"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 0,
+          "input": "hardware.cr4",
+          "op": "clear-low-bits"
+        }
+      },
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "cpu.control-state.observe",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "control-register-value",
+      "shadow_source": "current-cr4"
     }
   ]
 }

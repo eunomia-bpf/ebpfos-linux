@@ -42,6 +42,7 @@ CONTROL_REGISTERS = {
         "read_effects": ["page_table.root.observe"],
         "read_post_state": "result-u64",
         "readback_required": True,
+        "shadow_constant": "EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD",
         "shadow_sources": {"current-mm-pgd"},
         "write": bytes.fromhex("0f22d8"),
         "write_effects": [
@@ -58,6 +59,22 @@ CONTROL_REGISTERS = {
             "pti.user-companion-asid.not-modeled",
         ],
         "write_post_state": "hardware.cr3.root-after",
+        "write_source": "register-before",
+    },
+    "cr4": {
+        "max_writes": 0,
+        "normalize_bits": 0,
+        "payload_id": 4,
+        "read": bytes.fromhex("0f20e0"),
+        "read_effects": ["cpu.control-state.observe"],
+        "read_post_state": "result-u64",
+        "readback_required": False,
+        "shadow_constant": "EBPFOS_KOPERATION_SHADOW_CURRENT_CR4",
+        "shadow_sources": {"current-cr4"},
+        "write": b"",
+        "write_effects": [],
+        "write_observations": [],
+        "write_post_state": "hardware.cr4.after",
         "write_source": "register-before",
     },
 }
@@ -86,8 +103,8 @@ def bpf_insn(code: int, dst: int = 0, src: int = 0, off: int = 0,
 
 
 def clear_low_mask(bits: Any, name: str) -> int:
-    if not isinstance(bits, int) or bits <= 0 or bits > 31:
-        raise SpecError(f"{name}: clear-low-bits must be in [1, 31]")
+    if not isinstance(bits, int) or bits < 0 or bits > 31:
+        raise SpecError(f"{name}: clear-low-bits must be in [0, 31]")
     return -(1 << bits)
 
 
@@ -285,7 +302,7 @@ def architecture_requirements(trace: dict[str, Any]) -> int:
     return requirements
 
 
-def control_binding(operation: dict[str, Any]) -> tuple[int, int]:
+def control_binding(operation: dict[str, Any]) -> tuple[int, int, int, str]:
     registers = {
         item.get("register") for item in operation["native_ir"]
         if isinstance(item, dict) and item.get("op") in {
@@ -302,7 +319,9 @@ def control_binding(operation: dict[str, Any]) -> tuple[int, int]:
     if register not in CONTROL_REGISTERS:
         raise SpecError(f"{operation['name']}: control payload register is unsupported")
     action = "reload" if writes else "observe"
-    return CONTROL_REGISTERS[register]["payload_id"], CONTROL_ACTIONS[action]
+    metadata = CONTROL_REGISTERS[register]
+    return (metadata["payload_id"], CONTROL_ACTIONS[action],
+            metadata["normalize_bits"], metadata["shadow_constant"])
 
 
 def check_semantics(operation: dict[str, Any]) -> None:
@@ -451,7 +470,8 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             "result": operation["result"],
         }
         equivalence_sha = digest(canonical(equivalence))
-        control_register, control_action = control_binding(operation)
+        (control_register, control_action, normalize_bits,
+         shadow_constant) = control_binding(operation)
         sym = symbol(operation["name"])
         proof_name = f"ebpfos_koperation_proof_{operation['id']}"
         header.extend([
@@ -490,10 +510,11 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             f"\t\t.architecture_requirements = {architecture_requirements(trace)}U,\n"
             f"\t\t.kprog_control_register = {control_register}U,\n"
             f"\t\t.kprog_control_action = {control_action}U,\n"
+            f"\t\t.kprog_normalize_bits = {normalize_bits}U,\n"
             f"\t\t.proof_insns = {proof_name},\n"
             f"\t\t.proof_insn_count = ARRAY_SIZE({proof_name}),\n"
             f"\t\t.proof_imm64_insn = {immediate_index}U,\n"
-            "\t\t.shadow_source = EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD,\n"
+            f"\t\t.shadow_source = {shadow_constant},\n"
             f"\t\t.native_emit = {sym},\n"
             f"\t\t.native_body_end_delta = &{sym}_body_end_delta,\n"
             f"\t\t.native_body_size = {len(native)}U,\n"
