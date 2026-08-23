@@ -13,8 +13,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mm.h>
-#include <linux/ebpfos.h>
-#include <linux/ebpfos_ops.h>
 #include <linux/sched/mm.h>
 #include <linux/module.h>
 #include <linux/gfp.h>
@@ -6188,14 +6186,6 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
-	/* EBPFOS generated boundary: memory reclaim component. */
-	if (IS_ENABLED(CONFIG_EBPFOS_MM_HOOK)) {
-		u64 ebpfos_args[4] = { sc->nr_to_reclaim, sc->priority, sc->gfp_mask, pgdat->node_id };
-		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_MM_RECLAIM, ebpfos_args, ARRAY_SIZE(ebpfos_args));
-		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) return;
-		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_OVERRIDE && EBPFOS_ACTION_PAYLOAD(ebpfos_action)) sc->nr_to_reclaim = EBPFOS_ACTION_PAYLOAD(ebpfos_action);
-	}
-
 	unsigned long nr_reclaimed, nr_scanned, nr_node_reclaimed;
 	struct lruvec *target_lruvec;
 	bool reclaimable = false;

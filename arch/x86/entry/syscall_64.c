@@ -6,8 +6,6 @@
 #include <linux/cache.h>
 #include <linux/syscalls.h>
 #include <linux/entry-common.h>
-#include <linux/ebpfos.h>
-#include <linux/ebpfos_ops.h>
 #include <linux/nospec.h>
 #include <asm/syscall.h>
 
@@ -93,30 +91,11 @@ __visible noinstr bool do_syscall_64(struct pt_regs *regs, int nr)
 	instrumentation_begin();
 	add_random_kstack_offset();
 
-	/* EBPFOS generated boundary: syscall component. */
-	if (IS_ENABLED(CONFIG_EBPFOS_SYSCALL_HOOK) && nr >= 0) {
-		u64 ebpfos_args[EBPFOS_MAX_ARGS] = { nr, regs->di, regs->si, regs->dx, regs->r10, regs->r8 };
-		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_SYSCALL_ENTER, ebpfos_args, ARRAY_SIZE(ebpfos_args));
-		switch (EBPFOS_ACTION_VERDICT(ebpfos_action)) {
-		case EBPFOS_VERDICT_DENY: regs->ax = ebpfos_action_error(ebpfos_action); goto ebpfos_syscall_done;
-		case EBPFOS_VERDICT_REDIRECT: nr = EBPFOS_ACTION_PAYLOAD(ebpfos_action); break;
-		case EBPFOS_VERDICT_OVERRIDE: regs->ax = EBPFOS_ACTION_PAYLOAD(ebpfos_action); goto ebpfos_syscall_done;
-		default: break;
-		}
-	}
-
 	if (!do_syscall_x64(regs, nr) && !do_syscall_x32(regs, nr) && nr != -1) {
 		/* Invalid system call, but still a system call. */
 		regs->ax = __x64_sys_ni_syscall(regs);
 	}
 
-ebpfos_syscall_done:
-	if (IS_ENABLED(CONFIG_EBPFOS_SYSCALL_HOOK) && nr >= 0) {
-		u64 ebpfos_exit_args[3] = { nr, regs->ax, regs->orig_ax };
-		u32 ebpfos_exit_action = ebpfos_component_run_hook(EBPFOS_HOOK_SYSCALL_EXIT, ebpfos_exit_args, ARRAY_SIZE(ebpfos_exit_args));
-		if (EBPFOS_ACTION_VERDICT(ebpfos_exit_action) == EBPFOS_VERDICT_DENY) regs->ax = ebpfos_action_error(ebpfos_exit_action);
-		else if (EBPFOS_ACTION_VERDICT(ebpfos_exit_action) == EBPFOS_VERDICT_OVERRIDE) regs->ax = EBPFOS_ACTION_PAYLOAD(ebpfos_exit_action);
-	}
 	instrumentation_end();
 	syscall_exit_to_user_mode(regs);
 

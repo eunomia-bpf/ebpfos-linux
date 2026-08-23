@@ -90,8 +90,6 @@
 #include <linux/interrupt.h>
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
-#include <linux/ebpfos.h>
-#include <linux/ebpfos_ops.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/ethtool_netlink.h>
@@ -4777,20 +4775,6 @@ int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 	bool again = false;
 	struct Qdisc *q;
 
-	/* EBPFOS generated boundary: network component TX. */
-	if (IS_ENABLED(CONFIG_EBPFOS_NET_HOOK)) {
-		u64 ebpfos_args[4] = {
-			(u64)(unsigned long)skb, skb->len, skb->protocol, dev->ifindex
-		};
-		u32 ebpfos_action = ebpfos_component_run_hook(
-			EBPFOS_HOOK_NET_TX, ebpfos_args, ARRAY_SIZE(ebpfos_args));
-
-		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) {
-			kfree_skb(skb);
-			return NET_XMIT_DROP;
-		}
-	}
-
 	skb_reset_mac_header(skb);
 	skb_assert_len(skb);
 
@@ -6004,19 +5988,6 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
 	bool deliver_exact = false;
 	int ret = NET_RX_DROP;
 	__be16 type;
-
-	/* EBPFOS generated boundary: network component RX. */
-	if (IS_ENABLED(CONFIG_EBPFOS_NET_HOOK)) {
-		u64 ebpfos_args[4] = {
-			(u64)(unsigned long)skb, skb->len, skb->protocol,
-			skb->dev ? skb->dev->ifindex : 0
-		};
-		u32 ebpfos_action = ebpfos_component_run_hook(
-			EBPFOS_HOOK_NET_RX, ebpfos_args, ARRAY_SIZE(ebpfos_args));
-
-		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY)
-			goto drop;
-	}
 
 	net_timestamp_check(!READ_ONCE(net_hotdata.tstamp_prequeue), skb);
 

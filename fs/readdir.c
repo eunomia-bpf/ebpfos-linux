@@ -21,8 +21,6 @@
 #include <linux/unistd.h>
 #include <linux/compat.h>
 #include <linux/uaccess.h>
-#include <linux/ebpfos.h>
-#include <linux/ebpfos_ops.h>
 
 #define dirent_size(dirent, len) offsetof(typeof(*(dirent)), d_name[len])
 
@@ -90,14 +88,6 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
 	int res = -ENOTDIR;
-
-	/* EBPFOS generated boundary: VFS readdir component. */
-	if (IS_ENABLED(CONFIG_EBPFOS_VFS_HOOK)) {
-		u64 ebpfos_args[4] = { (u64)(unsigned long)file, (u64)(unsigned long)inode, ctx->pos, file->f_mode };
-		u32 ebpfos_action = ebpfos_component_run_hook(EBPFOS_HOOK_VFS_READDIR, ebpfos_args, ARRAY_SIZE(ebpfos_args));
-		if (EBPFOS_ACTION_VERDICT(ebpfos_action) == EBPFOS_VERDICT_DENY) { res = ebpfos_action_error(ebpfos_action); goto out; }
-	}
-
 
 	if (!file->f_op->iterate_shared)
 		goto out;

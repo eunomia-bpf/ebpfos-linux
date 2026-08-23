@@ -613,9 +613,6 @@ typedef ssize_t (*ebpfos_file_iter_fn)(struct kiocb *iocb,
 				       struct iov_iter *iter);
 
 #ifdef CONFIG_EBPFOS
-/* Legacy graph dispatch; typed struct_ops call it only as a fallback. */
-u32 ebpfos_run_hook(enum ebpfos_hook_id hook, const u64 *args, u32 nr_args);
-bool ebpfos_hook_enabled(enum ebpfos_hook_id hook);
 long ebpfos_policy_activate_ioctl(void __user *argp);
 long ebpfos_policy_status_ioctl(void __user *argp);
 long ebpfos_admission_seal_ioctl(void __user *argp);
@@ -815,17 +812,6 @@ ssize_t ebpfos_shmem_native_snapshot(struct file *file, void *buffer,
 				     size_t size);
 #endif
 #else
-static inline u32 ebpfos_run_hook(enum ebpfos_hook_id hook,
-				  const u64 *args, u32 nr_args)
-{
-	return EBPFOS_ACTION(EBPFOS_VERDICT_CONTINUE, 0);
-}
-
-static inline bool ebpfos_hook_enabled(enum ebpfos_hook_id hook)
-{
-	return false;
-}
-
 static inline long ebpfos_policy_activate_ioctl(void __user *argp)
 {
 	return -EOPNOTSUPP;
