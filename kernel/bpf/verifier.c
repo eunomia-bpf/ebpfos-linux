@@ -18623,6 +18623,28 @@ static int check_ebpfos_meta_map(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static int check_ebpfos_component_map(struct bpf_verifier_env *env,
+				       struct bpf_map *map)
+{
+	if (map->map_type != BPF_MAP_TYPE_ARRAY || bpf_map_is_offloaded(map) ||
+	    map->key_size != sizeof(u32) || !map->value_size ||
+	    !map->max_entries || map->map_flags != BPF_F_RDONLY_PROG ||
+	    map->map_extra || map->inner_map_meta || map->btf ||
+	    map->btf_key_type_id || map->btf_value_type_id ||
+	    map->btf_vmlinux_value_type_id || map->record || map->excl ||
+	    map->excl_prog_sha) {
+		verbose(env,
+			"eBPFOS stateful component requires one frozen read-only ordinary ARRAY map\n");
+		return -EINVAL;
+	}
+	if (!READ_ONCE(map->frozen)) {
+		verbose(env,
+			"eBPFOS stateful component map must be frozen before program load\n");
+		return -EPERM;
+	}
+	return 0;
+}
+
 static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 {
 	struct bpf_prog_aux *aux = env->prog->aux;
@@ -18661,11 +18683,8 @@ static int check_ebpfos_provider_resources(struct bpf_verifier_env *env)
 			/* Publish the immutable verifier snapshot last. */
 			aux->ebpfos_kop_requirements_valid = true;
 		}
-		if (env->used_map_cnt) {
-			verbose(env,
-				"eBPFOS stateless component provider cannot reference maps\n");
-			return -EINVAL;
-		}
+		if (env->used_map_cnt > 1)
+			return -E2BIG;
 		if (env->used_btf_cnt) {
 			verbose(env,
 				"eBPFOS component provider cannot reference BTF objects\n");
@@ -18800,12 +18819,6 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	bool component = provider || meta || call_component;
 	int i, err;
 
-	if (call_component) {
-		verbose(env,
-			"eBPFOS stateless component provider cannot reference maps\n");
-		return -EACCES;
-	}
-
 	/* check whether we recorded this map already */
 	for (i = 0; i < env->used_map_cnt; i++)
 		if (env->used_maps[i] == map)
@@ -18822,7 +18835,8 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 			return -EINVAL;
 		}
 		err = meta ? check_ebpfos_meta_map(env, map) :
-			     check_ebpfos_provider_map(env, map);
+		      call_component ? check_ebpfos_component_map(env, map) :
+				       check_ebpfos_provider_map(env, map);
 		if (err)
 			return err;
 	}

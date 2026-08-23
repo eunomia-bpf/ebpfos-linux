@@ -165,8 +165,10 @@ static int ebpfos_executor_root_role_fill(
 	       ebpfos_binding_prog(binding) &&
 	       ebpfos_binding_prog(binding)->aux->ebpfos_provider;
 	component = descriptor &&
-		le32_to_cpu(descriptor->resource_count) == 0 &&
-		!ebpfos_binding_map(binding) && ebpfos_binding_prog(binding) &&
+		le32_to_cpu(descriptor->resource_count) <= 1 &&
+		!!le32_to_cpu(descriptor->resource_count) ==
+			!!ebpfos_binding_map(binding) &&
+		ebpfos_binding_prog(binding) &&
 		ebpfos_binding_prog(binding)->aux->ebpfos_component;
 	if (ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
 	    (!file && !component)) {

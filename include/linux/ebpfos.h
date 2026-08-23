@@ -460,7 +460,10 @@ struct ebpfos_binding {
 
 /* Generic capability/effect lattice cells for verifier-admitted kprog. */
 #define EBPFOS_CAP_KPROG_MACHINE_ROOT BIT_ULL(3)
+#define EBPFOS_CAP_COMPONENT_STATE_READ BIT_ULL(4)
 #define EBPFOS_EFFECT_KPROG_MACHINE_STATE BIT_ULL(6)
+#define EBPFOS_EFFECT_COMPONENT_STATE_READ \
+	(EBPFOS_EFFECT_MAP_LOOKUP | EBPFOS_EFFECT_STATE_READ)
 
 int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
 			       bool own_koperation_id);

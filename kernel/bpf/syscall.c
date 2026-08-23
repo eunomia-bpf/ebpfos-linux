@@ -6683,9 +6683,8 @@ static const struct bpf_func_proto bpf_kallsyms_lookup_name_proto = {
 static const struct bpf_func_proto *
 syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (prog->aux->ebpfos_component)
-		return NULL;
-	if (prog->aux->ebpfos_provider || prog->aux->ebpfos_meta)
+	if (prog->aux->ebpfos_provider || prog->aux->ebpfos_meta ||
+	    prog->aux->ebpfos_component)
 		return func_id == BPF_FUNC_map_lookup_elem ?
 		       &bpf_map_lookup_elem_proto : NULL;
 
