@@ -63,6 +63,10 @@ def main() -> int:
         if (header.count(".architecture_requirements = 0U") != 1 or
                 header.count(".architecture_requirements = 1U") != 1):
             raise SystemExit("generated architecture preconditions are not access-derived")
+        if (header.count(".kprog_control_register = 3U") != 2 or
+                header.count(".kprog_control_action = 1U") != 1 or
+                header.count(".kprog_control_action = 2U") != 1):
+            raise SystemExit("generated control payload bindings are not access-derived")
         if any(item["generator_proof_status"] != "bound-unproved"
                for item in certificate["operations"]):
             raise SystemExit("generator overclaimed equivalence proof")

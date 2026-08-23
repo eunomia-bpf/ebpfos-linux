@@ -25,6 +25,9 @@
 struct ebpfos_koperation_descriptor {
 	u32 operation_id;
 	u32 architecture_requirements;
+	u8 kprog_control_register;
+	u8 kprog_control_action;
+	u16 reserved0;
 	const struct bpf_insn *proof_insns;
 	u32 proof_insn_count;
 	u32 proof_imm64_insn;
@@ -56,6 +59,7 @@ ebpfos_koperation_find(u32 operation_id);
 #define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
 #define EBPFOS_KPROG_CONTROL_CR3 3U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
+#define EBPFOS_KPROG_ACTION_OBSERVE 2U
 
 static bool ebpfos_kprog_payload_escaped(u64 payload)
 {
@@ -94,9 +98,27 @@ static int ebpfos_kprog_control_decode(
 	    decoded->input_reg > BPF_REG_9 ||
 	    decoded->output_reg != BPF_REG_0 ||
 	    decoded->control_register != EBPFOS_KPROG_CONTROL_CR3 ||
-	    decoded->action != EBPFOS_KPROG_ACTION_RELOAD)
+	    (decoded->action != EBPFOS_KPROG_ACTION_RELOAD &&
+	     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))
 		return -EINVAL;
 	return 0;
+}
+
+static const struct ebpfos_koperation_descriptor *
+ebpfos_koperation_find_control(u8 control_register, u8 action)
+{
+	unsigned int index;
+
+	for (index = 0; index < ARRAY_SIZE(ebpfos_koperation_descriptors);
+	     index++) {
+		const struct ebpfos_koperation_descriptor *descriptor =
+			&ebpfos_koperation_descriptors[index];
+
+		if (descriptor->kprog_control_register == control_register &&
+		    descriptor->kprog_control_action == action)
+			return descriptor;
+	}
+	return NULL;
 }
 
 static int ebpfos_kprog_control_instantiate(u64 payload,
@@ -112,8 +134,8 @@ static int ebpfos_kprog_control_instantiate(u64 payload,
 	error = ebpfos_kprog_control_decode(payload, &decoded);
 	if (error)
 		return error;
-	operation = ebpfos_koperation_find(
-		EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
+	operation = ebpfos_koperation_find_control(decoded.control_register,
+						     decoded.action);
 	if (!operation)
 		return -ENOENT;
 	/* The canonical BPF model preserves the declared root while committing
@@ -138,8 +160,8 @@ static int ebpfos_kprog_control_requirements(
 	error = ebpfos_kprog_control_decode(payload, &decoded);
 	if (error)
 		return error;
-	operation = ebpfos_koperation_find(
-		EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
+	operation = ebpfos_koperation_find_control(decoded.control_register,
+						     decoded.action);
 	if (!operation)
 		return -ENOENT;
 	*capability_mask = EBPFOS_CAP_KPROG_MACHINE_ROOT;
@@ -174,7 +196,7 @@ static int ebpfos_kprog_control_emit_x86(
 	u8 code[64];
 	u8 *cursor = code;
 	u8 *first_mismatch;
-	u8 *second_mismatch;
+	u8 *second_mismatch = NULL;
 	u8 *success_jump;
 	u8 input_code;
 	u32 size;
@@ -191,26 +213,34 @@ static int ebpfos_kprog_control_emit_x86(
 	if (input_code == 0xff)
 		return -EINVAL;
 #define EMIT(_byte) (*cursor++ = (_byte))
-	/* raw CR3 -> R11; normalized root -> BPF R0/RAX */
+	/* The descriptor table selects the action; the payload only supplies
+	 * verifier-visible registers.  Both actions first observe and validate
+	 * the exact normalized hardware root. */
 	EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
-	EMIT(0x49); EMIT(0x89); EMIT(0xc3);
+	if (decoded.action == EBPFOS_KPROG_ACTION_RELOAD) {
+		/* Preserve raw CR3, including PCID, for the same-root reload. */
+		EMIT(0x49); EMIT(0x89); EMIT(0xc3);
+	}
 	EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
 	EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
 	EMIT(0x39); EMIT(0xc0 | (input_code << 3));
 	EMIT(0x75); first_mismatch = cursor++;
-	/* Clear CR3.NOFLUSH before the unique privileged write. */
-	EMIT(0x49); EMIT(0x0f); EMIT(0xba); EMIT(0xf3); EMIT(0x3f);
-	EMIT(0x41); EMIT(0x0f); EMIT(0x22); EMIT(0xdb);
-	/* Read back and require the same normalized root. */
-	EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
-	EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
-	EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
-	EMIT(0x39); EMIT(0xc0 | (input_code << 3));
-	EMIT(0x75); second_mismatch = cursor++;
+	if (decoded.action == EBPFOS_KPROG_ACTION_RELOAD) {
+		/* Clear CR3.NOFLUSH before the unique privileged write. */
+		EMIT(0x49); EMIT(0x0f); EMIT(0xba); EMIT(0xf3); EMIT(0x3f);
+		EMIT(0x41); EMIT(0x0f); EMIT(0x22); EMIT(0xdb);
+		/* Read back and require the same normalized root. */
+		EMIT(0x0f); EMIT(0x20); EMIT(0xd8);
+		EMIT(0x48); EMIT(0x25); EMIT(0x00); EMIT(0xf0); EMIT(0xff); EMIT(0xff);
+		EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+		EMIT(0x39); EMIT(0xc0 | (input_code << 3));
+		EMIT(0x75); second_mismatch = cursor++;
+	}
 	EMIT(0xeb); success_jump = cursor++;
 	/* -ESTALE is a fail-closed precondition/readback result. */
 	*first_mismatch = cursor - (first_mismatch + 1);
-	*second_mismatch = cursor - (second_mismatch + 1);
+	if (second_mismatch)
+		*second_mismatch = cursor - (second_mismatch + 1);
 	EMIT(0x48); EMIT(0xc7); EMIT(0xc0);
 	EMIT(0x8c); EMIT(0xff); EMIT(0xff); EMIT(0xff);
 	*success_jump = cursor - (success_jump + 1);
@@ -269,15 +299,11 @@ static const struct btf_kfunc_id_set ebpfos_kprog_control_set = {
 
 static int __init ebpfos_kprog_register(void)
 {
-	const struct ebpfos_koperation_descriptor *reload =
-		ebpfos_koperation_find(
-			EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT);
-
-	if (!reload)
+	if (!ebpfos_koperation_find_control(EBPFOS_KPROG_CONTROL_CR3,
+					    EBPFOS_KPROG_ACTION_RELOAD) ||
+	    !ebpfos_koperation_find_control(EBPFOS_KPROG_CONTROL_CR3,
+					    EBPFOS_KPROG_ACTION_OBSERVE))
 		return -ENOENT;
-	memcpy(ebpfos_kprog_control.semantic_sha256,
-	       reload->semantic_sha256,
-	       sizeof(ebpfos_kprog_control.semantic_sha256));
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_control_set);
 }

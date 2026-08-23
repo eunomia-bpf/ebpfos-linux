@@ -37,6 +37,7 @@ CONTROL_REGISTERS = {
     "cr3": {
         "max_writes": 1,
         "normalize_bits": 12,
+        "payload_id": 3,
         "read": bytes.fromhex("0f20d8"),
         "read_effects": ["page_table.root.observe"],
         "read_post_state": "result-u64",
@@ -59,6 +60,11 @@ CONTROL_REGISTERS = {
         "write_post_state": "hardware.cr3.root-after",
         "write_source": "register-before",
     },
+}
+
+CONTROL_ACTIONS = {
+    "reload": 1,
+    "observe": 2,
 }
 
 
@@ -279,6 +285,26 @@ def architecture_requirements(trace: dict[str, Any]) -> int:
     return requirements
 
 
+def control_binding(operation: dict[str, Any]) -> tuple[int, int]:
+    registers = {
+        item.get("register") for item in operation["native_ir"]
+        if isinstance(item, dict) and item.get("op") in {
+            "read-control-register", "write-control-register"
+        }
+    }
+    writes = [
+        item for item in operation["native_ir"]
+        if isinstance(item, dict) and item.get("op") == "write-control-register"
+    ]
+    if len(registers) != 1:
+        raise SpecError(f"{operation['name']}: control payload must bind one register")
+    register = registers.pop()
+    if register not in CONTROL_REGISTERS:
+        raise SpecError(f"{operation['name']}: control payload register is unsupported")
+    action = "reload" if writes else "observe"
+    return CONTROL_REGISTERS[register]["payload_id"], CONTROL_ACTIONS[action]
+
+
 def check_semantics(operation: dict[str, Any]) -> None:
     precondition = operation["precondition"]
     if (not isinstance(precondition, dict) or set(precondition) != {"left", "right"} or
@@ -425,6 +451,7 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             "result": operation["result"],
         }
         equivalence_sha = digest(canonical(equivalence))
+        control_register, control_action = control_binding(operation)
         sym = symbol(operation["name"])
         proof_name = f"ebpfos_koperation_proof_{operation['id']}"
         header.extend([
@@ -461,6 +488,8 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             "\t{\n"
             f"\t\t.operation_id = {operation['id']}U,\n"
             f"\t\t.architecture_requirements = {architecture_requirements(trace)}U,\n"
+            f"\t\t.kprog_control_register = {control_register}U,\n"
+            f"\t\t.kprog_control_action = {control_action}U,\n"
             f"\t\t.proof_insns = {proof_name},\n"
             f"\t\t.proof_insn_count = ARRAY_SIZE({proof_name}),\n"
             f"\t\t.proof_imm64_insn = {immediate_index}U,\n"
