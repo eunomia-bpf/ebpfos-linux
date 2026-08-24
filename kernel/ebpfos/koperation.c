@@ -19,6 +19,7 @@
 #include <linux/uaccess.h>
 
 #include <asm/page.h>
+#include <asm/desc.h>
 #include <asm/msr.h>
 #include <asm/processor-flags.h>
 #include <asm/special_insns.h>
@@ -47,6 +48,7 @@ struct ebpfos_koperation_descriptor {
 #define EBPFOS_KOPERATION_SHADOW_CURRENT_CR4 2U
 #define EBPFOS_KOPERATION_SHADOW_CURRENT_LSTAR 3U
 #define EBPFOS_KOPERATION_SHADOW_UNAVAILABLE 4U
+#define EBPFOS_KOPERATION_SHADOW_CURRENT_IDTR 5U
 #define EBPFOS_KOPERATION_REQUIRE_CR3_NOFLUSH_CLEAR (1U << 0)
 
 #include "koperation-generated.h"
@@ -63,9 +65,11 @@ ebpfos_koperation_find(u32 operation_id);
  */
 #define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
 #define EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER 2U
+#define EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER 3U
 #define EBPFOS_KPROG_CONTROL_CR3 3U
 #define EBPFOS_KPROG_CONTROL_CR4 4U
 #define EBPFOS_KPROG_MSR_LSTAR 1U
+#define EBPFOS_KPROG_DESCRIPTOR_IDTR 1U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
 #define EBPFOS_KPROG_ACTION_OBSERVE 2U
 #define EBPFOS_KPROG_ACTION_INSTALL 3U
@@ -99,7 +103,8 @@ static int ebpfos_kprog_machine_decode(
 	payload = ebpfos_kprog_payload_decode(payload);
 	decoded->form = payload & 0xf;
 	if ((decoded->form != EBPFOS_KPROG_FORM_CONTROL_REGISTER &&
-	     decoded->form != EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER) ||
+	     decoded->form != EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
+	     decoded->form != EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER) ||
 	    payload >> 24)
 		return -EINVAL;
 	decoded->input_reg = (payload >> 4) & 0xf;
@@ -116,9 +121,15 @@ static int ebpfos_kprog_machine_decode(
 		    (decoded->action != EBPFOS_KPROG_ACTION_RELOAD &&
 		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))
 			return -EINVAL;
-	} else if (decoded->selector != EBPFOS_KPROG_MSR_LSTAR ||
+	} else if (decoded->form == EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
+		   (decoded->selector != EBPFOS_KPROG_MSR_LSTAR ||
 		   (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
-		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE)) {
+		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
+		return -EINVAL;
+	} else if (decoded->form == EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER &&
+		   (decoded->selector != EBPFOS_KPROG_DESCRIPTOR_IDTR ||
+		    (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
+		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
 		return -EINVAL;
 	}
 	return 0;
@@ -219,6 +230,7 @@ static int ebpfos_kprog_machine_emit_x86(
 	u8 *cursor = code;
 	u8 *first_mismatch = NULL;
 	u8 *second_mismatch = NULL;
+	u8 *third_mismatch = NULL;
 	u8 *success_jump;
 	u8 input_code;
 	s32 normalize_mask;
@@ -266,6 +278,46 @@ static int ebpfos_kprog_machine_emit_x86(
 			EMIT(0x39); EMIT(0xc0 | (input_code << 3));
 			EMIT(0x75); second_mismatch = cursor++;
 		}
+	} else if (decoded.form == EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER) {
+		/* IDTR is a 10-byte architectural value.  The generated ABI binds
+		 * its base in the BPF u64 operand and fixes the x86-64 IDT limit to
+		 * 256 descriptors.  Both observe and install verify limit and base. */
+		if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
+			EMIT(0x49 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+			EMIT(0x89); EMIT(0xc0 | (input_code << 3) | 3); /* input -> r11 */
+			/* Reject a non-canonical component-owned table base. */
+			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+			EMIT(0x48); EMIT(0xc1); EMIT(0xe0); EMIT(0x10);
+			EMIT(0x48); EMIT(0xc1); EMIT(0xf8); EMIT(0x10);
+			EMIT(0x49); EMIT(0x39); EMIT(0xc3);
+			EMIT(0x75); first_mismatch = cursor++;
+		}
+		EMIT(0x48); EMIT(0x83); EMIT(0xec); EMIT(0x10);
+		if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
+			EMIT(0x66); EMIT(0xc7); EMIT(0x04); EMIT(0x24);
+			EMIT(0xff); EMIT(0x0f); /* 256 * 16 - 1 */
+			EMIT(0x4c); EMIT(0x89); EMIT(0x5c); EMIT(0x24); EMIT(0x02);
+			EMIT(0x0f); EMIT(0x01); EMIT(0x1c); EMIT(0x24); /* lidt */
+		}
+		EMIT(0x0f); EMIT(0x01); EMIT(0x0c); EMIT(0x24); /* sidt */
+		EMIT(0x48); EMIT(0x8b); EMIT(0x44); EMIT(0x24); EMIT(0x02);
+		EMIT(0x0f); EMIT(0xb7); EMIT(0x14); EMIT(0x24);
+		EMIT(0x48); EMIT(0x83); EMIT(0xc4); EMIT(0x10);
+		EMIT(0x81); EMIT(0xfa); EMIT(0xff); EMIT(0x0f); EMIT(0x00); EMIT(0x00);
+		EMIT(0x75);
+		if (!first_mismatch)
+			first_mismatch = cursor++;
+		else
+			second_mismatch = cursor++;
+		EMIT(0x48 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+		EMIT(0x39); EMIT(0xc0 | (input_code << 3));
+		EMIT(0x75);
+		if (!first_mismatch)
+			first_mismatch = cursor++;
+		else if (!second_mismatch)
+			second_mismatch = cursor++;
+		else
+			third_mismatch = cursor++;
 	} else if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
 		/* Stage the component-owned root in r11 and reject non-canonical
 		 * x86-64 addresses before the unique WRMSR execution point. */
@@ -302,6 +354,8 @@ static int ebpfos_kprog_machine_emit_x86(
 	*first_mismatch = cursor - (first_mismatch + 1);
 	if (second_mismatch)
 		*second_mismatch = cursor - (second_mismatch + 1);
+	if (third_mismatch)
+		*third_mismatch = cursor - (third_mismatch + 1);
 	EMIT(0x48); EMIT(0xc7); EMIT(0xc0);
 	EMIT(0x8c); EMIT(0xff); EMIT(0xff); EMIT(0xff);
 	*success_jump = cursor - (success_jump + 1);
@@ -374,7 +428,13 @@ static int __init ebpfos_kprog_register(void)
 			EBPFOS_KPROG_MSR_LSTAR, EBPFOS_KPROG_ACTION_OBSERVE) ||
 	    !ebpfos_koperation_find_machine(
 			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_LSTAR, EBPFOS_KPROG_ACTION_INSTALL))
+			EBPFOS_KPROG_MSR_LSTAR, EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER,
+			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_OBSERVE) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER,
+			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_INSTALL))
 		return -ENOENT;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_machine_set);
@@ -434,6 +494,15 @@ ebpfos_koperation_shadow(const struct ebpfos_koperation_descriptor *descriptor,
 	case EBPFOS_KOPERATION_SHADOW_CURRENT_LSTAR:
 		rdmsrl(MSR_LSTAR, *shadow);
 		return 0;
+	case EBPFOS_KOPERATION_SHADOW_CURRENT_IDTR: {
+		struct desc_ptr idtr;
+
+		store_idt(&idtr);
+		if (idtr.size != IDT_ENTRIES * sizeof(gate_desc) - 1)
+			return -EOPNOTSUPP;
+		*shadow = idtr.address;
+		return 0;
+	}
 	case EBPFOS_KOPERATION_SHADOW_UNAVAILABLE:
 		/* Component-owned operands are admitted through the verifier-visible
 		 * KOperation payload, never through the experimental ioctl. */

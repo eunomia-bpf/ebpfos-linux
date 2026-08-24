@@ -268,6 +268,111 @@
       ],
       "result": "installed-syscall-entry-root-address",
       "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.idtr.read"
+      ],
+      "effects": [
+        "irq.descriptor-table.root.observe"
+      ],
+      "id": 6,
+      "name": "irq.read-idtr-root",
+      "native_ir": [
+        {
+          "op": "read-descriptor-table-register",
+          "register": "idtr"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 0,
+          "input": "hardware.idtr",
+          "op": "clear-low-bits"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.descriptor-table.root.observe",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "interrupt-descriptor-table-root-address",
+      "shadow_source": "current-idtr"
+    },
+    {
+      "capabilities": [
+        "cpu.idtr.write"
+      ],
+      "effects": [
+        "irq.descriptor-table.root.replace"
+      ],
+      "id": 7,
+      "name": "irq.install-idtr-root",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-descriptor-table-register",
+          "register": "idtr",
+          "source": "value"
+        },
+        {
+          "op": "read-descriptor-table-register",
+          "register": "idtr"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.idtr.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.descriptor-table.root.replace",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "installed-interrupt-descriptor-table-root-address",
+      "shadow_source": "component-root-input"
     }
   ]
 }

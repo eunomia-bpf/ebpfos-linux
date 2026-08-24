@@ -15,6 +15,8 @@
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_ROOT 2U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT 3U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT 4U
 
 struct ebpfos_runtime_root_slot {
 	__u64 slot_id;
@@ -83,6 +85,21 @@ struct ebpfos_runtime_syscall_root {
 	__u32 reserved;
 };
 
+struct ebpfos_runtime_irq_root {
+	__u32 version;
+	__u32 flags;
+	__u64 expected_epoch;
+	__u64 observer_slot_id;
+	__u64 installer_slot_id;
+	__u64 old_idtr;
+	__u64 target_idtr;
+	__u8 target_table_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u32 cpus_observed;
+	__u32 cpus_written;
+	__u32 active;
+	__u32 reserved;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -101,5 +118,11 @@ struct ebpfos_runtime_syscall_root {
 #define EBPFOS_RUNTIME_ROOT_IOC_SYSCALL_READ \
 	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x06, \
 	     struct ebpfos_runtime_syscall_root)
+#define EBPFOS_RUNTIME_ROOT_IOC_IRQ_INSTALL \
+	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x07, \
+	      struct ebpfos_runtime_irq_root)
+#define EBPFOS_RUNTIME_ROOT_IOC_IRQ_READ \
+	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x08, \
+	     struct ebpfos_runtime_irq_root)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */

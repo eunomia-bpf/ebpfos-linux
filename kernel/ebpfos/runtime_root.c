@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Policy-free target runtime root/epoch publication and dispatch primitive. */
+#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/ebpfos.h>
 #include <linux/ebpfos_runtime.h>
@@ -22,6 +23,7 @@
 #include <linux/workqueue.h>
 
 #include <asm/ptrace.h>
+#include <asm/desc.h>
 
 struct ebpfos_runtime_slot {
 	u64 slot_id;
@@ -67,6 +69,24 @@ struct ebpfos_runtime_syscall_state {
 
 static struct ebpfos_runtime_syscall_state ebpfos_runtime_syscall = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_syscall.lock),
+};
+
+struct ebpfos_runtime_irq_state {
+	struct mutex lock;
+	u64 observer_slot_id;
+	u64 installer_slot_id;
+	u64 epoch;
+	u64 old_idtr;
+	u64 target_idtr;
+	unsigned long target_table;
+	u8 target_table_sha256[SHA256_DIGEST_SIZE];
+	u32 cpus_observed;
+	u32 cpus_written;
+	bool active;
+};
+
+static struct ebpfos_runtime_irq_state ebpfos_runtime_irq = {
+	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_irq.lock),
 };
 
 static bool ebpfos_runtime_syscall_active(void)
@@ -436,6 +456,8 @@ static bool ebpfos_runtime_machine_program(const struct bpf_prog *prog)
 }
 
 static int ebpfos_runtime_root_vector(struct ebpfos_runtime_bundle *bundle,
+				      u64 observer_slot_id,
+				      u64 installer_slot_id,
 				      u64 expected_root, u64 target_root,
 				      u32 *observed, u32 *written)
 {
@@ -444,9 +466,9 @@ static int ebpfos_runtime_root_vector(struct ebpfos_runtime_bundle *bundle,
 	int observer_slot, installer_slot, error;
 
 	observer_slot = ebpfos_runtime_bundle_find(
-		bundle, ebpfos_runtime_syscall.observer_slot_id);
+		bundle, observer_slot_id);
 	installer_slot = ebpfos_runtime_bundle_find(
-		bundle, ebpfos_runtime_syscall.installer_slot_id);
+		bundle, installer_slot_id);
 	if (observer_slot < 0 || installer_slot < 0)
 		return -ENOENT;
 	observer = bundle->slots[observer_slot].prog;
@@ -500,6 +522,8 @@ static int ebpfos_runtime_syscall_rollback(
 		goto out;
 	}
 	error = ebpfos_runtime_root_vector(bundle,
+			 ebpfos_runtime_syscall.observer_slot_id,
+			 ebpfos_runtime_syscall.installer_slot_id,
 			 ebpfos_runtime_syscall.target_lstar,
 			 ebpfos_runtime_syscall.old_lstar, &observed, &written);
 	if (!error) {
@@ -559,6 +583,8 @@ static long ebpfos_runtime_syscall_install(void __user *argp)
 		(u64)ebpfos_runtime_syscall_entry;
 	smp_store_release(&ebpfos_runtime_syscall.active, true);
 	error = ebpfos_runtime_root_vector(bundle,
+			 ebpfos_runtime_syscall.observer_slot_id,
+			 ebpfos_runtime_syscall.installer_slot_id,
 			 ebpfos_runtime_syscall.old_lstar,
 			 ebpfos_runtime_syscall.target_lstar, &observed, &written);
 	if (error) {
@@ -603,6 +629,176 @@ static long ebpfos_runtime_syscall_read(void __user *argp)
 	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
 }
 
+static void ebpfos_runtime_irq_status(struct ebpfos_runtime_irq_root *status)
+{
+	memset(status, 0, sizeof(*status));
+	status->version = EBPFOS_RUNTIME_ROOT_ABI_VERSION;
+	mutex_lock(&ebpfos_runtime_irq.lock);
+	status->expected_epoch = ebpfos_runtime_irq.epoch;
+	status->observer_slot_id = ebpfos_runtime_irq.observer_slot_id;
+	status->installer_slot_id = ebpfos_runtime_irq.installer_slot_id;
+	status->old_idtr = ebpfos_runtime_irq.old_idtr;
+	status->target_idtr = ebpfos_runtime_irq.target_idtr;
+	memcpy(status->target_table_sha256,
+	       ebpfos_runtime_irq.target_table_sha256,
+	       sizeof(status->target_table_sha256));
+	status->cpus_observed = ebpfos_runtime_irq.cpus_observed;
+	status->cpus_written = ebpfos_runtime_irq.cpus_written;
+	status->active = ebpfos_runtime_irq.active;
+	mutex_unlock(&ebpfos_runtime_irq.lock);
+}
+
+static int ebpfos_runtime_irq_rollback(struct ebpfos_runtime_bundle *bundle,
+				       u64 expected_epoch)
+{
+	unsigned long target_table = 0;
+	u32 observed = 0, written = 0;
+	int error;
+
+	mutex_lock(&ebpfos_runtime_irq.lock);
+	if (!ebpfos_runtime_irq.active || bundle->epoch != expected_epoch ||
+	    ebpfos_runtime_irq.epoch != expected_epoch) {
+		error = -ESTALE;
+		goto out;
+	}
+	error = ebpfos_runtime_root_vector(bundle,
+			 ebpfos_runtime_irq.observer_slot_id,
+			 ebpfos_runtime_irq.installer_slot_id,
+			 ebpfos_runtime_irq.target_idtr,
+			 ebpfos_runtime_irq.old_idtr, &observed, &written);
+	if (!error) {
+		ebpfos_runtime_irq.cpus_observed += observed;
+		ebpfos_runtime_irq.cpus_written += written;
+		ebpfos_runtime_irq.active = false;
+		target_table = ebpfos_runtime_irq.target_table;
+		ebpfos_runtime_irq.target_table = 0;
+	}
+out:
+	mutex_unlock(&ebpfos_runtime_irq.lock);
+	if (target_table)
+		free_page(target_table);
+	return error;
+}
+
+static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
+				       u64 expected_epoch,
+				       u64 observer_slot_id,
+				       u64 installer_slot_id,
+				       struct ebpfos_runtime_irq_root *status)
+{
+	struct desc_ptr old_idtr;
+	unsigned long target_table;
+	u32 observed = 0, written = 0, rollback_count = 0;
+	int error, observer_slot, installer_slot, rollback_error;
+
+	if (!expected_epoch || !observer_slot_id || !installer_slot_id ||
+	    bundle->epoch != expected_epoch)
+		return -ESTALE;
+	observer_slot = ebpfos_runtime_bundle_find(bundle,
+						 observer_slot_id);
+	installer_slot = ebpfos_runtime_bundle_find(bundle,
+						  installer_slot_id);
+	if (observer_slot < 0 || installer_slot < 0 ||
+	    !ebpfos_runtime_machine_program(bundle->slots[observer_slot].prog) ||
+	    !ebpfos_runtime_machine_program(bundle->slots[installer_slot].prog))
+		return -EPROTO;
+	store_idt(&old_idtr);
+	if (old_idtr.size != IDT_ENTRIES * sizeof(gate_desc) - 1)
+		return -EOPNOTSUPP;
+	target_table = get_zeroed_page(GFP_KERNEL);
+	if (!target_table)
+		return -ENOMEM;
+	memcpy((void *)target_table, (const void *)old_idtr.address, PAGE_SIZE);
+	mutex_lock(&ebpfos_runtime_irq.lock);
+	if (ebpfos_runtime_irq.active) {
+		error = -EBUSY;
+		goto out_free_unlock;
+	}
+	ebpfos_runtime_irq.observer_slot_id = observer_slot_id;
+	ebpfos_runtime_irq.installer_slot_id = installer_slot_id;
+	ebpfos_runtime_irq.epoch = expected_epoch;
+	ebpfos_runtime_irq.old_idtr = old_idtr.address;
+	ebpfos_runtime_irq.target_idtr = target_table;
+	ebpfos_runtime_irq.target_table = target_table;
+	sha256((const u8 *)target_table, PAGE_SIZE,
+	       ebpfos_runtime_irq.target_table_sha256);
+	error = ebpfos_runtime_root_vector(bundle,
+			 observer_slot_id, installer_slot_id,
+			 old_idtr.address, target_table, &observed, &written);
+	if (error) {
+		rollback_error = ebpfos_runtime_machine_all_cpus(
+			bundle->slots[installer_slot].prog, old_idtr.address,
+			&rollback_count);
+		if (rollback_error) {
+			/* A partially installed architectural root owns its backing
+			 * page until an exact later rollback succeeds. */
+			error = rollback_error;
+			ebpfos_runtime_irq.cpus_observed = observed;
+			ebpfos_runtime_irq.cpus_written = written;
+			ebpfos_runtime_irq.active = true;
+			mutex_unlock(&ebpfos_runtime_irq.lock);
+			return error;
+		}
+		goto out_free_unlock;
+	}
+	ebpfos_runtime_irq.cpus_observed = observed;
+	ebpfos_runtime_irq.cpus_written = written;
+	ebpfos_runtime_irq.active = true;
+	if (status) {
+		status->old_idtr = old_idtr.address;
+		status->target_idtr = target_table;
+		memcpy(status->target_table_sha256,
+		       ebpfos_runtime_irq.target_table_sha256,
+		       sizeof(status->target_table_sha256));
+		status->cpus_observed = observed;
+		status->cpus_written = written;
+		status->active = 1;
+	}
+	mutex_unlock(&ebpfos_runtime_irq.lock);
+	return 0;
+
+out_free_unlock:
+	ebpfos_runtime_irq.target_table = 0;
+	mutex_unlock(&ebpfos_runtime_irq.lock);
+	free_page(target_table);
+	return error;
+}
+
+static long ebpfos_runtime_irq_install(void __user *argp)
+{
+	struct ebpfos_runtime_irq_root request;
+	struct ebpfos_runtime_bundle *bundle;
+	u32 slot;
+	int error;
+
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
+	    request.reserved || !request.expected_epoch || !request.observer_slot_id ||
+	    !request.installer_slot_id)
+		return -EINVAL;
+	bundle = ebpfos_runtime_bundle_get(request.observer_slot_id, &slot);
+	if (!bundle)
+		return -ENOENT;
+	error = ebpfos_runtime_irq_activate(bundle, request.expected_epoch,
+			request.observer_slot_id, request.installer_slot_id, &request);
+	if (!error && copy_to_user(argp, &request, sizeof(request))) {
+		error = ebpfos_runtime_irq_rollback(bundle, request.expected_epoch);
+		if (!error)
+			error = -EFAULT;
+	}
+	ebpfos_runtime_bundle_release(bundle);
+	return error;
+}
+
+static long ebpfos_runtime_irq_read(void __user *argp)
+{
+	struct ebpfos_runtime_irq_root status;
+
+	ebpfos_runtime_irq_status(&status);
+	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
+}
+
 static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 {
 	struct ebpfos_component_call_frame frame = {
@@ -615,6 +811,7 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 		regs->di, regs->si, regs->dx, regs->r10, regs->r8, regs->r9,
 	};
 	u64 action = EBPFOS_RUNTIME_SYSCALL_ACTION_NONE, target_epoch = 0;
+	u64 observer_slot_id = 0, installer_slot_id = 0;
 	s64 result = -ENOSYS;
 	u32 slot, provider_status;
 
@@ -643,6 +840,12 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 	if (frame.output_size >= 3 * sizeof(u64))
 		memcpy(&target_epoch, frame.output + 2 * sizeof(u64),
 		       sizeof(target_epoch));
+	if (frame.output_size >= 5 * sizeof(u64)) {
+		memcpy(&observer_slot_id, frame.output + 3 * sizeof(u64),
+		       sizeof(observer_slot_id));
+		memcpy(&installer_slot_id, frame.output + 4 * sizeof(u64),
+		       sizeof(installer_slot_id));
+	}
 	if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED) {
 		int error = ebpfos_runtime_commit_staged(bundle->epoch, target_epoch);
 
@@ -652,6 +855,17 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 			WRITE_ONCE(ebpfos_runtime_syscall.epoch, target_epoch);
 	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_ROOT) {
 		int error = ebpfos_runtime_syscall_rollback(bundle, target_epoch);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT) {
+		int error = ebpfos_runtime_irq_rollback(bundle, target_epoch);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT) {
+		int error = ebpfos_runtime_irq_activate(bundle, target_epoch,
+				observer_slot_id, installer_slot_id, NULL);
 
 		if (error)
 			result = error;
@@ -726,6 +940,10 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_syscall_install(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_SYSCALL_READ:
 		return ebpfos_runtime_syscall_read(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_IRQ_INSTALL:
+		return ebpfos_runtime_irq_install(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_IRQ_READ:
+		return ebpfos_runtime_irq_read(argp);
 	default:
 		return -ENOTTY;
 	}

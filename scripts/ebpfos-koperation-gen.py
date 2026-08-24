@@ -115,8 +115,39 @@ MODEL_SPECIFIC_REGISTERS = {
     },
 }
 
+DESCRIPTOR_TABLE_REGISTERS = {
+    "idtr": {
+        "family": "descriptor-table-register",
+        "max_writes": 1,
+        "normalize_bits": 0,
+        "payload_id": 1,
+        "read": bytes.fromhex("4883ec100f010c24488b4424024883c410"),
+        "read_effects": ["irq.descriptor-table.root.observe"],
+        "read_post_state": "result-u64",
+        "readback_required": True,
+        "shadow_constants": {
+            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
+            "current-idtr": "EBPFOS_KOPERATION_SHADOW_CURRENT_IDTR",
+        },
+        "shadow_sources": {"component-root-input", "current-idtr"},
+        "write": bytes.fromhex(
+            "4989fb4883ec1066c70424ff0f4c895c24020f011c244883c410"),
+        "write_effects": ["irq.descriptor-table.root.replace"],
+        "write_observations": [
+            "all-target-cpus-required",
+            "component-root-input",
+            "descriptor-limit-4095",
+            "rollback-root-required",
+        ],
+        "write_post_state": "hardware.idtr.after",
+        "write_source": "operation-operand",
+        "write_action": "install",
+    },
+}
+
 REGISTER_FAMILIES = {
     "control-register": CONTROL_REGISTERS,
+    "descriptor-table-register": DESCRIPTOR_TABLE_REGISTERS,
     "model-specific-register": MODEL_SPECIFIC_REGISTERS,
 }
 
@@ -273,6 +304,19 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
                 value = ("register-before", register)
             events.append({"op": opcode, "register": register,
                            "value": expression_text(value)})
+        elif (opcode == "read-descriptor-table-register" and
+              set(instruction) == {"op", "register"}):
+            register = instruction["register"]
+            if register not in DESCRIPTOR_TABLE_REGISTERS or returned:
+                raise SpecError(f"{operation['name']}: unsupported or misplaced descriptor-table register")
+            output.extend(DESCRIPTOR_TABLE_REGISTERS[register]["read"])
+            if register in register_state:
+                value = ("register-after", register, register_state[register])
+                read_after_write.add(register)
+            else:
+                value = ("register-before", register)
+            events.append({"op": opcode, "register": register,
+                           "value": expression_text(value)})
         elif (opcode == "write-control-register" and
               set(instruction) == {"op", "register", "source"}):
             register = instruction["register"]
@@ -296,6 +340,18 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
                     value is None or returned):
                 raise SpecError(f"{operation['name']}: unsupported or misplaced MSR write")
             output.extend(msr_write_bytes(MODEL_SPECIFIC_REGISTERS[register]["msr"]))
+            writes.append((register, value))
+            register_state[register] = value
+            events.append({"op": opcode, "register": register,
+                           "value": expression_text(value)})
+        elif (opcode == "write-descriptor-table-register" and
+              set(instruction) == {"op", "register", "source"}):
+            register = instruction["register"]
+            if (register not in DESCRIPTOR_TABLE_REGISTERS or
+                    instruction["source"] != "value" or
+                    value is None or returned):
+                raise SpecError(f"{operation['name']}: unsupported or misplaced descriptor-table write")
+            output.extend(DESCRIPTOR_TABLE_REGISTERS[register]["write"])
             writes.append((register, value))
             register_state[register] = value
             events.append({"op": opcode, "register": register,
@@ -324,8 +380,9 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
     register_events = [event for event in events if "register" in event]
     registers = {event["register"] for event in register_events}
     families = {
-        "model-specific-register" if "model-specific-register" in event["op"]
-        else "control-register" for event in register_events
+        next(family for family in REGISTER_FAMILIES
+             if family in event["op"])
+        for event in register_events
     }
     if len(registers) != 1 or len(families) != 1:
         raise SpecError(f"{operation['name']}: state trace must use one machine register")
@@ -399,17 +456,21 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str]
     register_items = [item for item in operation["native_ir"]
                       if isinstance(item, dict) and item.get("op") in {
                           "read-control-register", "write-control-register",
+                          "read-descriptor-table-register",
+                          "write-descriptor-table-register",
                           "read-model-specific-register",
                           "write-model-specific-register",
                       }]
     registers = {item.get("register") for item in register_items}
-    families = {"model-specific-register"
-                if "model-specific-register" in item["op"]
-                else "control-register" for item in register_items}
+    families = {
+        next(family for family in REGISTER_FAMILIES if family in item["op"])
+        for item in register_items
+    }
     writes = [
         item for item in operation["native_ir"]
         if isinstance(item, dict) and item.get("op") in {
-            "write-control-register", "write-model-specific-register"
+            "write-control-register", "write-descriptor-table-register",
+            "write-model-specific-register"
         }
     ]
     if len(registers) != 1 or len(families) != 1:
@@ -420,7 +481,8 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str]
     if metadata is None:
         raise SpecError(f"{operation['name']}: machine payload register is unsupported")
     action = metadata["write_action"] if writes else "observe"
-    form = 1 if family == "control-register" else 2
+    form = {"control-register": 1, "model-specific-register": 2,
+            "descriptor-table-register": 3}[family]
     return (form, metadata["payload_id"], CONTROL_ACTIONS[action],
             metadata["normalize_bits"],
             metadata["shadow_constants"][operation["shadow_source"]])
@@ -437,9 +499,11 @@ def check_semantics(operation: dict[str, Any]) -> None:
     register_items = [item for item in operation["native_ir"]
                       if isinstance(item, dict) and "register" in item]
     registers = {item["register"] for item in register_items}
-    families = {"model-specific-register"
-                if "model-specific-register" in item.get("op", "")
-                else "control-register" for item in register_items}
+    families = {
+        next(family for family in REGISTER_FAMILIES
+             if family in item.get("op", ""))
+        for item in register_items
+    }
     if len(registers) != 1 or len(families) != 1:
         raise SpecError(f"{operation['name']}: unknown precondition register")
     register = registers.pop()
