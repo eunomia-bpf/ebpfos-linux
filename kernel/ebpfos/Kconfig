@@ -22,6 +22,22 @@ config EBPFOS_TRUSTED_KEYS
 	  list contains exactly one certificate.  Do not place a private key in
 	  this option or in the kernel image.
 
+config EBPFOS_RUNTIME_ROOT
+	bool "Minimal eBPFOS runtime root executor"
+	depends on BPF_SYSCALL && BPF_JIT
+	default n
+	help
+	  Build only the policy-free target runtime root primitive.  It holds
+	  verifier-admitted/JITed component program references in an immutable
+	  finite slot bundle, publishes the bundle with one expected-epoch RCU
+	  pointer swap, and synchronously dispatches an opaque typed call frame.
+	  Admission policy, graph construction, signatures, and role semantics
+	  remain outside this target-runtime nucleus.
+
+config EBPFOS_BUILD
+	bool
+	default y if EBPFOS || EBPFOS_RUNTIME_ROOT
+
 config EBPFOS_KOPERATION
 	bool "eBPFOS generated x86-64 KOperation executor"
 	depends on EBPFOS && X86_64
