@@ -36,16 +36,18 @@ config EBPFOS_RUNTIME_ROOT
 
 config EBPFOS_BUILD
 	bool
-	default y if EBPFOS || EBPFOS_RUNTIME_ROOT
+	default y if EBPFOS || EBPFOS_RUNTIME_ROOT || EBPFOS_KOPERATION
 
 config EBPFOS_KOPERATION
 	bool "eBPFOS generated x86-64 KOperation executor"
-	depends on EBPFOS && X86_64
-	default y
+	depends on X86_64 && BPF_SYSCALL && BPF_JIT
+	default y if EBPFOS
 	help
 	  Build the generic verifier-to-native KOperation executor and its
 	  generated operation table.  Individual operations are declarative data;
-	  they do not add verifier hooks or native fallback implementations.
+	  they do not add verifier hooks or native fallback implementations.  The
+	  executor can be linked with the policy-free runtime root without the
+	  donor admission/control plane.
 
 config EBPFOS_KUNIT_TEST
 	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS

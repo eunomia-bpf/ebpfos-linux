@@ -336,15 +336,35 @@ struct ebpfos_binding *ebpfos_executor_root_binding_get(
 	u64 object_id, u64 role_type, u64 *epoch);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
-int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
-			       bool own_koperation_id);
+#else
+static inline bool ebpfos_admission_root_publisher_program(
+	const struct bpf_prog *prog)
+{
+	return false;
+}
+static inline bool ebpfos_admission_meta_program(const struct bpf_prog *prog)
+{
+	return false;
+}
+static inline bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
+{
+	return false;
+}
+#endif
 
 #ifdef CONFIG_EBPFOS_KOPERATION
+int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
+			       bool own_koperation_id);
 long ebpfos_koperation_prepare_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot);
 long ebpfos_koperation_result_ioctl(void __user *argp, void **txn_slot);
 void ebpfos_koperation_release(void **txn_slot);
 #else
+static inline int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
+					      bool own_koperation_id)
+{
+	return -EACCES;
+}
 static inline long ebpfos_koperation_prepare_ioctl(void __user *argp,
 						    void **txn_slot)
 {
@@ -361,26 +381,6 @@ static inline long ebpfos_koperation_result_ioctl(void __user *argp,
 	return -EOPNOTSUPP;
 }
 static inline void ebpfos_koperation_release(void **txn_slot) { }
-#endif
-#else
-static inline bool ebpfos_admission_root_publisher_program(
-	const struct bpf_prog *prog)
-{
-	return false;
-}
-static inline bool ebpfos_admission_meta_program(const struct bpf_prog *prog)
-{
-	return false;
-}
-static inline bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
-{
-	return false;
-}
-static inline int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
-					      bool own_koperation_id)
-{
-	return -EACCES;
-}
 #endif
 
 #endif /* _LINUX_EBPFOS_H */
