@@ -373,6 +373,316 @@
       ],
       "result": "installed-interrupt-descriptor-table-root-address",
       "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-lvtt.read"
+      ],
+      "effects": [
+        "irq.apic.timer-vector.observe"
+      ],
+      "id": 8,
+      "name": "irq.observe-x2apic-lvtt",
+      "native_ir": [
+        {
+          "op": "read-model-specific-register",
+          "register": "x2apic-lvtt"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 0,
+          "input": "hardware.x2apic-lvtt",
+          "op": "clear-low-bits"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.apic.timer-vector.observe",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "x2apic-local-vector-table-timer-value",
+      "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-lvtt.write"
+      ],
+      "effects": [
+        "irq.apic.timer-vector.replace"
+      ],
+      "id": 9,
+      "name": "irq.install-x2apic-lvtt",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "x2apic-lvtt",
+          "source": "value"
+        },
+        {
+          "op": "read-model-specific-register",
+          "register": "x2apic-lvtt"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.x2apic-lvtt.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.apic.timer-vector.replace",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "installed-x2apic-local-vector-table-timer-value",
+      "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-tmcct.read"
+      ],
+      "effects": [
+        "timer.apic.current-count.observe"
+      ],
+      "id": 10,
+      "name": "timer.observe-x2apic-tmcct",
+      "native_ir": [
+        {
+          "op": "read-model-specific-register",
+          "register": "x2apic-tmcct"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 0,
+          "input": "hardware.x2apic-tmcct",
+          "op": "clear-low-bits"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "timer.apic.current-count.observe",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "x2apic-timer-current-count-value",
+      "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-tmict.write"
+      ],
+      "effects": [
+        "timer.apic.initial-count.arm"
+      ],
+      "id": 11,
+      "name": "timer.install-x2apic-tmict",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "x2apic-tmict",
+          "source": "value"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.x2apic-tmict.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "timer.apic.initial-count.arm",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "armed-x2apic-timer-initial-count",
+      "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-eoi.write"
+      ],
+      "effects": [
+        "irq.apic.eoi.acknowledge"
+      ],
+      "id": 12,
+      "name": "irq.ack-x2apic-eoi",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "x2apic-eoi",
+          "source": "value"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.x2apic-eoi.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.apic.eoi.acknowledge",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "x2apic-end-of-interrupt-acknowledged",
+      "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-icr-self.write"
+      ],
+      "effects": [
+        "irq.apic.self-ipi.deliver"
+      ],
+      "id": 13,
+      "name": "timer.resume-x2apic-self-ipi",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "x2apic-icr-self",
+          "source": "value"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.x2apic-icr-self.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.apic.self-ipi.deliver",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "x2apic-self-timer-interrupt-delivered",
+      "shadow_source": "component-root-input"
     }
   ]
 }

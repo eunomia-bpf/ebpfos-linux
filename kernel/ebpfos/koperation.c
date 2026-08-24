@@ -31,6 +31,11 @@ struct ebpfos_koperation_descriptor {
 	u8 kprog_machine_selector;
 	u8 kprog_machine_action;
 	u8 kprog_normalize_bits;
+	u32 kprog_machine_register;
+	u8 kprog_operand_policy;
+	u8 kprog_readback_required;
+	u64 kprog_operand_required;
+	u64 kprog_operand_variable_mask;
 	const struct bpf_insn *proof_insns;
 	u32 proof_insn_count;
 	u32 proof_imm64_insn;
@@ -69,10 +74,18 @@ ebpfos_koperation_find(u32 operation_id);
 #define EBPFOS_KPROG_CONTROL_CR3 3U
 #define EBPFOS_KPROG_CONTROL_CR4 4U
 #define EBPFOS_KPROG_MSR_LSTAR 1U
+#define EBPFOS_KPROG_MSR_X2APIC_LVTT 2U
+#define EBPFOS_KPROG_MSR_X2APIC_TMICT 3U
+#define EBPFOS_KPROG_MSR_X2APIC_TMCCT 4U
+#define EBPFOS_KPROG_MSR_X2APIC_ICR_SELF 5U
+#define EBPFOS_KPROG_MSR_X2APIC_EOI 6U
 #define EBPFOS_KPROG_DESCRIPTOR_IDTR 1U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
 #define EBPFOS_KPROG_ACTION_OBSERVE 2U
 #define EBPFOS_KPROG_ACTION_INSTALL 3U
+#define EBPFOS_KPROG_OPERAND_NONE 0U
+#define EBPFOS_KPROG_OPERAND_CANONICAL_ADDRESS 1U
+#define EBPFOS_KPROG_OPERAND_MASKED_VALUE 2U
 
 static bool ebpfos_kprog_payload_escaped(u64 payload)
 {
@@ -122,9 +135,8 @@ static int ebpfos_kprog_machine_decode(
 		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))
 			return -EINVAL;
 	} else if (decoded->form == EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
-		   (decoded->selector != EBPFOS_KPROG_MSR_LSTAR ||
 		   (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
-		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
+		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE)) {
 		return -EINVAL;
 	} else if (decoded->form == EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER &&
 		   (decoded->selector != EBPFOS_KPROG_DESCRIPTOR_IDTR ||
@@ -319,29 +331,63 @@ static int ebpfos_kprog_machine_emit_x86(
 		else
 			third_mismatch = cursor++;
 	} else if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
-		/* Stage the component-owned root in r11 and reject non-canonical
-		 * x86-64 addresses before the unique WRMSR execution point. */
+		/*
+		 * Stage and constrain the component-owned operand before the unique
+		 * WRMSR execution point selected by generated operation metadata.
+		 */
 		EMIT(0x49 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
 		EMIT(0x89); EMIT(0xc0 | (input_code << 3) | 3);
-		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-		EMIT(0x48); EMIT(0xc1); EMIT(0xe0); EMIT(0x10);
-		EMIT(0x48); EMIT(0xc1); EMIT(0xf8); EMIT(0x10);
-		EMIT(0x49); EMIT(0x39); EMIT(0xc3);
-		EMIT(0x75); first_mismatch = cursor++;
+		if (operation->kprog_operand_policy ==
+		    EBPFOS_KPROG_OPERAND_CANONICAL_ADDRESS) {
+			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+			EMIT(0x48); EMIT(0xc1); EMIT(0xe0); EMIT(0x10);
+			EMIT(0x48); EMIT(0xc1); EMIT(0xf8); EMIT(0x10);
+			EMIT(0x49); EMIT(0x39); EMIT(0xc3);
+			EMIT(0x75); first_mismatch = cursor++;
+		} else if (operation->kprog_operand_policy ==
+			   EBPFOS_KPROG_OPERAND_MASKED_VALUE) {
+			u32 mask = ~(u32)operation->kprog_operand_variable_mask;
+
+			if (operation->kprog_operand_required > S32_MAX ||
+			    operation->kprog_operand_variable_mask > U32_MAX)
+				return -ERANGE;
+			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+			EMIT(0x48); EMIT(0x25);
+			put_unaligned_le32(mask, cursor); cursor += 4;
+			EMIT(0x48); EMIT(0x3d);
+			put_unaligned_le32((u32)operation->kprog_operand_required,
+					   cursor);
+			cursor += 4;
+			EMIT(0x75); first_mismatch = cursor++;
+		} else if (operation->kprog_operand_policy !=
+			   EBPFOS_KPROG_OPERAND_NONE) {
+			return -EINVAL;
+		}
 		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
 		EMIT(0x4c); EMIT(0x89); EMIT(0xda);
 		EMIT(0x48); EMIT(0xc1); EMIT(0xea); EMIT(0x20);
-		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
+		EMIT(0xb9);
+		put_unaligned_le32(operation->kprog_machine_register, cursor);
+		cursor += 4;
 		EMIT(0x0f); EMIT(0x30);
-		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
-		EMIT(0x0f); EMIT(0x32);
-		EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
-		EMIT(0x48); EMIT(0x09); EMIT(0xd0);
-		EMIT(0x49); EMIT(0x39); EMIT(0xc3);
-		EMIT(0x75); second_mismatch = cursor++;
+		if (operation->kprog_readback_required) {
+			EMIT(0xb9);
+			put_unaligned_le32(operation->kprog_machine_register,
+					   cursor);
+			cursor += 4;
+			EMIT(0x0f); EMIT(0x32);
+			EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
+			EMIT(0x48); EMIT(0x09); EMIT(0xd0);
+			EMIT(0x49); EMIT(0x39); EMIT(0xc3);
+			EMIT(0x75); second_mismatch = cursor++;
+		} else {
+			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+		}
 	} else {
-		/* Observe IA32_LSTAR and require the verifier-visible expected root. */
-		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
+		/* Observe the generated MSR and require the verifier-visible value. */
+		EMIT(0xb9);
+		put_unaligned_le32(operation->kprog_machine_register, cursor);
+		cursor += 4;
 		EMIT(0x0f); EMIT(0x32);
 		EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
 		EMIT(0x48); EMIT(0x09); EMIT(0xd0);
@@ -434,7 +480,31 @@ static int __init ebpfos_kprog_register(void)
 			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_OBSERVE) ||
 	    !ebpfos_koperation_find_machine(
 			EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER,
-			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_INSTALL))
+			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_LVTT,
+			EBPFOS_KPROG_ACTION_OBSERVE) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_LVTT,
+			EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_TMCCT,
+			EBPFOS_KPROG_ACTION_OBSERVE) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_TMICT,
+			EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_ICR_SELF,
+			EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
+			EBPFOS_KPROG_MSR_X2APIC_EOI,
+			EBPFOS_KPROG_ACTION_INSTALL))
 		return -ENOENT;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_machine_set);

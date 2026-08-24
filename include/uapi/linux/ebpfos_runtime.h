@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 2U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 3U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -17,6 +17,7 @@
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_ROOT 2U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT 3U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT 4U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_REARM_IRQ_ROOT 5U
 
 struct ebpfos_runtime_root_slot {
 	__u64 slot_id;
@@ -92,6 +93,14 @@ struct ebpfos_runtime_irq_root {
 	__u64 observer_slot_id;
 	__u64 installer_slot_id;
 	__u64 handler_slot_id;
+	__u64 routing_observer_slot_id;
+	__u64 routing_installer_slot_id;
+	__u64 pulse_observer_slot_id;
+	__u64 pulse_installer_slot_id;
+	__u64 routing_old;
+	__u64 routing_target;
+	__u64 pulse_resting;
+	__u64 pulse_armed;
 	__u64 old_idtr;
 	__u64 target_idtr;
 	__u64 handler_entry;
@@ -99,10 +108,13 @@ struct ebpfos_runtime_irq_root {
 	__u8 entry_descriptor_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u64 dispatches;
 	__u64 dispatch_errors;
+	__u64 pulse_rearms;
 	__u64 first_dispatch_epoch;
 	__u64 last_dispatch_epoch;
 	__u32 cpus_observed;
 	__u32 cpus_written;
+	__u32 machine_cpus_observed;
+	__u32 machine_cpus_written;
 	__u32 vector;
 	__u32 gate_dpl;
 	__u32 first_dispatch_prog_id;

@@ -81,6 +81,14 @@ struct ebpfos_runtime_irq_state {
 	u64 observer_slot_id;
 	u64 installer_slot_id;
 	u64 handler_slot_id;
+	u64 routing_observer_slot_id;
+	u64 routing_installer_slot_id;
+	u64 pulse_observer_slot_id;
+	u64 pulse_installer_slot_id;
+	u64 routing_old;
+	u64 routing_target;
+	u64 pulse_resting;
+	u64 pulse_armed;
 	u64 epoch;
 	u64 old_idtr;
 	u64 target_idtr;
@@ -89,12 +97,15 @@ struct ebpfos_runtime_irq_state {
 	u8 target_table_sha256[SHA256_DIGEST_SIZE];
 	atomic64_t dispatches;
 	atomic64_t dispatch_errors;
+	atomic64_t pulse_rearms;
 	atomic64_t first_dispatch_epoch;
 	atomic64_t last_dispatch_epoch;
 	atomic_t first_dispatch_prog_id;
 	atomic_t last_dispatch_prog_id;
 	u32 cpus_observed;
 	u32 cpus_written;
+	u32 machine_cpus_observed;
+	u32 machine_cpus_written;
 	u32 vector;
 	u32 gate_dpl;
 	bool active;
@@ -119,9 +130,11 @@ static bool ebpfos_runtime_irq_active(void)
 static bool ebpfos_runtime_irq_program(const struct bpf_prog *prog)
 {
 	return prog->type == BPF_PROG_TYPE_SYSCALL && !prog->sleepable &&
-	       prog->aux->ebpfos_component && !bpf_prog_has_kop_call(prog) &&
+	       prog->aux->ebpfos_component && bpf_prog_has_kop_call(prog) &&
 	       prog->jited && prog->jited_len;
 }
+
+static bool ebpfos_runtime_machine_program(const struct bpf_prog *prog);
 
 extern asmlinkage void ebpfos_runtime_syscall_entry(void);
 extern asmlinkage void entry_SYSCALL_64(void);
@@ -156,6 +169,15 @@ ebpfos_runtime_bundle_has_irq_program(
 }
 
 static bool
+ebpfos_runtime_bundle_has_machine_program(
+	const struct ebpfos_runtime_bundle *bundle, u64 slot_id)
+{
+	int slot = ebpfos_runtime_bundle_find(bundle, slot_id);
+
+	return slot >= 0 && ebpfos_runtime_machine_program(bundle->slots[slot].prog);
+}
+
+static bool
 ebpfos_runtime_bundle_preserves_active_roots(
 	const struct ebpfos_runtime_bundle *bundle)
 {
@@ -164,8 +186,16 @@ ebpfos_runtime_bundle_preserves_active_roots(
 		bundle, READ_ONCE(ebpfos_runtime_syscall.syscall_slot_id)) < 0)
 		return false;
 	if (ebpfos_runtime_irq_active() &&
-	    !ebpfos_runtime_bundle_has_irq_program(
-		bundle, READ_ONCE(ebpfos_runtime_irq.handler_slot_id)))
+	    (!ebpfos_runtime_bundle_has_irq_program(
+		bundle, READ_ONCE(ebpfos_runtime_irq.handler_slot_id)) ||
+	     !ebpfos_runtime_bundle_has_machine_program(
+		bundle, READ_ONCE(ebpfos_runtime_irq.routing_observer_slot_id)) ||
+	     !ebpfos_runtime_bundle_has_machine_program(
+		bundle, READ_ONCE(ebpfos_runtime_irq.routing_installer_slot_id)) ||
+	     !ebpfos_runtime_bundle_has_machine_program(
+		bundle, READ_ONCE(ebpfos_runtime_irq.pulse_observer_slot_id)) ||
+	     !ebpfos_runtime_bundle_has_machine_program(
+		bundle, READ_ONCE(ebpfos_runtime_irq.pulse_installer_slot_id))))
 		return false;
 	return true;
 }
@@ -353,7 +383,14 @@ static int ebpfos_runtime_commit_staged(u64 expected_epoch, u64 target_epoch)
 	spin_unlock_irqrestore(&ebpfos_runtime_root.lock, irq_flags);
 	if (!result) {
 		atomic64_inc(&ebpfos_runtime_syscall.graph_commits);
-		call_rcu(&source->rcu, ebpfos_runtime_bundle_retire_rcu);
+		/*
+		 * Root replacement is rare and must not depend on the retired
+		 * donor timer to advance callbacks.  The expedited grace period
+		 * also makes commit return only after every IRQ-side A operation
+		 * has linearized wholly before the B epoch.
+		 */
+		synchronize_rcu_expedited();
+		ebpfos_runtime_bundle_release(source);
 	}
 	return result;
 }
@@ -753,6 +790,17 @@ static void ebpfos_runtime_irq_status(struct ebpfos_runtime_irq_root *status)
 	status->observer_slot_id = ebpfos_runtime_irq.observer_slot_id;
 	status->installer_slot_id = ebpfos_runtime_irq.installer_slot_id;
 	status->handler_slot_id = ebpfos_runtime_irq.handler_slot_id;
+	status->routing_observer_slot_id =
+		ebpfos_runtime_irq.routing_observer_slot_id;
+	status->routing_installer_slot_id =
+		ebpfos_runtime_irq.routing_installer_slot_id;
+	status->pulse_observer_slot_id = ebpfos_runtime_irq.pulse_observer_slot_id;
+	status->pulse_installer_slot_id =
+		ebpfos_runtime_irq.pulse_installer_slot_id;
+	status->routing_old = ebpfos_runtime_irq.routing_old;
+	status->routing_target = ebpfos_runtime_irq.routing_target;
+	status->pulse_resting = ebpfos_runtime_irq.pulse_resting;
+	status->pulse_armed = ebpfos_runtime_irq.pulse_armed;
 	status->old_idtr = ebpfos_runtime_irq.old_idtr;
 	status->target_idtr = ebpfos_runtime_irq.target_idtr;
 	status->handler_entry = ebpfos_runtime_irq.handler_entry;
@@ -765,12 +813,16 @@ static void ebpfos_runtime_irq_status(struct ebpfos_runtime_irq_root *status)
 	status->dispatches = atomic64_read(&ebpfos_runtime_irq.dispatches);
 	status->dispatch_errors =
 		atomic64_read(&ebpfos_runtime_irq.dispatch_errors);
+	status->pulse_rearms = atomic64_read(&ebpfos_runtime_irq.pulse_rearms);
 	status->first_dispatch_epoch =
 		atomic64_read(&ebpfos_runtime_irq.first_dispatch_epoch);
 	status->last_dispatch_epoch =
 		atomic64_read(&ebpfos_runtime_irq.last_dispatch_epoch);
 	status->cpus_observed = ebpfos_runtime_irq.cpus_observed;
 	status->cpus_written = ebpfos_runtime_irq.cpus_written;
+	status->machine_cpus_observed =
+		ebpfos_runtime_irq.machine_cpus_observed;
+	status->machine_cpus_written = ebpfos_runtime_irq.machine_cpus_written;
 	status->vector = ebpfos_runtime_irq.vector;
 	status->gate_dpl = ebpfos_runtime_irq.gate_dpl;
 	status->first_dispatch_prog_id =
@@ -782,30 +834,79 @@ static void ebpfos_runtime_irq_status(struct ebpfos_runtime_irq_root *status)
 }
 
 static int ebpfos_runtime_irq_rollback(struct ebpfos_runtime_bundle *bundle,
-				       u64 expected_epoch)
+				       u64 expected_epoch,
+				       u64 resume_installer_slot_id,
+				       u64 resume_operand)
 {
 	unsigned long target_table = 0;
-	u32 observed = 0, written = 0;
-	int error;
+	struct bpf_prog *pulse_observer, *pulse_installer, *resume_installer = NULL;
+	u32 observed = 0, written = 0, count = 0;
+	int error, pulse_observer_slot, pulse_installer_slot, resume_installer_slot;
 
 	mutex_lock(&ebpfos_runtime_irq.lock);
-	if (!ebpfos_runtime_irq.active || bundle->epoch != expected_epoch ||
+	if (!ebpfos_runtime_irq_active() || bundle->epoch != expected_epoch ||
 	    ebpfos_runtime_irq.epoch != expected_epoch) {
 		error = -ESTALE;
 		goto out;
 	}
+	pulse_observer_slot = ebpfos_runtime_bundle_find(
+		bundle, ebpfos_runtime_irq.pulse_observer_slot_id);
+	pulse_installer_slot = ebpfos_runtime_bundle_find(
+		bundle, ebpfos_runtime_irq.pulse_installer_slot_id);
+	resume_installer_slot = resume_installer_slot_id ?
+		ebpfos_runtime_bundle_find(bundle, resume_installer_slot_id) : -1;
+	if (pulse_observer_slot < 0 || pulse_installer_slot < 0 ||
+	    (resume_installer_slot_id && resume_installer_slot < 0)) {
+		error = -ENOENT;
+		goto out;
+	}
+	pulse_observer = bundle->slots[pulse_observer_slot].prog;
+	pulse_installer = bundle->slots[pulse_installer_slot].prog;
+	if (resume_installer_slot_id)
+		resume_installer = bundle->slots[resume_installer_slot].prog;
+	if (!ebpfos_runtime_machine_program(pulse_observer) ||
+	    !ebpfos_runtime_machine_program(pulse_installer) ||
+	    (resume_installer_slot_id &&
+	     !ebpfos_runtime_machine_program(resume_installer))) {
+		error = -EPROTO;
+		goto out;
+	}
+	error = ebpfos_runtime_machine_all_cpus(
+		pulse_observer, ebpfos_runtime_irq.pulse_resting, &count);
+	ebpfos_runtime_irq.machine_cpus_observed += count;
+	if (error)
+		goto out;
+	error = ebpfos_runtime_machine_all_cpus(
+		pulse_installer, ebpfos_runtime_irq.pulse_resting, &count);
+	ebpfos_runtime_irq.machine_cpus_written += count;
+	if (error)
+		goto out;
 	error = ebpfos_runtime_root_vector(bundle,
 			 ebpfos_runtime_irq.observer_slot_id,
 			 ebpfos_runtime_irq.installer_slot_id,
 			 ebpfos_runtime_irq.target_idtr,
 			 ebpfos_runtime_irq.old_idtr, &observed, &written);
-	if (!error) {
-		ebpfos_runtime_irq.cpus_observed += observed;
-		ebpfos_runtime_irq.cpus_written += written;
-		/* Publish inactive only after every CPU restored the old IDTR. */
-		smp_store_release(&ebpfos_runtime_irq.active, false);
-		target_table = ebpfos_runtime_irq.target_table;
-		ebpfos_runtime_irq.target_table = 0;
+	ebpfos_runtime_irq.cpus_observed += observed;
+	ebpfos_runtime_irq.cpus_written += written;
+	if (error)
+		goto out;
+	error = ebpfos_runtime_root_vector(bundle,
+			 ebpfos_runtime_irq.routing_observer_slot_id,
+			 ebpfos_runtime_irq.routing_installer_slot_id,
+			 ebpfos_runtime_irq.routing_target,
+			 ebpfos_runtime_irq.routing_old, &observed, &written);
+	ebpfos_runtime_irq.machine_cpus_observed += observed;
+	ebpfos_runtime_irq.machine_cpus_written += written;
+	if (error)
+		goto out;
+	/* Publish inactive only after every CPU restored both machine roots. */
+	smp_store_release(&ebpfos_runtime_irq.active, false);
+	target_table = ebpfos_runtime_irq.target_table;
+	ebpfos_runtime_irq.target_table = 0;
+	if (resume_installer) {
+		error = ebpfos_runtime_machine_all_cpus(
+			resume_installer, resume_operand, &count);
+		ebpfos_runtime_irq.machine_cpus_written += count;
 	}
 out:
 	mutex_unlock(&ebpfos_runtime_irq.lock);
@@ -819,17 +920,29 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 				       u64 observer_slot_id,
 				       u64 installer_slot_id,
 				       u64 handler_slot_id,
+				       u64 routing_observer_slot_id,
+				       u64 routing_installer_slot_id,
+				       u64 pulse_observer_slot_id,
+				       u64 pulse_installer_slot_id,
+				       u64 routing_old, u64 routing_target,
+				       u64 pulse_resting, u64 pulse_armed,
 				       u32 vector, u32 gate_dpl,
 				       struct ebpfos_runtime_irq_root *status)
 {
 	struct desc_ptr old_idtr;
 	unsigned long target_table;
 	unsigned long handler_entry;
-	u32 observed = 0, written = 0, rollback_count = 0;
-	int error, observer_slot, installer_slot, handler_slot, rollback_error;
+	u32 observed = 0, written = 0, count = 0, rollback_count = 0;
+	int error, observer_slot, installer_slot, handler_slot;
+	int routing_observer_slot, routing_installer_slot;
+	int pulse_observer_slot, pulse_installer_slot, rollback_error;
+	bool routing_installed = false, idtr_installed = false;
 
 	if (!expected_epoch || !observer_slot_id || !installer_slot_id ||
-	    !handler_slot_id || vector < FIRST_EXTERNAL_VECTOR ||
+	    !handler_slot_id || !routing_observer_slot_id ||
+	    !routing_installer_slot_id || !pulse_observer_slot_id ||
+	    !pulse_installer_slot_id || routing_old == routing_target ||
+	    pulse_resting == pulse_armed || vector < FIRST_EXTERNAL_VECTOR ||
 	    vector >= NR_VECTORS || (gate_dpl != 0 && gate_dpl != 3) ||
 	    bundle->epoch != expected_epoch)
 		return -ESTALE;
@@ -838,10 +951,28 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 	installer_slot = ebpfos_runtime_bundle_find(bundle,
 						  installer_slot_id);
 	handler_slot = ebpfos_runtime_bundle_find(bundle, handler_slot_id);
+	routing_observer_slot = ebpfos_runtime_bundle_find(
+		bundle, routing_observer_slot_id);
+	routing_installer_slot = ebpfos_runtime_bundle_find(
+		bundle, routing_installer_slot_id);
+	pulse_observer_slot = ebpfos_runtime_bundle_find(
+		bundle, pulse_observer_slot_id);
+	pulse_installer_slot = ebpfos_runtime_bundle_find(
+		bundle, pulse_installer_slot_id);
 	if (observer_slot < 0 || installer_slot < 0 ||
-	    handler_slot < 0 ||
+	    handler_slot < 0 || routing_observer_slot < 0 ||
+	    routing_installer_slot < 0 || pulse_observer_slot < 0 ||
+	    pulse_installer_slot < 0 ||
 	    !ebpfos_runtime_machine_program(bundle->slots[observer_slot].prog) ||
 	    !ebpfos_runtime_machine_program(bundle->slots[installer_slot].prog) ||
+	    !ebpfos_runtime_machine_program(
+		bundle->slots[routing_observer_slot].prog) ||
+	    !ebpfos_runtime_machine_program(
+		bundle->slots[routing_installer_slot].prog) ||
+	    !ebpfos_runtime_machine_program(
+		bundle->slots[pulse_observer_slot].prog) ||
+	    !ebpfos_runtime_machine_program(
+		bundle->slots[pulse_installer_slot].prog) ||
 	    !ebpfos_runtime_irq_program(bundle->slots[handler_slot].prog))
 		return -EPROTO;
 	store_idt(&old_idtr);
@@ -863,6 +994,14 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 	ebpfos_runtime_irq.observer_slot_id = observer_slot_id;
 	ebpfos_runtime_irq.installer_slot_id = installer_slot_id;
 	ebpfos_runtime_irq.handler_slot_id = handler_slot_id;
+	ebpfos_runtime_irq.routing_observer_slot_id = routing_observer_slot_id;
+	ebpfos_runtime_irq.routing_installer_slot_id = routing_installer_slot_id;
+	ebpfos_runtime_irq.pulse_observer_slot_id = pulse_observer_slot_id;
+	ebpfos_runtime_irq.pulse_installer_slot_id = pulse_installer_slot_id;
+	ebpfos_runtime_irq.routing_old = routing_old;
+	ebpfos_runtime_irq.routing_target = routing_target;
+	ebpfos_runtime_irq.pulse_resting = pulse_resting;
+	ebpfos_runtime_irq.pulse_armed = pulse_armed;
 	ebpfos_runtime_irq.epoch = expected_epoch;
 	ebpfos_runtime_irq.old_idtr = old_idtr.address;
 	ebpfos_runtime_irq.target_idtr = target_table;
@@ -872,36 +1011,43 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 	ebpfos_runtime_irq.gate_dpl = gate_dpl;
 	atomic64_set(&ebpfos_runtime_irq.dispatches, 0);
 	atomic64_set(&ebpfos_runtime_irq.dispatch_errors, 0);
+	atomic64_set(&ebpfos_runtime_irq.pulse_rearms, 0);
 	atomic64_set(&ebpfos_runtime_irq.first_dispatch_epoch, 0);
 	atomic64_set(&ebpfos_runtime_irq.last_dispatch_epoch, 0);
 	atomic_set(&ebpfos_runtime_irq.first_dispatch_prog_id, 0);
 	atomic_set(&ebpfos_runtime_irq.last_dispatch_prog_id, 0);
+	ebpfos_runtime_irq.machine_cpus_observed = 0;
+	ebpfos_runtime_irq.machine_cpus_written = 0;
 	sha256((const u8 *)target_table, PAGE_SIZE,
 	       ebpfos_runtime_irq.target_table_sha256);
+	routing_installed = true;
+	error = ebpfos_runtime_root_vector(bundle,
+			 routing_observer_slot_id, routing_installer_slot_id,
+			 routing_old, routing_target, &observed, &written);
+	ebpfos_runtime_irq.machine_cpus_observed += observed;
+	ebpfos_runtime_irq.machine_cpus_written += written;
+	if (error)
+		goto out_restore;
+	error = ebpfos_runtime_machine_all_cpus(
+		bundle->slots[pulse_observer_slot].prog, pulse_resting, &count);
+	ebpfos_runtime_irq.machine_cpus_observed += count;
+	if (error)
+		goto out_restore;
+	idtr_installed = true;
 	error = ebpfos_runtime_root_vector(bundle,
 			 observer_slot_id, installer_slot_id,
 			 old_idtr.address, target_table, &observed, &written);
-	if (error) {
-		rollback_error = ebpfos_runtime_machine_all_cpus(
-			bundle->slots[installer_slot].prog, old_idtr.address,
-			&rollback_count);
-		if (rollback_error) {
-			/* A partially installed architectural root owns its backing
-			 * page until an exact later rollback succeeds. */
-			error = rollback_error;
-			ebpfos_runtime_irq.cpus_observed = observed;
-			ebpfos_runtime_irq.cpus_written = written;
-			/* Preserve ownership if exact rollback did not finish. */
-			smp_store_release(&ebpfos_runtime_irq.active, true);
-			mutex_unlock(&ebpfos_runtime_irq.lock);
-			return error;
-		}
-		goto out_free_unlock;
-	}
 	ebpfos_runtime_irq.cpus_observed = observed;
 	ebpfos_runtime_irq.cpus_written = written;
-	/* Publish active after the state and every CPU IDTR are ready. */
+	if (error)
+		goto out_restore;
+	/* Publish active before arming any interrupt source. */
 	smp_store_release(&ebpfos_runtime_irq.active, true);
+	error = ebpfos_runtime_machine_all_cpus(
+		bundle->slots[pulse_installer_slot].prog, pulse_armed, &count);
+	ebpfos_runtime_irq.machine_cpus_written += count;
+	if (error)
+		goto out_restore;
 	if (status) {
 		status->old_idtr = old_idtr.address;
 		status->target_idtr = target_table;
@@ -911,6 +1057,10 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 		       sizeof(status->target_table_sha256));
 		status->cpus_observed = observed;
 		status->cpus_written = written;
+		status->machine_cpus_observed =
+			ebpfos_runtime_irq.machine_cpus_observed;
+		status->machine_cpus_written =
+			ebpfos_runtime_irq.machine_cpus_written;
 		status->vector = vector;
 		status->gate_dpl = gate_dpl;
 		status->active = 1;
@@ -918,10 +1068,80 @@ static int ebpfos_runtime_irq_activate(struct ebpfos_runtime_bundle *bundle,
 	mutex_unlock(&ebpfos_runtime_irq.lock);
 	return 0;
 
+out_restore:
+	rollback_error = ebpfos_runtime_machine_all_cpus(
+		bundle->slots[pulse_installer_slot].prog, pulse_resting,
+		&rollback_count);
+	if (!rollback_error && idtr_installed)
+		rollback_error = ebpfos_runtime_machine_all_cpus(
+			bundle->slots[installer_slot].prog, old_idtr.address,
+			&rollback_count);
+	if (!rollback_error && routing_installed)
+		rollback_error = ebpfos_runtime_machine_all_cpus(
+			bundle->slots[routing_installer_slot].prog, routing_old,
+			&rollback_count);
+	if (rollback_error) {
+		/* A partial architectural root retains ownership until recovery. */
+		smp_store_release(&ebpfos_runtime_irq.active, true);
+		mutex_unlock(&ebpfos_runtime_irq.lock);
+		return rollback_error;
+	}
+	/* Pairs with acquire reads after all partial roots have been restored. */
+	smp_store_release(&ebpfos_runtime_irq.active, false);
 out_free_unlock:
 	ebpfos_runtime_irq.target_table = 0;
 	mutex_unlock(&ebpfos_runtime_irq.lock);
 	free_page(target_table);
+	return error;
+}
+
+static int ebpfos_runtime_irq_rearm(struct ebpfos_runtime_bundle *bundle,
+				     u64 expected_epoch,
+				     u64 pulse_observer_slot_id,
+				     u64 pulse_installer_slot_id,
+				     u64 pulse_resting, u64 pulse_armed)
+{
+	struct bpf_prog *observer, *installer;
+	u32 count;
+	int error, observer_slot, installer_slot;
+
+	mutex_lock(&ebpfos_runtime_irq.lock);
+	if (!ebpfos_runtime_irq_active() || bundle->epoch != expected_epoch ||
+	    ebpfos_runtime_irq.epoch != expected_epoch ||
+	    pulse_observer_slot_id !=
+		ebpfos_runtime_irq.pulse_observer_slot_id ||
+	    pulse_installer_slot_id !=
+		ebpfos_runtime_irq.pulse_installer_slot_id ||
+	    pulse_resting != ebpfos_runtime_irq.pulse_resting ||
+	    pulse_armed != ebpfos_runtime_irq.pulse_armed) {
+		error = -ESTALE;
+		goto out;
+	}
+	observer_slot = ebpfos_runtime_bundle_find(bundle,
+						  pulse_observer_slot_id);
+	installer_slot = ebpfos_runtime_bundle_find(bundle,
+						   pulse_installer_slot_id);
+	if (observer_slot < 0 || installer_slot < 0) {
+		error = -ENOENT;
+		goto out;
+	}
+	observer = bundle->slots[observer_slot].prog;
+	installer = bundle->slots[installer_slot].prog;
+	if (!ebpfos_runtime_machine_program(observer) ||
+	    !ebpfos_runtime_machine_program(installer)) {
+		error = -EPROTO;
+		goto out;
+	}
+	error = ebpfos_runtime_machine_all_cpus(observer, pulse_resting, &count);
+	ebpfos_runtime_irq.machine_cpus_observed += count;
+	if (error)
+		goto out;
+	error = ebpfos_runtime_machine_all_cpus(installer, pulse_armed, &count);
+	ebpfos_runtime_irq.machine_cpus_written += count;
+	if (!error)
+		atomic64_inc(&ebpfos_runtime_irq.pulse_rearms);
+out:
+	mutex_unlock(&ebpfos_runtime_irq.lock);
 	return error;
 }
 
@@ -937,17 +1157,25 @@ static long ebpfos_runtime_irq_install(void __user *argp)
 	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
 	    request.reserved || request.reserved1 || !request.expected_epoch ||
 	    !request.observer_slot_id || !request.installer_slot_id ||
-	    !request.handler_slot_id)
+	    !request.handler_slot_id || !request.routing_observer_slot_id ||
+	    !request.routing_installer_slot_id || !request.pulse_observer_slot_id ||
+	    !request.pulse_installer_slot_id)
 		return -EINVAL;
 	bundle = ebpfos_runtime_bundle_get(request.observer_slot_id, &slot);
 	if (!bundle)
 		return -ENOENT;
 	error = ebpfos_runtime_irq_activate(bundle, request.expected_epoch,
 			request.observer_slot_id, request.installer_slot_id,
-			request.handler_slot_id, request.vector, request.gate_dpl,
+			request.handler_slot_id, request.routing_observer_slot_id,
+			request.routing_installer_slot_id,
+			request.pulse_observer_slot_id,
+			request.pulse_installer_slot_id, request.routing_old,
+			request.routing_target, request.pulse_resting,
+			request.pulse_armed, request.vector, request.gate_dpl,
 			&request);
 	if (!error && copy_to_user(argp, &request, sizeof(request))) {
-		error = ebpfos_runtime_irq_rollback(bundle, request.expected_epoch);
+		error = ebpfos_runtime_irq_rollback(bundle, request.expected_epoch,
+						    0, 0);
 		if (!error)
 			error = -EFAULT;
 	}
@@ -976,6 +1204,10 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 	};
 	u64 action = EBPFOS_RUNTIME_SYSCALL_ACTION_NONE, target_epoch = 0;
 	u64 observer_slot_id = 0, installer_slot_id = 0, handler_slot_id = 0;
+	u64 routing_observer_slot_id = 0, routing_installer_slot_id = 0;
+	u64 pulse_observer_slot_id = 0, pulse_installer_slot_id = 0;
+	u64 routing_old = 0, routing_target = 0;
+	u64 pulse_resting = 0, pulse_armed = 0;
 	u64 vector = 0, gate_dpl = 0;
 	s64 result = -ENOSYS;
 	u32 slot, provider_status;
@@ -1018,6 +1250,24 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 		memcpy(&gate_dpl, frame.output + 7 * sizeof(u64),
 		       sizeof(gate_dpl));
 	}
+	if (frame.output_size >= 16 * sizeof(u64)) {
+		memcpy(&routing_observer_slot_id,
+		       frame.output + 8 * sizeof(u64), sizeof(routing_observer_slot_id));
+		memcpy(&routing_installer_slot_id,
+		       frame.output + 9 * sizeof(u64), sizeof(routing_installer_slot_id));
+		memcpy(&routing_old, frame.output + 10 * sizeof(u64),
+		       sizeof(routing_old));
+		memcpy(&routing_target, frame.output + 11 * sizeof(u64),
+		       sizeof(routing_target));
+		memcpy(&pulse_observer_slot_id,
+		       frame.output + 12 * sizeof(u64), sizeof(pulse_observer_slot_id));
+		memcpy(&pulse_installer_slot_id,
+		       frame.output + 13 * sizeof(u64), sizeof(pulse_installer_slot_id));
+		memcpy(&pulse_resting, frame.output + 14 * sizeof(u64),
+		       sizeof(pulse_resting));
+		memcpy(&pulse_armed, frame.output + 15 * sizeof(u64),
+		       sizeof(pulse_armed));
+	}
 	if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED) {
 		int error = ebpfos_runtime_commit_staged(bundle->epoch, target_epoch);
 
@@ -1029,14 +1279,25 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 		if (error)
 			result = error;
 	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT) {
-		int error = ebpfos_runtime_irq_rollback(bundle, target_epoch);
+		int error = ebpfos_runtime_irq_rollback(bundle, target_epoch,
+				observer_slot_id, installer_slot_id);
 
 		if (error)
 			result = error;
 	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT) {
 		int error = ebpfos_runtime_irq_activate(bundle, target_epoch,
 				observer_slot_id, installer_slot_id, handler_slot_id,
+				routing_observer_slot_id, routing_installer_slot_id,
+				pulse_observer_slot_id, pulse_installer_slot_id,
+				routing_old, routing_target, pulse_resting, pulse_armed,
 				vector, gate_dpl, NULL);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_REARM_IRQ_ROOT) {
+		int error = ebpfos_runtime_irq_rearm(bundle, target_epoch,
+				pulse_observer_slot_id, pulse_installer_slot_id,
+				pulse_resting, pulse_armed);
 
 		if (error)
 			result = error;
