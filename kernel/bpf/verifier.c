@@ -20123,10 +20123,11 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	u64 key;
 
 	if (prog->type == BPF_PROG_TYPE_SYSCALL) {
-		if (prog->sleepable)
+		if (prog->sleepable || prog->aux->ebpfos_component)
 			/* attach_btf_id checked to be zero already */
 			return 0;
-		verbose(env, "Syscall programs can only be sleepable\n");
+		verbose(env,
+			"Syscall programs can only be sleepable or admitted eBPFOS components\n");
 		return -EINVAL;
 	}
 
