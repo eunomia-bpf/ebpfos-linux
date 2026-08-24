@@ -331,7 +331,7 @@ struct bpf_map {
 	spinlock_t owner_lock;
 	struct bpf_map_owner *owner;
 	/* Protected by owner_lock.  eBPFOS providers require exclusive use. */
-	struct bpf_prog_aux *ebpfos_provider_owner;
+	struct bpf_prog_aux *ebpfos_component_owner;
 	u32 ebpfos_prog_users;
 	u32 ebpfos_external_writers;
 	u32 ebpfos_external_gp_refs;
@@ -391,14 +391,14 @@ static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
 
 	spin_lock_bh(&map->owner_lock);
 	if (provider) {
-		if (!map->ebpfos_provider_owner && !map->ebpfos_prog_users &&
+		if (!map->ebpfos_component_owner && !map->ebpfos_prog_users &&
 		    !map->ebpfos_external_writers)
-			map->ebpfos_provider_owner = aux;
-		if (map->ebpfos_provider_owner == aux) {
+			map->ebpfos_component_owner = aux;
+		if (map->ebpfos_component_owner == aux) {
 			map->ebpfos_prog_users++;
 			allowed = true;
 		}
-	} else if (!map->ebpfos_provider_owner &&
+	} else if (!map->ebpfos_component_owner &&
 		   map->ebpfos_prog_users != U32_MAX) {
 		map->ebpfos_prog_users++;
 		allowed = true;
@@ -416,10 +416,10 @@ static inline void bpf_ebpfos_map_prog_put(struct bpf_map *map,
 		goto out;
 
 	map->ebpfos_prog_users--;
-	if (map->ebpfos_provider_owner == aux) {
+	if (map->ebpfos_component_owner == aux) {
 		WARN_ON_ONCE(map->ebpfos_prog_users);
 		if (!map->ebpfos_prog_users)
-			map->ebpfos_provider_owner = NULL;
+			map->ebpfos_component_owner = NULL;
 	}
 out:
 	spin_unlock_bh(&map->owner_lock);
@@ -430,7 +430,7 @@ static inline bool bpf_ebpfos_map_external_get(struct bpf_map *map)
 	bool allowed = false;
 
 	spin_lock_bh(&map->owner_lock);
-	if (!map->ebpfos_provider_owner &&
+	if (!map->ebpfos_component_owner &&
 	    map->ebpfos_external_writers != U32_MAX) {
 		map->ebpfos_external_writers++;
 		allowed = true;
@@ -1868,7 +1868,6 @@ struct bpf_prog_aux {
 	bool changes_pkt_data;
 	bool might_sleep;
 	bool kprobe_write_ctx;
-	bool ebpfos_provider;
 	bool ebpfos_meta;
 	bool ebpfos_component;
 	u32 ebpfos_load_insn_cnt;

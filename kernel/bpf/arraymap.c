@@ -968,11 +968,6 @@ static void *prog_fd_array_get_ptr(struct bpf_map *map,
 
 	if (IS_ERR(prog))
 		return prog;
-	if (prog->aux->ebpfos_provider) {
-		bpf_prog_put(prog);
-		return ERR_PTR(-EPERM);
-	}
-
 	if (prog->type == BPF_PROG_TYPE_EXT ||
 	    !bpf_prog_map_compatible(map, prog)) {
 		bpf_prog_put(prog);

@@ -1311,7 +1311,6 @@ enum bpf_perf_event_type {
 #define BPF_F_TEST_REG_INVARIANTS	(1U << 7)
 
 /* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
-#define BPF_F_EBPFOS_PROVIDER	(1U << 8)
 #define BPF_F_EBPFOS_META	(1U << 9)
 /* Restrict a sleepable syscall program to the typed component-call ABI. */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)

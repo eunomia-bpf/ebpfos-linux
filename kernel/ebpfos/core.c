@@ -8,10 +8,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
-struct ebpfos_file {
-	/* Serializes the one file-replacement transaction owned by this FD. */
-	struct mutex file_txn_lock;
-	void *file_txn;
+struct ebpfos_control {
 	/* Independent generated KOperation proof/native transaction. */
 	struct mutex koperation_txn_lock;
 	void *koperation_txn;
@@ -22,12 +19,11 @@ static_assert(sizeof(struct ebpfos_ioc_version) == 8);
 
 static int ebpfos_open(struct inode *inode, struct file *file)
 {
-	struct ebpfos_file *state;
+	struct ebpfos_control *state;
 
 	state = kzalloc_obj(*state, GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
-	mutex_init(&state->file_txn_lock);
 	mutex_init(&state->koperation_txn_lock);
 	file->private_data = state;
 	return 0;
@@ -35,13 +31,11 @@ static int ebpfos_open(struct inode *inode, struct file *file)
 
 static int ebpfos_release(struct inode *inode, struct file *file)
 {
-	struct ebpfos_file *state = file->private_data;
+	struct ebpfos_control *state = file->private_data;
 
 	if (state) {
-		ebpfos_file_replace_release(&state->file_txn);
 		ebpfos_koperation_release(&state->koperation_txn);
 		mutex_destroy(&state->koperation_txn_lock);
-		mutex_destroy(&state->file_txn_lock);
 		kfree(state);
 	}
 	return 0;
@@ -59,7 +53,7 @@ static long ebpfos_ioctl_version(void __user *argp)
 
 static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct ebpfos_file *state = file->private_data;
+	struct ebpfos_control *state = file->private_data;
 	void __user *argp = (void __user *)arg;
 	long result;
 
@@ -76,100 +70,6 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_admission_info_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_RUNTIME_INFO:
 		return ebpfos_admission_runtime_info_ioctl(argp);
-	case EBPFOS_IOC_STATE_ADAPTER_SEAL:
-		return ebpfos_state_adapter_seal_ioctl(argp);
-	case EBPFOS_IOC_STATE_ADAPTER_INFO:
-		return ebpfos_state_adapter_info_ioctl(argp);
-	case EBPFOS_IOC_STATE_ADAPTER_TARGET_PAIR_EXPERIMENTAL:
-		return ebpfos_state_adapter_target_pair_ioctl(argp);
-	case EBPFOS_IOC_FILE_SPLIT_PRIVATE_CONVERT_EXPERIMENTAL:
-		return ebpfos_file_split_private_convert_experimental_ioctl(argp);
-	case EBPFOS_IOC_FILE_SPLIT_HOT_PUBLISH_EXPERIMENTAL:
-		return ebpfos_file_split_hot_publish_experimental_ioctl(argp);
-	case EBPFOS_IOC_OBJECT_CREATE:
-		return ebpfos_object_create_ioctl(argp);
-	case EBPFOS_IOC_FILE_ENROLL:
-		return ebpfos_file_enroll_ioctl(argp);
-	case EBPFOS_IOC_FILE_STATUS:
-		return ebpfos_file_status_ioctl(argp);
-	case EBPFOS_IOC_FILE_REPLACE_BEGIN:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_begin_ioctl(argp,
-							 &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_REPLACE_CATCHUP:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_catchup_ioctl(argp,
-							   &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_REPLACE_COMMIT:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_commit_ioctl(argp,
-							  &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_REPLACE_ABORT:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_abort_ioctl(argp,
-							 &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_REPLACE_STATUS:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_status_ioctl(argp,
-							  &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_BEGIN:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_recovery_begin_ioctl(argp,
-							  &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_ARM:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_recovery_arm_ioctl(argp,
-							&state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_ABORT:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_recovery_abort_ioctl(argp,
-							  &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_STATUS:
-		return ebpfos_file_recovery_status_ioctl(argp);
-	case EBPFOS_IOC_FILE_RECOVERY_RETIRE:
-		return ebpfos_file_recovery_retire_ioctl(argp);
-	case EBPFOS_IOC_FILE_REPLACE_BEGIN_V2:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_replace_begin_v2_ioctl(argp,
-							    &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_BEGIN_V2:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_recovery_begin_v2_ioctl(
-			argp, &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_RECOVERY_ARM_V2:
-		mutex_lock(&state->file_txn_lock);
-		result = ebpfos_file_recovery_arm_v2_ioctl(argp,
-							   &state->file_txn);
-		mutex_unlock(&state->file_txn_lock);
-		return result;
-	case EBPFOS_IOC_FILE_ADMISSION_STATUS:
-		return ebpfos_file_admission_status_ioctl(argp);
-	case EBPFOS_IOC_FILE_SPLIT_PUBLISH_EXPERIMENTAL:
-		return ebpfos_file_split_publish_experimental_ioctl(argp);
-	case EBPFOS_IOC_FILE_SPLIT_CONTROL_EXPERIMENTAL:
-		return ebpfos_file_split_control_experimental_ioctl(argp);
-	case EBPFOS_IOC_FILE_CHECKPOINT_EXPERIMENTAL:
-		return ebpfos_file_checkpoint_experimental_ioctl(argp);
 	case EBPFOS_IOC_KOPERATION_PREPARE_EXPERIMENTAL:
 		mutex_lock(&state->koperation_txn_lock);
 		result = ebpfos_koperation_prepare_ioctl(

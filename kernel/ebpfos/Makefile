@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-obj-y += admission.o admission_certificates.o state_adapter.o component_graph.o executor_root.o core.o object.o file.o
+obj-y += admission.o admission_certificates.o component_graph.o executor_root.o core.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o koperation-generated.o
 obj-$(CONFIG_EBPFOS_KUNIT_TEST) += koperation_kunit.o
 

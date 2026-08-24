@@ -460,9 +460,6 @@ static void ebpfos_kop_domain_filter_test(struct kunit *test)
 	/* A hook filter must not affect kfunc IDs owned by another set. */
 	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, false), 0);
 	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
-	aux->ebpfos_provider = true;
-	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
-	aux->ebpfos_provider = false;
 	aux->ebpfos_meta = true;
 	KUNIT_EXPECT_EQ(test, ebpfos_kprog_domain_filter(&prog, true), 1);
 	aux->ebpfos_meta = false;

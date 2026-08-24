@@ -21,7 +21,6 @@
  */
 
 #include <linux/fs.h>
-#include <linux/ebpfos.h>
 #include <linux/init.h>
 #include <linux/vfs.h>
 #include <linux/mount.h>
@@ -1287,7 +1286,6 @@ static int shmem_getattr(struct mnt_idmap *idmap,
 {
 	struct inode *inode = path->dentry->d_inode;
 	struct shmem_inode_info *info = SHMEM_I(inode);
-	loff_t visible_size;
 
 	if (info->alloced - info->swapped != inode->i_mapping->nrpages)
 		shmem_recalc_inode(inode, 0, 0);
@@ -1302,9 +1300,6 @@ static int shmem_getattr(struct mnt_idmap *idmap,
 			STATX_ATTR_IMMUTABLE |
 			STATX_ATTR_NODUMP);
 	generic_fillattr(idmap, request_mask, inode, stat);
-	if (ebpfos_inode_visible_size(inode, &visible_size))
-		stat->size = visible_size;
-
 	if (shmem_huge_global_enabled(inode, 0, 0, false, NULL, 0))
 		stat->blksize = HPAGE_PMD_SIZE;
 
@@ -1325,9 +1320,6 @@ static int shmem_setattr(struct mnt_idmap *idmap,
 	int error;
 	bool update_mtime = false;
 	bool update_ctime = true;
-
-	if (ebpfos_inode_reject_managed(inode))
-		return -EBUSY;
 
 	error = setattr_prepare(idmap, dentry, attr);
 	if (error)
@@ -2958,27 +2950,10 @@ out_nomem:
 	return retval;
 }
 
-#ifdef CONFIG_EBPFOS
-static int shmem_ebpfos_mmap_success(const struct vm_area_struct *vma)
-{
-	struct inode *inode = file_inode(vma->vm_file);
-
-	/* vma_link_file() still holds mapping->i_mmap_rwsem for this check. */
-	return ebpfos_inode_reject_managed(inode) ? -EBUSY : 0;
-}
-#endif
-
 static int shmem_mmap_prepare(struct vm_area_desc *desc)
 {
 	struct file *file = desc->file;
 	struct inode *inode = file_inode(file);
-
-	if (ebpfos_inode_reject_managed(inode))
-		return -EBUSY;
-#ifdef CONFIG_EBPFOS
-	desc->action.success_hook = shmem_ebpfos_mmap_success;
-	desc->action.hide_from_rmap_until_complete = true;
-#endif
 
 	file_accessed(file);
 	/* This is anonymous shared memory if it is unlinked at the time of mmap */
@@ -3485,36 +3460,8 @@ static ssize_t __shmem_file_read_iter(struct kiocb *iocb,
 
 static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	return ebpfos_file_read_iter(iocb, to, __shmem_file_read_iter);
+	return __shmem_file_read_iter(iocb, to);
 }
-
-#ifdef CONFIG_EBPFOS
-ssize_t ebpfos_shmem_native_read(struct file *file, void *buffer, size_t size,
-				 loff_t offset)
-{
-	struct iov_iter iter;
-	struct kiocb iocb;
-	struct kvec vector = {
-		.iov_base = buffer,
-		.iov_len = size,
-	};
-
-	if (offset < 0)
-		return -EINVAL;
-	if (!size)
-		return 0;
-	init_sync_kiocb(&iocb, file);
-	iocb.ki_pos = offset;
-	iov_iter_kvec(&iter, ITER_DEST, &vector, 1, size);
-	return __shmem_file_read_iter(&iocb, &iter);
-}
-
-ssize_t ebpfos_shmem_native_snapshot(struct file *file, void *buffer,
-				     size_t size)
-{
-	return ebpfos_shmem_native_read(file, buffer, size, 0);
-}
-#endif
 
 static ssize_t __shmem_file_write_iter(struct kiocb *iocb,
 				       struct iov_iter *from)
@@ -3542,7 +3489,7 @@ unlock:
 static ssize_t shmem_file_write_iter(struct kiocb *iocb,
 				     struct iov_iter *from)
 {
-	return ebpfos_file_write_iter(iocb, from, __shmem_file_write_iter);
+	return __shmem_file_write_iter(iocb, from);
 }
 
 static bool zero_pipe_buf_get(struct pipe_inode_info *pipe,
@@ -3600,9 +3547,6 @@ static ssize_t shmem_file_splice_read(struct file *in, loff_t *ppos,
 	size_t total_spliced = 0, used, npages, n, part;
 	loff_t isize;
 	int error = 0;
-
-	if (ebpfos_inode_reject_managed(inode))
-		return -EOPNOTSUPP;
 
 	/* Work out how much data we can actually add into the pipe */
 	used = pipe_buf_usage(pipe);
@@ -3709,8 +3653,6 @@ static ssize_t shmem_file_splice_write(struct pipe_inode_info *pipe,
 				       struct file *out, loff_t *ppos,
 				       size_t len, unsigned int flags)
 {
-	if (ebpfos_inode_reject_managed(file_inode(out)))
-		return -EOPNOTSUPP;
 	return iter_file_splice_write(pipe, out, ppos, len, flags);
 }
 
@@ -3718,15 +3660,6 @@ static loff_t shmem_file_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = mapping->host;
-	loff_t visible_size;
-
-	if (ebpfos_inode_visible_size(inode, &visible_size)) {
-		if (whence == SEEK_DATA || whence == SEEK_HOLE)
-			return -EOPNOTSUPP;
-		return generic_file_llseek_size(file, offset, whence,
-						MAX_LFS_FILESIZE, visible_size);
-	}
-
 	if (whence != SEEK_DATA && whence != SEEK_HOLE)
 		return generic_file_llseek_size(file, offset, whence,
 					MAX_LFS_FILESIZE, i_size_read(inode));
@@ -3752,19 +3685,10 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 	pgoff_t start, index, end, undo_fallocend;
 	int error;
 
-	if (ebpfos_inode_reject_managed(inode))
-		return -EOPNOTSUPP;
-
 	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		return -EOPNOTSUPP;
 
 	inode_lock(inode);
-	/* Close enrollment's NULL-route -> i_rwsem acquisition window. */
-	if (ebpfos_inode_reject_managed(inode)) {
-		error = -EOPNOTSUPP;
-		goto out;
-	}
-
 	if (info->flags & SHMEM_F_MAPPING_FROZEN) {
 		error = -EPERM;
 		goto out;
@@ -5306,14 +5230,6 @@ static const struct file_operations shmem_file_operations = {
 	.setlease	= generic_setlease,
 #endif
 };
-
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_TMPFS)
-bool ebpfos_shmem_file_supported(struct file *file)
-{
-	return file->f_op == &shmem_file_operations &&
-		file->f_mapping && file->f_mapping->host == file_inode(file);
-}
-#endif
 
 static const struct inode_operations shmem_inode_operations = {
 	.getattr	= shmem_getattr,
