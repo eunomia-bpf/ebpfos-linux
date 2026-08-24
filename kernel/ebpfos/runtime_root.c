@@ -16,6 +16,8 @@
 #include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
+#include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
@@ -29,6 +31,7 @@
 #include <asm/irq_regs.h>
 #include <asm/irq_vectors.h>
 #include <asm/ptrace.h>
+#include <asm/thread_info.h>
 
 struct ebpfos_runtime_slot {
 	u64 slot_id;
@@ -115,6 +118,36 @@ static struct ebpfos_runtime_irq_state ebpfos_runtime_irq = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_irq.lock),
 };
 
+struct ebpfos_runtime_process_state {
+	struct mutex lock;
+	struct task_struct *task;
+	u64 process_slot_id;
+	u64 epoch;
+	u64 task_object_id;
+	u64 task_start_boottime;
+	u64 mm_object_id;
+	atomic64_t returns;
+	atomic64_t return_errors;
+	atomic64_t syscall_returns;
+	atomic64_t irq_returns;
+	atomic64_t first_return_epoch;
+	atomic64_t last_return_epoch;
+	atomic64_t native_fallbacks;
+	atomic_t first_return_prog_id;
+	atomic_t last_return_prog_id;
+	u32 task_pid;
+	u32 task_tgid;
+	bool active;
+};
+
+#define EBPFOS_RUNTIME_PROCESS_RETURN_SYSCALL 1U
+#define EBPFOS_RUNTIME_PROCESS_RETURN_IRQ 2U
+#define EBPFOS_RUNTIME_PROCESS_CONTINUE_CURRENT 1U
+
+static struct ebpfos_runtime_process_state ebpfos_runtime_process = {
+	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_process.lock),
+};
+
 static bool ebpfos_runtime_syscall_active(void)
 {
 	/* Pairs with the release-store after the root state is initialized. */
@@ -127,6 +160,12 @@ static bool ebpfos_runtime_irq_active(void)
 	return smp_load_acquire(&ebpfos_runtime_irq.active);
 }
 
+static bool ebpfos_runtime_process_active(void)
+{
+	/* Pairs with release-stores after process ownership or rollback. */
+	return smp_load_acquire(&ebpfos_runtime_process.active);
+}
+
 static bool ebpfos_runtime_irq_program(const struct bpf_prog *prog)
 {
 	return prog->type == BPF_PROG_TYPE_SYSCALL && !prog->sleepable &&
@@ -136,11 +175,19 @@ static bool ebpfos_runtime_irq_program(const struct bpf_prog *prog)
 
 static bool ebpfos_runtime_machine_program(const struct bpf_prog *prog);
 
+static bool ebpfos_runtime_process_program(const struct bpf_prog *prog)
+{
+	return prog->type == BPF_PROG_TYPE_SYSCALL && !prog->sleepable &&
+	       prog->aux->ebpfos_component && !bpf_prog_has_kop_call(prog) &&
+	       prog->jited && prog->jited_len;
+}
+
 extern asmlinkage void ebpfos_runtime_syscall_entry(void);
 extern asmlinkage void entry_SYSCALL_64(void);
 extern char ebpfos_runtime_irq_entries_start[];
 extern const u8 ebpfos_runtime_irq_entry_descriptor_sha256[SHA256_DIGEST_SIZE];
 __visible noinstr void ebpfos_runtime_syscall_dispatch(struct pt_regs *regs);
+static int ebpfos_runtime_process_return(u64 operation);
 
 static int ebpfos_runtime_bundle_find(const struct ebpfos_runtime_bundle *bundle,
 				      u64 slot_id)
@@ -197,6 +244,14 @@ ebpfos_runtime_bundle_preserves_active_roots(
 	     !ebpfos_runtime_bundle_has_machine_program(
 		bundle, READ_ONCE(ebpfos_runtime_irq.pulse_installer_slot_id))))
 		return false;
+	if (ebpfos_runtime_process_active()) {
+		int slot = ebpfos_runtime_bundle_find(
+			bundle, READ_ONCE(ebpfos_runtime_process.process_slot_id));
+
+		if (slot < 0 ||
+		    !ebpfos_runtime_process_program(bundle->slots[slot].prog))
+			return false;
+	}
 	return true;
 }
 
@@ -361,6 +416,7 @@ static int ebpfos_runtime_commit_staged(u64 expected_epoch, u64 target_epoch)
 {
 	struct ebpfos_runtime_bundle *source, *target;
 	unsigned long irq_flags;
+	bool process_owned = false;
 	int result = 0;
 
 	spin_lock_irqsave(&ebpfos_runtime_root.lock, irq_flags);
@@ -379,6 +435,10 @@ static int ebpfos_runtime_commit_staged(u64 expected_epoch, u64 target_epoch)
 			WRITE_ONCE(ebpfos_runtime_syscall.epoch, target_epoch);
 		if (ebpfos_runtime_irq_active())
 			WRITE_ONCE(ebpfos_runtime_irq.epoch, target_epoch);
+		if (ebpfos_runtime_process_active()) {
+			WRITE_ONCE(ebpfos_runtime_process.epoch, target_epoch);
+			process_owned = true;
+		}
 	}
 	spin_unlock_irqrestore(&ebpfos_runtime_root.lock, irq_flags);
 	if (!result) {
@@ -389,8 +449,12 @@ static int ebpfos_runtime_commit_staged(u64 expected_epoch, u64 target_epoch)
 		 * also makes commit return only after every IRQ-side A operation
 		 * has linearized wholly before the B epoch.
 		 */
-		synchronize_rcu_expedited();
-		ebpfos_runtime_bundle_release(source);
+		if (process_owned)
+			call_rcu(&source->rcu, ebpfos_runtime_bundle_retire_rcu);
+		else {
+			synchronize_rcu_expedited();
+			ebpfos_runtime_bundle_release(source);
+		}
 	}
 	return result;
 }
@@ -474,7 +538,29 @@ error:
 }
 
 DECLARE_IDTENTRY_IRQ(X86_TRAP_OTHER, ebpfos_runtime_irq_vector);
-DEFINE_IDTENTRY_IRQ(ebpfos_runtime_irq_vector)
+static void __ebpfos_runtime_irq_vector(struct pt_regs *regs, u32 vector);
+
+__visible noinstr void ebpfos_runtime_irq_vector(
+	struct pt_regs *regs, unsigned long error_code)
+{
+	irqentry_state_t state = irqentry_enter(regs);
+	u32 vector = (u32)(u8)error_code;
+
+	kvm_set_cpu_l1tf_flush_l1d();
+	instrumentation_begin();
+	run_irq_on_irqstack_cond(__ebpfos_runtime_irq_vector, regs, vector);
+	if (user_mode(regs) && ebpfos_runtime_process_active()) {
+		ebpfos_runtime_process_return(EBPFOS_RUNTIME_PROCESS_RETURN_IRQ);
+		instrumentation_end();
+		exit_to_user_mode();
+		return;
+	}
+	instrumentation_end();
+	irqentry_exit(regs, state);
+}
+
+static noinline void __ebpfos_runtime_irq_vector(
+	struct pt_regs *regs, u32 vector)
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
@@ -779,6 +865,209 @@ static long ebpfos_runtime_syscall_read(void __user *argp)
 
 	ebpfos_runtime_syscall_status(&status);
 	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
+}
+
+static int ebpfos_runtime_process_activate(
+	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
+	u64 process_slot_id)
+{
+	struct task_struct *task = current;
+	u64 object_id;
+	int error = 0, slot;
+
+	if (!expected_epoch || !process_slot_id || bundle->epoch != expected_epoch ||
+	    !ebpfos_runtime_syscall_active() || !task->mm ||
+	    task_pid_nr(task) != task_tgid_nr(task))
+		return -EINVAL;
+	slot = ebpfos_runtime_bundle_find(bundle, process_slot_id);
+	if (slot < 0 ||
+	    !ebpfos_runtime_process_program(bundle->slots[slot].prog))
+		return -EPROTO;
+	mutex_lock(&ebpfos_runtime_process.lock);
+	if (ebpfos_runtime_process_active()) {
+		error = -EBUSY;
+		goto out;
+	}
+	object_id = task->start_boottime ^ ((u64)(u32)task_pid_nr(task) << 32) ^
+		    (u32)task_tgid_nr(task);
+	if (!object_id)
+		object_id = 1;
+	get_task_struct(task);
+	ebpfos_runtime_process.task = task;
+	ebpfos_runtime_process.process_slot_id = process_slot_id;
+	ebpfos_runtime_process.epoch = expected_epoch;
+	ebpfos_runtime_process.task_object_id = object_id;
+	ebpfos_runtime_process.task_start_boottime = task->start_boottime;
+	ebpfos_runtime_process.mm_object_id = (u64)(unsigned long)task->mm;
+	ebpfos_runtime_process.task_pid = task_pid_nr(task);
+	ebpfos_runtime_process.task_tgid = task_tgid_nr(task);
+	atomic64_set(&ebpfos_runtime_process.returns, 0);
+	atomic64_set(&ebpfos_runtime_process.return_errors, 0);
+	atomic64_set(&ebpfos_runtime_process.syscall_returns, 0);
+	atomic64_set(&ebpfos_runtime_process.irq_returns, 0);
+	atomic64_set(&ebpfos_runtime_process.first_return_epoch, 0);
+	atomic64_set(&ebpfos_runtime_process.last_return_epoch, 0);
+	atomic64_set(&ebpfos_runtime_process.native_fallbacks, 0);
+	atomic_set(&ebpfos_runtime_process.first_return_prog_id, 0);
+	atomic_set(&ebpfos_runtime_process.last_return_prog_id, 0);
+	/* Publish the complete stable identity before return-path readers. */
+	smp_store_release(&ebpfos_runtime_process.active, true);
+out:
+	mutex_unlock(&ebpfos_runtime_process.lock);
+	return error;
+}
+
+static int ebpfos_runtime_process_rollback(
+	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
+	u64 process_slot_id)
+{
+	struct task_struct *task = NULL;
+	int error = 0;
+
+	mutex_lock(&ebpfos_runtime_process.lock);
+	if (!ebpfos_runtime_process_active() ||
+	    bundle->epoch != expected_epoch ||
+	    READ_ONCE(ebpfos_runtime_process.epoch) != expected_epoch ||
+	    ebpfos_runtime_process.process_slot_id != process_slot_id ||
+	    ebpfos_runtime_process.task != current) {
+		error = -ESTALE;
+		goto out;
+	}
+	task = ebpfos_runtime_process.task;
+	/* Stop return-path readers before dropping the stable task reference. */
+	smp_store_release(&ebpfos_runtime_process.active, false);
+	ebpfos_runtime_process.task = NULL;
+out:
+	mutex_unlock(&ebpfos_runtime_process.lock);
+	if (task)
+		put_task_struct(task);
+	return error;
+}
+
+static void ebpfos_runtime_process_status(
+	struct ebpfos_runtime_process_root *status)
+{
+	memset(status, 0, sizeof(*status));
+	status->version = EBPFOS_RUNTIME_ROOT_ABI_VERSION;
+	mutex_lock(&ebpfos_runtime_process.lock);
+	status->expected_epoch = READ_ONCE(ebpfos_runtime_process.epoch);
+	status->process_slot_id = ebpfos_runtime_process.process_slot_id;
+	status->task_object_id = ebpfos_runtime_process.task_object_id;
+	status->task_start_boottime =
+		ebpfos_runtime_process.task_start_boottime;
+	status->mm_object_id = ebpfos_runtime_process.mm_object_id;
+	status->task_pid = ebpfos_runtime_process.task_pid;
+	status->task_tgid = ebpfos_runtime_process.task_tgid;
+	status->active = ebpfos_runtime_process_active();
+	mutex_unlock(&ebpfos_runtime_process.lock);
+	status->returns = atomic64_read(&ebpfos_runtime_process.returns);
+	status->return_errors =
+		atomic64_read(&ebpfos_runtime_process.return_errors);
+	status->syscall_returns =
+		atomic64_read(&ebpfos_runtime_process.syscall_returns);
+	status->irq_returns = atomic64_read(&ebpfos_runtime_process.irq_returns);
+	status->first_return_epoch =
+		atomic64_read(&ebpfos_runtime_process.first_return_epoch);
+	status->last_return_epoch =
+		atomic64_read(&ebpfos_runtime_process.last_return_epoch);
+	status->native_fallbacks =
+		atomic64_read(&ebpfos_runtime_process.native_fallbacks);
+	status->first_return_prog_id =
+		atomic_read(&ebpfos_runtime_process.first_return_prog_id);
+	status->last_return_prog_id =
+		atomic_read(&ebpfos_runtime_process.last_return_prog_id);
+}
+
+static long ebpfos_runtime_process_read(void __user *argp)
+{
+	struct ebpfos_runtime_process_root status;
+
+	ebpfos_runtime_process_status(&status);
+	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
+}
+
+static int ebpfos_runtime_process_return(u64 operation)
+{
+	struct ebpfos_component_call_frame frame = {
+		.version = EBPFOS_COMPONENT_CALL_ABI_VERSION,
+		.method_id = operation,
+		.input_size = 6 * sizeof(u64),
+		.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE,
+	};
+	struct ebpfos_runtime_bundle *bundle;
+	struct bpf_prog *prog;
+	u64 input[6], action = 0, object_id = 0;
+	u64 return_index;
+	u32 provider_status, slot;
+	int error = 0;
+
+	if (!ebpfos_runtime_process_active())
+		return -ENOENT;
+	bundle = ebpfos_runtime_bundle_get(
+		READ_ONCE(ebpfos_runtime_process.process_slot_id), &slot);
+	if (!bundle) {
+		error = -ENOENT;
+		goto fault;
+	}
+	prog = bundle->slots[slot].prog;
+	if (!ebpfos_runtime_process_program(prog) ||
+	    bundle->epoch != READ_ONCE(ebpfos_runtime_process.epoch) ||
+	    current != READ_ONCE(ebpfos_runtime_process.task) ||
+	    task_pid_nr(current) != ebpfos_runtime_process.task_pid ||
+	    task_tgid_nr(current) != ebpfos_runtime_process.task_tgid ||
+	    current->start_boottime !=
+		ebpfos_runtime_process.task_start_boottime ||
+	    (u64)(unsigned long)current->mm !=
+		ebpfos_runtime_process.mm_object_id) {
+		error = -ESTALE;
+		goto out;
+	}
+	frame.object_id = ebpfos_runtime_process.task_object_id;
+	frame.epoch = bundle->epoch;
+	input[0] = frame.object_id;
+	input[1] = (u64)(unsigned long)current;
+	input[2] = (u64)(unsigned long)current->mm;
+	input[3] = ebpfos_runtime_process.task_pid;
+	input[4] = ebpfos_runtime_process.task_tgid;
+	input[5] = READ_ONCE(current_thread_info()->flags) |
+		   READ_ONCE(current_thread_info()->syscall_work);
+	memcpy(frame.input, input, sizeof(input));
+	provider_status = bpf_prog_run_pin_on_cpu(prog, &frame);
+	if (provider_status || frame.status ||
+	    frame.output_size != 2 * sizeof(u64)) {
+		error = frame.status ? frame.status : -EREMOTEIO;
+		goto out;
+	}
+	memcpy(&action, frame.output, sizeof(action));
+	memcpy(&object_id, frame.output + sizeof(u64), sizeof(object_id));
+	if (action != EBPFOS_RUNTIME_PROCESS_CONTINUE_CURRENT ||
+	    object_id != ebpfos_runtime_process.task_object_id) {
+		error = -EPROTO;
+		goto out;
+	}
+	return_index = atomic64_inc_return(&ebpfos_runtime_process.returns);
+	if (operation == EBPFOS_RUNTIME_PROCESS_RETURN_SYSCALL)
+		atomic64_inc(&ebpfos_runtime_process.syscall_returns);
+	else if (operation == EBPFOS_RUNTIME_PROCESS_RETURN_IRQ)
+		atomic64_inc(&ebpfos_runtime_process.irq_returns);
+	else {
+		error = -EINVAL;
+		goto out;
+	}
+	if (return_index == 1) {
+		atomic64_set(&ebpfos_runtime_process.first_return_epoch,
+			     bundle->epoch);
+		atomic_set(&ebpfos_runtime_process.first_return_prog_id,
+			   prog->aux->id);
+	}
+	atomic64_set(&ebpfos_runtime_process.last_return_epoch, bundle->epoch);
+	atomic_set(&ebpfos_runtime_process.last_return_prog_id, prog->aux->id);
+out:
+	ebpfos_runtime_bundle_release(bundle);
+fault:
+	if (error)
+		atomic64_inc(&ebpfos_runtime_process.return_errors);
+	return error;
 }
 
 static void ebpfos_runtime_irq_status(struct ebpfos_runtime_irq_root *status)
@@ -1301,6 +1590,18 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 
 		if (error)
 			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_PROCESS_ROOT) {
+		int error = ebpfos_runtime_process_activate(
+			bundle, target_epoch, observer_slot_id);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_PROCESS_ROOT) {
+		int error = ebpfos_runtime_process_rollback(
+			bundle, target_epoch, observer_slot_id);
+
+		if (error)
+			result = error;
 	} else if (action != EBPFOS_RUNTIME_SYSCALL_ACTION_NONE) {
 		result = -EPROTO;
 	}
@@ -1314,10 +1615,24 @@ out:
 
 __visible noinstr void ebpfos_runtime_syscall_dispatch(struct pt_regs *regs)
 {
+	int process_error;
+
 	enter_from_user_mode(regs);
 	instrumentation_begin();
 	local_irq_enable();
 	regs->ax = ebpfos_runtime_run_syscall(regs);
+	if (ebpfos_runtime_process_active()) {
+		process_error = ebpfos_runtime_process_return(
+			EBPFOS_RUNTIME_PROCESS_RETURN_SYSCALL);
+		if (process_error)
+			regs->ax = process_error;
+		local_irq_disable();
+		regs->cx = regs->ip;
+		regs->r11 = regs->flags;
+		instrumentation_end();
+		exit_to_user_mode();
+		return;
+	}
 	local_irq_disable();
 	syscall_exit_to_user_mode_prepare(regs);
 	regs->cx = regs->ip;
@@ -1376,6 +1691,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_irq_install(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_IRQ_READ:
 		return ebpfos_runtime_irq_read(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_PROCESS_READ:
+		return ebpfos_runtime_process_read(argp);
 	default:
 		return -ENOTTY;
 	}

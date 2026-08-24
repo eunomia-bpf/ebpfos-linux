@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 3U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 4U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -18,6 +18,8 @@
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT 3U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT 4U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_REARM_IRQ_ROOT 5U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_PROCESS_ROOT 6U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_PROCESS_ROOT 7U
 
 struct ebpfos_runtime_root_slot {
 	__u64 slot_id;
@@ -124,6 +126,30 @@ struct ebpfos_runtime_irq_root {
 	__u32 reserved1;
 };
 
+struct ebpfos_runtime_process_root {
+	__u32 version;
+	__u32 flags;
+	__u64 expected_epoch;
+	__u64 process_slot_id;
+	__u64 task_object_id;
+	__u64 task_start_boottime;
+	__u64 mm_object_id;
+	__u64 returns;
+	__u64 return_errors;
+	__u64 syscall_returns;
+	__u64 irq_returns;
+	__u64 first_return_epoch;
+	__u64 last_return_epoch;
+	__u64 native_fallbacks;
+	__u64 state_mutations;
+	__u32 task_pid;
+	__u32 task_tgid;
+	__u32 first_return_prog_id;
+	__u32 last_return_prog_id;
+	__u32 active;
+	__u32 reserved;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -148,5 +174,8 @@ struct ebpfos_runtime_irq_root {
 #define EBPFOS_RUNTIME_ROOT_IOC_IRQ_READ \
 	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x08, \
 	     struct ebpfos_runtime_irq_root)
+#define EBPFOS_RUNTIME_ROOT_IOC_PROCESS_READ \
+	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x09, \
+	     struct ebpfos_runtime_process_root)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */
