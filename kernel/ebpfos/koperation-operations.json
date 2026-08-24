@@ -163,6 +163,111 @@
       ],
       "result": "control-register-value",
       "shadow_source": "current-cr4"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.lstar.read"
+      ],
+      "effects": [
+        "syscall.entry.root.observe"
+      ],
+      "id": 4,
+      "name": "syscall.read-lstar-root",
+      "native_ir": [
+        {
+          "op": "read-model-specific-register",
+          "register": "lstar"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "bits": 0,
+          "input": "hardware.lstar",
+          "op": "clear-low-bits"
+        }
+      },
+      "postcondition": {
+        "left": "result-u64",
+        "right": "staged-u64"
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "syscall.entry.root.observe",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "syscall-entry-root-address",
+      "shadow_source": "current-lstar"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.lstar.write"
+      ],
+      "effects": [
+        "syscall.entry.root.replace"
+      ],
+      "id": 5,
+      "name": "syscall.install-lstar-root",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "lstar",
+          "source": "value"
+        },
+        {
+          "op": "read-model-specific-register",
+          "register": "lstar"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "postcondition": {
+        "left": "hardware.lstar.after",
+        "right": "staged-u64"
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "syscall.entry.root.replace",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "installed-syscall-entry-root-address",
+      "shadow_source": "component-root-input"
     }
   ]
 }

@@ -35,6 +35,7 @@ OP_KEYS = {
 HEX = "0123456789abcdef"
 CONTROL_REGISTERS = {
     "cr3": {
+        "family": "control-register",
         "max_writes": 1,
         "normalize_bits": 12,
         "payload_id": 3,
@@ -42,7 +43,9 @@ CONTROL_REGISTERS = {
         "read_effects": ["page_table.root.observe"],
         "read_post_state": "result-u64",
         "readback_required": True,
-        "shadow_constant": "EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD",
+        "shadow_constants": {
+            "current-mm-pgd": "EBPFOS_KOPERATION_SHADOW_CURRENT_MM_PGD",
+        },
         "shadow_sources": {"current-mm-pgd"},
         "write": bytes.fromhex("0f22d8"),
         "write_effects": [
@@ -60,8 +63,10 @@ CONTROL_REGISTERS = {
         ],
         "write_post_state": "hardware.cr3.root-after",
         "write_source": "register-before",
+        "write_action": "reload",
     },
     "cr4": {
+        "family": "control-register",
         "max_writes": 0,
         "normalize_bits": 0,
         "payload_id": 4,
@@ -69,19 +74,56 @@ CONTROL_REGISTERS = {
         "read_effects": ["cpu.control-state.observe"],
         "read_post_state": "result-u64",
         "readback_required": False,
-        "shadow_constant": "EBPFOS_KOPERATION_SHADOW_CURRENT_CR4",
+        "shadow_constants": {
+            "current-cr4": "EBPFOS_KOPERATION_SHADOW_CURRENT_CR4",
+        },
         "shadow_sources": {"current-cr4"},
         "write": b"",
         "write_effects": [],
         "write_observations": [],
         "write_post_state": "hardware.cr4.after",
         "write_source": "register-before",
+        "write_action": "reload",
     },
+}
+
+MODEL_SPECIFIC_REGISTERS = {
+    "lstar": {
+        "family": "model-specific-register",
+        "max_writes": 1,
+        "msr": 0xC0000082,
+        "normalize_bits": 0,
+        "payload_id": 1,
+        "read_effects": ["syscall.entry.root.observe"],
+        "read_post_state": "result-u64",
+        "readback_required": True,
+        "shadow_constants": {
+            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
+            "current-lstar": "EBPFOS_KOPERATION_SHADOW_CURRENT_LSTAR",
+        },
+        "shadow_sources": {"component-root-input", "current-lstar"},
+        "write_effects": ["syscall.entry.root.replace"],
+        "write_observations": [
+            "all-target-cpus-required",
+            "component-root-input",
+            "executor.preemption-disabled",
+            "rollback-root-required",
+        ],
+        "write_post_state": "hardware.lstar.after",
+        "write_source": "operation-operand",
+        "write_action": "install",
+    },
+}
+
+REGISTER_FAMILIES = {
+    "control-register": CONTROL_REGISTERS,
+    "model-specific-register": MODEL_SPECIFIC_REGISTERS,
 }
 
 CONTROL_ACTIONS = {
     "reload": 1,
     "observe": 2,
+    "install": 3,
 }
 
 
@@ -161,6 +203,8 @@ def proof_template(operation: dict[str, Any]) -> tuple[bytes, int]:
 
 
 def expression_text(expression: tuple[Any, ...]) -> str:
+    if expression[0] == "operation-operand":
+        return "operation-operand-u64"
     if expression[0] == "register-before":
         return f"{expression[1]}-before-raw"
     if expression[0] == "register-after":
@@ -168,6 +212,16 @@ def expression_text(expression: tuple[Any, ...]) -> str:
     if expression[0] == "clear-low-bits":
         return f"normalize{expression[1]}({expression_text(expression[2])})"
     raise AssertionError(expression)
+
+
+def msr_read_bytes(msr: int) -> bytes:
+    return (bytes.fromhex("b9") + struct.pack("<I", msr) +
+            bytes.fromhex("0f3248c1e2204809d0"))
+
+
+def msr_write_bytes(msr: int) -> bytes:
+    return (bytes.fromhex("4889f84889fa48c1ea20b9") + struct.pack("<I", msr) +
+            bytes.fromhex("0f30"))
 
 
 def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
@@ -185,7 +239,12 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
         if not isinstance(instruction, dict) or "op" not in instruction:
             raise SpecError(f"{operation['name']}: malformed native instruction")
         opcode = instruction["op"]
-        if (opcode == "read-control-register" and
+        if opcode == "load-operand-u64" and set(instruction) == {"op"}:
+            if value is not None or returned:
+                raise SpecError(f"{operation['name']}: misplaced operation operand")
+            value = ("operation-operand",)
+            events.append({"op": opcode, "value": expression_text(value)})
+        elif (opcode == "read-control-register" and
                 set(instruction) == {"op", "register"}):
             register = instruction["register"]
             if register not in CONTROL_REGISTERS or returned:
@@ -201,6 +260,19 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
                 "register": register,
                 "value": expression_text(value),
             })
+        elif (opcode == "read-model-specific-register" and
+              set(instruction) == {"op", "register"}):
+            register = instruction["register"]
+            if register not in MODEL_SPECIFIC_REGISTERS or returned:
+                raise SpecError(f"{operation['name']}: unsupported or misplaced MSR")
+            output.extend(msr_read_bytes(MODEL_SPECIFIC_REGISTERS[register]["msr"]))
+            if register in register_state:
+                value = ("register-after", register, register_state[register])
+                read_after_write.add(register)
+            else:
+                value = ("register-before", register)
+            events.append({"op": opcode, "register": register,
+                           "value": expression_text(value)})
         elif (opcode == "write-control-register" and
               set(instruction) == {"op", "register", "source"}):
             register = instruction["register"]
@@ -216,6 +288,18 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
                 "register": register,
                 "value": expression_text(value),
             })
+        elif (opcode == "write-model-specific-register" and
+              set(instruction) == {"op", "register", "source"}):
+            register = instruction["register"]
+            if (register not in MODEL_SPECIFIC_REGISTERS or
+                    instruction["source"] != "value" or
+                    value is None or returned):
+                raise SpecError(f"{operation['name']}: unsupported or misplaced MSR write")
+            output.extend(msr_write_bytes(MODEL_SPECIFIC_REGISTERS[register]["msr"]))
+            writes.append((register, value))
+            register_state[register] = value
+            events.append({"op": opcode, "register": register,
+                           "value": expression_text(value)})
         elif opcode == "clear-low-bits" and set(instruction) == {"bits", "op"}:
             if value is None or returned:
                 raise SpecError(f"{operation['name']}: native transform has no live value")
@@ -237,28 +321,29 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
             raise SpecError(f"{operation['name']}: unsupported native opcode {opcode!r}")
     if not returned:
         raise SpecError(f"{operation['name']}: native program must return")
-    registers = {
-        event["register"] for event in events
-        if "register" in event
+    register_events = [event for event in events if "register" in event]
+    registers = {event["register"] for event in register_events}
+    families = {
+        "model-specific-register" if "model-specific-register" in event["op"]
+        else "control-register" for event in register_events
     }
-    if len(registers) != 1:
-        raise SpecError(f"{operation['name']}: state trace must use one control register")
+    if len(registers) != 1 or len(families) != 1:
+        raise SpecError(f"{operation['name']}: state trace must use one machine register")
     register = registers.pop()
-    metadata = CONTROL_REGISTERS[register]
+    family = families.pop()
+    metadata = REGISTER_FAMILIES[family][register]
     before = ("register-before", register)
     root_bits = metadata["normalize_bits"]
     normalized_before = ("clear-low-bits", root_bits, before)
-    if (operation["precondition"]["right"]["bits"] != root_bits or
-            operation["precondition"]["right"]["input"] !=
-            f"hardware.{register}"):
-        raise SpecError(f"{operation['name']}: precondition does not match control-register trace")
     if writes:
+        expected_source = (before if metadata["write_source"] == "register-before"
+                           else ("operation-operand",))
         if (len(writes) > metadata["max_writes"] or
-                metadata["write_source"] != "register-before" or
-                any(written_register != register or source != before
+                any(written_register != register or
+                    source != expected_source
                     for written_register, source in writes)):
             raise SpecError(
-                f"{operation['name']}: control-register write violates metadata")
+                f"{operation['name']}: machine-register write violates metadata")
         if metadata["readback_required"]:
             if register not in read_after_write:
                 raise SpecError(
@@ -272,6 +357,14 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
         terminal_source = before
         inferred_effects = metadata["read_effects"]
         expected_post = metadata["read_post_state"]
+    right = operation["precondition"]["right"]
+    if metadata["write_source"] == "operation-operand" and writes:
+        if right != {"input": "operation-operand", "op": "identity"}:
+            raise SpecError(f"{operation['name']}: operand precondition is not exact")
+    elif (right.get("bits") != root_bits or
+          right.get("input") != f"hardware.{register}" or
+          right.get("op") != "clear-low-bits"):
+        raise SpecError(f"{operation['name']}: precondition does not match machine trace")
     if value != ("clear-low-bits", root_bits, terminal_source):
         raise SpecError(
             f"{operation['name']}: terminal value violates control-register metadata")
@@ -302,26 +395,35 @@ def architecture_requirements(trace: dict[str, Any]) -> int:
     return requirements
 
 
-def control_binding(operation: dict[str, Any]) -> tuple[int, int, int, str]:
-    registers = {
-        item.get("register") for item in operation["native_ir"]
-        if isinstance(item, dict) and item.get("op") in {
-            "read-control-register", "write-control-register"
-        }
-    }
+def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    register_items = [item for item in operation["native_ir"]
+                      if isinstance(item, dict) and item.get("op") in {
+                          "read-control-register", "write-control-register",
+                          "read-model-specific-register",
+                          "write-model-specific-register",
+                      }]
+    registers = {item.get("register") for item in register_items}
+    families = {"model-specific-register"
+                if "model-specific-register" in item["op"]
+                else "control-register" for item in register_items}
     writes = [
         item for item in operation["native_ir"]
-        if isinstance(item, dict) and item.get("op") == "write-control-register"
+        if isinstance(item, dict) and item.get("op") in {
+            "write-control-register", "write-model-specific-register"
+        }
     ]
-    if len(registers) != 1:
-        raise SpecError(f"{operation['name']}: control payload must bind one register")
+    if len(registers) != 1 or len(families) != 1:
+        raise SpecError(f"{operation['name']}: machine payload must bind one register")
     register = registers.pop()
-    if register not in CONTROL_REGISTERS:
-        raise SpecError(f"{operation['name']}: control payload register is unsupported")
-    action = "reload" if writes else "observe"
-    metadata = CONTROL_REGISTERS[register]
-    return (metadata["payload_id"], CONTROL_ACTIONS[action],
-            metadata["normalize_bits"], metadata["shadow_constant"])
+    family = families.pop()
+    metadata = REGISTER_FAMILIES[family].get(register)
+    if metadata is None:
+        raise SpecError(f"{operation['name']}: machine payload register is unsupported")
+    action = metadata["write_action"] if writes else "observe"
+    form = 1 if family == "control-register" else 2
+    return (form, metadata["payload_id"], CONTROL_ACTIONS[action],
+            metadata["normalize_bits"],
+            metadata["shadow_constants"][operation["shadow_source"]])
 
 
 def check_semantics(operation: dict[str, Any]) -> None:
@@ -330,17 +432,27 @@ def check_semantics(operation: dict[str, Any]) -> None:
             precondition["left"] != "staged-u64"):
         raise SpecError(f"{operation['name']}: malformed equivalence precondition")
     right = precondition["right"]
-    if (not isinstance(right, dict) or
-            set(right) != {"bits", "input", "op"} or
-            right["op"] != "clear-low-bits" or
-            not isinstance(right["input"], str) or
-            not right["input"].startswith("hardware.")):
+    if not isinstance(right, dict):
         raise SpecError(f"{operation['name']}: unsupported precondition expression")
-    clear_low_mask(right["bits"], operation["name"])
-    register = right["input"].removeprefix("hardware.")
-    if register not in CONTROL_REGISTERS:
+    register_items = [item for item in operation["native_ir"]
+                      if isinstance(item, dict) and "register" in item]
+    registers = {item["register"] for item in register_items}
+    families = {"model-specific-register"
+                if "model-specific-register" in item.get("op", "")
+                else "control-register" for item in register_items}
+    if len(registers) != 1 or len(families) != 1:
         raise SpecError(f"{operation['name']}: unknown precondition register")
-    metadata = CONTROL_REGISTERS[register]
+    register = registers.pop()
+    metadata = REGISTER_FAMILIES[families.pop()].get(register)
+    if metadata is None:
+        raise SpecError(f"{operation['name']}: unknown precondition register")
+    if right.get("op") == "clear-low-bits":
+        if (set(right) != {"bits", "input", "op"} or
+                right["input"] != f"hardware.{register}"):
+            raise SpecError(f"{operation['name']}: unsupported register precondition")
+        clear_low_mask(right["bits"], operation["name"])
+    elif right != {"input": "operation-operand", "op": "identity"}:
+        raise SpecError(f"{operation['name']}: unsupported operand precondition")
     postcondition = operation["postcondition"]
     if (not isinstance(postcondition, dict) or
             set(postcondition) != {"left", "right"} or
@@ -470,12 +582,12 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             "result": operation["result"],
         }
         equivalence_sha = digest(canonical(equivalence))
-        (control_register, control_action, normalize_bits,
-         shadow_constant) = control_binding(operation)
+        (machine_form, machine_selector, machine_action, normalize_bits,
+         shadow_constant) = machine_binding(operation)
         sym = symbol(operation["name"])
         proof_name = f"ebpfos_koperation_proof_{operation['id']}"
         header.extend([
-            f"extern u64 {sym}(void);",
+            f"extern u64 {sym}(u64 operand);",
             f"extern const u32 {sym}_body_end_delta;",
             f"static const struct bpf_insn {proof_name}[] = {{",
             *c_insns(proof),
@@ -508,8 +620,9 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             "\t{\n"
             f"\t\t.operation_id = {operation['id']}U,\n"
             f"\t\t.architecture_requirements = {architecture_requirements(trace)}U,\n"
-            f"\t\t.kprog_control_register = {control_register}U,\n"
-            f"\t\t.kprog_control_action = {control_action}U,\n"
+            f"\t\t.kprog_machine_form = {machine_form}U,\n"
+            f"\t\t.kprog_machine_selector = {machine_selector}U,\n"
+            f"\t\t.kprog_machine_action = {machine_action}U,\n"
             f"\t\t.kprog_normalize_bits = {normalize_bits}U,\n"
             f"\t\t.proof_insns = {proof_name},\n"
             f"\t\t.proof_insn_count = ARRAY_SIZE({proof_name}),\n"
