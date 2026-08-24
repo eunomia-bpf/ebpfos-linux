@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 1U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 2U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -91,13 +91,25 @@ struct ebpfos_runtime_irq_root {
 	__u64 expected_epoch;
 	__u64 observer_slot_id;
 	__u64 installer_slot_id;
+	__u64 handler_slot_id;
 	__u64 old_idtr;
 	__u64 target_idtr;
+	__u64 handler_entry;
 	__u8 target_table_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 entry_descriptor_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u64 dispatches;
+	__u64 dispatch_errors;
+	__u64 first_dispatch_epoch;
+	__u64 last_dispatch_epoch;
 	__u32 cpus_observed;
 	__u32 cpus_written;
+	__u32 vector;
+	__u32 gate_dpl;
+	__u32 first_dispatch_prog_id;
+	__u32 last_dispatch_prog_id;
 	__u32 active;
 	__u32 reserved;
+	__u32 reserved1;
 };
 
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \

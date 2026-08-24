@@ -551,6 +551,11 @@ __irqentry_text_start:
 
 #include <asm/idtentry.h>
 
+#ifdef CONFIG_EBPFOS_RUNTIME_ROOT
+	/* One policy-free entry body serves every generator-owned vector stub. */
+	idtentry_irq X86_TRAP_OTHER ebpfos_runtime_irq_vector
+#endif
+
 	__ALIGN
 	.globl __irqentry_text_end
 __irqentry_text_end:

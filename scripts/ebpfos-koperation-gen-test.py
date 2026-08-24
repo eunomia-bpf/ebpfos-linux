@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -48,23 +49,23 @@ def main() -> int:
         certificate = json.loads((out / "certificate.json").read_text())
         header = (out / "generated.h").read_text()
         commitments = (out / "commitments.h").read_text()
-        if len(certificate["operations"]) != 5:
+        if len(certificate["operations"]) != 7:
             raise SystemExit("declarative operations were not generated")
         if assembly.count("0x48, 0x25, 0x00, 0xf0, 0xff, 0xff") != 2:
             raise SystemExit("native clear-low-bits opcodes were not composed")
-        if assembly.count("0x48, 0x25, 0xff, 0xff, 0xff, 0xff") != 3:
+        if assembly.count("0x48, 0x25, 0xff, 0xff, 0xff, 0xff") != 5:
             raise SystemExit("identity-width machine-register normalization was not composed")
         if assembly.count("0x0f, 0x20, 0xe0") != 1:
             raise SystemExit("CR4 control-register read opcode was not composed")
         if assembly.count("0x0f, 0x22, 0xd8") != 1:
             raise SystemExit("control-register write opcode was not composed")
-        if header.count(".code = 0xa7") != 6:
+        if header.count(".code = 0xa7") != 8:
             raise SystemExit("proof effect commitments were not composed")
         if "proof_template[" in commitments:
             raise SystemExit("userspace proof manifest has a fixed instruction ceiling")
-        if assembly.count("\tRET") != 5 or "ANNOTATE_UNRET_SAFE" in assembly:
+        if assembly.count("\tRET") != 7 or "ANNOTATE_UNRET_SAFE" in assembly:
             raise SystemExit("generated operations did not use the kernel return ABI")
-        if (header.count(".architecture_requirements = 0U") != 4 or
+        if (header.count(".architecture_requirements = 0U") != 6 or
                 header.count(".architecture_requirements = 1U") != 1):
             raise SystemExit("generated architecture preconditions are not access-derived")
         if (header.count(".kprog_machine_form = 1U") != 3 or
@@ -72,9 +73,9 @@ def main() -> int:
                 header.count(".kprog_machine_selector = 3U") != 2 or
                 header.count(".kprog_machine_selector = 4U") != 1 or
                 header.count(".kprog_machine_action = 1U") != 1 or
-                header.count(".kprog_machine_action = 2U") != 3 or
-                header.count(".kprog_machine_action = 3U") != 1 or
-                header.count(".kprog_normalize_bits = 0U") != 3 or
+                header.count(".kprog_machine_action = 2U") != 4 or
+                header.count(".kprog_machine_action = 3U") != 2 or
+                header.count(".kprog_normalize_bits = 0U") != 5 or
                 header.count(".kprog_normalize_bits = 12U") != 2):
             raise SystemExit("generated machine payload bindings are not access-derived")
         if (assembly.count("0xb9, 0x82, 0x00, 0x00, 0xc0, 0x0f, 0x32") != 2 or
@@ -86,6 +87,26 @@ def main() -> int:
         if any(item["return_abi"] != "kernel-rethunk"
                for item in certificate["operations"]):
             raise SystemExit("generated operation omitted the kernel return ABI")
+        irq_entry_descriptor = {
+            "architecture": "x86_64",
+            "dispatch_symbol": "asm_ebpfos_runtime_irq_vector",
+            "entry_alignment": "8*(1+HAS_KERNEL_IBT)",
+            "entry_symbol": "ebpfos_runtime_irq_entries_start",
+            "first_vector": "FIRST_EXTERNAL_VECTOR",
+            "generator": "ebpfos-koperation-gen.py",
+            "last_vector": "NR_VECTORS-1",
+            "policy": "none",
+            "profile": "all-vector-shared-dispatch-v1",
+        }
+        irq_entry_sha = hashlib.sha256(
+            (json.dumps(irq_entry_descriptor, sort_keys=True,
+                        separators=(",", ":")) + "\n").encode()).hexdigest()
+        if ("SYM_CODE_START(ebpfos_runtime_irq_entries_start)" not in assembly or
+                "\t.rept NR_VECTORS - FIRST_EXTERNAL_VECTOR" not in assembly or
+                "\t\tjmp asm_ebpfos_runtime_irq_vector" not in assembly or
+                irq_entry_sha not in header or
+                assembly.count("ebpfos_runtime_irq_entry_descriptor_sha256") != 4):
+            raise SystemExit("generated universal IRQ entry descriptor drifted")
         reload = certificate["operations"][1]
         if (reload["effects"] != [
                 "page_table.root.preserve",
@@ -127,7 +148,7 @@ def main() -> int:
             if rejected.returncode == 0:
                 raise SystemExit(f"{name} native/effect mutant was accepted")
 
-    print("EBPFOS_KOPERATION_GENERATOR_PASS operations=5 control_registers=2 model_specific_registers=1 declarative_write=PASS effect_commitment=PASS trace_mutants=REJECT")
+    print("EBPFOS_KOPERATION_GENERATOR_PASS operations=7 control_registers=2 model_specific_registers=1 descriptor_table_registers=2 universal_irq_entries=GENERATED declarative_write=PASS effect_commitment=PASS trace_mutants=REJECT")
     return 0
 
 

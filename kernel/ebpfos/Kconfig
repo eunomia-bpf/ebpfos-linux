@@ -25,6 +25,7 @@ config EBPFOS_TRUSTED_KEYS
 config EBPFOS_RUNTIME_ROOT
 	bool "Minimal eBPFOS runtime root executor"
 	depends on X86_64 && BPF_SYSCALL && BPF_JIT
+	select EBPFOS_KOPERATION
 	default n
 	help
 	  Build only the policy-free target runtime root primitive.  It holds
