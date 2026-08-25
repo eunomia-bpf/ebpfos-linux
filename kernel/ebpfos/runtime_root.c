@@ -264,6 +264,7 @@ struct ebpfos_runtime_successor_state {
 	u32 preflight_cpus;
 	u32 preflight_cr3_cpus;
 	u32 preflight_root_cpus;
+	u32 preflight_reverified_cpus;
 	u32 preflight_component_cpus;
 	bool transaction_admitted;
 	bool handoff_preflighted;
@@ -3196,6 +3197,7 @@ struct ebpfos_runtime_successor_preflight_context {
 	cpumask_t observed;
 	cpumask_t cr3_switched;
 	cpumask_t root_registers;
+	cpumask_t reverified;
 	cpumask_t components;
 	atomic_t failures;
 };
@@ -3232,6 +3234,7 @@ static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 	}
 	cpumask_set_cpu(cpu, &context->cr3_switched);
 	cpumask_set_cpu(cpu, &context->root_registers);
+	cpumask_set_cpu(cpu, &context->reverified);
 	cpumask_set_cpu(cpu, &context->components);
 	cpumask_set_cpu(cpu, &context->observed);
 }
@@ -3253,6 +3256,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	    request.expected_cpus != EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
 	    request.observed_cpus || request.cr3_switched_cpus ||
 	    request.root_register_cpus ||
+	    request.reverified_cpus ||
 	    request.component_cpus ||
 	    request.preflighted || request.published || request.reserved ||
 	    !ebpfos_runtime_successor_identity_nonzero(
@@ -3296,6 +3300,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	cpumask_clear(&context.observed);
 	cpumask_clear(&context.cr3_switched);
 	cpumask_clear(&context.root_registers);
+	cpumask_clear(&context.reverified);
 	cpumask_clear(&context.components);
 	atomic_set(&context.failures, 0);
 	alias_page = context.entry & PAGE_MASK;
@@ -3312,6 +3317,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		       !cpumask_equal(&context.observed, &expected) ||
 		       !cpumask_equal(&context.cr3_switched, &expected) ||
 		       !cpumask_equal(&context.root_registers, &expected) ||
+		       !cpumask_equal(&context.reverified, &expected) ||
 		       !cpumask_equal(&context.components, &expected)))
 		error = -EIO;
 	if (error)
@@ -3319,6 +3325,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	request.observed_cpus = cpumask_weight(&context.observed);
 	request.cr3_switched_cpus = cpumask_weight(&context.cr3_switched);
 	request.root_register_cpus = cpumask_weight(&context.root_registers);
+	request.reverified_cpus = cpumask_weight(&context.reverified);
 	request.component_cpus = cpumask_weight(&context.components);
 	request.preflighted = 1;
 	if (copy_to_user(argp, &request, sizeof(request))) {
@@ -3330,6 +3337,8 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		request.cr3_switched_cpus;
 	ebpfos_runtime_successor.preflight_root_cpus =
 		request.root_register_cpus;
+	ebpfos_runtime_successor.preflight_reverified_cpus =
+		request.reverified_cpus;
 	ebpfos_runtime_successor.preflight_component_cpus =
 		request.component_cpus;
 	ebpfos_runtime_successor.handoff_preflighted = true;

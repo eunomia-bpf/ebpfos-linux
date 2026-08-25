@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 15U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 16U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -300,6 +300,7 @@ struct ebpfos_runtime_successor_preflight {
 	__u32 observed_cpus;
 	__u32 cr3_switched_cpus;
 	__u32 root_register_cpus;
+	__u32 reverified_cpus;
 	__u32 component_cpus;
 	__u32 preflighted;
 	__u32 published;
