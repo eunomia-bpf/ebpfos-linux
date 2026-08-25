@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 14U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 15U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -19,7 +19,7 @@
 #define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_VERSION 1U
 #define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_FLAGS 0x1fULL
 #define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_RECORD_FLAGS 0x0fULL
-#define EBPFOS_RUNTIME_SUCCESSOR_PREFLIGHT_STACK_BYTES 80U
+#define EBPFOS_RUNTIME_SUCCESSOR_PREFLIGHT_STACK_BYTES 128U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_CPU 1U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_BOOT_TASK_MM 2U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER 3U
@@ -235,6 +235,7 @@ struct ebpfos_runtime_successor_stage {
 	__u64 cpu_stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 	__u64 cpu_contexts[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 	__u64 handoff_preflight;
+	__u64 component_probe;
 	__u64 handoff_alias;
 	__u64 handoff_physical;
 	__u64 handoff_bytes;
@@ -299,6 +300,7 @@ struct ebpfos_runtime_successor_preflight {
 	__u32 observed_cpus;
 	__u32 cr3_switched_cpus;
 	__u32 root_register_cpus;
+	__u32 component_cpus;
 	__u32 preflighted;
 	__u32 published;
 	__u32 reserved;
