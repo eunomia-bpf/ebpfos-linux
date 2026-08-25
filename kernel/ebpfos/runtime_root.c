@@ -9,7 +9,10 @@
 #include <linux/filter.h>
 #include <linux/fs.h>
 #include <linux/irq.h>
+#include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
@@ -32,6 +35,7 @@
 #include <asm/irq_regs.h>
 #include <asm/irq_vectors.h>
 #include <asm/page.h>
+#include <asm/pgtable_types.h>
 #include <asm/processor-flags.h>
 #include <asm/ptrace.h>
 #include <asm/thread_info.h>
@@ -242,6 +246,18 @@ struct ebpfos_runtime_device_state {
 
 static struct ebpfos_runtime_device_state ebpfos_runtime_device_root = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_device_root.lock),
+};
+
+struct ebpfos_runtime_successor_state {
+	struct mutex lock;
+	struct resource *region;
+	void *image;
+	u64 reserved_bytes;
+	struct ebpfos_runtime_successor_stage descriptor;
+};
+
+static struct ebpfos_runtime_successor_state ebpfos_runtime_successor = {
+	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_successor.lock),
 };
 
 static bool ebpfos_runtime_syscall_active(void)
@@ -2532,6 +2548,236 @@ static long ebpfos_runtime_read(void __user *argp)
 	return copy_to_user(argp, &snapshot, sizeof(snapshot)) ? -EFAULT : 0;
 }
 
+#define EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES (64ULL << 20)
+
+static void *ebpfos_runtime_successor_physical(
+	const struct ebpfos_runtime_successor_stage *request, void *image,
+	u64 physical, size_t bytes)
+{
+	u64 offset;
+
+	if (physical < request->physical_base)
+		return NULL;
+	offset = physical - request->physical_base;
+	if (offset > request->image_bytes ||
+	    bytes > request->image_bytes - offset)
+		return NULL;
+	return (u8 *)image + offset;
+}
+
+static int ebpfos_runtime_successor_walk(
+	const struct ebpfos_runtime_successor_stage *request, void *image,
+	u64 virtual, u64 *leaf)
+{
+	static const u32 shifts[] = { 39, 30, 21 };
+	u64 table = request->cr3 & CR3_ADDR_MASK;
+	u64 *entry, value;
+	u32 index;
+
+	for (index = 0; index < ARRAY_SIZE(shifts); index++) {
+		entry = ebpfos_runtime_successor_physical(
+			request, image, table +
+			(((virtual >> shifts[index]) & 0x1ff) * sizeof(*entry)),
+			sizeof(*entry));
+		if (!entry)
+			return -ERANGE;
+		value = READ_ONCE(*entry);
+		if (!(value & _PAGE_PRESENT))
+			return -ENOENT;
+		if (value & _PAGE_PSE)
+			return -EPROTO;
+		table = value & PTE_PFN_MASK;
+	}
+	entry = ebpfos_runtime_successor_physical(
+		request, image,
+		table + (((virtual >> PAGE_SHIFT) & 0x1ff) * sizeof(*entry)),
+		sizeof(*entry));
+	if (!entry)
+		return -ERANGE;
+	value = READ_ONCE(*entry);
+	if (!(value & _PAGE_PRESENT))
+		return -ENOENT;
+	*leaf = value;
+	return 0;
+}
+
+static int ebpfos_runtime_successor_root_page(
+	const struct ebpfos_runtime_successor_stage *request, void *image,
+	u64 virtual, bool writable, bool executable)
+{
+	u64 expected, leaf;
+	int error;
+
+	if (virtual < request->virtual_base ||
+	    virtual - request->virtual_base >= request->image_bytes)
+		return -ERANGE;
+	error = ebpfos_runtime_successor_walk(request, image, virtual, &leaf);
+	if (error)
+		return error;
+	expected = request->physical_base +
+		((virtual - request->virtual_base) & PAGE_MASK);
+	if ((leaf & PTE_PFN_MASK) != expected ||
+	    !!(leaf & _PAGE_RW) != writable ||
+	    !!(leaf & _PAGE_NX) == executable || leaf & _PAGE_USER)
+		return -EPROTO;
+	return 0;
+}
+
+static int ebpfos_runtime_successor_validate(
+	struct ebpfos_runtime_successor_stage *request, void *image)
+{
+	gate_desc *idt;
+	u64 end, leaf, mapped = 0, virtual, idt_physical;
+	u32 cpu, vector;
+	int error;
+
+	if (check_add_overflow(request->virtual_base,
+				 PAGE_ALIGN(request->image_bytes), &end))
+		return -EOVERFLOW;
+	for (virtual = request->virtual_base; virtual < end;
+	     virtual += PAGE_SIZE) {
+		error = ebpfos_runtime_successor_walk(
+			request, image, virtual, &leaf);
+		if (error == -ENOENT)
+			continue;
+		if (error)
+			return error;
+		if ((leaf & PTE_PFN_MASK) != request->physical_base +
+		    (virtual - request->virtual_base) ||
+		    ((leaf & _PAGE_RW) && !(leaf & _PAGE_NX)) ||
+		    (leaf & _PAGE_USER))
+			return -EPROTO;
+		mapped++;
+	}
+	if (mapped != request->mapped_pages)
+		return -EPROTO;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->lstar, false, true);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->cpu_root, false, true);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->idtr, false, false);
+	if (error)
+		return error;
+	idt_physical = request->physical_base +
+		(request->idtr - request->virtual_base);
+	idt = ebpfos_runtime_successor_physical(
+		request, image, idt_physical,
+		IDT_ENTRIES * sizeof(*idt));
+	if (!idt)
+		return -ERANGE;
+	for (vector = 0; vector < request->idt_vectors; vector++) {
+		u64 target;
+
+		if (!idt[vector].bits.p || idt[vector].segment != __KERNEL_CS)
+			return -EPROTO;
+		target = gate_offset(&idt[vector]);
+		error = ebpfos_runtime_successor_root_page(
+			request, image, target, false, true);
+		if (error)
+			return error;
+	}
+	for (cpu = 0; cpu < request->cpus; cpu++) {
+		if (!request->cpu_stacks[cpu] || !request->cpu_contexts[cpu])
+			return -EINVAL;
+		error = ebpfos_runtime_successor_root_page(
+			request, image, request->cpu_stacks[cpu] - sizeof(u64),
+			true, false);
+		if (error)
+			return error;
+		error = ebpfos_runtime_successor_root_page(
+			request, image, request->cpu_contexts[cpu], true, false);
+		if (error)
+			return error;
+	}
+	return 0;
+}
+
+static long ebpfos_runtime_successor_stage(void __user *argp)
+{
+	struct ebpfos_runtime_successor_stage request;
+	struct resource *region = NULL;
+	u8 digest[SHA256_DIGEST_SIZE];
+	void *image = NULL;
+	u64 reserved_bytes;
+	long error = 0;
+
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
+	    request.reserved || request.staged || !request.user_address ||
+	    !request.image_bytes ||
+	    request.image_bytes > EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES ||
+	    request.physical_base & ~PAGE_MASK ||
+	    request.virtual_base & ~PAGE_MASK ||
+	    request.cr3 & ~PAGE_MASK ||
+	    request.cpus != EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    request.idt_vectors != IDT_ENTRIES || !request.mapped_pages ||
+	    !ebpfos_runtime_nonzero(request.image_sha256,
+				    sizeof(request.image_sha256)))
+		return -EINVAL;
+	reserved_bytes = PAGE_ALIGN(request.image_bytes);
+	if (region_intersects(request.physical_base, reserved_bytes,
+			      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
+	    REGION_DISJOINT)
+		return -EBUSY;
+	mutex_lock(&ebpfos_runtime_successor.lock);
+	if (ebpfos_runtime_successor.image) {
+		error = -EBUSY;
+		goto out;
+	}
+	region = request_mem_region(request.physical_base, reserved_bytes,
+				    "ebpfos-successor");
+	if (!region) {
+		error = -EBUSY;
+		goto out;
+	}
+	image = memremap(request.physical_base, reserved_bytes, MEMREMAP_WB);
+	if (!image) {
+		error = -ENOMEM;
+		goto out;
+	}
+	if (copy_from_user(image,
+			   (void __user *)(uintptr_t)request.user_address,
+			   request.image_bytes)) {
+		error = -EFAULT;
+		goto out;
+	}
+	memset((u8 *)image + request.image_bytes, 0,
+	       reserved_bytes - request.image_bytes);
+	sha256(image, request.image_bytes, digest);
+	if (memcmp(digest, request.image_sha256, sizeof(digest))) {
+		error = -EBADMSG;
+		goto out;
+	}
+	error = ebpfos_runtime_successor_validate(&request, image);
+	if (error)
+		goto out;
+	request.user_address = 0;
+	request.staged = 1;
+	if (copy_to_user(argp, &request, sizeof(request))) {
+		error = -EFAULT;
+		goto out;
+	}
+	ebpfos_runtime_successor.region = region;
+	ebpfos_runtime_successor.image = image;
+	ebpfos_runtime_successor.reserved_bytes = reserved_bytes;
+	ebpfos_runtime_successor.descriptor = request;
+	region = NULL;
+	image = NULL;
+out:
+	if (image)
+		memunmap(image);
+	if (region)
+		release_mem_region(request.physical_base, reserved_bytes);
+	mutex_unlock(&ebpfos_runtime_successor.lock);
+	return error;
+}
+
 static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 				 unsigned long argument)
 {
@@ -2558,6 +2804,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_process_read(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_DEVICE_READ:
 		return ebpfos_runtime_device_read(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_STAGE:
+		return ebpfos_runtime_successor_stage(argp);
 	default:
 		return -ENOTTY;
 	}

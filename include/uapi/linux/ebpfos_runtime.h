@@ -5,13 +5,14 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 9U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 10U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
 #define EBPFOS_RUNTIME_ROOT_DIGEST_SIZE 32U
 #define EBPFOS_RUNTIME_ROOT_IOC_MAGIC 0xe8
 #define EBPFOS_RUNTIME_PROCESS_MAX_TASKS 4U
+#define EBPFOS_RUNTIME_SUCCESSOR_CPUS 4U
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
@@ -208,6 +209,27 @@ struct ebpfos_runtime_device_root {
 	__u32 reserved;
 };
 
+struct ebpfos_runtime_successor_stage {
+	__u32 version;
+	__u32 flags;
+	__u64 user_address;
+	__u64 image_bytes;
+	__u64 physical_base;
+	__u64 virtual_base;
+	__u64 cr3;
+	__u64 idtr;
+	__u64 lstar;
+	__u64 cpu_root;
+	__u64 cpu_stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+	__u64 cpu_contexts[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u64 mapped_pages;
+	__u32 idt_vectors;
+	__u32 cpus;
+	__u32 staged;
+	__u32 reserved;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -238,5 +260,8 @@ struct ebpfos_runtime_device_root {
 #define EBPFOS_RUNTIME_ROOT_IOC_DEVICE_READ \
 	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0a, \
 	     struct ebpfos_runtime_device_root)
+#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_STAGE \
+	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0b, \
+	      struct ebpfos_runtime_successor_stage)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */
