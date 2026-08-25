@@ -5,12 +5,13 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 7U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 8U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
 #define EBPFOS_RUNTIME_ROOT_DIGEST_SIZE 32U
 #define EBPFOS_RUNTIME_ROOT_IOC_MAGIC 0xe8
+#define EBPFOS_RUNTIME_PROCESS_MAX_TASKS 4U
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
@@ -164,6 +165,11 @@ struct ebpfos_runtime_process_root {
 	__u64 last_return_epoch;
 	__u64 native_fallbacks;
 	__u64 state_mutations;
+	__u64 task_set_digest;
+	__u64 address_space_set_digest;
+	__u64 mmu_root_set_digest;
+	__u64 task_enrollments;
+	__u64 cpu_mask;
 	__u32 task_pid;
 	__u32 task_tgid;
 	__u32 first_return_prog_id;
@@ -171,6 +177,10 @@ struct ebpfos_runtime_process_root {
 	__u32 mmu_observer_prog_id;
 	__u32 mmu_reloader_prog_id;
 	__u32 active;
+	__u32 task_count;
+	__u32 mm_count;
+	__u32 max_tasks;
+	__u32 cpus_observed;
 	__u32 reserved;
 };
 
