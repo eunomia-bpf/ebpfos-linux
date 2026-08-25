@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 6U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 7U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -98,6 +98,7 @@ struct ebpfos_runtime_irq_root {
 	__u64 observer_slot_id;
 	__u64 installer_slot_id;
 	__u64 handler_slot_id;
+	__u64 portal_broadcast_slot_id;
 	__u64 routing_observer_slot_id;
 	__u64 routing_installer_slot_id;
 	__u64 pulse_observer_slot_id;
@@ -114,6 +115,9 @@ struct ebpfos_runtime_irq_root {
 	__u64 dispatches;
 	__u64 dispatch_errors;
 	__u64 pulse_rearms;
+	__u64 portal_broadcasts;
+	__u64 portal_dispatches;
+	__u64 portal_generation;
 	__u64 first_dispatch_epoch;
 	__u64 last_dispatch_epoch;
 	__u32 cpus_observed;
@@ -125,8 +129,13 @@ struct ebpfos_runtime_irq_root {
 	__u32 first_dispatch_prog_id;
 	__u32 last_dispatch_prog_id;
 	__u32 active;
+	__u32 first_vector;
+	__u32 last_vector;
+	__u32 vector_count;
+	__u32 donor_external_gates;
+	__u32 portal_vector;
+	__u32 portal_errors;
 	__u32 reserved;
-	__u32 reserved1;
 };
 
 struct ebpfos_runtime_process_root {

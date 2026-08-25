@@ -735,6 +735,58 @@
       ],
       "result": "uart8250-transmit-byte-emitted",
       "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "cpu.msr.x2apic-icr-allbutself.write"
+      ],
+      "effects": [
+        "irq.portal.broadcast.deliver"
+      ],
+      "id": 15,
+      "name": "irq.portal-broadcast-allbutself",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-model-specific-register",
+          "register": "x2apic-icr-allbutself",
+          "source": "value"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.x2apic-icr-allbutself.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "irq.portal.broadcast.deliver",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "x2apic-component-portal-broadcast-delivered",
+      "shadow_source": "component-root-input"
     }
   ]
 }
