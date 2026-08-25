@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 4U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 5U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -131,13 +131,23 @@ struct ebpfos_runtime_process_root {
 	__u32 flags;
 	__u64 expected_epoch;
 	__u64 process_slot_id;
+	__u64 mmu_observer_slot_id;
+	__u64 mmu_reloader_slot_id;
 	__u64 task_object_id;
 	__u64 task_start_boottime;
 	__u64 mm_object_id;
+	__u64 address_space_object_id;
+	__u64 mmu_root_physical;
 	__u64 returns;
 	__u64 return_errors;
 	__u64 syscall_returns;
 	__u64 irq_returns;
+	__u64 mmu_observations;
+	__u64 mmu_reloads;
+	__u64 mmu_errors;
+	__u64 mmu_first_epoch;
+	__u64 mmu_last_epoch;
+	__u64 mmu_native_fallbacks;
 	__u64 first_return_epoch;
 	__u64 last_return_epoch;
 	__u64 native_fallbacks;
@@ -146,6 +156,8 @@ struct ebpfos_runtime_process_root {
 	__u32 task_tgid;
 	__u32 first_return_prog_id;
 	__u32 last_return_prog_id;
+	__u32 mmu_observer_prog_id;
+	__u32 mmu_reloader_prog_id;
 	__u32 active;
 	__u32 reserved;
 };
