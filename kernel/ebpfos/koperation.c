@@ -71,6 +71,7 @@ ebpfos_koperation_find(u32 operation_id);
 #define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
 #define EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER 2U
 #define EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER 3U
+#define EBPFOS_KPROG_FORM_IO_PORT 4U
 #define EBPFOS_KPROG_CONTROL_CR3 3U
 #define EBPFOS_KPROG_CONTROL_CR4 4U
 #define EBPFOS_KPROG_MSR_LSTAR 1U
@@ -80,6 +81,7 @@ ebpfos_koperation_find(u32 operation_id);
 #define EBPFOS_KPROG_MSR_X2APIC_ICR_SELF 5U
 #define EBPFOS_KPROG_MSR_X2APIC_EOI 6U
 #define EBPFOS_KPROG_DESCRIPTOR_IDTR 1U
+#define EBPFOS_KPROG_IO_PORT_UART8250_TX 1U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
 #define EBPFOS_KPROG_ACTION_OBSERVE 2U
 #define EBPFOS_KPROG_ACTION_INSTALL 3U
@@ -117,7 +119,8 @@ static int ebpfos_kprog_machine_decode(
 	decoded->form = payload & 0xf;
 	if ((decoded->form != EBPFOS_KPROG_FORM_CONTROL_REGISTER &&
 	     decoded->form != EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
-	     decoded->form != EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER) ||
+	     decoded->form != EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER &&
+	     decoded->form != EBPFOS_KPROG_FORM_IO_PORT) ||
 	    payload >> 24)
 		return -EINVAL;
 	decoded->input_reg = (payload >> 4) & 0xf;
@@ -142,6 +145,10 @@ static int ebpfos_kprog_machine_decode(
 		   (decoded->selector != EBPFOS_KPROG_DESCRIPTOR_IDTR ||
 		    (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
 		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
+		return -EINVAL;
+	} else if (decoded->form == EBPFOS_KPROG_FORM_IO_PORT &&
+		   (decoded->selector != EBPFOS_KPROG_IO_PORT_UART8250_TX ||
+		    decoded->action != EBPFOS_KPROG_ACTION_INSTALL)) {
 		return -EINVAL;
 	}
 	return 0;
@@ -330,6 +337,32 @@ static int ebpfos_kprog_machine_emit_x86(
 			second_mismatch = cursor++;
 		else
 			third_mismatch = cursor++;
+	} else if (decoded.form == EBPFOS_KPROG_FORM_IO_PORT) {
+		u32 mask = ~(u32)operation->kprog_operand_variable_mask;
+
+		if (operation->kprog_operand_policy !=
+		    EBPFOS_KPROG_OPERAND_MASKED_VALUE ||
+		    operation->kprog_operand_required > S32_MAX ||
+		    operation->kprog_operand_variable_mask > U32_MAX ||
+		    operation->kprog_machine_register > U16_MAX)
+			return -ERANGE;
+		/* Stage the component byte in r11 and reject non-byte authority. */
+		EMIT(0x49 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
+		EMIT(0x89); EMIT(0xc0 | (input_code << 3) | 3);
+		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+		EMIT(0x48); EMIT(0x25);
+		put_unaligned_le32(mask, cursor); cursor += 4;
+		EMIT(0x48); EMIT(0x3d);
+		put_unaligned_le32((u32)operation->kprog_operand_required, cursor);
+		cursor += 4;
+		EMIT(0x75); first_mismatch = cursor++;
+		/* Unique generated PIO execution point: out %al,(%dx). */
+		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+		EMIT(0xba);
+		put_unaligned_le32(operation->kprog_machine_register, cursor);
+		cursor += 4;
+		EMIT(0xee);
+		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
 	} else if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
 		/*
 		 * Stage and constrain the component-owned operand before the unique
@@ -504,6 +537,10 @@ static int __init ebpfos_kprog_register(void)
 	    !ebpfos_koperation_find_machine(
 			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
 			EBPFOS_KPROG_MSR_X2APIC_EOI,
+			EBPFOS_KPROG_ACTION_INSTALL) ||
+	    !ebpfos_koperation_find_machine(
+			EBPFOS_KPROG_FORM_IO_PORT,
+			EBPFOS_KPROG_IO_PORT_UART8250_TX,
 			EBPFOS_KPROG_ACTION_INSTALL))
 		return -ENOENT;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,

@@ -5,8 +5,8 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 5U
-#define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 6U
+#define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
 #define EBPFOS_RUNTIME_ROOT_DIGEST_SIZE 32U
@@ -20,6 +20,9 @@
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_REARM_IRQ_ROOT 5U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_PROCESS_ROOT 6U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_PROCESS_ROOT 7U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_DEVICE_ROOT 8U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_EMIT_DEVICE_BYTE 9U
+#define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_DEVICE_ROOT 10U
 
 struct ebpfos_runtime_root_slot {
 	__u64 slot_id;
@@ -162,6 +165,25 @@ struct ebpfos_runtime_process_root {
 	__u32 reserved;
 };
 
+struct ebpfos_runtime_device_root {
+	__u32 version;
+	__u32 flags;
+	__u64 expected_epoch;
+	__u64 device_slot_id;
+	__u64 device_object_id;
+	__u64 writes;
+	__u64 write_errors;
+	__u64 first_write_epoch;
+	__u64 last_write_epoch;
+	__u64 native_fallbacks;
+	__u64 dma_operations;
+	__u32 io_port;
+	__u32 first_write_prog_id;
+	__u32 last_write_prog_id;
+	__u32 active;
+	__u32 reserved;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -189,5 +211,8 @@ struct ebpfos_runtime_process_root {
 #define EBPFOS_RUNTIME_ROOT_IOC_PROCESS_READ \
 	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x09, \
 	     struct ebpfos_runtime_process_root)
+#define EBPFOS_RUNTIME_ROOT_IOC_DEVICE_READ \
+	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0a, \
+	     struct ebpfos_runtime_device_root)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */

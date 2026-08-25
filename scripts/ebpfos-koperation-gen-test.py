@@ -49,29 +49,30 @@ def main() -> int:
         certificate = json.loads((out / "certificate.json").read_text())
         header = (out / "generated.h").read_text()
         commitments = (out / "commitments.h").read_text()
-        if len(certificate["operations"]) != 13:
+        if len(certificate["operations"]) != 14:
             raise SystemExit("declarative operations were not generated")
         if assembly.count("0x48, 0x25, 0x00, 0xf0, 0xff, 0xff") != 2:
             raise SystemExit("native clear-low-bits opcodes were not composed")
-        if assembly.count("0x48, 0x25, 0xff, 0xff, 0xff, 0xff") != 11:
+        if assembly.count("0x48, 0x25, 0xff, 0xff, 0xff, 0xff") != 12:
             raise SystemExit("identity-width machine-register normalization was not composed")
         if assembly.count("0x0f, 0x20, 0xe0") != 1:
             raise SystemExit("CR4 control-register read opcode was not composed")
         if assembly.count("0x0f, 0x22, 0xd8") != 1:
             raise SystemExit("control-register write opcode was not composed")
-        if header.count(".code = 0xa7") != 14:
+        if header.count(".code = 0xa7") != 15:
             raise SystemExit("proof effect commitments were not composed")
         if "proof_template[" in commitments:
             raise SystemExit("userspace proof manifest has a fixed instruction ceiling")
-        if assembly.count("\tRET") != 13 or "ANNOTATE_UNRET_SAFE" in assembly:
+        if assembly.count("\tRET") != 14 or "ANNOTATE_UNRET_SAFE" in assembly:
             raise SystemExit("generated operations did not use the kernel return ABI")
-        if (header.count(".architecture_requirements = 0U") != 12 or
+        if (header.count(".architecture_requirements = 0U") != 13 or
                 header.count(".architecture_requirements = 1U") != 1):
             raise SystemExit("generated architecture preconditions are not access-derived")
         if (header.count(".kprog_machine_form = 1U") != 3 or
                 header.count(".kprog_machine_form = 2U") != 8 or
                 header.count(".kprog_machine_form = 3U") != 2 or
-                header.count(".kprog_machine_selector = 1U") != 4 or
+                header.count(".kprog_machine_form = 4U") != 1 or
+                header.count(".kprog_machine_selector = 1U") != 5 or
                 header.count(".kprog_machine_selector = 2U") != 2 or
                 header.count(".kprog_machine_selector = 3U") != 3 or
                 header.count(".kprog_machine_selector = 4U") != 2 or
@@ -79,10 +80,10 @@ def main() -> int:
                 header.count(".kprog_machine_selector = 6U") != 1 or
                 header.count(".kprog_machine_action = 1U") != 1 or
                 header.count(".kprog_machine_action = 2U") != 6 or
-                header.count(".kprog_machine_action = 3U") != 6 or
-                header.count(".kprog_normalize_bits = 0U") != 11 or
+                header.count(".kprog_machine_action = 3U") != 7 or
+                header.count(".kprog_normalize_bits = 0U") != 12 or
                 header.count(".kprog_normalize_bits = 12U") != 2 or
-                header.count(".kprog_readback_required = 0U") != 5 or
+                header.count(".kprog_readback_required = 0U") != 6 or
                 header.count(".kprog_readback_required = 1U") != 8):
             raise SystemExit("generated machine payload bindings are not access-derived")
         if (assembly.count("0xb9, 0x82, 0x00, 0x00, 0xc0, 0x0f, 0x32") != 2 or
@@ -93,6 +94,9 @@ def main() -> int:
                 assembly.count("0xb9, 0x30, 0x08, 0x00, 0x00") != 1 or
                 assembly.count("0xb9, 0x0b, 0x08, 0x00, 0x00") != 1):
             raise SystemExit("generated MSR read/write family is incomplete")
+        if assembly.count(
+                "0x48, 0x89, 0xf8, 0xba, 0xf8, 0x03, 0x00, 0x00, 0xee") != 1:
+            raise SystemExit("generated fixed UART PIO write is incomplete")
         if any(item["generator_proof_status"] != "bound-unproved"
                for item in certificate["operations"]):
             raise SystemExit("generator overclaimed equivalence proof")
@@ -160,7 +164,7 @@ def main() -> int:
             if rejected.returncode == 0:
                 raise SystemExit(f"{name} native/effect mutant was accepted")
 
-    print("EBPFOS_KOPERATION_GENERATOR_PASS operations=13 control_register_operations=3 model_specific_register_operations=8 model_specific_registers=6 descriptor_table_register_operations=2 universal_irq_entries=GENERATED declarative_write=PASS effect_commitment=PASS trace_mutants=REJECT")
+    print("EBPFOS_KOPERATION_GENERATOR_PASS operations=14 control_register_operations=3 model_specific_register_operations=8 model_specific_registers=6 descriptor_table_register_operations=2 io_port_operations=1 universal_irq_entries=GENERATED declarative_write=PASS effect_commitment=PASS trace_mutants=REJECT")
     return 0
 
 

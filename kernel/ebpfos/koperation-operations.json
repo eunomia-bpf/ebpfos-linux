@@ -683,6 +683,58 @@
       ],
       "result": "x2apic-self-timer-interrupt-delivered",
       "shadow_source": "component-root-input"
+    },
+    {
+      "capabilities": [
+        "device.pio.uart8250.write"
+      ],
+      "effects": [
+        "device.console.byte.emit"
+      ],
+      "id": 14,
+      "name": "device.emit-uart8250-byte",
+      "native_ir": [
+        {
+          "op": "load-operand-u64"
+        },
+        {
+          "op": "write-io-port",
+          "register": "uart8250-tx",
+          "source": "value"
+        },
+        {
+          "bits": 0,
+          "op": "clear-low-bits"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "postcondition": {
+        "left": "hardware.uart8250-tx.after",
+        "right": "staged-u64"
+      },
+      "precondition": {
+        "left": "staged-u64",
+        "right": {
+          "input": "operation-operand",
+          "op": "identity"
+        }
+      },
+      "proof_ir": [
+        {
+          "op": "load-staged-u64"
+        },
+        {
+          "effect": "device.console.byte.emit",
+          "op": "commit-effect"
+        },
+        {
+          "op": "return"
+        }
+      ],
+      "result": "uart8250-transmit-byte-emitted",
+      "shadow_source": "component-root-input"
     }
   ]
 }

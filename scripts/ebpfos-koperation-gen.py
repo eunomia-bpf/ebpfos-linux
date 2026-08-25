@@ -275,9 +275,40 @@ DESCRIPTOR_TABLE_REGISTERS = {
     },
 }
 
+IO_PORTS = {
+    "uart8250-tx": {
+        "family": "io-port",
+        "max_writes": 1,
+        "normalize_bits": 0,
+        "operand_policy": "masked-value",
+        "operand_required": 0,
+        "operand_variable_mask": 0xff,
+        "payload_id": 1,
+        "port": 0x3f8,
+        "read_effects": [],
+        "read_post_state": "result-u64",
+        "readback_required": False,
+        "shadow_constants": {
+            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
+        },
+        "shadow_sources": {"component-root-input"},
+        "write": bytes.fromhex("4889f8baf8030000ee"),
+        "write_effects": ["device.console.byte.emit"],
+        "write_observations": [
+            "component-root-input-byte",
+            "fixed-io-port-0x3f8",
+            "pio-no-dma",
+        ],
+        "write_post_state": "hardware.uart8250-tx.after",
+        "write_source": "operation-operand",
+        "write_action": "install",
+    },
+}
+
 REGISTER_FAMILIES = {
     "control-register": CONTROL_REGISTERS,
     "descriptor-table-register": DESCRIPTOR_TABLE_REGISTERS,
+    "io-port": IO_PORTS,
     "model-specific-register": MODEL_SPECIFIC_REGISTERS,
 }
 
@@ -498,6 +529,19 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
             register_state[register] = value
             events.append({"op": opcode, "register": register,
                            "value": expression_text(value)})
+        elif (opcode == "write-io-port" and
+              set(instruction) == {"op", "register", "source"}):
+            register = instruction["register"]
+            if (register not in IO_PORTS or
+                    instruction["source"] != "value" or
+                    value is None or returned):
+                raise SpecError(
+                    f"{operation['name']}: unsupported or misplaced I/O-port write")
+            output.extend(IO_PORTS[register]["write"])
+            writes.append((register, value))
+            register_state[register] = value
+            events.append({"op": opcode, "register": register,
+                           "value": expression_text(value)})
         elif opcode == "clear-low-bits" and set(instruction) == {"bits", "op"}:
             if value is None or returned:
                 raise SpecError(f"{operation['name']}: native transform has no live value")
@@ -603,6 +647,7 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
                           "write-descriptor-table-register",
                           "read-model-specific-register",
                           "write-model-specific-register",
+                          "write-io-port",
                       }]
     registers = {item.get("register") for item in register_items}
     families = {
@@ -613,7 +658,7 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
         item for item in operation["native_ir"]
         if isinstance(item, dict) and item.get("op") in {
             "write-control-register", "write-descriptor-table-register",
-            "write-model-specific-register"
+            "write-io-port", "write-model-specific-register"
         }
     ]
     if len(registers) != 1 or len(families) != 1:
@@ -625,13 +670,13 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
         raise SpecError(f"{operation['name']}: machine payload register is unsupported")
     action = metadata["write_action"] if writes else "observe"
     form = {"control-register": 1, "model-specific-register": 2,
-            "descriptor-table-register": 3}[family]
+            "descriptor-table-register": 3, "io-port": 4}[family]
     operand_policies = {"none": 0, "canonical-address": 1,
                         "masked-value": 2}
     return (form, metadata["payload_id"], CONTROL_ACTIONS[action],
             metadata["normalize_bits"],
             metadata["shadow_constants"][operation["shadow_source"]],
-            metadata.get("msr", 0),
+            metadata.get("msr", metadata.get("port", 0)),
             operand_policies[metadata.get("operand_policy", "none")],
             metadata.get("operand_required", 0),
             metadata.get("operand_variable_mask", 0),

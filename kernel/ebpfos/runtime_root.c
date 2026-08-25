@@ -162,6 +162,29 @@ static struct ebpfos_runtime_process_state ebpfos_runtime_process = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_process.lock),
 };
 
+struct ebpfos_runtime_device_state {
+	struct mutex lock;
+	u64 device_slot_id;
+	u64 device_object_id;
+	u64 epoch;
+	atomic64_t writes;
+	atomic64_t write_errors;
+	atomic64_t first_write_epoch;
+	atomic64_t last_write_epoch;
+	atomic64_t native_fallbacks;
+	atomic64_t dma_operations;
+	atomic_t first_write_prog_id;
+	atomic_t last_write_prog_id;
+	u32 io_port;
+	bool active;
+};
+
+#define EBPFOS_RUNTIME_DEVICE_UART8250_TX_PORT 0x3f8U
+
+static struct ebpfos_runtime_device_state ebpfos_runtime_device_root = {
+	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_device_root.lock),
+};
+
 static bool ebpfos_runtime_syscall_active(void)
 {
 	/* Pairs with the release-store after the root state is initialized. */
@@ -178,6 +201,12 @@ static bool ebpfos_runtime_process_active(void)
 {
 	/* Pairs with release-stores after process ownership or rollback. */
 	return smp_load_acquire(&ebpfos_runtime_process.active);
+}
+
+static bool ebpfos_runtime_device_active(void)
+{
+	/* Pairs with release-stores after device ownership or exact rollback. */
+	return smp_load_acquire(&ebpfos_runtime_device_root.active);
 }
 
 static bool ebpfos_runtime_irq_program(const struct bpf_prog *prog)
@@ -272,6 +301,10 @@ ebpfos_runtime_bundle_preserves_active_roots(
 			READ_ONCE(ebpfos_runtime_process.mmu_reloader_slot_id)))
 			return false;
 	}
+	if (ebpfos_runtime_device_active() &&
+	    !ebpfos_runtime_bundle_has_machine_program(
+		bundle, READ_ONCE(ebpfos_runtime_device_root.device_slot_id)))
+		return false;
 	return true;
 }
 
@@ -459,6 +492,8 @@ static int ebpfos_runtime_commit_staged(u64 expected_epoch, u64 target_epoch)
 			WRITE_ONCE(ebpfos_runtime_process.epoch, target_epoch);
 			process_owned = true;
 		}
+		if (ebpfos_runtime_device_active())
+			WRITE_ONCE(ebpfos_runtime_device_root.epoch, target_epoch);
 	}
 	spin_unlock_irqrestore(&ebpfos_runtime_root.lock, irq_flags);
 	if (!result) {
@@ -980,6 +1015,7 @@ static int ebpfos_runtime_process_rollback(
 	    ebpfos_runtime_process.process_slot_id != process_slot_id ||
 	    ebpfos_runtime_process.mmu_observer_slot_id != mmu_observer_slot_id ||
 	    ebpfos_runtime_process.mmu_reloader_slot_id != mmu_reloader_slot_id ||
+	    ebpfos_runtime_device_active() ||
 	    ebpfos_runtime_process.task != current) {
 		error = -ESTALE;
 		goto out;
@@ -1055,6 +1091,181 @@ static long ebpfos_runtime_process_read(void __user *argp)
 	struct ebpfos_runtime_process_root status;
 
 	ebpfos_runtime_process_status(&status);
+	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
+}
+
+static int ebpfos_runtime_device_activate(
+	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
+	u64 device_slot_id)
+{
+	int error = 0, slot;
+
+	if (!expected_epoch || !device_slot_id ||
+	    bundle->epoch != expected_epoch ||
+	    !ebpfos_runtime_syscall_active() ||
+	    !ebpfos_runtime_process_active() ||
+	    READ_ONCE(ebpfos_runtime_process.task) != current)
+		return -EINVAL;
+	slot = ebpfos_runtime_bundle_find(bundle, device_slot_id);
+	if (slot < 0 ||
+	    !ebpfos_runtime_machine_program(bundle->slots[slot].prog))
+		return -EPROTO;
+	mutex_lock(&ebpfos_runtime_device_root.lock);
+	if (ebpfos_runtime_device_active()) {
+		error = -EBUSY;
+		goto out;
+	}
+	ebpfos_runtime_device_root.device_slot_id = device_slot_id;
+	ebpfos_runtime_device_root.device_object_id = device_slot_id;
+	ebpfos_runtime_device_root.epoch = expected_epoch;
+	ebpfos_runtime_device_root.io_port =
+		EBPFOS_RUNTIME_DEVICE_UART8250_TX_PORT;
+	atomic64_set(&ebpfos_runtime_device_root.writes, 0);
+	atomic64_set(&ebpfos_runtime_device_root.write_errors, 0);
+	atomic64_set(&ebpfos_runtime_device_root.first_write_epoch, 0);
+	atomic64_set(&ebpfos_runtime_device_root.last_write_epoch, 0);
+	atomic64_set(&ebpfos_runtime_device_root.native_fallbacks, 0);
+	atomic64_set(&ebpfos_runtime_device_root.dma_operations, 0);
+	atomic_set(&ebpfos_runtime_device_root.first_write_prog_id, 0);
+	atomic_set(&ebpfos_runtime_device_root.last_write_prog_id, 0);
+	/* Publish the complete fixed PIO authority before write-path readers. */
+	smp_store_release(&ebpfos_runtime_device_root.active, true);
+out:
+	mutex_unlock(&ebpfos_runtime_device_root.lock);
+	return error;
+}
+
+static int ebpfos_runtime_device_emit(
+	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
+	u64 device_slot_id, u64 byte)
+{
+	struct ebpfos_component_call_frame frame = {
+		.version = EBPFOS_COMPONENT_CALL_ABI_VERSION,
+		.method_id = 1,
+		.input_size = sizeof(byte),
+		.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE,
+	};
+	struct bpf_prog *prog;
+	u64 result = 0, write_index;
+	u32 provider_status;
+	int error = 0, slot;
+
+	if (byte > U8_MAX)
+		return -ERANGE;
+	mutex_lock(&ebpfos_runtime_device_root.lock);
+	if (!ebpfos_runtime_device_active() ||
+	    bundle->epoch != expected_epoch ||
+	    ebpfos_runtime_device_root.epoch != expected_epoch ||
+	    ebpfos_runtime_device_root.device_slot_id != device_slot_id ||
+	    ebpfos_runtime_device_root.io_port !=
+		EBPFOS_RUNTIME_DEVICE_UART8250_TX_PORT ||
+	    !ebpfos_runtime_process_active() ||
+	    READ_ONCE(ebpfos_runtime_process.task) != current) {
+		error = -ESTALE;
+		goto fault;
+	}
+	slot = ebpfos_runtime_bundle_find(bundle, device_slot_id);
+	if (slot < 0) {
+		error = -ENOENT;
+		goto fault;
+	}
+	prog = bundle->slots[slot].prog;
+	if (!ebpfos_runtime_machine_program(prog)) {
+		error = -EPROTO;
+		goto fault;
+	}
+	frame.object_id = ebpfos_runtime_device_root.device_object_id;
+	frame.epoch = bundle->epoch;
+	memcpy(frame.input, &byte, sizeof(byte));
+	provider_status = bpf_prog_run_pin_on_cpu(prog, &frame);
+	if (provider_status || frame.status ||
+	    frame.output_size != sizeof(result)) {
+		error = frame.status ? frame.status : -EREMOTEIO;
+		goto fault;
+	}
+	memcpy(&result, frame.output, sizeof(result));
+	if (result != byte) {
+		error = -ESTALE;
+		goto fault;
+	}
+	write_index = atomic64_inc_return(&ebpfos_runtime_device_root.writes);
+	if (write_index == 1) {
+		atomic64_set(&ebpfos_runtime_device_root.first_write_epoch,
+			     bundle->epoch);
+		atomic_set(&ebpfos_runtime_device_root.first_write_prog_id,
+			   prog->aux->id);
+	}
+	atomic64_set(&ebpfos_runtime_device_root.last_write_epoch, bundle->epoch);
+	atomic_set(&ebpfos_runtime_device_root.last_write_prog_id, prog->aux->id);
+	mutex_unlock(&ebpfos_runtime_device_root.lock);
+	return 0;
+
+fault:
+	atomic64_inc(&ebpfos_runtime_device_root.write_errors);
+	mutex_unlock(&ebpfos_runtime_device_root.lock);
+	return error;
+}
+
+static int ebpfos_runtime_device_rollback(
+	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
+	u64 device_slot_id)
+{
+	int error = 0, slot;
+
+	mutex_lock(&ebpfos_runtime_device_root.lock);
+	slot = ebpfos_runtime_bundle_find(bundle, device_slot_id);
+	if (!ebpfos_runtime_device_active() ||
+	    bundle->epoch != expected_epoch ||
+	    ebpfos_runtime_device_root.epoch != expected_epoch ||
+	    ebpfos_runtime_device_root.device_slot_id != device_slot_id ||
+	    slot < 0 ||
+	    !ebpfos_runtime_machine_program(bundle->slots[slot].prog) ||
+	    !ebpfos_runtime_process_active() ||
+	    READ_ONCE(ebpfos_runtime_process.task) != current) {
+		error = -ESTALE;
+		goto out;
+	}
+	/* The append-only console prefix remains the exact abstract state. */
+	smp_store_release(&ebpfos_runtime_device_root.active, false);
+out:
+	mutex_unlock(&ebpfos_runtime_device_root.lock);
+	return error;
+}
+
+static void ebpfos_runtime_device_status(
+	struct ebpfos_runtime_device_root *status)
+{
+	memset(status, 0, sizeof(*status));
+	status->version = EBPFOS_RUNTIME_ROOT_ABI_VERSION;
+	mutex_lock(&ebpfos_runtime_device_root.lock);
+	status->expected_epoch = READ_ONCE(ebpfos_runtime_device_root.epoch);
+	status->device_slot_id = ebpfos_runtime_device_root.device_slot_id;
+	status->device_object_id = ebpfos_runtime_device_root.device_object_id;
+	status->io_port = ebpfos_runtime_device_root.io_port;
+	status->active = ebpfos_runtime_device_active();
+	mutex_unlock(&ebpfos_runtime_device_root.lock);
+	status->writes = atomic64_read(&ebpfos_runtime_device_root.writes);
+	status->write_errors =
+		atomic64_read(&ebpfos_runtime_device_root.write_errors);
+	status->first_write_epoch =
+		atomic64_read(&ebpfos_runtime_device_root.first_write_epoch);
+	status->last_write_epoch =
+		atomic64_read(&ebpfos_runtime_device_root.last_write_epoch);
+	status->native_fallbacks =
+		atomic64_read(&ebpfos_runtime_device_root.native_fallbacks);
+	status->dma_operations =
+		atomic64_read(&ebpfos_runtime_device_root.dma_operations);
+	status->first_write_prog_id =
+		atomic_read(&ebpfos_runtime_device_root.first_write_prog_id);
+	status->last_write_prog_id =
+		atomic_read(&ebpfos_runtime_device_root.last_write_prog_id);
+}
+
+static long ebpfos_runtime_device_read(void __user *argp)
+{
+	struct ebpfos_runtime_device_root status;
+
+	ebpfos_runtime_device_status(&status);
 	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
 }
 
@@ -1707,6 +1918,24 @@ static long ebpfos_runtime_run_syscall(struct pt_regs *regs)
 
 		if (error)
 			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_DEVICE_ROOT) {
+		int error = ebpfos_runtime_device_activate(
+			bundle, target_epoch, observer_slot_id);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_EMIT_DEVICE_BYTE) {
+		int error = ebpfos_runtime_device_emit(
+			bundle, target_epoch, observer_slot_id, arguments[0]);
+
+		if (error)
+			result = error;
+	} else if (action == EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_DEVICE_ROOT) {
+		int error = ebpfos_runtime_device_rollback(
+			bundle, target_epoch, observer_slot_id);
+
+		if (error)
+			result = error;
 	} else if (action != EBPFOS_RUNTIME_SYSCALL_ACTION_NONE) {
 		result = -EPROTO;
 	}
@@ -1798,6 +2027,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_irq_read(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_PROCESS_READ:
 		return ebpfos_runtime_process_read(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_DEVICE_READ:
+		return ebpfos_runtime_device_read(argp);
 	default:
 		return -ENOTTY;
 	}
