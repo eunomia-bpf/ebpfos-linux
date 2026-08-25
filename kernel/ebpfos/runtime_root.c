@@ -267,6 +267,7 @@ struct ebpfos_runtime_successor_state {
 	u32 preflight_reverified_cpus;
 	u32 preflight_koperation_cpus;
 	u32 preflight_state_store_cpus;
+	u32 preflight_idle_entry_cpus;
 	u32 preflight_component_cpus;
 	bool transaction_admitted;
 	bool handoff_preflighted;
@@ -3203,6 +3204,7 @@ struct ebpfos_runtime_successor_preflight_context {
 	cpumask_t reverified;
 	cpumask_t koperations;
 	cpumask_t state_stores;
+	cpumask_t idle_entries;
 	cpumask_t components;
 	atomic_t failures;
 };
@@ -3243,6 +3245,7 @@ static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 	cpumask_set_cpu(cpu, &context->reverified);
 	cpumask_set_cpu(cpu, &context->koperations);
 	cpumask_set_cpu(cpu, &context->state_stores);
+	cpumask_set_cpu(cpu, &context->idle_entries);
 	cpumask_set_cpu(cpu, &context->components);
 	cpumask_set_cpu(cpu, &context->observed);
 }
@@ -3267,6 +3270,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	    request.reverified_cpus ||
 	    request.koperation_cpus ||
 	    request.state_store_cpus ||
+	    request.idle_entry_cpus ||
 	    request.component_cpus ||
 	    request.preflighted || request.published || request.reserved ||
 	    !ebpfos_runtime_successor_identity_nonzero(
@@ -3314,6 +3318,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	cpumask_clear(&context.reverified);
 	cpumask_clear(&context.koperations);
 	cpumask_clear(&context.state_stores);
+	cpumask_clear(&context.idle_entries);
 	cpumask_clear(&context.components);
 	atomic_set(&context.failures, 0);
 	alias_page = context.entry & PAGE_MASK;
@@ -3333,6 +3338,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		       !cpumask_equal(&context.reverified, &expected) ||
 		       !cpumask_equal(&context.koperations, &expected) ||
 		       !cpumask_equal(&context.state_stores, &expected) ||
+		       !cpumask_equal(&context.idle_entries, &expected) ||
 		       !cpumask_equal(&context.components, &expected)))
 		error = -EIO;
 	if (error == -EIO)
@@ -3347,6 +3353,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	request.reverified_cpus = cpumask_weight(&context.reverified);
 	request.koperation_cpus = cpumask_weight(&context.koperations);
 	request.state_store_cpus = cpumask_weight(&context.state_stores);
+	request.idle_entry_cpus = cpumask_weight(&context.idle_entries);
 	request.component_cpus = cpumask_weight(&context.components);
 	request.preflighted = 1;
 	if (copy_to_user(argp, &request, sizeof(request))) {
@@ -3364,6 +3371,8 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		request.koperation_cpus;
 	ebpfos_runtime_successor.preflight_state_store_cpus =
 		request.state_store_cpus;
+	ebpfos_runtime_successor.preflight_idle_entry_cpus =
+		request.idle_entry_cpus;
 	ebpfos_runtime_successor.preflight_component_cpus =
 		request.component_cpus;
 	ebpfos_runtime_successor.handoff_preflighted = true;
