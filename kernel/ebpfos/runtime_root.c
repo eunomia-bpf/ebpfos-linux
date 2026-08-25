@@ -271,6 +271,7 @@ struct ebpfos_runtime_successor_state {
 	u32 preflight_component_cpus;
 	bool transaction_admitted;
 	bool handoff_preflighted;
+	bool handoff_publishing;
 	struct ebpfos_runtime_successor_stage descriptor;
 };
 
@@ -2701,8 +2702,10 @@ static int ebpfos_runtime_successor_validate(
 {
 	gate_desc *idt;
 	u8 handoff_digest[SHA256_DIGEST_SIZE];
-	void *handoff;
-	u64 end, handoff_end, leaf, mapped = 0, physical_end, virtual;
+	void *handoff, *publication_cpu_flags;
+	u64 end, handoff_end, handoff_publish_end, leaf, mapped = 0;
+	u64 physical_end, publication_cpu_flags_alias;
+	u64 publication_cpu_flags_physical, virtual;
 	u64 idt_physical;
 	u32 cpu, vector;
 	int error;
@@ -2728,8 +2731,8 @@ static int ebpfos_runtime_successor_validate(
 			return -EPROTO;
 		mapped++;
 	}
-	/* One generated direct-map alias is outside the packed high image. */
-	if (mapped + 1 != request->mapped_pages)
+	/* Generated bridge and acknowledgement aliases are outside the image. */
+	if (mapped + 2 != request->mapped_pages)
 		return -EPROTO;
 	error = ebpfos_runtime_successor_root_page(
 		request, image, request->lstar, false, true);
@@ -2822,6 +2825,74 @@ static int ebpfos_runtime_successor_validate(
 	if (memcmp(handoff_digest, request->handoff_sha256,
 		   sizeof(handoff_digest)))
 		return -EBADMSG;
+	if (!request->handoff_publish || !request->handoff_publish_alias ||
+	    !request->handoff_publish_physical ||
+	    !request->handoff_publish_bytes ||
+	    !ebpfos_runtime_nonzero(request->handoff_publish_sha256,
+				   sizeof(request->handoff_publish_sha256)) ||
+	    request->handoff_publish_physical < request->physical_base ||
+	    check_add_overflow(request->handoff_publish_physical,
+			       request->handoff_publish_bytes,
+			       &handoff_publish_end) ||
+	    handoff_publish_end > physical_end ||
+	    request->handoff_publish_bytes > PAGE_SIZE -
+		offset_in_page(request->handoff_publish_physical) ||
+	    (request->handoff_publish_physical & PAGE_MASK) !=
+		(request->handoff_physical & PAGE_MASK) ||
+	    request->handoff_publish != request->virtual_base +
+		(request->handoff_publish_physical - request->physical_base) ||
+	    request->handoff_publish_alias !=
+		(u64)(unsigned long)__va(request->handoff_publish_physical))
+		return -EINVAL;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->handoff_publish, false, true);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_mapping_page(
+		request, image, request->handoff_publish_alias,
+		request->handoff_publish_physical, false, true);
+	if (error)
+		return error;
+	handoff = ebpfos_runtime_successor_physical(
+		request, image, request->handoff_publish_physical,
+		request->handoff_publish_bytes);
+	if (!handoff)
+		return -ERANGE;
+	sha256(handoff, request->handoff_publish_bytes, handoff_digest);
+	if (memcmp(handoff_digest, request->handoff_publish_sha256,
+		   sizeof(handoff_digest)))
+		return -EBADMSG;
+	if (!request->publication_cpu_flags ||
+	    request->publication_cpu_flags_bytes !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS * sizeof(u64))
+		return -EINVAL;
+	publication_cpu_flags = ebpfos_runtime_successor_virtual(
+		request, image, request->publication_cpu_flags,
+		request->publication_cpu_flags_bytes);
+	if (!publication_cpu_flags || memchr_inv(
+		publication_cpu_flags, 0, request->publication_cpu_flags_bytes))
+		return -EPROTO;
+	publication_cpu_flags_physical = request->physical_base +
+		(request->publication_cpu_flags - request->virtual_base);
+	if (request->publication_cpu_flags_bytes > PAGE_SIZE -
+		offset_in_page(publication_cpu_flags_physical))
+		return -EINVAL;
+	publication_cpu_flags_alias = (u64)(unsigned long)__va(
+		publication_cpu_flags_physical);
+	error = ebpfos_runtime_successor_mapping_page(
+		request, image, publication_cpu_flags_alias,
+		publication_cpu_flags_physical, true, false);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->publication_cpu_flags, true, false);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->publication_cpu_flags +
+		request->publication_cpu_flags_bytes - 1, true, false);
+	if (error)
+		return error;
 	if (!request->publication_state ||
 	    request->publication_capacity <
 		sizeof(struct ebpfos_runtime_successor_transaction_header) ||
@@ -3085,9 +3156,17 @@ static int ebpfos_runtime_successor_transaction_validate(
 			    record->operands[1] != stage->handoff_alias ||
 			    record->operands[2] != stage->handoff_physical ||
 			    record->operands[3] != stage->handoff_bytes ||
-			    record->operands[4] != stage->handoff_magic)
+			    record->operands[4] != stage->handoff_magic ||
+			    record->operands[5] != stage->handoff_publish ||
+			    record->operands[6] != stage->handoff_publish_alias ||
+			    record->operands[7] !=
+				stage->handoff_publish_physical ||
+			    record->operands[8] != stage->handoff_publish_bytes ||
+			    record->operands[9] != stage->publication_cpu_flags ||
+			    record->operands[10] !=
+				stage->publication_cpu_flags_bytes)
 				return -EPROTO;
-			for (other = 5; other < ARRAY_SIZE(record->operands);
+			for (other = 11; other < ARRAY_SIZE(record->operands);
 			     other++)
 				if (record->operands[other])
 					return -EPROTO;
@@ -3097,6 +3176,18 @@ static int ebpfos_runtime_successor_transaction_validate(
 				error = ebpfos_runtime_successor_mapping_page(
 					stage, image, record->operands[1],
 					record->operands[2], false, true);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[5],
+					false, true);
+			if (!error)
+				error = ebpfos_runtime_successor_mapping_page(
+					stage, image, record->operands[6],
+					record->operands[7], false, true);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[9],
+					true, false);
 			if (error)
 				return error;
 			break;
@@ -3208,6 +3299,20 @@ struct ebpfos_runtime_successor_preflight_context {
 	cpumask_t components;
 	atomic_t failures;
 };
+
+struct ebpfos_runtime_successor_commit_context {
+	unsigned long entry;
+	u64 cr3;
+	u64 idtr;
+	u64 lstar;
+	u64 cpu_root;
+	u64 stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+};
+
+static struct ebpfos_runtime_successor_commit_context
+	ebpfos_runtime_successor_commit_context;
+static call_single_data_t
+	ebpfos_runtime_successor_commit_csd[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 
 static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 {
@@ -3383,6 +3488,145 @@ out_unlock:
 	return error;
 }
 
+static void ebpfos_runtime_successor_commit_cpu(void *opaque)
+{
+	struct ebpfos_runtime_successor_commit_context *context = opaque;
+	void (*entry)(u64, u64, u64, u64, u64, u64) =
+		(void *)context->entry;
+	u32 cpu = raw_smp_processor_id();
+
+	if (cpu >= EBPFOS_RUNTIME_SUCCESSOR_CPUS)
+		panic("ebpfos successor publication CPU is out of range");
+	entry(cpu, context->cr3, context->stacks[cpu], context->idtr,
+	      context->lstar, context->cpu_root);
+	panic("ebpfos successor publication bridge returned");
+}
+
+static long ebpfos_runtime_successor_commit(void __user *argp)
+{
+	struct ebpfos_runtime_successor_commit_context *context =
+		&ebpfos_runtime_successor_commit_context;
+	struct ebpfos_runtime_successor_commit request;
+	cpumask_t expected;
+	u64 *publication_cpu_flags;
+	unsigned long alias_page;
+	u64 attempt;
+	u32 cpu, current_cpu, observed;
+	int error = 0;
+
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
+	    !request.expected_epoch || !request.expected_magic ||
+	    request.expected_cpus != EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    request.reserved ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		request.transaction_sha256))
+		return -EINVAL;
+	mutex_lock(&ebpfos_runtime_successor.lock);
+	if (!ebpfos_runtime_successor.image ||
+	    !ebpfos_runtime_successor.transaction_admitted ||
+	    !ebpfos_runtime_successor.handoff_preflighted ||
+	    ebpfos_runtime_successor.handoff_publishing ||
+	    ebpfos_runtime_successor.preflight_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_cr3_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_root_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_reverified_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_koperation_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_state_store_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_idle_entry_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    ebpfos_runtime_successor.preflight_component_cpus !=
+		EBPFOS_RUNTIME_SUCCESSOR_CPUS) {
+		error = -EBUSY;
+		goto out_unlock;
+	}
+	if (request.expected_epoch !=
+		ebpfos_runtime_successor.transaction_epoch ||
+	    request.expected_magic !=
+		ebpfos_runtime_successor.descriptor.handoff_magic ||
+	    memcmp(request.transaction_sha256,
+		   ebpfos_runtime_successor.transaction_sha256,
+		   sizeof(request.transaction_sha256))) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
+	publication_cpu_flags = ebpfos_runtime_successor_virtual(
+		&ebpfos_runtime_successor.descriptor,
+		ebpfos_runtime_successor.image,
+		ebpfos_runtime_successor.descriptor.publication_cpu_flags,
+		ebpfos_runtime_successor.descriptor.publication_cpu_flags_bytes);
+	if (!publication_cpu_flags || memchr_inv(
+		publication_cpu_flags, 0,
+		ebpfos_runtime_successor.descriptor.publication_cpu_flags_bytes)) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
+	cpus_read_lock();
+	cpumask_clear(&expected);
+	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++)
+		cpumask_set_cpu(cpu, &expected);
+	if (!cpumask_equal(cpu_online_mask, &expected)) {
+		error = -ENODEV;
+		goto out_cpus;
+	}
+	current_cpu = get_cpu();
+	context->entry =
+		ebpfos_runtime_successor.descriptor.handoff_publish_alias;
+	context->cr3 = ebpfos_runtime_successor.descriptor.cr3;
+	context->idtr = ebpfos_runtime_successor.descriptor.idtr;
+	context->lstar = ebpfos_runtime_successor.descriptor.lstar;
+	context->cpu_root = ebpfos_runtime_successor.descriptor.cpu_root;
+	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++) {
+		context->stacks[cpu] =
+			ebpfos_runtime_successor.descriptor.cpu_stacks[cpu];
+		INIT_CSD(&ebpfos_runtime_successor_commit_csd[cpu],
+			 ebpfos_runtime_successor_commit_cpu, context);
+	}
+	alias_page = context->entry & PAGE_MASK;
+	error = set_memory_rox(alias_page, 1);
+	if (error)
+		goto out_preempt;
+	ebpfos_runtime_successor.handoff_publishing = true;
+	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++) {
+		if (cpu == current_cpu)
+			continue;
+		error = smp_call_function_single_async(
+			cpu, &ebpfos_runtime_successor_commit_csd[cpu]);
+		if (error)
+			panic("ebpfos successor publication IPI failed: %d", error);
+	}
+	for (attempt = 0; attempt < 1000000000ULL; attempt++) {
+		observed = 0;
+		for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++)
+			if (cpu == current_cpu ||
+			    READ_ONCE(publication_cpu_flags[cpu]) == 1 ||
+			    READ_ONCE(publication_cpu_flags[cpu]) == 2)
+				observed++;
+		if (observed == EBPFOS_RUNTIME_SUCCESSOR_CPUS)
+			break;
+		cpu_relax();
+	}
+	if (observed != EBPFOS_RUNTIME_SUCCESSOR_CPUS)
+		panic("ebpfos successor publication acknowledgement timed out");
+	ebpfos_runtime_successor_commit_cpu(context);
+	unreachable();
+
+out_preempt:
+	put_cpu();
+out_cpus:
+	cpus_read_unlock();
+out_unlock:
+	mutex_unlock(&ebpfos_runtime_successor.lock);
+	return error;
+}
+
 static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 				 unsigned long argument)
 {
@@ -3415,6 +3659,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_successor_publish(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PREFLIGHT:
 		return ebpfos_runtime_successor_preflight(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_COMMIT:
+		return ebpfos_runtime_successor_commit(argp);
 	default:
 		return -ENOTTY;
 	}

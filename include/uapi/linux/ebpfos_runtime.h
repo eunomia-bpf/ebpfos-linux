@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 19U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 20U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -242,6 +242,13 @@ struct ebpfos_runtime_successor_stage {
 	__u64 handoff_magic;
 	__u8 handoff_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u8 handoff_descriptor_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u64 handoff_publish;
+	__u64 handoff_publish_alias;
+	__u64 handoff_publish_physical;
+	__u64 handoff_publish_bytes;
+	__u8 handoff_publish_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u64 publication_cpu_flags;
+	__u64 publication_cpu_flags_bytes;
 	__u64 publication_state;
 	__u64 publication_capacity;
 	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
@@ -310,6 +317,16 @@ struct ebpfos_runtime_successor_preflight {
 	__u32 reserved;
 };
 
+struct ebpfos_runtime_successor_commit {
+	__u32 version;
+	__u32 flags;
+	__u64 expected_epoch;
+	__u64 expected_magic;
+	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u32 expected_cpus;
+	__u32 reserved;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -349,5 +366,8 @@ struct ebpfos_runtime_successor_preflight {
 #define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PREFLIGHT \
 	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0d, \
 	      struct ebpfos_runtime_successor_preflight)
+#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_COMMIT \
+	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0e, \
+	     struct ebpfos_runtime_successor_commit)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */
