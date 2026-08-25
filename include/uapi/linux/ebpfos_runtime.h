@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 8U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 9U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -170,6 +170,10 @@ struct ebpfos_runtime_process_root {
 	__u64 mmu_root_set_digest;
 	__u64 task_enrollments;
 	__u64 cpu_mask;
+	__u64 scheduler_decisions;
+	__u64 scheduler_context_switch_growth;
+	__u64 scheduler_cpu_owner_digest;
+	__u64 scheduler_native_fallbacks;
 	__u32 task_pid;
 	__u32 task_tgid;
 	__u32 first_return_prog_id;
@@ -181,6 +185,7 @@ struct ebpfos_runtime_process_root {
 	__u32 mm_count;
 	__u32 max_tasks;
 	__u32 cpus_observed;
+	__u32 scheduler_cpu_claims;
 	__u32 reserved;
 };
 

@@ -155,6 +155,7 @@ struct ebpfos_runtime_process_task {
 	u64 mm_object_id;
 	u64 address_space_object_id;
 	u64 mmu_root_physical;
+	u64 context_switch_baseline;
 	u32 task_pid;
 	u32 task_tgid;
 };
@@ -189,6 +190,8 @@ struct ebpfos_runtime_process_state {
 	atomic64_t native_fallbacks;
 	atomic64_t task_enrollments;
 	atomic64_t cpu_mask;
+	atomic64_t scheduler_decisions;
+	atomic64_t scheduler_native_fallbacks;
 	atomic_t first_return_prog_id;
 	atomic_t last_return_prog_id;
 	atomic_t mmu_observer_prog_id;
@@ -200,6 +203,10 @@ struct ebpfos_runtime_process_state {
 	u64 task_set_digest;
 	u64 address_space_set_digest;
 	u64 mmu_root_set_digest;
+	u64 scheduler_context_switch_growth;
+	u64 scheduler_cpu_owner_digest;
+	u64 cpu_task_objects[EBPFOS_RUNTIME_PROCESS_MAX_TASKS];
+	u32 scheduler_cpu_claims;
 	atomic_t operations;
 	bool active;
 };
@@ -1133,6 +1140,12 @@ static u64 ebpfos_runtime_process_digest(u64 value)
 	return value ?: 1;
 }
 
+static u64 ebpfos_runtime_process_context_switches(struct task_struct *task)
+{
+	return (u64)READ_ONCE(task->nvcsw) +
+	       (u64)READ_ONCE(task->nivcsw);
+}
+
 static int ebpfos_runtime_process_describe(
 	struct task_struct *task, struct ebpfos_runtime_process_task *description)
 {
@@ -1149,6 +1162,8 @@ static int ebpfos_runtime_process_describe(
 	description->task_tgid = task_tgid_nr(task);
 	description->mmu_root_physical =
 		__pa(task->mm->pgd) & CR3_ADDR_MASK;
+	description->context_switch_baseline =
+		ebpfos_runtime_process_context_switches(task);
 	address_space_id = description->task_object_id ^
 			   description->mm_object_id;
 	description->address_space_object_id = address_space_id ?: 1;
@@ -1158,16 +1173,19 @@ static int ebpfos_runtime_process_describe(
 }
 
 static int ebpfos_runtime_process_registry_snapshot(
-	const struct ebpfos_runtime_process_task *candidate, bool *member,
-	u32 *task_count)
+	const struct ebpfos_runtime_process_task *candidate, u32 cpu,
+	bool *member, u32 *task_count, u64 *context_switch_baseline,
+	u64 *cpu_task_object)
 {
 	unsigned long irq_flags;
 	u32 index;
 	int error = 0;
 
 	*member = false;
+	*context_switch_baseline = candidate->context_switch_baseline;
 	spin_lock_irqsave(&ebpfos_runtime_process.registry_lock, irq_flags);
 	*task_count = ebpfos_runtime_process.task_count;
+	*cpu_task_object = ebpfos_runtime_process.cpu_task_objects[cpu];
 	for (index = 0; index < *task_count; index++) {
 		const struct ebpfos_runtime_process_task *entry =
 			&ebpfos_runtime_process.tasks[index];
@@ -1184,8 +1202,10 @@ static int ebpfos_runtime_process_registry_snapshot(
 		    entry->task_pid != candidate->task_pid ||
 		    entry->task_tgid != candidate->task_tgid)
 			error = -ESTALE;
-		else
+		else {
 			*member = true;
+			*context_switch_baseline = entry->context_switch_baseline;
+		}
 		break;
 	}
 	spin_unlock_irqrestore(&ebpfos_runtime_process.registry_lock, irq_flags);
@@ -1239,6 +1259,27 @@ out:
 	return error;
 }
 
+static int ebpfos_runtime_process_claim_cpu(u32 cpu, u64 task_object_id)
+{
+	unsigned long irq_flags;
+	u64 *owner;
+	int error = 0;
+
+	spin_lock_irqsave(&ebpfos_runtime_process.registry_lock, irq_flags);
+	owner = &ebpfos_runtime_process.cpu_task_objects[cpu];
+	if (!*owner) {
+		*owner = task_object_id;
+		ebpfos_runtime_process.scheduler_cpu_claims++;
+		ebpfos_runtime_process.scheduler_cpu_owner_digest ^=
+			ebpfos_runtime_process_digest(
+				task_object_id ^ ((u64)cpu << 56));
+	} else if (*owner != task_object_id) {
+		error = -ESTALE;
+	}
+	spin_unlock_irqrestore(&ebpfos_runtime_process.registry_lock, irq_flags);
+	return error;
+}
+
 static int ebpfos_runtime_process_activate(
 	struct ebpfos_runtime_bundle *bundle, u64 expected_epoch,
 	u64 process_slot_id, u64 mmu_observer_slot_id,
@@ -1270,6 +1311,8 @@ static int ebpfos_runtime_process_activate(
 	get_task_struct(task);
 	memset(ebpfos_runtime_process.tasks, 0,
 	       sizeof(ebpfos_runtime_process.tasks));
+	memset(ebpfos_runtime_process.cpu_task_objects, 0,
+	       sizeof(ebpfos_runtime_process.cpu_task_objects));
 	ebpfos_runtime_process.tasks[0] = owner;
 	ebpfos_runtime_process.task = task;
 	ebpfos_runtime_process.process_slot_id = process_slot_id;
@@ -1292,6 +1335,9 @@ static int ebpfos_runtime_process_activate(
 		ebpfos_runtime_process_digest(owner.address_space_object_id);
 	ebpfos_runtime_process.mmu_root_set_digest =
 		ebpfos_runtime_process_digest(owner.mmu_root_physical);
+	ebpfos_runtime_process.scheduler_context_switch_growth = 0;
+	ebpfos_runtime_process.scheduler_cpu_owner_digest = 0;
+	ebpfos_runtime_process.scheduler_cpu_claims = 0;
 	atomic64_set(&ebpfos_runtime_process.returns, 0);
 	atomic64_set(&ebpfos_runtime_process.return_errors, 0);
 	atomic64_set(&ebpfos_runtime_process.syscall_returns, 0);
@@ -1307,6 +1353,8 @@ static int ebpfos_runtime_process_activate(
 	atomic64_set(&ebpfos_runtime_process.native_fallbacks, 0);
 	atomic64_set(&ebpfos_runtime_process.task_enrollments, 1);
 	atomic64_set(&ebpfos_runtime_process.cpu_mask, 0);
+	atomic64_set(&ebpfos_runtime_process.scheduler_decisions, 0);
+	atomic64_set(&ebpfos_runtime_process.scheduler_native_fallbacks, 0);
 	atomic_set(&ebpfos_runtime_process.operations, 0);
 	atomic_set(&ebpfos_runtime_process.first_return_prog_id, 0);
 	atomic_set(&ebpfos_runtime_process.last_return_prog_id, 0);
@@ -1348,7 +1396,21 @@ static int ebpfos_runtime_process_rollback(
 	spin_lock_irqsave(&ebpfos_runtime_process.registry_lock, irq_flags);
 	task_count = ebpfos_runtime_process.task_count;
 	for (index = 0; index < task_count; index++) {
+		u64 context_switches;
+
 		tasks[index] = ebpfos_runtime_process.tasks[index].task;
+		context_switches = tasks[index] ?
+			ebpfos_runtime_process_context_switches(tasks[index]) : 0;
+		if (context_switches <
+		    ebpfos_runtime_process.tasks[index].context_switch_baseline)
+			ebpfos_runtime_process.scheduler_context_switch_growth =
+				U64_MAX;
+		else if (ebpfos_runtime_process.scheduler_context_switch_growth !=
+			 U64_MAX)
+			ebpfos_runtime_process.scheduler_context_switch_growth +=
+				context_switches -
+				ebpfos_runtime_process.tasks[index].
+					context_switch_baseline;
 		ebpfos_runtime_process.tasks[index].task = NULL;
 	}
 	spin_unlock_irqrestore(&ebpfos_runtime_process.registry_lock, irq_flags);
@@ -1393,6 +1455,12 @@ static void ebpfos_runtime_process_status(
 		ebpfos_runtime_process.address_space_set_digest;
 	status->mmu_root_set_digest =
 		ebpfos_runtime_process.mmu_root_set_digest;
+	status->scheduler_context_switch_growth =
+		ebpfos_runtime_process.scheduler_context_switch_growth;
+	status->scheduler_cpu_owner_digest =
+		ebpfos_runtime_process.scheduler_cpu_owner_digest;
+	status->scheduler_cpu_claims =
+		ebpfos_runtime_process.scheduler_cpu_claims;
 	spin_unlock_irqrestore(&ebpfos_runtime_process.registry_lock, irq_flags);
 	mutex_unlock(&ebpfos_runtime_process.lock);
 	status->returns = atomic64_read(&ebpfos_runtime_process.returns);
@@ -1420,6 +1488,10 @@ static void ebpfos_runtime_process_status(
 	status->task_enrollments =
 		atomic64_read(&ebpfos_runtime_process.task_enrollments);
 	status->cpu_mask = atomic64_read(&ebpfos_runtime_process.cpu_mask);
+	status->scheduler_decisions =
+		atomic64_read(&ebpfos_runtime_process.scheduler_decisions);
+	status->scheduler_native_fallbacks = atomic64_read(
+		&ebpfos_runtime_process.scheduler_native_fallbacks);
 	status->max_tasks = EBPFOS_RUNTIME_PROCESS_MAX_TASKS;
 	status->cpus_observed = hweight64(status->cpu_mask);
 	status->first_return_prog_id =
@@ -1620,17 +1692,18 @@ static int ebpfos_runtime_process_return(u64 operation)
 	struct ebpfos_component_call_frame frame = {
 		.version = EBPFOS_COMPONENT_CALL_ABI_VERSION,
 		.method_id = operation,
-		.input_size = 14 * sizeof(u64),
+		.input_size = 16 * sizeof(u64),
 		.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE,
 	};
 	struct ebpfos_runtime_process_task candidate;
 	struct ebpfos_runtime_bundle *bundle = NULL;
 	struct task_struct *group_leader, *real_parent;
 	struct bpf_prog *observer, *prog, *reloader;
-	u64 input[14], action = 0, group_object_id, object_id = 0;
-	u64 mmu_index, parent_object_id, return_index;
-	u32 provider_status, slot, task_count;
-	bool member;
+	u64 action = 0, context_switch_baseline, cpu_task_object;
+	u64 group_object_id, input[16], mmu_index, object_id = 0;
+	u64 parent_object_id, return_index;
+	u32 cpu, provider_status, slot, task_count;
+	bool member, migration_disabled = false;
 	int error = 0, observer_slot, reloader_slot;
 
 	if (!ebpfos_runtime_process_active())
@@ -1641,12 +1714,20 @@ static int ebpfos_runtime_process_return(u64 operation)
 		error = -ENOENT;
 		goto fault;
 	}
+	migrate_disable();
+	migration_disabled = true;
+	cpu = raw_smp_processor_id();
+	if (cpu >= EBPFOS_RUNTIME_PROCESS_MAX_TASKS) {
+		error = -ERANGE;
+		goto fault;
+	}
 	if (ebpfos_runtime_process_describe(current, &candidate)) {
 		error = -ESTALE;
 		goto fault;
 	}
 	error = ebpfos_runtime_process_registry_snapshot(
-		&candidate, &member, &task_count);
+		&candidate, cpu, &member, &task_count,
+		&context_switch_baseline, &cpu_task_object);
 	if (error)
 		goto fault;
 	rcu_read_lock();
@@ -1679,20 +1760,22 @@ static int ebpfos_runtime_process_return(u64 operation)
 	frame.object_id = candidate.task_object_id;
 	frame.epoch = bundle->epoch;
 	input[0] = frame.object_id;
-	input[1] = (u64)(unsigned long)current;
-	input[2] = (u64)(unsigned long)current->mm;
-	input[3] = candidate.task_pid;
-	input[4] = candidate.task_tgid;
-	input[5] = READ_ONCE(current_thread_info()->flags) |
+	input[1] = candidate.mm_object_id;
+	input[2] = READ_ONCE(current_thread_info()->flags) |
 		   READ_ONCE(current_thread_info()->syscall_work);
-	input[6] = candidate.task_start_boottime;
-	input[7] = candidate.mmu_root_physical;
-	input[8] = READ_ONCE(ebpfos_runtime_process.task_object_id);
-	input[9] = parent_object_id;
-	input[10] = group_object_id;
-	input[11] = member;
-	input[12] = task_count;
-	input[13] = EBPFOS_RUNTIME_PROCESS_MAX_TASKS;
+	input[3] = candidate.task_start_boottime;
+	input[4] = candidate.mmu_root_physical;
+	input[5] = READ_ONCE(ebpfos_runtime_process.task_object_id);
+	input[6] = parent_object_id;
+	input[7] = group_object_id;
+	input[8] = member;
+	input[9] = task_count;
+	input[10] = EBPFOS_RUNTIME_PROCESS_MAX_TASKS;
+	input[11] = cpu;
+	input[12] = cpu_task_object;
+	input[13] = candidate.context_switch_baseline;
+	input[14] = context_switch_baseline;
+	input[15] = EBPFOS_RUNTIME_PROCESS_MAX_TASKS;
 	memcpy(frame.input, input, sizeof(input));
 	provider_status = bpf_prog_run_pin_on_cpu(prog, &frame);
 	if (provider_status || frame.status ||
@@ -1712,7 +1795,10 @@ static int ebpfos_runtime_process_return(u64 operation)
 		if (error)
 			goto out;
 	}
-	migrate_disable();
+	error = ebpfos_runtime_process_claim_cpu(cpu,
+					 candidate.task_object_id);
+	if (error)
+		goto out;
 	error = ebpfos_runtime_machine_run(observer,
 					   candidate.mmu_root_physical);
 	if (!error)
@@ -1721,7 +1807,6 @@ static int ebpfos_runtime_process_return(u64 operation)
 	if (!error)
 		atomic64_or(BIT_ULL(raw_smp_processor_id()),
 			    &ebpfos_runtime_process.cpu_mask);
-	migrate_enable();
 	if (error) {
 		atomic64_inc(&ebpfos_runtime_process.mmu_errors);
 		goto out;
@@ -1737,6 +1822,7 @@ static int ebpfos_runtime_process_return(u64 operation)
 		   observer->aux->id);
 	atomic_set(&ebpfos_runtime_process.mmu_reloader_prog_id,
 		   reloader->aux->id);
+	atomic64_inc(&ebpfos_runtime_process.scheduler_decisions);
 	return_index = atomic64_inc_return(&ebpfos_runtime_process.returns);
 	if (operation == EBPFOS_RUNTIME_PROCESS_RETURN_SYSCALL)
 		atomic64_inc(&ebpfos_runtime_process.syscall_returns);
@@ -1757,6 +1843,8 @@ static int ebpfos_runtime_process_return(u64 operation)
 out:
 	ebpfos_runtime_bundle_release(bundle);
 fault:
+	if (migration_disabled)
+		migrate_enable();
 	if (error)
 		atomic64_inc(&ebpfos_runtime_process.return_errors);
 	atomic_dec(&ebpfos_runtime_process.operations);
