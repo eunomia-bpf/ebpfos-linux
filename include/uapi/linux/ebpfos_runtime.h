@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 12U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 13U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -296,8 +296,10 @@ struct ebpfos_runtime_successor_preflight {
 	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u32 expected_cpus;
 	__u32 observed_cpus;
+	__u32 cr3_switched_cpus;
 	__u32 preflighted;
 	__u32 published;
+	__u32 reserved;
 };
 
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \

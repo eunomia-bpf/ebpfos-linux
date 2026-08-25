@@ -260,6 +260,7 @@ struct ebpfos_runtime_successor_state {
 	u64 transaction_epoch;
 	u8 transaction_sha256[SHA256_DIGEST_SIZE];
 	u32 preflight_cpus;
+	u32 preflight_cr3_cpus;
 	bool transaction_admitted;
 	bool handoff_preflighted;
 	struct ebpfos_runtime_successor_stage descriptor;
@@ -3168,14 +3169,17 @@ out_free:
 struct ebpfos_runtime_successor_preflight_context {
 	unsigned long entry;
 	u64 magic;
+	u64 cr3;
 	cpumask_t observed;
+	cpumask_t cr3_switched;
 	atomic_t failures;
 };
 
 static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 {
 	struct ebpfos_runtime_successor_preflight_context *context = opaque;
-	u64 (*entry)(u64) = (void *)context->entry;
+	u64 (*entry)(u64, u64) = (void *)context->entry;
+	unsigned long irq_flags;
 	u32 cpu = raw_smp_processor_id();
 	u64 value;
 
@@ -3183,11 +3187,14 @@ static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 		atomic_inc(&context->failures);
 		return;
 	}
-	value = entry(cpu);
+	local_irq_save(irq_flags);
+	value = entry(cpu, context->cr3);
+	local_irq_restore(irq_flags);
 	if (value != (context->magic ^ cpu)) {
 		atomic_inc(&context->failures);
 		return;
 	}
+	cpumask_set_cpu(cpu, &context->cr3_switched);
 	cpumask_set_cpu(cpu, &context->observed);
 }
 
@@ -3206,7 +3213,8 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
 	    !request.expected_epoch || !request.expected_magic ||
 	    request.expected_cpus != EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
-	    request.observed_cpus || request.preflighted || request.published ||
+	    request.observed_cpus || request.cr3_switched_cpus ||
+	    request.preflighted || request.published || request.reserved ||
 	    !ebpfos_runtime_successor_identity_nonzero(
 		request.transaction_sha256))
 		return -EINVAL;
@@ -3237,7 +3245,9 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	}
 	context.entry = ebpfos_runtime_successor.descriptor.handoff_alias;
 	context.magic = ebpfos_runtime_successor.descriptor.handoff_magic;
+	context.cr3 = ebpfos_runtime_successor.descriptor.cr3;
 	cpumask_clear(&context.observed);
+	cpumask_clear(&context.cr3_switched);
 	atomic_set(&context.failures, 0);
 	alias_page = context.entry & PAGE_MASK;
 	error = set_memory_rox(alias_page, 1);
@@ -3250,17 +3260,21 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	if (!error && rw_error)
 		error = rw_error;
 	if (!error && (atomic_read(&context.failures) ||
-		       !cpumask_equal(&context.observed, &expected)))
+		       !cpumask_equal(&context.observed, &expected) ||
+		       !cpumask_equal(&context.cr3_switched, &expected)))
 		error = -EIO;
 	if (error)
 		goto out_cpus;
 	request.observed_cpus = cpumask_weight(&context.observed);
+	request.cr3_switched_cpus = cpumask_weight(&context.cr3_switched);
 	request.preflighted = 1;
 	if (copy_to_user(argp, &request, sizeof(request))) {
 		error = -EFAULT;
 		goto out_cpus;
 	}
 	ebpfos_runtime_successor.preflight_cpus = request.observed_cpus;
+	ebpfos_runtime_successor.preflight_cr3_cpus =
+		request.cr3_switched_cpus;
 	ebpfos_runtime_successor.handoff_preflighted = true;
 out_cpus:
 	cpus_read_unlock();
