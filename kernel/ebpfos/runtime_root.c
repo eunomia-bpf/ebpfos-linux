@@ -253,6 +253,9 @@ struct ebpfos_runtime_successor_state {
 	struct resource *region;
 	void *image;
 	u64 reserved_bytes;
+	u64 transaction_bytes;
+	u8 transaction_sha256[SHA256_DIGEST_SIZE];
+	bool transaction_admitted;
 	struct ebpfos_runtime_successor_stage descriptor;
 };
 
@@ -2623,6 +2626,20 @@ static int ebpfos_runtime_successor_root_page(
 	return 0;
 }
 
+static void *ebpfos_runtime_successor_virtual(
+	const struct ebpfos_runtime_successor_stage *request, void *image,
+	u64 virtual, size_t bytes)
+{
+	u64 offset;
+
+	if (virtual < request->virtual_base)
+		return NULL;
+	offset = virtual - request->virtual_base;
+	if (offset > request->image_bytes || bytes > request->image_bytes - offset)
+		return NULL;
+	return (u8 *)image + offset;
+}
+
 static int ebpfos_runtime_successor_validate(
 	struct ebpfos_runtime_successor_stage *request, void *image)
 {
@@ -2694,6 +2711,29 @@ static int ebpfos_runtime_successor_validate(
 		if (error)
 			return error;
 	}
+	if (!request->publication_state ||
+	    request->publication_capacity <
+		sizeof(struct ebpfos_runtime_successor_transaction_header) ||
+	    request->publication_capacity >
+		EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_BYTES ||
+	    !ebpfos_runtime_successor_virtual(request, image,
+		request->publication_state, request->publication_capacity))
+		return -EINVAL;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->publication_state, true, false);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image,
+		request->publication_state + request->publication_capacity - 1,
+		true, false);
+	if (error)
+		return error;
+	if (memchr_inv(ebpfos_runtime_successor_virtual(
+			request, image, request->publication_state,
+			request->publication_capacity), 0,
+		request->publication_capacity))
+		return -EPROTO;
 	return 0;
 }
 
@@ -2778,6 +2818,240 @@ out:
 	return error;
 }
 
+static bool ebpfos_runtime_successor_identity_nonzero(const u8 *identity)
+{
+	return ebpfos_runtime_nonzero(identity,
+				      EBPFOS_RUNTIME_ROOT_DIGEST_SIZE);
+}
+
+static int ebpfos_runtime_successor_transaction_validate(
+	const struct ebpfos_runtime_successor_publish *request, const void *blob,
+	const struct ebpfos_runtime_successor_stage *stage, void *image)
+{
+	const struct ebpfos_runtime_successor_transaction_header *header = blob;
+	const struct ebpfos_runtime_successor_transaction_record *records;
+	size_t expected_bytes;
+	u32 apic = 0, boot = 0, cpu_mask = 0, index, other, uart = 0;
+	int error;
+
+	if (request->transaction_bytes < sizeof(*header) ||
+	    memcmp(header->magic, "EBPFOSRT", sizeof(header->magic)) ||
+	    header->version != EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_VERSION ||
+	    header->header_bytes != sizeof(*header) ||
+	    header->record_bytes != sizeof(*records) || !header->record_count ||
+	    header->record_count > EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_ROOTS ||
+	    header->record_count != request->root_count ||
+	    header->expected_epoch != request->expected_epoch ||
+	    header->flags != EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_FLAGS ||
+	    memcmp(header->image_sha256, stage->image_sha256,
+		   sizeof(header->image_sha256)) ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		header->root_table_sha256) ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		header->entry_points_sha256) ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		header->boot_state_sha256))
+		return -EPROTO;
+	if (check_mul_overflow((size_t)header->record_count, sizeof(*records),
+			       &expected_bytes) ||
+	    check_add_overflow(expected_bytes, sizeof(*header), &expected_bytes) ||
+	    expected_bytes != request->transaction_bytes)
+		return -EOVERFLOW;
+	records = (const void *)((const u8 *)blob + sizeof(*header));
+	for (index = 0; index < header->record_count; index++) {
+		const struct ebpfos_runtime_successor_transaction_record *record =
+			&records[index];
+
+		if (record->flags !=
+			EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_RECORD_FLAGS ||
+		    !ebpfos_runtime_successor_identity_nonzero(
+			record->root_identity) ||
+		    (!ebpfos_runtime_successor_identity_nonzero(
+			record->component_identity) &&
+		     !ebpfos_runtime_successor_identity_nonzero(
+			record->descriptor_identity) &&
+		     !ebpfos_runtime_successor_identity_nonzero(
+			record->state_identity)))
+			return -EPROTO;
+		for (other = 0; other < index; other++)
+			if (!memcmp(record->root_identity,
+				    records[other].root_identity,
+				    sizeof(record->root_identity)))
+				return -EEXIST;
+		switch (record->kind) {
+		case EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_CPU:
+			if (record->cpu >= stage->cpus ||
+			    cpu_mask & BIT(record->cpu) ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->component_identity) ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->descriptor_identity) ||
+			    record->operands[0] != stage->cpu_root ||
+			    record->operands[1] != stage->cpu_stacks[record->cpu] ||
+			    record->operands[2] != stage->lstar ||
+			    record->operands[3] != stage->idtr ||
+			    record->operands[4] != IDT_ENTRIES * sizeof(gate_desc) - 1 ||
+			    record->operands[5] != stage->cr3 ||
+			    record->operands[6] != stage->cpu_contexts[record->cpu] ||
+			    !record->operands[7] || !record->operands[8] ||
+			    !record->operands[9] || !record->operands[11] ||
+			    !record->operands[12] || !record->operands[13] ||
+			    !record->operands[14] ||
+			    record->operands[15] != stage->cpu_stacks[record->cpu])
+				return -EPROTO;
+			error = ebpfos_runtime_successor_root_page(
+				stage, image, record->operands[8], false, true);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[7], true, false);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[9], true, false);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[11], true, false);
+			if (!error)
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[13], true, false);
+			if (error)
+				return error;
+			cpu_mask |= BIT(record->cpu);
+			break;
+		case EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_BOOT_TASK_MM:
+			if (record->cpu != U32_MAX || boot++ ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->descriptor_identity) ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->state_identity) ||
+			    !record->operands[0] || !record->operands[1] ||
+			    !record->operands[2] || !record->operands[3] ||
+			    record->operands[4] != stage->cr3 ||
+			    !record->operands[5] || !record->operands[6] ||
+			    !record->operands[7] || !record->operands[8])
+				return -EPROTO;
+			for (other = 0; other < 4; other++) {
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[other],
+					true, false);
+				if (error)
+					return error;
+			}
+			for (other = 5; other < 9; other++) {
+				error = ebpfos_runtime_successor_root_page(
+					stage, image, record->operands[other],
+					true, false);
+				if (error)
+					return error;
+			}
+			break;
+		case EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER:
+			if (record->cpu != U32_MAX || apic++ ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->component_identity) ||
+			    !record->operands[0])
+				return -EPROTO;
+			error = ebpfos_runtime_successor_root_page(
+				stage, image, record->operands[0], false, true);
+			if (error)
+				return error;
+			break;
+		case EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_UART_PIO:
+			if (record->cpu != U32_MAX || uart++ ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->component_identity) ||
+			    !record->operands[0])
+				return -EPROTO;
+			error = ebpfos_runtime_successor_root_page(
+				stage, image, record->operands[0], false, true);
+			if (error)
+				return error;
+			break;
+		default:
+			return -EPROTO;
+		}
+	}
+	return cpu_mask == GENMASK(stage->cpus - 1, 0) && boot == 1 &&
+	       apic == 1 && uart == 1 ? 0 : -EPROTO;
+}
+
+static long ebpfos_runtime_successor_publish(void __user *argp)
+{
+	struct ebpfos_runtime_successor_publish request;
+	u8 digest[SHA256_DIGEST_SIZE];
+	void *blob = NULL, *destination;
+	long error = 0;
+
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
+	    request.reserved || request.admitted || request.published ||
+	    !request.user_address || !request.transaction_bytes ||
+	    request.transaction_bytes >
+		EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_BYTES ||
+	    !request.root_count ||
+	    request.root_count > EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_ROOTS ||
+	    !request.expected_epoch ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		request.transaction_sha256))
+		return -EINVAL;
+	blob = memdup_user((void __user *)(uintptr_t)request.user_address,
+			   request.transaction_bytes);
+	if (IS_ERR(blob))
+		return PTR_ERR(blob);
+	sha256(blob, request.transaction_bytes, digest);
+	if (memcmp(digest, request.transaction_sha256, sizeof(digest))) {
+		error = -EBADMSG;
+		goto out_free;
+	}
+	mutex_lock(&ebpfos_runtime_successor.lock);
+	if (!ebpfos_runtime_successor.image ||
+	    ebpfos_runtime_successor.transaction_admitted) {
+		error = -EBUSY;
+		goto out_unlock;
+	}
+	if (request.transaction_bytes >
+	    ebpfos_runtime_successor.descriptor.publication_capacity) {
+		error = -E2BIG;
+		goto out_unlock;
+	}
+	error = ebpfos_runtime_successor_transaction_validate(
+		&request, blob, &ebpfos_runtime_successor.descriptor,
+		ebpfos_runtime_successor.image);
+	if (error)
+		goto out_unlock;
+	destination = ebpfos_runtime_successor_virtual(
+		&ebpfos_runtime_successor.descriptor,
+		ebpfos_runtime_successor.image,
+		ebpfos_runtime_successor.descriptor.publication_state,
+		ebpfos_runtime_successor.descriptor.publication_capacity);
+	if (!destination || memchr_inv(
+			destination, 0,
+			ebpfos_runtime_successor.descriptor.publication_capacity)) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
+	memcpy(destination, blob, request.transaction_bytes);
+	memcpy(ebpfos_runtime_successor.transaction_sha256, digest,
+	       sizeof(digest));
+	ebpfos_runtime_successor.transaction_bytes = request.transaction_bytes;
+	ebpfos_runtime_successor.transaction_admitted = true;
+	request.user_address = 0;
+	request.admitted = 1;
+	if (copy_to_user(argp, &request, sizeof(request))) {
+		memset(destination, 0, request.transaction_bytes);
+		memset(ebpfos_runtime_successor.transaction_sha256, 0,
+		       sizeof(ebpfos_runtime_successor.transaction_sha256));
+		ebpfos_runtime_successor.transaction_bytes = 0;
+		ebpfos_runtime_successor.transaction_admitted = false;
+		error = -EFAULT;
+	}
+out_unlock:
+	mutex_unlock(&ebpfos_runtime_successor.lock);
+out_free:
+	kfree(blob);
+	return error;
+}
+
 static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 				 unsigned long argument)
 {
@@ -2806,6 +3080,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_device_read(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_STAGE:
 		return ebpfos_runtime_successor_stage(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PUBLISH:
+		return ebpfos_runtime_successor_publish(argp);
 	default:
 		return -ENOTTY;
 	}

@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 10U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 11U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -13,6 +13,16 @@
 #define EBPFOS_RUNTIME_ROOT_IOC_MAGIC 0xe8
 #define EBPFOS_RUNTIME_PROCESS_MAX_TASKS 4U
 #define EBPFOS_RUNTIME_SUCCESSOR_CPUS 4U
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAGIC_BYTES 8U
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_BYTES 4096U
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_ROOTS 64U
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_VERSION 1U
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_FLAGS 0x1fULL
+#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_RECORD_FLAGS 0x0fULL
+#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_CPU 1U
+#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_BOOT_TASK_MM 2U
+#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER 3U
+#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_UART_PIO 4U
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
@@ -222,11 +232,51 @@ struct ebpfos_runtime_successor_stage {
 	__u64 cpu_root;
 	__u64 cpu_stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 	__u64 cpu_contexts[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+	__u64 publication_state;
+	__u64 publication_capacity;
 	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u64 mapped_pages;
 	__u32 idt_vectors;
 	__u32 cpus;
 	__u32 staged;
+	__u32 reserved;
+};
+
+struct ebpfos_runtime_successor_transaction_header {
+	__u8 magic[EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAGIC_BYTES];
+	__u32 version;
+	__u32 header_bytes;
+	__u32 record_bytes;
+	__u32 record_count;
+	__u64 expected_epoch;
+	__u64 flags;
+	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 root_table_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 entry_points_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 boot_state_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+};
+
+struct ebpfos_runtime_successor_transaction_record {
+	__u32 kind;
+	__u32 cpu;
+	__u64 flags;
+	__u8 root_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 component_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 descriptor_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 state_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u64 operands[16];
+};
+
+struct ebpfos_runtime_successor_publish {
+	__u32 version;
+	__u32 flags;
+	__u64 user_address;
+	__u64 transaction_bytes;
+	__u64 expected_epoch;
+	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u32 root_count;
+	__u32 admitted;
+	__u32 published;
 	__u32 reserved;
 };
 
@@ -263,5 +313,8 @@ struct ebpfos_runtime_successor_stage {
 #define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_STAGE \
 	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0b, \
 	      struct ebpfos_runtime_successor_stage)
+#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PUBLISH \
+	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0c, \
+	      struct ebpfos_runtime_successor_publish)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */
