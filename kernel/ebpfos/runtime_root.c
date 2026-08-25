@@ -266,6 +266,7 @@ struct ebpfos_runtime_successor_state {
 	u32 preflight_root_cpus;
 	u32 preflight_reverified_cpus;
 	u32 preflight_koperation_cpus;
+	u32 preflight_state_store_cpus;
 	u32 preflight_component_cpus;
 	bool transaction_admitted;
 	bool handoff_preflighted;
@@ -3195,11 +3196,13 @@ struct ebpfos_runtime_successor_preflight_context {
 	u64 lstar;
 	u64 component_probe;
 	u64 stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+	u64 results[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 	cpumask_t observed;
 	cpumask_t cr3_switched;
 	cpumask_t root_registers;
 	cpumask_t reverified;
 	cpumask_t koperations;
+	cpumask_t state_stores;
 	cpumask_t components;
 	atomic_t failures;
 };
@@ -3223,6 +3226,7 @@ static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 	rdmsrl(MSR_LSTAR, donor_lstar);
 	value = entry(cpu, context->cr3, context->stacks[cpu],
 		      context->idtr, context->lstar, context->component_probe);
+	WRITE_ONCE(context->results[cpu], value);
 	store_idt(&restored_idtr);
 	restored_cr3 = __read_cr3();
 	rdmsrl(MSR_LSTAR, restored_lstar);
@@ -3238,6 +3242,7 @@ static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
 	cpumask_set_cpu(cpu, &context->root_registers);
 	cpumask_set_cpu(cpu, &context->reverified);
 	cpumask_set_cpu(cpu, &context->koperations);
+	cpumask_set_cpu(cpu, &context->state_stores);
 	cpumask_set_cpu(cpu, &context->components);
 	cpumask_set_cpu(cpu, &context->observed);
 }
@@ -3261,6 +3266,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	    request.root_register_cpus ||
 	    request.reverified_cpus ||
 	    request.koperation_cpus ||
+	    request.state_store_cpus ||
 	    request.component_cpus ||
 	    request.preflighted || request.published || request.reserved ||
 	    !ebpfos_runtime_successor_identity_nonzero(
@@ -3301,11 +3307,13 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++)
 		context.stacks[cpu] =
 			ebpfos_runtime_successor.descriptor.cpu_stacks[cpu];
+	memset(context.results, 0, sizeof(context.results));
 	cpumask_clear(&context.observed);
 	cpumask_clear(&context.cr3_switched);
 	cpumask_clear(&context.root_registers);
 	cpumask_clear(&context.reverified);
 	cpumask_clear(&context.koperations);
+	cpumask_clear(&context.state_stores);
 	cpumask_clear(&context.components);
 	atomic_set(&context.failures, 0);
 	alias_page = context.entry & PAGE_MASK;
@@ -3324,8 +3332,13 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		       !cpumask_equal(&context.root_registers, &expected) ||
 		       !cpumask_equal(&context.reverified, &expected) ||
 		       !cpumask_equal(&context.koperations, &expected) ||
+		       !cpumask_equal(&context.state_stores, &expected) ||
 		       !cpumask_equal(&context.components, &expected)))
 		error = -EIO;
+	if (error == -EIO)
+		pr_err("successor preflight results=%#llx,%#llx,%#llx,%#llx failures=%d\n",
+		       context.results[0], context.results[1], context.results[2],
+		       context.results[3], atomic_read(&context.failures));
 	if (error)
 		goto out_cpus;
 	request.observed_cpus = cpumask_weight(&context.observed);
@@ -3333,6 +3346,7 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 	request.root_register_cpus = cpumask_weight(&context.root_registers);
 	request.reverified_cpus = cpumask_weight(&context.reverified);
 	request.koperation_cpus = cpumask_weight(&context.koperations);
+	request.state_store_cpus = cpumask_weight(&context.state_stores);
 	request.component_cpus = cpumask_weight(&context.components);
 	request.preflighted = 1;
 	if (copy_to_user(argp, &request, sizeof(request))) {
@@ -3348,6 +3362,8 @@ static long ebpfos_runtime_successor_preflight(void __user *argp)
 		request.reverified_cpus;
 	ebpfos_runtime_successor.preflight_koperation_cpus =
 		request.koperation_cpus;
+	ebpfos_runtime_successor.preflight_state_store_cpus =
+		request.state_store_cpus;
 	ebpfos_runtime_successor.preflight_component_cpus =
 		request.component_cpus;
 	ebpfos_runtime_successor.handoff_preflighted = true;
