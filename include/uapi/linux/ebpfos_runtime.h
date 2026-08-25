@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 11U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 12U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -23,6 +23,7 @@
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_BOOT_TASK_MM 2U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER 3U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_UART_PIO 4U
+#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_HANDOFF_BRIDGE 5U
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
@@ -232,6 +233,13 @@ struct ebpfos_runtime_successor_stage {
 	__u64 cpu_root;
 	__u64 cpu_stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
 	__u64 cpu_contexts[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
+	__u64 handoff_preflight;
+	__u64 handoff_alias;
+	__u64 handoff_physical;
+	__u64 handoff_bytes;
+	__u64 handoff_magic;
+	__u8 handoff_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u8 handoff_descriptor_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u64 publication_state;
 	__u64 publication_capacity;
 	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
@@ -280,6 +288,18 @@ struct ebpfos_runtime_successor_publish {
 	__u32 reserved;
 };
 
+struct ebpfos_runtime_successor_preflight {
+	__u32 version;
+	__u32 flags;
+	__u64 expected_epoch;
+	__u64 expected_magic;
+	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
+	__u32 expected_cpus;
+	__u32 observed_cpus;
+	__u32 preflighted;
+	__u32 published;
+};
+
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
 	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x01, \
 	     struct ebpfos_runtime_root_publish)
@@ -316,5 +336,8 @@ struct ebpfos_runtime_successor_publish {
 #define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PUBLISH \
 	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0c, \
 	      struct ebpfos_runtime_successor_publish)
+#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PREFLIGHT \
+	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0d, \
+	      struct ebpfos_runtime_successor_preflight)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */

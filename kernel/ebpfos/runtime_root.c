@@ -2,6 +2,7 @@
 /* Policy-free target runtime root/epoch publication and dispatch primitive. */
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
+#include <linux/cpu.h>
 #include <linux/ebpfos.h>
 #include <linux/ebpfos_runtime.h>
 #include <linux/entry-common.h>
@@ -38,6 +39,7 @@
 #include <asm/pgtable_types.h>
 #include <asm/processor-flags.h>
 #include <asm/ptrace.h>
+#include <asm/set_memory.h>
 #include <asm/thread_info.h>
 
 struct ebpfos_runtime_slot {
@@ -254,8 +256,11 @@ struct ebpfos_runtime_successor_state {
 	void *image;
 	u64 reserved_bytes;
 	u64 transaction_bytes;
+	u64 transaction_epoch;
 	u8 transaction_sha256[SHA256_DIGEST_SIZE];
+	u32 preflight_cpus;
 	bool transaction_admitted;
+	bool handoff_preflighted;
 	struct ebpfos_runtime_successor_stage descriptor;
 };
 
@@ -2626,6 +2631,23 @@ static int ebpfos_runtime_successor_root_page(
 	return 0;
 }
 
+static int ebpfos_runtime_successor_mapping_page(
+	const struct ebpfos_runtime_successor_stage *request, void *image,
+	u64 virtual, u64 physical, bool writable, bool executable)
+{
+	u64 leaf;
+	int error;
+
+	error = ebpfos_runtime_successor_walk(request, image, virtual, &leaf);
+	if (error)
+		return error;
+	if ((leaf & PTE_PFN_MASK) != (physical & PAGE_MASK) ||
+	    !!(leaf & _PAGE_RW) != writable ||
+	    !!(leaf & _PAGE_NX) == executable || leaf & _PAGE_USER)
+		return -EPROTO;
+	return 0;
+}
+
 static void *ebpfos_runtime_successor_virtual(
 	const struct ebpfos_runtime_successor_stage *request, void *image,
 	u64 virtual, size_t bytes)
@@ -2644,12 +2666,18 @@ static int ebpfos_runtime_successor_validate(
 	struct ebpfos_runtime_successor_stage *request, void *image)
 {
 	gate_desc *idt;
-	u64 end, leaf, mapped = 0, virtual, idt_physical;
+	u8 handoff_digest[SHA256_DIGEST_SIZE];
+	void *handoff;
+	u64 end, handoff_end, leaf, mapped = 0, physical_end, virtual;
+	u64 idt_physical;
 	u32 cpu, vector;
 	int error;
 
 	if (check_add_overflow(request->virtual_base,
 				 PAGE_ALIGN(request->image_bytes), &end))
+		return -EOVERFLOW;
+	if (check_add_overflow(request->physical_base, request->image_bytes,
+			       &physical_end))
 		return -EOVERFLOW;
 	for (virtual = request->virtual_base; virtual < end;
 	     virtual += PAGE_SIZE) {
@@ -2666,7 +2694,8 @@ static int ebpfos_runtime_successor_validate(
 			return -EPROTO;
 		mapped++;
 	}
-	if (mapped != request->mapped_pages)
+	/* One generated direct-map alias is outside the packed high image. */
+	if (mapped + 1 != request->mapped_pages)
 		return -EPROTO;
 	error = ebpfos_runtime_successor_root_page(
 		request, image, request->lstar, false, true);
@@ -2711,6 +2740,42 @@ static int ebpfos_runtime_successor_validate(
 		if (error)
 			return error;
 	}
+	if (!request->handoff_preflight || !request->handoff_alias ||
+	    !request->handoff_physical || !request->handoff_bytes ||
+	    !request->handoff_magic ||
+	    !ebpfos_runtime_nonzero(request->handoff_sha256,
+				   sizeof(request->handoff_sha256)) ||
+	    !ebpfos_runtime_nonzero(request->handoff_descriptor_identity,
+				   sizeof(request->handoff_descriptor_identity)) ||
+	    request->handoff_physical < request->physical_base ||
+	    check_add_overflow(request->handoff_physical,
+			       request->handoff_bytes, &handoff_end) ||
+	    handoff_end > physical_end ||
+	    request->handoff_bytes >
+		PAGE_SIZE - offset_in_page(request->handoff_physical) ||
+	    request->handoff_preflight != request->virtual_base +
+		(request->handoff_physical - request->physical_base) ||
+	    request->handoff_alias !=
+		(u64)(unsigned long)__va(request->handoff_physical))
+		return -EINVAL;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->handoff_preflight, false, true);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_mapping_page(
+		request, image, request->handoff_alias,
+		request->handoff_physical, false, true);
+	if (error)
+		return error;
+	handoff = ebpfos_runtime_successor_physical(
+		request, image, request->handoff_physical,
+		request->handoff_bytes);
+	if (!handoff)
+		return -ERANGE;
+	sha256(handoff, request->handoff_bytes, handoff_digest);
+	if (memcmp(handoff_digest, request->handoff_sha256,
+		   sizeof(handoff_digest)))
+		return -EBADMSG;
 	if (!request->publication_state ||
 	    request->publication_capacity <
 		sizeof(struct ebpfos_runtime_successor_transaction_header) ||
@@ -2831,7 +2896,8 @@ static int ebpfos_runtime_successor_transaction_validate(
 	const struct ebpfos_runtime_successor_transaction_header *header = blob;
 	const struct ebpfos_runtime_successor_transaction_record *records;
 	size_t expected_bytes;
-	u32 apic = 0, boot = 0, cpu_mask = 0, index, other, uart = 0;
+	u32 apic = 0, boot = 0, cpu_mask = 0, handoff = 0, index, other;
+	u32 uart = 0;
 	int error;
 
 	if (request->transaction_bytes < sizeof(*header) ||
@@ -2966,12 +3032,43 @@ static int ebpfos_runtime_successor_transaction_validate(
 			if (error)
 				return error;
 			break;
+		case EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_HANDOFF_BRIDGE:
+			if (record->cpu != U32_MAX || handoff++ ||
+			    ebpfos_runtime_successor_identity_nonzero(
+				record->component_identity) ||
+			    !ebpfos_runtime_successor_identity_nonzero(
+				record->descriptor_identity) ||
+			    memcmp(record->descriptor_identity,
+				   stage->handoff_descriptor_identity,
+				   sizeof(record->descriptor_identity)) ||
+			    ebpfos_runtime_successor_identity_nonzero(
+				record->state_identity) ||
+			    record->operands[0] != stage->handoff_preflight ||
+			    record->operands[1] != stage->handoff_alias ||
+			    record->operands[2] != stage->handoff_physical ||
+			    record->operands[3] != stage->handoff_bytes ||
+			    record->operands[4] != stage->handoff_magic)
+				return -EPROTO;
+			for (other = 5; other < ARRAY_SIZE(record->operands);
+			     other++)
+				if (record->operands[other])
+					return -EPROTO;
+			error = ebpfos_runtime_successor_root_page(
+				stage, image, record->operands[0], false, true);
+			if (!error)
+				error = ebpfos_runtime_successor_mapping_page(
+					stage, image, record->operands[1],
+					record->operands[2], false, true);
+			if (error)
+				return error;
+			break;
 		default:
 			return -EPROTO;
 		}
 	}
-	return cpu_mask == GENMASK(stage->cpus - 1, 0) && boot == 1 &&
-	       apic == 1 && uart == 1 ? 0 : -EPROTO;
+	return header->record_count == 8 &&
+	       cpu_mask == GENMASK(stage->cpus - 1, 0) && boot == 1 &&
+	       apic == 1 && uart == 1 && handoff == 1 ? 0 : -EPROTO;
 }
 
 static long ebpfos_runtime_successor_publish(void __user *argp)
@@ -3034,6 +3131,7 @@ static long ebpfos_runtime_successor_publish(void __user *argp)
 	memcpy(ebpfos_runtime_successor.transaction_sha256, digest,
 	       sizeof(digest));
 	ebpfos_runtime_successor.transaction_bytes = request.transaction_bytes;
+	ebpfos_runtime_successor.transaction_epoch = request.expected_epoch;
 	ebpfos_runtime_successor.transaction_admitted = true;
 	request.user_address = 0;
 	request.admitted = 1;
@@ -3042,6 +3140,7 @@ static long ebpfos_runtime_successor_publish(void __user *argp)
 		memset(ebpfos_runtime_successor.transaction_sha256, 0,
 		       sizeof(ebpfos_runtime_successor.transaction_sha256));
 		ebpfos_runtime_successor.transaction_bytes = 0;
+		ebpfos_runtime_successor.transaction_epoch = 0;
 		ebpfos_runtime_successor.transaction_admitted = false;
 		error = -EFAULT;
 	}
@@ -3049,6 +3148,110 @@ out_unlock:
 	mutex_unlock(&ebpfos_runtime_successor.lock);
 out_free:
 	kfree(blob);
+	return error;
+}
+
+struct ebpfos_runtime_successor_preflight_context {
+	unsigned long entry;
+	u64 magic;
+	cpumask_t observed;
+	atomic_t failures;
+};
+
+static void ebpfos_runtime_successor_preflight_cpu(void *opaque)
+{
+	struct ebpfos_runtime_successor_preflight_context *context = opaque;
+	u64 (*entry)(u64) = (void *)context->entry;
+	u32 cpu = raw_smp_processor_id();
+	u64 value;
+
+	if (cpu >= EBPFOS_RUNTIME_SUCCESSOR_CPUS) {
+		atomic_inc(&context->failures);
+		return;
+	}
+	value = entry(cpu);
+	if (value != (context->magic ^ cpu)) {
+		atomic_inc(&context->failures);
+		return;
+	}
+	cpumask_set_cpu(cpu, &context->observed);
+}
+
+static long ebpfos_runtime_successor_preflight(void __user *argp)
+{
+	struct ebpfos_runtime_successor_preflight_context context;
+	struct ebpfos_runtime_successor_preflight request;
+	cpumask_t expected;
+	unsigned long alias_page;
+	u32 cpu;
+	int nx_error, rw_error;
+	long error = 0;
+
+	if (copy_from_user(&request, argp, sizeof(request)))
+		return -EFAULT;
+	if (request.version != EBPFOS_RUNTIME_ROOT_ABI_VERSION || request.flags ||
+	    !request.expected_epoch || !request.expected_magic ||
+	    request.expected_cpus != EBPFOS_RUNTIME_SUCCESSOR_CPUS ||
+	    request.observed_cpus || request.preflighted || request.published ||
+	    !ebpfos_runtime_successor_identity_nonzero(
+		request.transaction_sha256))
+		return -EINVAL;
+	mutex_lock(&ebpfos_runtime_successor.lock);
+	if (!ebpfos_runtime_successor.image ||
+	    !ebpfos_runtime_successor.transaction_admitted ||
+	    ebpfos_runtime_successor.handoff_preflighted) {
+		error = -EBUSY;
+		goto out_unlock;
+	}
+	if (request.expected_epoch !=
+		ebpfos_runtime_successor.transaction_epoch ||
+	    request.expected_magic !=
+		ebpfos_runtime_successor.descriptor.handoff_magic ||
+	    memcmp(request.transaction_sha256,
+		   ebpfos_runtime_successor.transaction_sha256,
+		   sizeof(request.transaction_sha256))) {
+		error = -ESTALE;
+		goto out_unlock;
+	}
+	cpus_read_lock();
+	cpumask_clear(&expected);
+	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++)
+		cpumask_set_cpu(cpu, &expected);
+	if (!cpumask_equal(cpu_online_mask, &expected)) {
+		error = -ENODEV;
+		goto out_cpus;
+	}
+	context.entry = ebpfos_runtime_successor.descriptor.handoff_alias;
+	context.magic = ebpfos_runtime_successor.descriptor.handoff_magic;
+	cpumask_clear(&context.observed);
+	atomic_set(&context.failures, 0);
+	alias_page = context.entry & PAGE_MASK;
+	error = set_memory_rox(alias_page, 1);
+	if (!error)
+		on_each_cpu(ebpfos_runtime_successor_preflight_cpu, &context, 1);
+	nx_error = set_memory_nx(alias_page, 1);
+	rw_error = set_memory_rw(alias_page, 1);
+	if (!error && nx_error)
+		error = nx_error;
+	if (!error && rw_error)
+		error = rw_error;
+	if (!error && (atomic_read(&context.failures) ||
+		       !cpumask_equal(&context.observed, &expected)))
+		error = -EIO;
+	if (error)
+		goto out_cpus;
+	request.observed_cpus = cpumask_weight(&context.observed);
+	request.preflighted = 1;
+	if (copy_to_user(argp, &request, sizeof(request))) {
+		error = -EFAULT;
+		goto out_cpus;
+	}
+	ebpfos_runtime_successor.preflight_cpus = request.observed_cpus;
+	ebpfos_runtime_successor.handoff_preflighted = true;
+out_cpus:
+	cpus_read_unlock();
+out_unlock:
+	mutex_unlock(&ebpfos_runtime_successor.lock);
 	return error;
 }
 
@@ -3082,6 +3285,8 @@ static long ebpfos_runtime_ioctl(struct file *file, unsigned int command,
 		return ebpfos_runtime_successor_stage(argp);
 	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PUBLISH:
 		return ebpfos_runtime_successor_publish(argp);
+	case EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PREFLIGHT:
+		return ebpfos_runtime_successor_preflight(argp);
 	default:
 		return -ENOTTY;
 	}
