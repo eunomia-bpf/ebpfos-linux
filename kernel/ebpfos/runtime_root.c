@@ -9,10 +9,12 @@
 #include <linux/err.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
+#include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/miscdevice.h>
+#include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -252,7 +254,6 @@ static struct ebpfos_runtime_device_state ebpfos_runtime_device_root = {
 
 struct ebpfos_runtime_successor_state {
 	struct mutex lock;
-	struct resource *region;
 	void *image;
 	u64 reserved_bytes;
 	u64 transaction_bytes;
@@ -264,9 +265,35 @@ struct ebpfos_runtime_successor_state {
 	struct ebpfos_runtime_successor_stage descriptor;
 };
 
+#define EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES (64ULL << 20)
+
 static struct ebpfos_runtime_successor_state ebpfos_runtime_successor = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_successor.lock),
 };
+
+static phys_addr_t ebpfos_runtime_successor_reserved_base;
+static phys_addr_t ebpfos_runtime_successor_reserved_bytes;
+
+static int __init ebpfos_runtime_successor_reserve(char *argument)
+{
+	char *end;
+	phys_addr_t base, bytes;
+
+	if (!argument)
+		return -EINVAL;
+	bytes = memparse(argument, &end);
+	if (*end != '@')
+		return -EINVAL;
+	base = memparse(end + 1, &end);
+	if (*end || !bytes || bytes > EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES ||
+	    !PAGE_ALIGNED(base) || !PAGE_ALIGNED(bytes) ||
+	    memblock_reserve(base, bytes))
+		return -EINVAL;
+	ebpfos_runtime_successor_reserved_base = base;
+	ebpfos_runtime_successor_reserved_bytes = bytes;
+	return 0;
+}
+early_param("ebpfos_successor", ebpfos_runtime_successor_reserve);
 
 static bool ebpfos_runtime_syscall_active(void)
 {
@@ -2556,8 +2583,6 @@ static long ebpfos_runtime_read(void __user *argp)
 	return copy_to_user(argp, &snapshot, sizeof(snapshot)) ? -EFAULT : 0;
 }
 
-#define EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES (64ULL << 20)
-
 static void *ebpfos_runtime_successor_physical(
 	const struct ebpfos_runtime_successor_stage *request, void *image,
 	u64 physical, size_t bytes)
@@ -2805,7 +2830,6 @@ static int ebpfos_runtime_successor_validate(
 static long ebpfos_runtime_successor_stage(void __user *argp)
 {
 	struct ebpfos_runtime_successor_stage request;
-	struct resource *region = NULL;
 	u8 digest[SHA256_DIGEST_SIZE];
 	void *image = NULL;
 	u64 reserved_bytes;
@@ -2826,18 +2850,12 @@ static long ebpfos_runtime_successor_stage(void __user *argp)
 				    sizeof(request.image_sha256)))
 		return -EINVAL;
 	reserved_bytes = PAGE_ALIGN(request.image_bytes);
-	if (region_intersects(request.physical_base, reserved_bytes,
-			      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
-	    REGION_DISJOINT)
-		return -EBUSY;
+	if (!ebpfos_runtime_successor_reserved_bytes ||
+	    request.physical_base != ebpfos_runtime_successor_reserved_base ||
+	    reserved_bytes > ebpfos_runtime_successor_reserved_bytes)
+		return -ENXIO;
 	mutex_lock(&ebpfos_runtime_successor.lock);
 	if (ebpfos_runtime_successor.image) {
-		error = -EBUSY;
-		goto out;
-	}
-	region = request_mem_region(request.physical_base, reserved_bytes,
-				    "ebpfos-successor");
-	if (!region) {
 		error = -EBUSY;
 		goto out;
 	}
@@ -2868,17 +2886,13 @@ static long ebpfos_runtime_successor_stage(void __user *argp)
 		error = -EFAULT;
 		goto out;
 	}
-	ebpfos_runtime_successor.region = region;
 	ebpfos_runtime_successor.image = image;
 	ebpfos_runtime_successor.reserved_bytes = reserved_bytes;
 	ebpfos_runtime_successor.descriptor = request;
-	region = NULL;
 	image = NULL;
 out:
 	if (image)
 		memunmap(image);
-	if (region)
-		release_mem_region(request.physical_base, reserved_bytes);
 	mutex_unlock(&ebpfos_runtime_successor.lock);
 	return error;
 }
