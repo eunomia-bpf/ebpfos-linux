@@ -2704,7 +2704,7 @@ static int ebpfos_runtime_successor_validate(
 	u8 handoff_digest[SHA256_DIGEST_SIZE];
 	void *handoff, *publication_cpu_flags;
 	u64 end, handoff_end, handoff_publish_end, leaf, mapped = 0;
-	u64 physical_end, publication_cpu_flags_alias;
+	u64 alias, physical, physical_end, publication_cpu_flags_alias;
 	u64 publication_cpu_flags_physical, virtual;
 	u64 idt_physical;
 	u32 cpu, vector;
@@ -2729,10 +2729,21 @@ static int ebpfos_runtime_successor_validate(
 		    ((leaf & _PAGE_RW) && !(leaf & _PAGE_NX)) ||
 		    (leaf & _PAGE_USER))
 			return -EPROTO;
+		physical = request->physical_base +
+			(virtual - request->virtual_base);
+		alias = (u64)(unsigned long)__va(physical);
+		error = ebpfos_runtime_successor_mapping_page(
+			request, image, alias, physical,
+			leaf & _PAGE_RW, !(leaf & _PAGE_NX));
+		if (error)
+			return error;
 		mapped++;
 	}
-	/* Generated bridge and acknowledgement aliases are outside the image. */
-	if (mapped + 2 != request->mapped_pages)
+	/* Every owned image page has one generated, authority-preserving direct-map
+	 * view of the same physical backing.  The bridge and acknowledgement pages
+	 * are members of that generic alias set rather than exceptional mappings.
+	 */
+	if (mapped * 2 != request->mapped_pages)
 		return -EPROTO;
 	error = ebpfos_runtime_successor_root_page(
 		request, image, request->lstar, false, true);
