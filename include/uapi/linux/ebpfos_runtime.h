@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 20U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 21U
 #define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
@@ -25,6 +25,12 @@
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER 3U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_UART_PIO 4U
 #define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_HANDOFF_BRIDGE 5U
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_VERSION 1U
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_MAGIC 0x454250464f534150ULL
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_READ (1ULL << 0)
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_WRITE (1ULL << 1)
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_EXEC (1ULL << 2)
+#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_STACK (1ULL << 3)
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
@@ -251,12 +257,83 @@ struct ebpfos_runtime_successor_stage {
 	__u64 publication_cpu_flags_bytes;
 	__u64 publication_state;
 	__u64 publication_capacity;
+	__u64 allocator_metadata;
+	__u64 allocator_metadata_bytes;
+	__u64 app_state;
+	__u64 app_state_bytes;
+	__u64 app_page_arena;
+	__u64 app_page_arena_physical;
+	__u64 app_page_arena_bytes;
 	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u64 mapped_pages;
 	__u32 idt_vectors;
 	__u32 cpus;
 	__u32 staged;
 	__u32 reserved;
+};
+
+struct ebpfos_runtime_successor_allocator_state {
+	__u8 magic[8];
+	__u32 version;
+	__u32 page_bytes;
+	__u64 epoch;
+	__u64 virtual_address;
+	__u64 physical_address;
+	__u64 pages;
+	__u32 bitmap_bytes;
+	__u32 reserved;
+	__u8 bitmap[];
+};
+
+/* Successor-owned migration state populated by the donor before the final
+ * graph cut.  Page records describe copied user pages at their unchanged
+ * application-visible addresses; no Linux task/mm pointer is exported. */
+struct ebpfos_runtime_successor_app_page {
+	__u64 user_address;
+	__u64 physical_address;
+	__u64 flags;
+	__u64 content_sha256_low;
+};
+
+struct ebpfos_runtime_successor_app_state {
+	__u64 magic;
+	__u32 version;
+	__u32 header_bytes;
+	__u32 page_record_bytes;
+	__u32 page_capacity;
+	__u32 page_count;
+	__u32 donor_pid;
+	__u32 donor_tgid;
+	__u32 retired;
+	__u32 resume_state;
+	__u64 user_rip;
+	__u64 user_rsp;
+	__u64 user_rflags;
+	__u64 user_rax;
+	__u64 user_rbx;
+	__u64 user_rcx;
+	__u64 user_rdx;
+	__u64 user_rsi;
+	__u64 user_rdi;
+	__u64 user_rbp;
+	__u64 user_r8;
+	__u64 user_r9;
+	__u64 user_r10;
+	__u64 user_r11;
+	__u64 user_r12;
+	__u64 user_r13;
+	__u64 user_r14;
+	__u64 user_r15;
+	__u64 user_cs;
+	__u64 user_ss;
+	__u64 copied_bytes;
+	__u64 allocator_pages_consumed;
+	__u64 donor_pages_poisoned;
+	__u64 donor_pages_reclaimed;
+	__u64 donor_fault_address;
+	__u64 user_fs_base;
+	__u64 user_gs_base;
+	struct ebpfos_runtime_successor_app_page pages[];
 };
 
 struct ebpfos_runtime_successor_transaction_header {

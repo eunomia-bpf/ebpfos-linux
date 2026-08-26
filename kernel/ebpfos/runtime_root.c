@@ -33,6 +33,7 @@
 #include <linux/workqueue.h>
 
 #include <asm/desc.h>
+#include <asm/fsgsbase.h>
 #include <asm/hw_irq.h>
 #include <asm/idtentry.h>
 #include <asm/irq_regs.h>
@@ -2700,6 +2701,7 @@ static void *ebpfos_runtime_successor_virtual(
 static int ebpfos_runtime_successor_validate(
 	struct ebpfos_runtime_successor_stage *request, void *image)
 {
+	struct ebpfos_runtime_successor_allocator_state *allocator;
 	gate_desc *idt;
 	u8 handoff_digest[SHA256_DIGEST_SIZE];
 	void *handoff, *publication_cpu_flags;
@@ -2927,7 +2929,399 @@ static int ebpfos_runtime_successor_validate(
 			request->publication_capacity), 0,
 		request->publication_capacity))
 		return -EPROTO;
+	if (!request->allocator_metadata ||
+	    request->allocator_metadata_bytes != PAGE_SIZE ||
+	    !PAGE_ALIGNED(request->allocator_metadata))
+		return -EINVAL;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->allocator_metadata, true, false);
+	if (error)
+		return error;
+	allocator = ebpfos_runtime_successor_virtual(
+		request, image, request->allocator_metadata,
+		request->allocator_metadata_bytes);
+	if (!allocator || memcmp(allocator->magic, "EBPFOSPA", 8) ||
+	    allocator->version != 1 || allocator->page_bytes != PAGE_SIZE ||
+	    allocator->virtual_address != request->app_page_arena ||
+	    allocator->physical_address != request->app_page_arena_physical ||
+	    allocator->pages != request->app_page_arena_bytes / PAGE_SIZE ||
+	    allocator->bitmap_bytes != DIV_ROUND_UP(allocator->pages, 8) ||
+	    offsetof(struct ebpfos_runtime_successor_allocator_state, bitmap) +
+		allocator->bitmap_bytes > request->allocator_metadata_bytes)
+		return -EPROTO;
+	if (!request->app_state || !PAGE_ALIGNED(request->app_state) ||
+	    request->app_state_bytes <
+		sizeof(struct ebpfos_runtime_successor_app_state) ||
+	    !PAGE_ALIGNED(request->app_state_bytes) ||
+	    !request->app_page_arena ||
+	    !PAGE_ALIGNED(request->app_page_arena) ||
+	    !request->app_page_arena_physical ||
+	    !PAGE_ALIGNED(request->app_page_arena_physical) ||
+	    !request->app_page_arena_bytes ||
+	    !PAGE_ALIGNED(request->app_page_arena_bytes) ||
+	    request->app_page_arena_physical != request->physical_base +
+		(request->app_page_arena - request->virtual_base))
+		return -EINVAL;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->app_state, true, false);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_root_page(
+		request, image, request->app_state + request->app_state_bytes - 1,
+		true, false);
+	if (error)
+		return error;
+	if (memchr_inv(ebpfos_runtime_successor_virtual(
+			request, image, request->app_state,
+			request->app_state_bytes), 0, request->app_state_bytes))
+		return -EPROTO;
+	error = ebpfos_runtime_successor_mapping_page(
+		request, image, request->app_page_arena,
+		request->app_page_arena_physical, true, false);
+	if (error)
+		return error;
+	error = ebpfos_runtime_successor_mapping_page(
+		request, image,
+		request->app_page_arena + request->app_page_arena_bytes - 1,
+		request->app_page_arena_physical +
+		request->app_page_arena_bytes - 1, true, false);
+	if (error)
+		return error;
 	return 0;
+}
+
+struct ebpfos_runtime_successor_app_capture {
+	const struct ebpfos_runtime_successor_stage *stage;
+	void *image;
+	struct ebpfos_runtime_successor_allocator_state *allocator;
+	struct ebpfos_runtime_successor_app_state *app;
+	u64 next_page;
+	bool captured_rip;
+	bool captured_rsp;
+};
+
+static int ebpfos_runtime_successor_app_alloc(
+	struct ebpfos_runtime_successor_app_capture *capture, u64 *physical)
+{
+	u64 page = capture->next_page++;
+	u8 *bitmap = capture->allocator->bitmap;
+	void *memory;
+
+	if (page >= capture->allocator->pages ||
+	    !(bitmap[page >> 3] & BIT(page & 7)))
+		return -ENOSPC;
+	*physical = capture->stage->app_page_arena_physical +
+		page * PAGE_SIZE;
+	memory = ebpfos_runtime_successor_physical(
+		capture->stage, capture->image, *physical, PAGE_SIZE);
+	if (!memory)
+		return -ERANGE;
+	memset(memory, 0, PAGE_SIZE);
+	bitmap[page >> 3] &= ~BIT(page & 7);
+	return 0;
+}
+
+static int ebpfos_runtime_successor_app_map(
+	struct ebpfos_runtime_successor_app_capture *capture, u64 virtual,
+	u64 physical, u64 flags)
+{
+	static const u32 shifts[] = { 39, 30, 21 };
+	u64 table = capture->stage->cr3 & CR3_ADDR_MASK;
+	u64 *entry, value, child;
+	u32 index;
+	int error;
+
+	for (index = 0; index < ARRAY_SIZE(shifts); index++) {
+		entry = ebpfos_runtime_successor_physical(
+			capture->stage, capture->image,
+			table + (((virtual >> shifts[index]) & 0x1ff) *
+				 sizeof(*entry)), sizeof(*entry));
+		if (!entry)
+			return -ERANGE;
+		value = READ_ONCE(*entry);
+		if (!(value & _PAGE_PRESENT)) {
+			error = ebpfos_runtime_successor_app_alloc(capture, &child);
+			if (error)
+				return error;
+			value = child | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER;
+			WRITE_ONCE(*entry, value);
+		} else if (value & _PAGE_PSE) {
+			return -EPROTO;
+		}
+		table = value & PTE_PFN_MASK;
+	}
+	entry = ebpfos_runtime_successor_physical(
+		capture->stage, capture->image,
+		table + (((virtual >> PAGE_SHIFT) & 0x1ff) * sizeof(*entry)),
+		sizeof(*entry));
+	if (!entry || READ_ONCE(*entry) & _PAGE_PRESENT)
+		return entry ? -EEXIST : -ERANGE;
+	value = physical | _PAGE_PRESENT | _PAGE_USER | _PAGE_ACCESSED;
+	if (flags & EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_WRITE)
+		value |= _PAGE_RW | _PAGE_DIRTY;
+	if (!(flags & EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_EXEC))
+		value |= _PAGE_NX;
+	WRITE_ONCE(*entry, value);
+	return 0;
+}
+
+static int ebpfos_runtime_successor_capture_app(
+	struct ebpfos_runtime_successor_state *successor)
+{
+	const struct ebpfos_runtime_successor_stage *stage =
+		&successor->descriptor;
+	struct ebpfos_runtime_successor_app_capture capture = {
+		.stage = stage,
+		.image = successor->image,
+	};
+	struct ebpfos_runtime_successor_app_page *record;
+	struct vm_area_struct *vma;
+	struct pt_regs *regs = current_pt_regs();
+	VMA_ITERATOR(vmi, current->mm, 0);
+	u8 digest[SHA256_DIGEST_SIZE];
+	u64 address, physical, runtime_user_end;
+	u32 capacity;
+	int error = 0;
+
+	if (!current->mm || !user_mode(regs) ||
+	    check_add_overflow(stage->user_address, stage->image_bytes,
+			       &runtime_user_end))
+		return -EINVAL;
+	capture.allocator = ebpfos_runtime_successor_virtual(
+		stage, capture.image, stage->allocator_metadata,
+		stage->allocator_metadata_bytes);
+	capture.app = ebpfos_runtime_successor_virtual(
+		stage, capture.image, stage->app_state, stage->app_state_bytes);
+	if (!capture.allocator || !capture.app ||
+	    READ_ONCE(capture.app->magic))
+		return -ESTALE;
+	capacity = (stage->app_state_bytes -
+		offsetof(struct ebpfos_runtime_successor_app_state, pages)) /
+		sizeof(*record);
+	capture.app->version = EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_VERSION;
+	capture.app->header_bytes =
+		offsetof(struct ebpfos_runtime_successor_app_state, pages);
+	capture.app->page_record_bytes = sizeof(*record);
+	capture.app->page_capacity = capacity;
+	capture.app->donor_pid = task_pid_nr(current);
+	capture.app->donor_tgid = task_tgid_nr(current);
+	capture.app->user_rip = regs->ip;
+	capture.app->user_rsp = regs->sp;
+	capture.app->user_rflags = regs->flags;
+	capture.app->user_rax = 0;
+	capture.app->user_rbx = regs->bx;
+	capture.app->user_rcx = regs->cx;
+	capture.app->user_rdx = regs->dx;
+	capture.app->user_rsi = regs->si;
+	capture.app->user_rdi = regs->di;
+	capture.app->user_rbp = regs->bp;
+	capture.app->user_r8 = regs->r8;
+	capture.app->user_r9 = regs->r9;
+	capture.app->user_r10 = regs->r10;
+	capture.app->user_r11 = regs->r11;
+	capture.app->user_r12 = regs->r12;
+	capture.app->user_r13 = regs->r13;
+	capture.app->user_r14 = regs->r14;
+	capture.app->user_r15 = regs->r15;
+	capture.app->user_cs = regs->cs;
+	capture.app->user_ss = regs->ss;
+	capture.app->user_fs_base = x86_fsbase_read_task(current);
+	capture.app->user_gs_base = x86_gsbase_read_task(current);
+
+	mmap_read_lock(current->mm);
+	for_each_vma(vmi, vma) {
+		u64 page_flags = 0;
+
+		if (!(vma->vm_flags & VM_READ) ||
+		    vma->vm_flags & (VM_IO | VM_PFNMAP | VM_MIXEDMAP))
+			continue;
+		if (vma->vm_flags & VM_READ)
+			page_flags |= EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_READ;
+		if (vma->vm_flags & VM_WRITE)
+			page_flags |= EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_WRITE;
+		if (vma->vm_flags & VM_EXEC)
+			page_flags |= EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_EXEC;
+		if (vma->vm_flags & VM_GROWSDOWN)
+			page_flags |= EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_STACK;
+		for (address = vma->vm_start & PAGE_MASK;
+		     address < vma->vm_end; address += PAGE_SIZE) {
+			void *destination;
+
+			if (address >= stage->user_address &&
+			    address < runtime_user_end)
+				continue;
+			if (capture.app->page_count >= capacity) {
+				error = -E2BIG;
+				goto out_unlock;
+			}
+			error = ebpfos_runtime_successor_app_alloc(
+				&capture, &physical);
+			if (error)
+				goto out_unlock;
+			destination = ebpfos_runtime_successor_physical(
+				stage, capture.image, physical, PAGE_SIZE);
+			if (!destination) {
+				error = -ERANGE;
+				goto out_unlock;
+			}
+			if (copy_from_user_nofault(
+					destination, u64_to_user_ptr(address),
+					PAGE_SIZE)) {
+				capture.next_page--;
+				capture.allocator->bitmap[capture.next_page >> 3] |=
+					BIT(capture.next_page & 7);
+				continue;
+			}
+			error = ebpfos_runtime_successor_app_map(
+				&capture, address, physical, page_flags);
+			if (error)
+				goto out_unlock;
+			record = &capture.app->pages[capture.app->page_count++];
+			record->user_address = address;
+			record->physical_address = physical;
+			record->flags = page_flags;
+			sha256(destination, PAGE_SIZE, digest);
+			memcpy(&record->content_sha256_low, digest,
+			       sizeof(record->content_sha256_low));
+			capture.app->copied_bytes += PAGE_SIZE;
+			if ((regs->ip & PAGE_MASK) == address)
+				capture.captured_rip = true;
+			if ((regs->sp & PAGE_MASK) == address)
+				capture.captured_rsp = true;
+		}
+	}
+out_unlock:
+	mmap_read_unlock(current->mm);
+	if (error) {
+		pr_err("successor app capture failed error=%d address=%#llx pages=%u capacity=%u allocator_pages=%llu consumed=%llu copied=%llu\n",
+		       error, address, capture.app->page_count, capacity,
+		       capture.allocator->pages, capture.next_page,
+		       capture.app->copied_bytes);
+		return error;
+	}
+	if (!capture.captured_rip || !capture.captured_rsp ||
+	    !capture.app->page_count)
+		return -EFAULT;
+	capture.app->allocator_pages_consumed = capture.next_page;
+	smp_wmb();
+	WRITE_ONCE(capture.app->magic,
+		   EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_MAGIC);
+	return 0;
+}
+
+/* This is the donor side of the final graph cut, not a post-handoff service.
+ * Every page used to resume the application has already been copied into and
+ * mapped from the successor allocator.  Poison those source mappings, remove
+ * the entire donor userspace (including the staged runtime-file mapping), and
+ * require real stale user accesses to fault before any CPU is published. */
+static int ebpfos_runtime_successor_retire_app(
+	struct ebpfos_runtime_successor_state *successor)
+{
+	const struct ebpfos_runtime_successor_stage *stage =
+		&successor->descriptor;
+	struct ebpfos_runtime_successor_app_state *app;
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, current->mm, 0);
+	unsigned long poison_page;
+	unsigned long unmap_starts[64], unmap_ends[64];
+	u8 verify[256], stale;
+	u64 index, runtime_pages, unmap_count = 0;
+	int error;
+
+	app = ebpfos_runtime_successor_virtual(
+		stage, successor->image, stage->app_state,
+		stage->app_state_bytes);
+	if (!app || app->magic != EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_MAGIC ||
+	    app->retired || !app->page_count ||
+	    app->page_count > app->page_capacity)
+		return -ESTALE;
+	mmap_read_lock(current->mm);
+	for_each_vma(vmi, vma) {
+		if (unmap_count == ARRAY_SIZE(unmap_starts)) {
+			mmap_read_unlock(current->mm);
+			return -E2BIG;
+		}
+		unmap_starts[unmap_count] = vma->vm_start;
+		unmap_ends[unmap_count++] = vma->vm_end;
+	}
+	mmap_read_unlock(current->mm);
+	if (!unmap_count)
+		return -ESTALE;
+	poison_page = __get_free_page(GFP_KERNEL);
+	if (!poison_page)
+		return -ENOMEM;
+	memset((void *)poison_page, 0xa5, PAGE_SIZE);
+	for (index = 0; index < app->page_count; index++) {
+		struct ebpfos_runtime_successor_app_page *page = &app->pages[index];
+
+		if (!PAGE_ALIGNED(page->user_address)) {
+			error = -EPROTO;
+			goto out_free;
+		}
+		if (access_process_vm(current, page->user_address,
+				      (void *)poison_page, PAGE_SIZE,
+				      FOLL_FORCE | FOLL_WRITE) != PAGE_SIZE) {
+			error = -EFAULT;
+			goto out_free;
+		}
+		if (copy_from_user_nofault(verify,
+				u64_to_user_ptr(page->user_address), sizeof(verify)) ||
+		    memcmp(verify, (void *)poison_page, sizeof(verify))) {
+			error = -EIO;
+			goto out_free;
+		}
+		app->donor_pages_poisoned++;
+	}
+	runtime_pages = DIV_ROUND_UP(stage->image_bytes, PAGE_SIZE);
+	for (index = 0; index < runtime_pages; index++) {
+		u64 offset = index * PAGE_SIZE;
+		u64 bytes = min_t(u64, PAGE_SIZE, stage->image_bytes - offset);
+
+		if (access_process_vm(current, stage->user_address + offset,
+				      (void *)poison_page, bytes,
+				      FOLL_FORCE | FOLL_WRITE) != bytes) {
+			error = -EFAULT;
+			goto out_free;
+		}
+		app->donor_pages_poisoned++;
+	}
+	if (app->donor_pages_poisoned != app->page_count + runtime_pages) {
+		error = -EIO;
+		goto out_free;
+	}
+	free_page(poison_page);
+
+	/* One terminal unmap also removes uncaptured donor-only mappings and the
+	 * read-only runtime source.  No path below this point may return to ring3. */
+	for (index = 0; index < unmap_count; index++) {
+		error = vm_munmap(unmap_starts[index],
+				  unmap_ends[index] - unmap_starts[index]);
+		if (error)
+			return error;
+	}
+	for (index = 0; index < app->page_count; index++) {
+		if (!copy_from_user_nofault(
+				&stale,
+				u64_to_user_ptr(app->pages[index].user_address), 1))
+			return -EPROTO;
+		app->donor_pages_reclaimed++;
+	}
+	if (!copy_from_user_nofault(
+			&stale, u64_to_user_ptr(stage->user_address), 1))
+		return -EPROTO;
+	if (!copy_from_user_nofault(
+			&stale, u64_to_user_ptr(stage->user_address +
+			stage->image_bytes - 1), 1))
+		return -EPROTO;
+	app->donor_pages_reclaimed = app->donor_pages_poisoned;
+	app->donor_fault_address = stage->user_address;
+	smp_wmb();
+	WRITE_ONCE(app->retired, 1);
+	return 0;
+
+out_free:
+	free_page(poison_page);
+	return error;
 }
 
 static long ebpfos_runtime_successor_stage(void __user *argp)
@@ -2935,7 +3329,7 @@ static long ebpfos_runtime_successor_stage(void __user *argp)
 	struct ebpfos_runtime_successor_stage request;
 	u8 digest[SHA256_DIGEST_SIZE];
 	void *image = NULL;
-	u64 reserved_bytes;
+	u64 reserved_bytes, user_address;
 	long error = 0;
 
 	if (copy_from_user(&request, argp, sizeof(request)))
@@ -2983,12 +3377,14 @@ static long ebpfos_runtime_successor_stage(void __user *argp)
 	error = ebpfos_runtime_successor_validate(&request, image);
 	if (error)
 		goto out;
+	user_address = request.user_address;
 	request.user_address = 0;
 	request.staged = 1;
 	if (copy_to_user(argp, &request, sizeof(request))) {
 		error = -EFAULT;
 		goto out;
 	}
+	request.user_address = user_address;
 	ebpfos_runtime_successor.image = image;
 	ebpfos_runtime_successor.reserved_bytes = reserved_bytes;
 	ebpfos_runtime_successor.descriptor = request;
@@ -3579,6 +3975,10 @@ static long ebpfos_runtime_successor_commit(void __user *argp)
 		error = -ESTALE;
 		goto out_unlock;
 	}
+	error = ebpfos_runtime_successor_capture_app(
+		&ebpfos_runtime_successor);
+	if (error)
+		goto out_unlock;
 	cpus_read_lock();
 	cpumask_clear(&expected);
 	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++)
@@ -3587,7 +3987,6 @@ static long ebpfos_runtime_successor_commit(void __user *argp)
 		error = -ENODEV;
 		goto out_cpus;
 	}
-	current_cpu = get_cpu();
 	context->entry =
 		ebpfos_runtime_successor.descriptor.handoff_publish_alias;
 	context->cr3 = ebpfos_runtime_successor.descriptor.cr3;
@@ -3603,7 +4002,13 @@ static long ebpfos_runtime_successor_commit(void __user *argp)
 	alias_page = context->entry & PAGE_MASK;
 	error = set_memory_rox(alias_page, 1);
 	if (error)
-		goto out_preempt;
+		goto out_cpus;
+	error = ebpfos_runtime_successor_retire_app(
+		&ebpfos_runtime_successor);
+	if (error)
+		panic("ebpfos successor donor application retirement failed: %d",
+		      error);
+	current_cpu = get_cpu();
 	ebpfos_runtime_successor.handoff_publishing = true;
 	for (cpu = 0; cpu < EBPFOS_RUNTIME_SUCCESSOR_CPUS; cpu++) {
 		if (cpu == current_cpu)
@@ -3629,8 +4034,6 @@ static long ebpfos_runtime_successor_commit(void __user *argp)
 	ebpfos_runtime_successor_commit_cpu(context);
 	unreachable();
 
-out_preempt:
-	put_cpu();
 out_cpus:
 	cpus_read_unlock();
 out_unlock:
