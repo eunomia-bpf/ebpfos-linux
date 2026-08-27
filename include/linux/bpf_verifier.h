@@ -700,7 +700,7 @@ static inline bool bpf_verifier_log_needed(const struct bpf_verifier_log *log)
 	return log && log->level;
 }
 
-#define BPF_MAX_SUBPROGS 256
+#define BPF_MAX_SUBPROGS 2048
 
 struct bpf_subprog_arg_info {
 	enum bpf_arg_type arg_type;
