@@ -8708,7 +8708,7 @@ static int btf_check_iter_kfuncs(struct btf *btf, const char *func_name,
 
 static int btf_check_kfunc_protos(struct btf *btf, u32 func_id, u32 func_flags)
 {
-	const struct btf_type *func;
+	const struct btf_type *func, *ret_type;
 	const char *func_name;
 	int err;
 
@@ -8725,6 +8725,16 @@ static int btf_check_kfunc_protos(struct btf *btf, u32 func_id, u32 func_flags)
 	func = btf_type_by_id(btf, func->type);
 	if (!func || !btf_type_is_func_proto(func))
 		return -EINVAL;
+
+	if (func_flags & KF_NORETURN) {
+		ret_type = btf_type_skip_modifiers(btf, func->type, NULL);
+		if (!ret_type || !btf_type_is_void(ret_type))
+			return -EINVAL;
+		if (func_flags & (KF_ACQUIRE | KF_RELEASE | KF_RET_NULL | KF_ITER_NEW |
+				  KF_ITER_NEXT | KF_ITER_DESTROY | KF_FASTCALL |
+				  KF_ARENA_RET | KF_RCU_PROTECTED))
+			return -EINVAL;
+	}
 
 	if (func_flags & (KF_ITER_NEW | KF_ITER_NEXT | KF_ITER_DESTROY)) {
 		err = btf_check_iter_kfuncs(btf, func_name, func, func_flags);

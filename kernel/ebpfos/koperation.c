@@ -450,11 +450,74 @@ static int ebpfos_kprog_machine_emit_x86(
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_machine_register(void) { }
+__bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_machine_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_machine_register)
 BTF_KFUNCS_END(ebpfos_kprog_machine_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kprog_terminal_effect, KF_NORETURN)
+BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
+
+/* sha256("ebpfos-koperation-terminal-effect-v1:x86_64:f390ebfc:verifier-noreturn") */
+static const u8 ebpfos_kprog_terminal_semantic_sha256[SHA256_DIGEST_SIZE] = {
+	0x47, 0x02, 0x35, 0x38, 0xad, 0x4b, 0xa3, 0xf9,
+	0xac, 0x64, 0x89, 0x4f, 0x7b, 0x81, 0x58, 0x6c,
+	0xbc, 0xbf, 0x60, 0xe2, 0xb8, 0xe0, 0xdc, 0xcc,
+	0xbd, 0x26, 0x8b, 0x60, 0x2b, 0xb8, 0x5b, 0x81,
+};
+
+static bool ebpfos_kprog_terminal_payload(u64 payload)
+{
+	return ebpfos_kprog_terminal_ids.cnt == 1 &&
+	       payload == ebpfos_kprog_terminal_ids.pairs[0].id;
+}
+
+static int ebpfos_kprog_terminal_instantiate(u64 payload,
+					      struct bpf_insn *insns)
+{
+	u32 effect_tag;
+
+	if (!insns || !ebpfos_kprog_terminal_payload(payload))
+		return -EINVAL;
+	effect_tag = get_unaligned_le32(
+		ebpfos_kprog_terminal_semantic_sha256) & S32_MAX;
+	insns[0] = BPF_MOV64_IMM(BPF_REG_0, effect_tag);
+	return 1;
+}
+
+static int ebpfos_kprog_terminal_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    !ebpfos_kprog_terminal_payload(payload))
+		return -EINVAL;
+	*capability_mask = EBPFOS_CAP_KPROG_TERMINAL_ROOT;
+	*effect_mask = EBPFOS_EFFECT_KPROG_TERMINAL_WAIT;
+	memcpy(semantic_sha256, ebpfos_kprog_terminal_semantic_sha256,
+	       SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kprog_terminal_emit_x86(
+	u8 *image, u32 *offset, bool emit, u64 payload,
+	const struct bpf_prog *prog, const u8 *final_ip)
+{
+	static const u8 terminal[] = { 0xf3, 0x90, 0xeb, 0xfc };
+
+	(void)prog;
+	(void)final_ip;
+	if (!offset || (emit && !image) ||
+	    !ebpfos_kprog_terminal_payload(payload))
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, terminal, sizeof(terminal));
+	*offset += sizeof(terminal);
+	return sizeof(terminal);
+}
 
 static struct bpf_kop ebpfos_kprog_machine = {
 	.max_insn_cnt = 3,
@@ -491,8 +554,55 @@ static const struct btf_kfunc_id_set ebpfos_kprog_machine_set = {
 	.kop_descs = ebpfos_kprog_machine_descs,
 };
 
+static struct bpf_kop ebpfos_kprog_terminal = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 4,
+	.capability_mask = EBPFOS_CAP_KPROG_TERMINAL_ROOT,
+	.effect_mask = EBPFOS_EFFECT_KPROG_TERMINAL_WAIT,
+	.semantic_sha256 = {
+		0x47, 0x02, 0x35, 0x38, 0xad, 0x4b, 0xa3, 0xf9,
+		0xac, 0x64, 0x89, 0x4f, 0x7b, 0x81, 0x58, 0x6c,
+		0xbc, 0xbf, 0x60, 0xe2, 0xb8, 0xe0, 0xdc, 0xcc,
+		0xbd, 0x26, 0x8b, 0x60, 0x2b, 0xb8, 0x5b, 0x81,
+	},
+	.requirements = ebpfos_kprog_terminal_requirements,
+	.instantiate_insn = ebpfos_kprog_terminal_instantiate,
+	.emit_x86 = ebpfos_kprog_terminal_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_terminal_descs[] = {
+	&ebpfos_kprog_terminal,
+};
+
+static int ebpfos_kprog_terminal_filter(const struct bpf_prog *prog,
+					u32 kfunc_id)
+{
+	bool own_id = btf_id_set8_contains(&ebpfos_kprog_terminal_ids,
+					 kfunc_id);
+
+	if (!own_id)
+		return 0;
+	if (!prog || !prog->aux)
+		return 1;
+	/* Admitted components may execute this root capability.  An ordinary
+	 * sleepable syscall program may only freeze verifier/JIT output; the
+	 * generic test-run paths reject it through kop_terminal_effect.
+	 */
+	if (prog->aux->ebpfos_component)
+		return 0;
+	return prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
+}
+
+static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
+	.set = &ebpfos_kprog_terminal_ids,
+	.filter = ebpfos_kprog_terminal_filter,
+	.kop_descs = ebpfos_kprog_terminal_descs,
+};
+
 static int __init ebpfos_kprog_register(void)
 {
+	int error;
+
 	if (!ebpfos_koperation_find_machine(EBPFOS_KPROG_FORM_CONTROL_REGISTER,
 					    EBPFOS_KPROG_CONTROL_CR3,
 					    EBPFOS_KPROG_ACTION_RELOAD) ||
@@ -543,8 +653,12 @@ static int __init ebpfos_kprog_register(void)
 			EBPFOS_KPROG_IO_PORT_UART8250_TX,
 			EBPFOS_KPROG_ACTION_INSTALL))
 		return -ENOENT;
+	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					  &ebpfos_kprog_machine_set);
+	if (error)
+		return error;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_machine_set);
+					 &ebpfos_kprog_terminal_set);
 }
 late_initcall(ebpfos_kprog_register);
 

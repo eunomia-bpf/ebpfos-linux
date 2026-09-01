@@ -3088,6 +3088,7 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	memset(desc, 0, sizeof(*desc));
 	desc->func_id = func_id;
 	desc->offset = offset;
+	desc->flags = kfunc.flags ? *kfunc.flags : 0;
 	if (kop_call) {
 		if (!kfunc.kop) {
 			verbose(env, "kfunc btf_id %u is not registered as a KOperation\n",
@@ -3168,11 +3169,13 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 			      u64 *capability_mask, u64 *effect_mask,
 			      u8 semantic_set_sha256[SHA256_DIGEST_SIZE])
 {
-	static const u8 domain[] = "eBPFOS-kprog-semantic-set-v1";
+	static const u8 domain_v1[] = "eBPFOS-kprog-semantic-set-v1";
+	static const u8 domain_v2[] = "eBPFOS-kprog-semantic-set-v2";
 	struct bpf_kfunc_desc_tab *tab;
 	struct sha256_ctx state;
 	u64 capabilities = 0;
 	u64 effects = 0;
+	bool bind_control_flags = false;
 	u32 count = 0;
 	u32 index;
 
@@ -3187,8 +3190,23 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 		       SHA256_DIGEST_SIZE);
 		return 0;
 	}
+	for (index = 0; tab && index < prog->len; index++) {
+		const struct bpf_insn *call = &prog->insnsi[index];
+		const struct bpf_kfunc_desc *desc;
+
+		if (!bpf_pseudo_kop_call(call))
+			continue;
+		desc = find_kfunc_desc(prog, call->imm, call->off);
+		if (desc && desc->kop && desc->flags & KF_NORETURN) {
+			bind_control_flags = true;
+			break;
+		}
+	}
 	sha256_init(&state);
-	sha256_update(&state, domain, sizeof(domain));
+	if (bind_control_flags)
+		sha256_update(&state, domain_v2, sizeof(domain_v2));
+	else
+		sha256_update(&state, domain_v1, sizeof(domain_v1));
 	for (index = 0; index < prog->len; index++) {
 		const struct bpf_insn *call = &prog->insnsi[index];
 		const struct bpf_kfunc_desc *desc;
@@ -3199,6 +3217,7 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 		u64 payload;
 		__le64 capability;
 		__le64 effect;
+		__le32 control_flags;
 		int error;
 
 		if (!bpf_pseudo_kop_call(call))
@@ -3244,6 +3263,11 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 		sha256_update(&state, (const u8 *)&effect, sizeof(effect));
 		sha256_update(&state, semantic_sha256,
 			      sizeof(semantic_sha256));
+		if (bind_control_flags) {
+			control_flags = cpu_to_le32(desc->flags & KF_NORETURN);
+			sha256_update(&state, (const u8 *)&control_flags,
+				      sizeof(control_flags));
+		}
 		count++;
 	}
 	{
@@ -3336,6 +3360,19 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		err = bpf_validate_kop_proof_seq(env, desc->kop, proof, count);
 		if (err)
 			goto err_free_proof;
+		if (desc->flags & KF_NORETURN) {
+			const struct bpf_insn *terminal = &proof[count - 1];
+			u8 class = BPF_CLASS(terminal->code);
+
+			if (class == BPF_JMP || class == BPF_JMP32 ||
+			    bpf_is_ldimm64(terminal) ||
+			    (count > 1 && bpf_is_ldimm64(terminal - 1))) {
+				verbose(env,
+					"no-return KOperation proof must end in a non-branch instruction\n");
+				err = -EINVAL;
+				goto err_free_proof;
+			}
+		}
 		if (env->kop_region_cnt == env->kop_region_cap) {
 			verbose(env, "too many KOperation proof regions\n");
 			err = -E2BIG;
@@ -3345,6 +3382,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		region = &env->kop_regions[env->kop_region_cnt++];
 		region->start = i - 1;
 		region->proof_len = count;
+		region->is_noreturn = desc->flags & KF_NORETURN;
 		region->orig[0] = *sidecar;
 		region->orig[1] = *call;
 
@@ -3357,6 +3395,10 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		if (!new_prog)
 			return -ENOMEM;
 		env->prog = new_prog;
+		if (region->is_noreturn) {
+			env->insn_aux_data[region->start + count - 1].is_noreturn = true;
+			env->prog->aux->kop_terminal_effect = true;
+		}
 
 		if (count != 2) {
 			u32 j;
@@ -3424,6 +3466,7 @@ static int restore_kop_proof_regions(struct bpf_verifier_env *env)
 		aux[region->start + 1] = (struct bpf_insn_aux_data) {
 			.seen = aux[region->start].seen,
 			.orig_idx = aux[region->start + 1].orig_idx,
+			.is_noreturn = region->is_noreturn,
 		};
 	}
 	return 0;
@@ -3520,6 +3563,13 @@ static int check_subprogs(struct bpf_verifier_env *env)
 	subprog_end = subprog[cur_subprog + 1].start;
 	for (i = 0; i < insn_cnt; i++) {
 		u8 code = insn[i].code;
+		struct bpf_kfunc_desc *desc;
+
+		if (bpf_pseudo_kfunc_call(&insn[i])) {
+			desc = find_kfunc_desc(env->prog, insn[i].imm, insn[i].off);
+			if (desc && desc->flags & KF_NORETURN)
+				env->insn_aux_data[i].is_noreturn = true;
+		}
 
 		if (code == (BPF_JMP | BPF_CALL) &&
 		    insn[i].src_reg == 0 &&
@@ -3545,13 +3595,14 @@ static int check_subprogs(struct bpf_verifier_env *env)
 		}
 next:
 		if (i == subprog_end - 1) {
-			/* to avoid fall-through from one subprog into another
-			 * the last insn of the subprog should be either exit
-			 * or unconditional jump back or bpf_throw call
+			/* To keep one subprog from flowing into another,
+			 * the last insn of the subprog should be an exit,
+			 * unconditional jump, or a no-return kfunc call.
 			 */
 			if (code != (BPF_JMP | BPF_EXIT) &&
 			    code != (BPF_JMP32 | BPF_JA) &&
-			    code != (BPF_JMP | BPF_JA)) {
+			    code != (BPF_JMP | BPF_JA) &&
+			    !env->insn_aux_data[i].is_noreturn) {
 				verbose(env, "last insn is not an exit or jmp\n");
 				return -EINVAL;
 			}
@@ -9938,7 +9989,8 @@ static int push_callback_call(struct bpf_verifier_env *env, struct bpf_insn *ins
 }
 
 static int process_bpf_exit_full(struct bpf_verifier_env *env,
-				 bool *do_print_state, bool exception_exit);
+				 bool *do_print_state, bool exception_exit,
+				 const char *exception_prefix);
 
 static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			   int *insn_idx)
@@ -10001,7 +10053,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				verbose(env, "failed to push state for global subprog exception path\n");
 				return PTR_ERR(branch);
 			}
-			return process_bpf_exit_full(env, NULL, true);
+			return process_bpf_exit_full(env, NULL, true, "bpf_throw");
 		}
 
 		/* continue with next insn after call */
@@ -13813,8 +13865,10 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	if (meta.func_id == special_kfunc_list[KF_bpf_session_cookie])
 		env->prog->call_session_cookie = true;
 
-	if (bpf_is_throw_kfunc(insn))
-		return process_bpf_exit_full(env, NULL, true);
+	if (bpf_is_throw_kfunc(insn) || bpf_is_kfunc_noreturn(&meta))
+		return process_bpf_exit_full(env, NULL, true,
+					     bpf_is_throw_kfunc(insn) ? "bpf_throw" :
+					     "terminal kfunc");
 
 	return 0;
 }
@@ -17877,7 +17931,8 @@ enum {
 
 static int process_bpf_exit_full(struct bpf_verifier_env *env,
 				 bool *do_print_state,
-				 bool exception_exit)
+				 bool exception_exit,
+				 const char *exception_prefix)
 {
 	struct bpf_func_state *cur_frame = cur_func(env);
 
@@ -17889,7 +17944,7 @@ static int process_bpf_exit_full(struct bpf_verifier_env *env,
 	 */
 	int err = check_resource_leak(env, exception_exit,
 				      exception_exit || !env->cur_state->curframe,
-				      exception_exit ? "bpf_throw" :
+				      exception_exit ? exception_prefix :
 				      "BPF_EXIT instruction in main prog");
 	if (err)
 		return err;
@@ -18098,7 +18153,7 @@ static int do_check_insn(struct bpf_verifier_env *env, bool *do_print_state)
 				env->insn_idx += insn->imm + 1;
 			return INSN_IDX_UPDATED;
 		} else if (opcode == BPF_EXIT) {
-			return process_bpf_exit_full(env, do_print_state, false);
+			return process_bpf_exit_full(env, do_print_state, false, NULL);
 		}
 		return check_cond_jmp_op(env, insn, &env->insn_idx);
 	}
@@ -18260,7 +18315,12 @@ static int do_check(struct bpf_verifier_env *env)
 			 */
 			insn_aux->alu_state = 0;
 			goto process_bpf_exit;
-		} else if (err < 0) {
+		}
+		if (!err && insn_aux->is_noreturn)
+			err = process_bpf_exit_full(env, NULL, true,
+						    "terminal effect");
+
+		if (err < 0) {
 			return err;
 		} else if (err == PROCESS_BPF_EXIT) {
 			goto process_bpf_exit;

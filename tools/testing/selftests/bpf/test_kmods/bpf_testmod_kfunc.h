@@ -130,6 +130,7 @@ void bpf_kfunc_call_test_fail3(struct prog_test_fail3 *p);
 void bpf_kfunc_call_test_mem_len_fail1(void *mem, int len);
 
 void bpf_kfunc_common_test(void) __ksym;
+void bpf_kfunc_noreturn_test(void) __ksym;
 
 int bpf_kfunc_init_sock(struct init_sock_args *args) __ksym;
 void bpf_kfunc_close_sock(void) __ksym;

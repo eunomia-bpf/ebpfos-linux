@@ -616,6 +616,7 @@ struct bpf_insn_aux_data {
 	bool needs_zext; /* alu op needs to clear upper bits */
 	bool non_sleepable; /* helper/kfunc may be called from non-sleepable context */
 	bool is_iter_next; /* bpf_iter_<type>_next() kfunc call */
+	bool is_noreturn; /* instruction has no CFG successor */
 	bool call_with_percpu_alloc_ptr; /* {this,per}_cpu_ptr() with prog percpu alloc */
 	u8 alu_state; /* used in combination with alu_limit */
 	/* true if STX or LDX instruction is a part of a spill/fill
@@ -811,6 +812,7 @@ struct bpf_liveness;
 struct bpf_kop_region {
 	u32 start;
 	u32 proof_len;
+	bool is_noreturn;
 	struct bpf_insn orig[2];
 };
 
@@ -1408,6 +1410,11 @@ static inline bool bpf_is_kfunc_sleepable(struct bpf_kfunc_call_arg_meta *meta)
 {
 	return meta->kfunc_flags & KF_SLEEPABLE;
 }
+
+static inline bool bpf_is_kfunc_noreturn(struct bpf_kfunc_call_arg_meta *meta)
+{
+	return meta->kfunc_flags & KF_NORETURN;
+}
 bool bpf_is_kfunc_pkt_changing(struct bpf_kfunc_call_arg_meta *meta);
 struct bpf_iarray *bpf_iarray_realloc(struct bpf_iarray *old, size_t n_elem);
 int bpf_copy_insn_array_uniq(struct bpf_map *map, u32 start, u32 end, u32 *off);
@@ -1474,6 +1481,7 @@ struct bpf_kfunc_desc {
 	struct btf_func_model func_model;
 	const struct bpf_kop *kop;
 	u32 func_id;
+	u32 flags;
 	s32 imm;
 	u16 offset;
 	unsigned long addr;

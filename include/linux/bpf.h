@@ -1873,6 +1873,8 @@ struct bpf_prog_aux {
 	u32 ebpfos_load_insn_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
 	bool ebpfos_kop_requirements_valid;
+	/* A terminal KOperation may be JIT-compiled but not test-run unadmitted. */
+	bool kop_terminal_effect;
 	u32 ebpfos_kop_count;
 	u64 ebpfos_kop_capability_mask;
 	u64 ebpfos_kop_effect_mask;

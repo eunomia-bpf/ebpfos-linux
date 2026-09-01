@@ -248,13 +248,15 @@ bpf_insn_successors(struct bpf_verifier_env *env, u32 idx)
 	struct bpf_iarray *succ, *jt;
 	int insn_sz;
 
-	jt = env->insn_aux_data[idx].jt;
-	if (unlikely(jt))
-		return jt;
-
 	/* pre-allocated array of size up to 2; reset cnt, as it may have been used already */
 	succ = env->succ;
 	succ->cnt = 0;
+	if (env->insn_aux_data[idx].is_noreturn)
+		return succ;
+
+	jt = env->insn_aux_data[idx].jt;
+	if (unlikely(jt))
+		return jt;
 
 	opcode_info = &opcode_info_tbl[BPF_CLASS(insn->code) | BPF_OP(insn->code)];
 	insn_sz = bpf_is_ldimm64(insn) ? 2 : 1;

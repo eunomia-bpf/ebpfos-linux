@@ -359,6 +359,7 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 	struct bpf_prog_aux *aux;
 	struct bpf_prog *prog;
 	u8 one[SHA256_DIGEST_SIZE];
+	u8 terminal[SHA256_DIGEST_SIZE];
 	u8 two[SHA256_DIGEST_SIZE];
 	u64 capabilities;
 	u64 effects;
@@ -381,6 +382,13 @@ static void ebpfos_kop_component_identity_test(struct kunit *test)
 		prog, &capabilities, &effects, one), 0);
 	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3));
 	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6));
+	tab->descs[0].flags = KF_NORETURN;
+	KUNIT_ASSERT_EQ(test, bpf_prog_kop_requirements(
+		prog, &capabilities, &effects, terminal), 0);
+	KUNIT_EXPECT_EQ(test, capabilities, BIT_ULL(3));
+	KUNIT_EXPECT_EQ(test, effects, BIT_ULL(6));
+	KUNIT_EXPECT_MEMNEQ(test, one, terminal, sizeof(one));
+	tab->descs[0].flags = 0;
 
 	tab->nr_descs = 2;
 	tab->descs[1].func_id = 2;

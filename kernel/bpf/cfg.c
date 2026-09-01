@@ -428,6 +428,10 @@ static int visit_insn(int t, struct bpf_verifier_env *env)
 	struct bpf_insn *insns = env->prog->insnsi, *insn = &insns[t];
 	int ret, off, insn_sz;
 
+	if (env->insn_aux_data[t].is_noreturn &&
+	    !bpf_pseudo_kfunc_call(insn))
+		return DONE_EXPLORING;
+
 	if (bpf_pseudo_func(insn))
 		return visit_func_call_insn(t, insns, env, true);
 
@@ -520,6 +524,8 @@ static int visit_insn(int t, struct bpf_verifier_env *env)
 				mark_subprog_changes_pkt_data(env, t);
 			if (ret == 0 && bpf_is_throw_kfunc(insn))
 				mark_subprog_might_throw(env, t);
+			if (env->insn_aux_data[t].is_noreturn)
+				return DONE_EXPLORING;
 		}
 		return visit_func_call_insn(t, insns, env, insn->src_reg == BPF_PSEUDO_CALL);
 
