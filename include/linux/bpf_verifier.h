@@ -812,8 +812,12 @@ struct bpf_liveness;
 struct bpf_kop_region {
 	u32 start;
 	u32 proof_len;
+	u32 orig_len;
+	u32 native_backedge_target;
 	bool is_noreturn;
-	struct bpf_insn orig[2];
+	bool has_native_backedge;
+	u32 orig_idx[3];
+	struct bpf_insn orig[3];
 };
 
 /* single container for all structs

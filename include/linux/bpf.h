@@ -1080,6 +1080,13 @@ struct bpf_kop {
 	u16 max_insn_cnt;
 	u16 max_emit_bytes;
 	/*
+	 * A no-return operation with this flag emits one iteration effect and
+	 * reaches an immediately following, verifier-hidden native backedge.
+	 * The verifier validates that continuation before replacing the pair by
+	 * its proof and still treats the operation itself as terminal.
+	 */
+	bool noreturn_native_backedge;
+	/*
 	 * Sealed component admission binds this verifier-visible operation
 	 * identity before its native emitter can become reachable.  These fields
 	 * describe one canonical eBPF semantic operation, not a native fallback.

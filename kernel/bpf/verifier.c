@@ -3321,6 +3321,8 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		struct bpf_prog *new_prog;
 		struct bpf_insn *call;
 		const struct bpf_insn *sidecar;
+		bool native_backedge;
+		u32 native_backedge_target = 0;
 		u64 payload;
 		int count;
 
@@ -3347,6 +3349,87 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		desc = find_kfunc_desc(env->prog, call->imm, call->off);
 		if (!desc || !desc->kop)
 			return -ENOENT;
+		native_backedge = desc->kop->noreturn_native_backedge;
+		if (native_backedge) {
+			const struct bpf_insn *backedge;
+			s64 target;
+			u32 subprog;
+			u32 subprog_start = 0;
+			u32 subprog_end = 0;
+			u32 index;
+
+			if (!(desc->flags & KF_NORETURN) || i + 1 >= env->prog->len) {
+				verbose(env,
+					"native-backedge KOperation must be no-return and precede a jump\n");
+				return -EINVAL;
+			}
+			backedge = &env->prog->insnsi[i + 1];
+			if (backedge->code != (BPF_JMP | BPF_JA) ||
+			    backedge->dst_reg || backedge->src_reg ||
+			    backedge->imm || backedge->off > -3) {
+				verbose(env,
+					"native-backedge KOperation lacks an exact backward continuation\n");
+				return -EINVAL;
+			}
+			target = (s64)i + 2 + backedge->off;
+			if (target < 0 || target > i - 1) {
+				verbose(env,
+					"native-backedge KOperation target is invalid\n");
+				return -EINVAL;
+			}
+			if (target && bpf_is_ldimm64(&env->prog->insnsi[target - 1])) {
+				verbose(env,
+					"native-backedge KOperation targets an ldimm64 continuation\n");
+				return -EINVAL;
+			}
+			for (subprog = 0; subprog < env->subprog_cnt; subprog++) {
+				u32 start = env->subprog_info[subprog].start;
+				u32 end = env->subprog_info[subprog + 1].start;
+
+				if (start <= i && i < end) {
+					if (target < start || i + 1 >= end) {
+						verbose(env,
+							"native-backedge KOperation escapes its subprogram\n");
+						return -EINVAL;
+					}
+					subprog_start = start;
+					subprog_end = end;
+					break;
+				}
+			}
+			if (subprog == env->subprog_cnt)
+				return -EINVAL;
+			for (index = subprog_start; index < subprog_end; index++) {
+				const struct bpf_insn *insn =
+					&env->prog->insnsi[index];
+				u8 class = BPF_CLASS(insn->code);
+				u8 operation;
+				s64 branch_target;
+
+				if (index == i + 1 ||
+				    (class != BPF_JMP && class != BPF_JMP32))
+					continue;
+				operation = BPF_OP(insn->code);
+				if (operation == BPF_EXIT)
+					continue;
+				if (operation == BPF_CALL) {
+					if (!bpf_pseudo_call(insn))
+						continue;
+					branch_target = (s64)index + 1 + insn->imm;
+				} else {
+					branch_target = (s64)index + 1 +
+						(insn->code == (BPF_JMP32 | BPF_JA) ?
+						 insn->imm : insn->off);
+				}
+				if (branch_target == i + 1) {
+					verbose(env,
+						"jump bypasses native-backedge KOperation at insn %d\n",
+						i);
+					return -EINVAL;
+				}
+			}
+			native_backedge_target = target;
+		}
 		payload = bpf_kop_sidecar_payload(sidecar);
 		proof = kvcalloc(desc->kop->max_insn_cnt, sizeof(*proof),
 				 GFP_KERNEL_ACCOUNT);
@@ -3382,13 +3465,31 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		region = &env->kop_regions[env->kop_region_cnt++];
 		region->start = i - 1;
 		region->proof_len = count;
+		region->orig_len = native_backedge ? 3 : 2;
 		region->is_noreturn = desc->flags & KF_NORETURN;
+		region->has_native_backedge = native_backedge;
+		region->native_backedge_target = native_backedge_target;
 		region->orig[0] = *sidecar;
 		region->orig[1] = *call;
+		if (native_backedge)
+			region->orig[2] = env->prog->insnsi[i + 1];
+		{
+			u32 j;
+
+			for (j = 0; j < region->orig_len; j++)
+				region->orig_idx[j] =
+					env->insn_aux_data[region->start + j].orig_idx;
+		}
 
 		err = bpf_verifier_remove_insns(env, i - 1, 1);
 		if (err)
 			goto err_free_proof;
+		if (native_backedge) {
+			/* The sidecar removal moved the continuation to index i. */
+			err = bpf_verifier_remove_insns(env, i, 1);
+			if (err)
+				goto err_free_proof;
+		}
 		new_prog = bpf_patch_insn_data(env, i - 1, proof, count);
 		kvfree(proof);
 		proof = NULL;
@@ -3400,19 +3501,28 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 			env->prog->aux->kop_terminal_effect = true;
 		}
 
-		if (count != 2) {
+		if (count != region->orig_len) {
 			u32 j;
+			s32 delta = (s32)count - (s32)region->orig_len;
 
 			for (j = 0; j + 1 < env->kop_region_cnt; j++) {
 				struct bpf_kop_region *prior = &env->kop_regions[j];
 				s32 start;
+				s32 target;
 
-				if (prior->start <= region->start)
-					continue;
-				start = (s32)prior->start + count - 2;
-				if (WARN_ON_ONCE(start < 0))
-					start = 0;
-				prior->start = start;
+				if (prior->has_native_backedge &&
+				    prior->native_backedge_target > region->start) {
+					target = (s32)prior->native_backedge_target + delta;
+					if (WARN_ON_ONCE(target < 0))
+						target = 0;
+					prior->native_backedge_target = target;
+				}
+				if (prior->start > region->start) {
+					start = (s32)prior->start + delta;
+					if (WARN_ON_ONCE(start < 0))
+						start = 0;
+					prior->start = start;
+				}
 			}
 		}
 	}
@@ -3438,36 +3548,51 @@ static int restore_kop_proof_regions(struct bpf_verifier_env *env)
 
 	for (i = 0; i < env->kop_region_cnt; i++) {
 		struct bpf_kop_region *region = &env->kop_regions[i];
+		struct bpf_insn original[ARRAY_SIZE(region->orig)];
 		struct bpf_insn_aux_data *aux;
 		struct bpf_prog *new_prog;
+		u32 seen = 0;
+		u32 j;
 		int err;
 
+		if (WARN_ON_ONCE(region->orig_len < 2 ||
+				 region->orig_len > ARRAY_SIZE(region->orig)))
+			return -EFAULT;
+		for (j = 0; j < region->proof_len; j++)
+			seen = max(seen, env->insn_aux_data[region->start + j].seen);
+		memcpy(original, region->orig,
+		       sizeof(*original) * region->orig_len);
+		if (region->has_native_backedge) {
+			s64 offset = (s64)region->native_backedge_target -
+				     ((s64)region->start + 3);
+
+			if (offset < S16_MIN || offset > -3)
+				return -ERANGE;
+			original[2].off = (s16)offset;
+		}
 		new_prog = bpf_patch_insn_data(env, region->start,
-					       region->orig, ARRAY_SIZE(region->orig));
+					       original, region->orig_len);
 		if (!new_prog)
 			return -ENOMEM;
 		env->prog = new_prog;
 		if (region->proof_len > 1) {
 			u32 remove = region->proof_len - 1;
 
-			err = bpf_verifier_remove_insns(env, region->start + 2, remove);
+			err = bpf_verifier_remove_insns(
+				env, region->start + region->orig_len, remove);
 			if (err)
 				return err;
 		}
 
 		aux = env->insn_aux_data;
-		kvfree(aux[region->start].jt);
-		kvfree(aux[region->start + 1].jt);
-		aux[region->start] = (struct bpf_insn_aux_data) {
-			.seen = max(aux[region->start].seen,
-				    aux[region->start + 1].seen),
-			.orig_idx = aux[region->start].orig_idx,
-		};
-		aux[region->start + 1] = (struct bpf_insn_aux_data) {
-			.seen = aux[region->start].seen,
-			.orig_idx = aux[region->start + 1].orig_idx,
-			.is_noreturn = region->is_noreturn,
-		};
+		for (j = 0; j < region->orig_len; j++) {
+			kvfree(aux[region->start + j].jt);
+			aux[region->start + j] = (struct bpf_insn_aux_data) {
+				.seen = seen,
+				.orig_idx = region->orig_idx[j],
+				.is_noreturn = j == 1 && region->is_noreturn,
+			};
+		}
 	}
 	return 0;
 }
