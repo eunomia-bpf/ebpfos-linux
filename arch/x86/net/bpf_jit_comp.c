@@ -2073,8 +2073,43 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				       dst_reg, imm32);
 			break;
 
-		case BPF_LD | BPF_IMM | BPF_DW:
-			if (insn->src_reg) {
+		case BPF_LD | BPF_IMM | BPF_DW: {
+			u64 immediate = ((u64)(u32)insn[1].imm << 32) |
+					(u32)insn[0].imm;
+			const struct bpf_map *named = NULL;
+			bool value_address = false;
+			u32 map_index;
+
+			/* The verifier clears the pseudo source once it has
+			 * resolved a map, so the instruction no longer says it
+			 * carries an address. Ask the program's own resolved
+			 * maps instead of guessing from the bytes.
+			 */
+			for (map_index = 0;
+			     map_index < bpf_prog->aux->used_map_cnt;
+			     map_index++) {
+				struct bpf_map *map =
+					bpf_prog->aux->used_maps[map_index];
+				u64 addr;
+
+				if (!map)
+					continue;
+				if (immediate == (u64)(unsigned long)map) {
+					named = map;
+					break;
+				}
+				if (!map->ops->map_direct_value_addr)
+					continue;
+				if (map->ops->map_direct_value_addr(map, &addr, 0))
+					continue;
+				if (immediate >= addr &&
+				    immediate < addr + map->value_size) {
+					named = map;
+					value_address = true;
+					break;
+				}
+			}
+			if (insn->src_reg || named) {
 				u8 *operand;
 				u16 width;
 
@@ -2083,8 +2118,16 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 						       &operand, &width);
 				jit_note_reloc(ctx, proglen, temp, operand,
 					       BPF_JIT_RELOC_PSEUDO_IMM64, width,
-					       ((u64)(u32)insn[1].imm << 32) |
-					       (u32)insn[0].imm, i);
+					       immediate, i);
+				if (named) {
+					char name[sizeof(((struct bpf_jit_reloc *)0)->symbol)];
+
+					snprintf(name, sizeof(name), "%s:%s%s",
+						 value_address ? "mapval" : "map",
+						 named->name[0] ? named->name : "anon",
+						 "");
+					jit_note_symbol(ctx, name);
+				}
 			} else {
 				emit_mov_imm64(&prog, dst_reg, insn[1].imm,
 					       insn[0].imm);
@@ -2092,6 +2135,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 			insn++;
 			i++;
 			break;
+		}
 
 			/* dst %= src, dst /= src, dst %= imm32, dst /= imm32 */
 		case BPF_ALU | BPF_MOD | BPF_X:
