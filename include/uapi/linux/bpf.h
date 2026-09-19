@@ -6746,6 +6746,11 @@ enum bpf_jit_reloc_kind {
 	BPF_JIT_RELOC_KOP_CALL		= 6,
 	BPF_JIT_RELOC_ARENA_USER_BASE	= 7,
 	BPF_JIT_RELOC_PERCPU_OFFSET	= 8,
+	BPF_JIT_RELOC_PRIV_STACK	= 9,
+	/* This build emitted something the table does not describe. A consumer
+	 * must refuse the image rather than assume the rest is complete.
+	 */
+	BPF_JIT_RELOC_UNDESCRIBED	= 10,
 };
 
 /* One operand the JIT emitted whose value belongs to the emitting kernel.
@@ -6759,6 +6764,12 @@ struct bpf_jit_reloc {
 	__u64 value;
 	__u32 insn_index;
 	__u32 function_index;
+	/* The target's kernel symbol, when it has one. An address is only
+	 * meaningful in the kernel that resolved it; a name is what another
+	 * kernel can bind. Empty when the target has no name to bind by, and
+	 * never truncated: a name that does not fit is left empty.
+	 */
+	char symbol[48];
 };
 
 /* One fault fixup the JIT installed. @insn_offset locates the faulting

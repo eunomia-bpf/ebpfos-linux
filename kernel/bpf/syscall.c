@@ -5351,11 +5351,18 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	if (prog->aux->func_cnt) {
 		u32 function;
 
-		for (function = 0; function < prog->aux->func_cnt; function++)
+		for (function = 0; function < prog->aux->func_cnt; function++) {
 			info.nr_jited_relocs +=
 				prog->aux->func[function]->jit_reloc_cnt;
+			/* An incomplete table gets one explicit record so it can
+			 * never be read as a complete empty one.
+			 */
+			if (prog->aux->func[function]->jit_reloc_incomplete)
+				info.nr_jited_relocs++;
+		}
 	} else {
-		info.nr_jited_relocs = prog->jit_reloc_cnt;
+		info.nr_jited_relocs = prog->jit_reloc_cnt +
+				       (prog->jit_reloc_incomplete ? 1 : 0);
 	}
 	if (ulen) {
 		if (bpf_dump_raw_ok(file->f_cred)) {
@@ -5375,6 +5382,17 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 						break;
 					record = sub->jit_relocs[entry];
 					record.function_index = index;
+					if (copy_to_user(&user_relocs[copied],
+							 &record, sizeof(record)))
+						return -EFAULT;
+					copied++;
+				}
+				if (sub->jit_reloc_incomplete && copied < ulen) {
+					struct bpf_jit_reloc record = {
+						.kind = BPF_JIT_RELOC_UNDESCRIBED,
+						.function_index = index,
+					};
+
 					if (copy_to_user(&user_relocs[copied],
 							 &record, sizeof(record)))
 						return -EFAULT;

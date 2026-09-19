@@ -325,6 +325,8 @@ struct jit_context {
 	struct bpf_jit_reloc *relocs;
 	u32 reloc_count;
 	u32 reloc_max;
+	bool reloc_incomplete;
+	char *symbol_scratch;
 };
 
 /* Maximum number of bytes emitted while JITing one eBPF insn */
@@ -594,8 +596,15 @@ static void jit_note_reloc(struct jit_context *ctx, int proglen, const u8 *temp,
 {
 	struct bpf_jit_reloc *record;
 
-	if (!ctx || !ctx->relocs || ctx->reloc_count >= ctx->reloc_max)
+	if (!ctx)
 		return;
+	if (!ctx->relocs || ctx->reloc_count >= ctx->reloc_max) {
+		/* Dropping an operand silently would leave a table that looks
+		 * complete. Say it is not.
+		 */
+		ctx->reloc_incomplete = true;
+		return;
+	}
 	record = &ctx->relocs[ctx->reloc_count++];
 	record->offset = proglen + (u32)(site - temp);
 	record->kind = kind;
@@ -603,6 +612,26 @@ static void jit_note_reloc(struct jit_context *ctx, int proglen, const u8 *temp,
 	record->value = value;
 	record->insn_index = insn_index;
 	record->function_index = 0;
+	record->symbol[0] = '\0';
+	/* A call target is only bindable elsewhere by name, so resolve it here
+	 * where the address still means something. A name that does not fit is
+	 * left empty rather than truncated into a different symbol.
+	 */
+	if ((kind == BPF_JIT_RELOC_HELPER_CALL ||
+	     kind == BPF_JIT_RELOC_KFUNC_CALL) && ctx->symbol_scratch &&
+	    !lookup_symbol_name((unsigned long)value, ctx->symbol_scratch) &&
+	    strlen(ctx->symbol_scratch) < sizeof(record->symbol))
+		strscpy(record->symbol, ctx->symbol_scratch,
+			sizeof(record->symbol));
+}
+
+/* Name the operand just recorded, where the emitter knows it statically. */
+static void jit_note_symbol(struct jit_context *ctx, const char *symbol)
+{
+	if (!ctx || !ctx->relocs || !ctx->reloc_count)
+		return;
+	strscpy(ctx->relocs[ctx->reloc_count - 1].symbol, symbol,
+		sizeof(ctx->relocs[ctx->reloc_count - 1].symbol));
 }
 
 static int emit_kop_desc_call(u8 **pprog,
@@ -1715,19 +1744,31 @@ static void emit_shiftx(u8 **pprog, u32 dst_reg, u8 src_reg, bool is64, u8 op)
 	*pprog = prog;
 }
 
-static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr)
+static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr,
+				struct jit_context *ctx, int proglen,
+				const u8 *temp)
 {
 	u8 *prog = *pprog;
+	u8 *operand;
+	u16 width;
 
 	/* movabs r9, priv_frame_ptr */
-	emit_mov_imm64(&prog, X86_REG_R9, (__force long) priv_frame_ptr >> 32,
-		       (u32) (__force long) priv_frame_ptr);
+	emit_mov_imm64_tracked(&prog, X86_REG_R9,
+			       (__force long) priv_frame_ptr >> 32,
+			       (u32) (__force long) priv_frame_ptr,
+			       &operand, &width);
+	jit_note_reloc(ctx, proglen, temp, operand, BPF_JIT_RELOC_PRIV_STACK,
+		       width, (u64)(__force long) priv_frame_ptr, -1);
 
 #ifdef CONFIG_SMP
 	/* add <r9>, gs:[<off>] */
 	EMIT2(0x65, 0x4c);
 	EMIT3(0x03, 0x0c, 0x25);
 	EMIT((u32)(unsigned long)&this_cpu_off, 4);
+	jit_note_reloc(ctx, proglen, temp, prog - 4,
+		       BPF_JIT_RELOC_PERCPU_OFFSET, 4,
+		       (u64)(unsigned long)&this_cpu_off, -1);
+	jit_note_symbol(ctx, "this_cpu_off");
 #endif
 
 	*pprog = prog;
@@ -1854,7 +1895,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	}
 
 	if (priv_frame_ptr)
-		emit_priv_frame_ptr(&prog, priv_frame_ptr);
+		emit_priv_frame_ptr(&prog, priv_frame_ptr, ctx, proglen, temp);
 
 	ilen = prog - temp;
 	if (rw_image)
@@ -1952,6 +1993,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				jit_note_reloc(ctx, proglen, temp, prog - 4,
 					       BPF_JIT_RELOC_PERCPU_OFFSET, 4,
 					       (u64)(unsigned long)&this_cpu_off, i);
+				jit_note_symbol(ctx, "this_cpu_off");
 #endif
 				break;
 			}
@@ -2645,7 +2687,22 @@ populate_extable:
 				push_r9(&prog);
 				ip += 2;
 			}
-			ip += x86_call_depth_emit_accounting(&prog, func, ip);
+			{
+				u8 *accounting = prog;
+				int emitted;
+
+				emitted = x86_call_depth_emit_accounting(&prog,
+									func, ip);
+				ip += emitted;
+				if (emitted)
+					/* Call-depth accounting embeds a target
+					 * this table does not describe.
+					 */
+					jit_note_reloc(ctx, proglen, temp,
+						       accounting,
+						       BPF_JIT_RELOC_UNDESCRIBED,
+						       (u16)emitted, 0, i);
+			}
 			call_site = prog;
 			if (emit_call(&prog, func, ip))
 				return -EINVAL;
@@ -3988,8 +4045,11 @@ skip_init_addrs:
 	 */
 	ctx.reloc_max = prog->len + 1;
 	ctx.relocs = kvcalloc(ctx.reloc_max, sizeof(*ctx.relocs), GFP_KERNEL);
-	if (!ctx.relocs)
+	if (!ctx.relocs) {
 		ctx.reloc_max = 0;
+		ctx.reloc_incomplete = true;
+	}
+	ctx.symbol_scratch = kmalloc(KSYM_NAME_LEN, GFP_KERNEL);
 
 	/*
 	 * JITed image shrinks with every pass and the loop iterates
@@ -4097,6 +4157,7 @@ out_image:
 		prog->bpf_func = (void *)image + cfi_get_offset();
 		prog->jited = 1;
 		prog->jited_len = proglen - cfi_get_offset();
+		prog->jit_reloc_incomplete = ctx.reloc_incomplete;
 		if (ctx.relocs && ctx.reloc_count) {
 			kvfree(prog->jit_relocs);
 			prog->jit_relocs = ctx.relocs;
@@ -4107,6 +4168,8 @@ out_image:
 	}
 	kvfree(ctx.relocs);
 	ctx.relocs = NULL;
+	kfree(ctx.symbol_scratch);
+	ctx.symbol_scratch = NULL;
 
 	if (!image || !prog->is_func || extra_pass) {
 		if (image)
@@ -4153,6 +4216,7 @@ void bpf_jit_free(struct bpf_prog *prog)
 	kvfree(prog->jit_relocs);
 	prog->jit_relocs = NULL;
 	prog->jit_reloc_cnt = 0;
+	prog->jit_reloc_incomplete = false;
 	if (prog->jited) {
 		struct x64_jit_data *jit_data = prog->aux->jit_data;
 		struct bpf_binary_header *hdr;

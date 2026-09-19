@@ -1993,6 +1993,11 @@ struct bpf_prog {
 	/* eBPFOS: operands the JIT emitted that only this kernel can resolve. */
 	struct bpf_jit_reloc *jit_relocs;
 	u32 jit_reloc_cnt;
+	/* Set when the table could not be completed -- no memory, or more
+	 * operands than were reserved. An empty table and an unrecorded one are
+	 * not the same answer, so this is reported rather than dropped.
+	 */
+	bool jit_reloc_incomplete;
 	struct bpf_prog_stats __percpu *stats;
 	u8 __percpu		*active;	/* u8[BPF_NR_CONTEXTS] for recursion protection */
 	unsigned int		(*bpf_func)(const void *ctx,
