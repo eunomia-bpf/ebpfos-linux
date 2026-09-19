@@ -5146,7 +5146,7 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	 * buffers, so the accepted input must reach it; everything past it still
 	 * has to be zero.
 	 */
-	len = offsetofend(struct bpf_prog_info, jited_relocs);
+	len = offsetofend(struct bpf_prog_info, jited_exentries);
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), len, info_len);
 	if (err)
 		return err;
@@ -5383,6 +5383,57 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 			}
 		} else {
 			info.jited_relocs = 0;
+		}
+	}
+
+	/* eBPFOS: the fault fixups the JIT installed, addressed from the same
+	 * base as jited_ksyms so a placement can rebuild them.
+	 */
+	ulen = info.nr_jited_exentries;
+	info.jited_exentry_rec_size = sizeof(struct bpf_jit_exentry);
+	info.nr_jited_exentries = 0;
+	if (prog->aux->func_cnt) {
+		u32 function;
+
+		for (function = 0; function < prog->aux->func_cnt; function++)
+			info.nr_jited_exentries +=
+				prog->aux->func[function]->aux->num_exentries;
+	} else {
+		info.nr_jited_exentries = prog->aux->num_exentries;
+	}
+	if (ulen) {
+		if (bpf_dump_raw_ok(file->f_cred)) {
+			struct bpf_jit_exentry __user *user_entries;
+			u32 copied = 0, index, entry;
+
+			ulen = min_t(u32, info.nr_jited_exentries, ulen);
+			user_entries = u64_to_user_ptr(info.jited_exentries);
+			for (index = 0; index < (prog->aux->func_cnt ? : 1); index++) {
+				struct bpf_prog *sub = prog->aux->func_cnt ?
+						       prog->aux->func[index] : prog;
+
+				for (entry = 0; entry < sub->aux->num_exentries; entry++) {
+					const struct exception_table_entry *ex =
+						&sub->aux->extable[entry];
+					struct bpf_jit_exentry record = {};
+					const u8 *faulting;
+
+					if (copied >= ulen)
+						break;
+					faulting = (const u8 *)&ex->insn + ex->insn;
+					record.insn_offset =
+						(u32)(faulting - (const u8 *)sub->bpf_func);
+					record.fixup = ex->fixup;
+					record.data = ex->data;
+					record.function_index = index;
+					if (copy_to_user(&user_entries[copied],
+							 &record, sizeof(record)))
+						return -EFAULT;
+					copied++;
+				}
+			}
+		} else {
+			info.jited_exentries = 0;
 		}
 	}
 

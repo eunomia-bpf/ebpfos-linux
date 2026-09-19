@@ -6729,6 +6729,12 @@ struct bpf_prog_info {
 	__u32 nr_jited_relocs;
 	__u32 jited_reloc_rec_size;
 	__aligned_u64 jited_relocs;
+	/* The program's fault fixups. An image whose arena accesses can fault
+	 * cannot be entered elsewhere without them.
+	 */
+	__u32 nr_jited_exentries;
+	__u32 jited_exentry_rec_size;
+	__aligned_u64 jited_exentries;
 } __attribute__((aligned(8)));
 
 enum bpf_jit_reloc_kind {
@@ -6738,6 +6744,8 @@ enum bpf_jit_reloc_kind {
 	BPF_JIT_RELOC_PSEUDO_IMM64	= 4,
 	BPF_JIT_RELOC_ARENA_BASE	= 5,
 	BPF_JIT_RELOC_KOP_CALL		= 6,
+	BPF_JIT_RELOC_ARENA_USER_BASE	= 7,
+	BPF_JIT_RELOC_PERCPU_OFFSET	= 8,
 };
 
 /* One operand the JIT emitted whose value belongs to the emitting kernel.
@@ -6750,6 +6758,18 @@ struct bpf_jit_reloc {
 	__u16 width;
 	__u64 value;
 	__u32 insn_index;
+	__u32 function_index;
+};
+
+/* One fault fixup the JIT installed. @insn_offset locates the faulting
+ * instruction inside its function's jited image; @fixup and @data are the
+ * encodings ex_handler_bpf() consumes and carry no address, so an image placed
+ * elsewhere can rebuild the entry from them.
+ */
+struct bpf_jit_exentry {
+	__u32 insn_offset;
+	__u32 fixup;
+	__u32 data;
 	__u32 function_index;
 };
 

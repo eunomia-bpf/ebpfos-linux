@@ -1921,6 +1921,9 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 					EMIT1_off32(0x0D,  user_vm_start >> 32);
 				else
 					EMIT2_off32(0x81, add_1reg(0xC8, dst_reg),  user_vm_start >> 32);
+				jit_note_reloc(ctx, proglen, temp, prog - 4,
+					       BPF_JIT_RELOC_ARENA_USER_BASE, 4,
+					       user_vm_start, i);
 
 				/* rol dst_reg, 32 */
 				maybe_emit_1mod(&prog, dst_reg, true);
@@ -1946,6 +1949,9 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				EMIT2(0x65, add_1mod(0x48, dst_reg));
 				EMIT3(0x03, add_2reg(0x04, 0, dst_reg), 0x25);
 				EMIT((u32)(unsigned long)&this_cpu_off, 4);
+				jit_note_reloc(ctx, proglen, temp, prog - 4,
+					       BPF_JIT_RELOC_PERCPU_OFFSET, 4,
+					       (u64)(unsigned long)&this_cpu_off, i);
 #endif
 				break;
 			}
