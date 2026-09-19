@@ -1877,6 +1877,7 @@ struct bpf_prog_aux {
 	bool kprobe_write_ctx;
 	bool ebpfos_meta;
 	bool ebpfos_component;
+	bool ebpfos_invariants;
 	u32 ebpfos_load_insn_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
 	bool ebpfos_kop_requirements_valid;

@@ -1318,6 +1318,11 @@ enum bpf_perf_event_type {
  * independent progress/termination contract.
  */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)
+/* Verify real backedges by inductive state containment for an authenticated
+ * eBPFOS implementation program.  Unlike BPF_F_EBPFOS_COMPONENT, this does
+ * not select the mapless component-call ABI.
+ */
+#define BPF_F_EBPFOS_INVARIANTS	(1U << 11)
 
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.

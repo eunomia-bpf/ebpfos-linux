@@ -1331,8 +1331,8 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 				}
 				goto skip_inf_loop_check;
 			}
-			/* eBPFOS components execute canonical kernel implementation code.
-			 * For these programs, admit a real backedge when its current
+			/* eBPFOS components and invariant-mode programs execute canonical
+			 * kernel implementation code.  Admit a real backedge when its current
 			 * abstract state is contained in an earlier state at the same
 			 * instruction.  The loop body has therefore been checked for all
 			 * values in the earlier state and the backedge re-establishes that
@@ -1342,12 +1342,13 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 			 * first used on a later iteration.
 			 *
 			 * This is a memory-safety (partial-correctness) proof only.  It does
-			 * not prove that the loop terminates.  BPF_F_EBPFOS_COMPONENT is a
-			 * restricted, privileged component ABI whose admission contract
-			 * must establish the separate progress/liveness property.  Ordinary
-			 * BPF programs retain the infinite-loop rejection below.
+			 * not prove that the loop terminates.  Both modes are restricted to
+			 * privileged eBPFOS build-time syscall programs whose admission
+			 * contract must establish the separate progress/liveness property.
+			 * Ordinary BPF programs retain the infinite-loop rejection below.
 			 */
-			if (env->prog->aux->ebpfos_component &&
+			if ((env->prog->aux->ebpfos_component ||
+			     env->prog->aux->ebpfos_invariants) &&
 			    states_equal(env, &sl->state, cur, RANGE_WITHIN)) {
 				loop = true;
 				goto hit;

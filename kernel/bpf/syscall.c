@@ -2923,6 +2923,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_TEST_REG_INVARIANTS |
 				 BPF_F_EBPFOS_META |
 				 BPF_F_EBPFOS_COMPONENT |
+				 BPF_F_EBPFOS_INVARIANTS |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
@@ -2940,8 +2941,16 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS_BUILD))
 		return -EOPNOTSUPP;
+	if ((attr->prog_flags & BPF_F_EBPFOS_INVARIANTS) &&
+	    (type != BPF_PROG_TYPE_SYSCALL ||
+	     attr->prog_flags != (BPF_F_EBPFOS_INVARIANTS | BPF_F_SLEEPABLE)))
+		return -EINVAL;
+	if ((attr->prog_flags & BPF_F_EBPFOS_INVARIANTS) &&
+	    !IS_ENABLED(CONFIG_EBPFOS_BUILD))
+		return -EOPNOTSUPP;
 	if ((attr->prog_flags &
-	     (BPF_F_EBPFOS_META | BPF_F_EBPFOS_COMPONENT)) &&
+	     (BPF_F_EBPFOS_META | BPF_F_EBPFOS_COMPONENT |
+	      BPF_F_EBPFOS_INVARIANTS)) &&
 	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->prog_btf_fd || attr->func_info_rec_size ||
 	     attr->func_info || attr->func_info_cnt ||
@@ -3065,6 +3074,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->aux->ebpfos_meta = !!(attr->prog_flags & BPF_F_EBPFOS_META);
 	prog->aux->ebpfos_component =
 		!!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT);
+	prog->aux->ebpfos_invariants =
+		!!(attr->prog_flags & BPF_F_EBPFOS_INVARIANTS);
 	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
