@@ -451,6 +451,7 @@ static int ebpfos_kprog_machine_emit_x86(
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_machine_register(void) { }
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
+__bpf_kfunc void bpf_ebpfos_kprog_bounded_memset(void) { }
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_machine_ids)
@@ -460,6 +461,97 @@ BTF_KFUNCS_END(ebpfos_kprog_machine_ids)
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_terminal_effect, KF_NORETURN)
 BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_bounded_memory_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kprog_bounded_memset)
+BTF_KFUNCS_END(ebpfos_kprog_bounded_memory_ids)
+
+/* sha256("ebpfos-koperation-bounded-memset-v1:x86_64:arena-bound:last-byte-proof:rep-stosb") */
+static const u8 ebpfos_kprog_bounded_memset_semantic_sha256[
+	SHA256_DIGEST_SIZE] = {
+	0xd4, 0x9c, 0x0c, 0xa8, 0x5d, 0x8b, 0xc9, 0xc7,
+	0x7c, 0xd0, 0x51, 0x52, 0x63, 0xbd, 0x88, 0x3a,
+	0x22, 0xdd, 0x30, 0x27, 0x23, 0x95, 0xca, 0xe4,
+	0x9c, 0x3f, 0xa8, 0x5d, 0xe7, 0x14, 0x7a, 0xf4,
+};
+
+static bool ebpfos_kprog_bounded_memory_payload(u64 payload)
+{
+	return payload && payload <= S32_MAX;
+}
+
+static int ebpfos_kprog_bounded_memset_instantiate(
+	u64 payload, struct bpf_insn *insns)
+{
+	if (!insns || !ebpfos_kprog_bounded_memory_payload(payload))
+		return -EINVAL;
+
+	/* R1 is the writable arena pointer, R2 the byte, and R3 the extent.
+	 * The final-byte store makes the upstream verifier prove the complete
+	 * dynamic span.  The restored KOperation performs that same admitted
+	 * effect over every byte; the proof instruction is never published. */
+	insns[0] = BPF_JMP_IMM(BPF_JGT, BPF_REG_3, (s32)payload, 8);
+	insns[1] = BPF_JMP_IMM(BPF_JEQ, BPF_REG_3, 0, 5);
+	insns[2] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_1);
+	insns[3] = BPF_MOV64_REG(BPF_REG_5, BPF_REG_3);
+	insns[4] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_5, -1);
+	insns[5] = BPF_ALU64_REG(BPF_ADD, BPF_REG_4, BPF_REG_5);
+	insns[6] = BPF_STX_MEM(BPF_B, BPF_REG_4, BPF_REG_2, 0);
+	insns[7] = BPF_MOV64_IMM(BPF_REG_0, 0);
+	insns[8] = BPF_JMP_IMM(BPF_JA, 0, 0, 1);
+	insns[9] = BPF_MOV64_IMM(BPF_REG_0, -E2BIG);
+	insns[10] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_0);
+	return 11;
+}
+
+static int ebpfos_kprog_bounded_memset_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    !ebpfos_kprog_bounded_memory_payload(payload))
+		return -EINVAL;
+	*capability_mask = EBPFOS_CAP_KPROG_BOUNDED_MEMORY;
+	*effect_mask = EBPFOS_EFFECT_KPROG_MEMORY_WRITE;
+	memcpy(semantic_sha256, ebpfos_kprog_bounded_memset_semantic_sha256,
+	       SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kprog_bounded_memset_emit_x86(
+	u8 *image, u32 *offset, bool emit, u64 payload,
+	const struct bpf_prog *prog, const u8 *final_ip)
+{
+	u8 code[40], *cursor = code;
+	u8 *too_large, *done;
+	u32 size;
+
+	(void)prog;
+	(void)final_ip;
+	if (!offset || (emit && !image) ||
+	    !ebpfos_kprog_bounded_memory_payload(payload))
+		return -EINVAL;
+#define EMIT(_byte) (*cursor++ = (_byte))
+	/* BPF R1/R2/R3 are RDI/RSI/RDX. */
+	EMIT(0x48); EMIT(0x81); EMIT(0xfa); /* cmp imm32,%rdx */
+	put_unaligned_le32((u32)payload, cursor); cursor += 4;
+	EMIT(0x77); too_large = cursor++;    /* ja failure */
+	EMIT(0x48); EMIT(0x89); EMIT(0xd1); /* mov %rdx,%rcx */
+	EMIT(0x48); EMIT(0x89); EMIT(0xf0); /* mov %rsi,%rax */
+	EMIT(0xf3); EMIT(0xaa);             /* rep stosb */
+	EMIT(0x31); EMIT(0xc0);             /* xor %eax,%eax */
+	EMIT(0xeb); done = cursor++;         /* skip failure */
+	*too_large = cursor - (too_large + 1);
+	EMIT(0x48); EMIT(0xc7); EMIT(0xc0);
+	put_unaligned_le32((u32)-E2BIG, cursor); cursor += 4;
+	*done = cursor - (done + 1);
+#undef EMIT
+	size = cursor - code;
+	if (emit)
+		memcpy(image + *offset, code, size);
+	*offset += size;
+	return size;
+}
 
 /* sha256("ebpfos-koperation-terminal-effect-v2:x86_64:f390:verified-native-backedge:verifier-noreturn") */
 static const u8 ebpfos_kprog_terminal_semantic_sha256[SHA256_DIGEST_SIZE] = {
@@ -600,6 +692,40 @@ static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
 	.kop_descs = ebpfos_kprog_terminal_descs,
 };
 
+static struct bpf_kop ebpfos_kprog_bounded_memset = {
+	.max_insn_cnt = 11,
+	.max_emit_bytes = 40,
+	.capability_mask = EBPFOS_CAP_KPROG_BOUNDED_MEMORY,
+	.effect_mask = EBPFOS_EFFECT_KPROG_MEMORY_WRITE,
+	.semantic_sha256 = {
+		0xd4, 0x9c, 0x0c, 0xa8, 0x5d, 0x8b, 0xc9, 0xc7,
+		0x7c, 0xd0, 0x51, 0x52, 0x63, 0xbd, 0x88, 0x3a,
+		0x22, 0xdd, 0x30, 0x27, 0x23, 0x95, 0xca, 0xe4,
+		0x9c, 0x3f, 0xa8, 0x5d, 0xe7, 0x14, 0x7a, 0xf4,
+	},
+	.requirements = ebpfos_kprog_bounded_memset_requirements,
+	.instantiate_insn = ebpfos_kprog_bounded_memset_instantiate,
+	.emit_x86 = ebpfos_kprog_bounded_memset_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_bounded_memory_descs[] = {
+	&ebpfos_kprog_bounded_memset,
+};
+
+static int ebpfos_kprog_bounded_memory_filter(const struct bpf_prog *prog,
+					       u32 kfunc_id)
+{
+	return ebpfos_kprog_domain_filter(
+		prog, btf_id_set8_contains(&ebpfos_kprog_bounded_memory_ids,
+					       kfunc_id));
+}
+
+static const struct btf_kfunc_id_set ebpfos_kprog_bounded_memory_set = {
+	.set = &ebpfos_kprog_bounded_memory_ids,
+	.filter = ebpfos_kprog_bounded_memory_filter,
+	.kop_descs = ebpfos_kprog_bounded_memory_descs,
+};
+
 static int __init ebpfos_kprog_register(void)
 {
 	int error;
@@ -658,8 +784,12 @@ static int __init ebpfos_kprog_register(void)
 					  &ebpfos_kprog_machine_set);
 	if (error)
 		return error;
+	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					  &ebpfos_kprog_terminal_set);
+	if (error)
+		return error;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_terminal_set);
+					 &ebpfos_kprog_bounded_memory_set);
 }
 late_initcall(ebpfos_kprog_register);
 
