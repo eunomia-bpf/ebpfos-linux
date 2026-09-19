@@ -5142,7 +5142,11 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	u32 ulen, len;
 	int err;
 
-	len = offsetofend(struct bpf_prog_info, attach_btf_id);
+	/* The relocation buffer is supplied by userspace like the other export
+	 * buffers, so the accepted input must reach it; everything past it still
+	 * has to be zero.
+	 */
+	len = offsetofend(struct bpf_prog_info, jited_relocs);
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), len, info_len);
 	if (err)
 		return err;
