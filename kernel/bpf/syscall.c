@@ -5337,6 +5337,51 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 		}
 	}
 
+	/* eBPFOS: the operands the JIT resolved from this kernel, in the same
+	 * function order as jited_ksyms, so a frozen image can be placed
+	 * elsewhere without inspecting its bytes.
+	 */
+	ulen = info.nr_jited_relocs;
+	info.jited_reloc_rec_size = sizeof(struct bpf_jit_reloc);
+	info.nr_jited_relocs = 0;
+	if (prog->aux->func_cnt) {
+		u32 function;
+
+		for (function = 0; function < prog->aux->func_cnt; function++)
+			info.nr_jited_relocs +=
+				prog->aux->func[function]->jit_reloc_cnt;
+	} else {
+		info.nr_jited_relocs = prog->jit_reloc_cnt;
+	}
+	if (ulen) {
+		if (bpf_dump_raw_ok(file->f_cred)) {
+			struct bpf_jit_reloc __user *user_relocs;
+			u32 copied = 0, index, entry;
+
+			ulen = min_t(u32, info.nr_jited_relocs, ulen);
+			user_relocs = u64_to_user_ptr(info.jited_relocs);
+			for (index = 0; index < (prog->aux->func_cnt ? : 1); index++) {
+				struct bpf_prog *sub = prog->aux->func_cnt ?
+						       prog->aux->func[index] : prog;
+
+				for (entry = 0; entry < sub->jit_reloc_cnt; entry++) {
+					struct bpf_jit_reloc record;
+
+					if (copied >= ulen)
+						break;
+					record = sub->jit_relocs[entry];
+					record.function_index = index;
+					if (copy_to_user(&user_relocs[copied],
+							 &record, sizeof(record)))
+						return -EFAULT;
+					copied++;
+				}
+			}
+		} else {
+			info.jited_relocs = 0;
+		}
+	}
+
 	info.attach_btf_id = prog->aux->attach_btf_id;
 	if (attach_btf)
 		info.attach_btf_obj_id = btf_obj_id(attach_btf);

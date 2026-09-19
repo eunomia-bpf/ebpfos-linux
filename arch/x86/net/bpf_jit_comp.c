@@ -317,6 +317,14 @@ struct jit_context {
 	 */
 	int tail_call_direct_label;
 	int tail_call_indirect_label;
+
+	/* eBPFOS: the operands this JIT resolved from its own kernel, recorded
+	 * where it wrote them so a frozen image can be placed elsewhere without
+	 * matching byte patterns. Reset on every pass; the converged pass wins.
+	 */
+	struct bpf_jit_reloc *relocs;
+	u32 reloc_count;
+	u32 reloc_max;
 };
 
 /* Maximum number of bytes emitted while JITing one eBPF insn */
@@ -574,6 +582,27 @@ static int emit_patch(u8 **pprog, void *func, void *ip, u8 opcode)
 static int emit_call(u8 **pprog, void *func, void *ip)
 {
 	return emit_patch(pprog, func, ip, 0xE8);
+}
+
+/* eBPFOS: note one operand and exactly where this JIT put it. @site points at
+ * the operand inside the per-instruction scratch buffer, so the image offset is
+ * the emitted length so far plus its distance from that buffer's start.
+ */
+static void jit_note_reloc(struct jit_context *ctx, int proglen, const u8 *temp,
+			   const u8 *site, u16 kind, u16 width, u64 value,
+			   int insn_index)
+{
+	struct bpf_jit_reloc *record;
+
+	if (!ctx || !ctx->relocs || ctx->reloc_count >= ctx->reloc_max)
+		return;
+	record = &ctx->relocs[ctx->reloc_count++];
+	record->offset = proglen + (u32)(site - temp);
+	record->kind = kind;
+	record->width = width;
+	record->value = value;
+	record->insn_index = insn_index;
+	record->function_index = 0;
 }
 
 static int emit_kop_desc_call(u8 **pprog,
@@ -1003,6 +1032,32 @@ static void emit_mov_imm64(u8 **pprog, u32 dst_reg,
 	}
 
 	*pprog = prog;
+}
+
+/* The same immediate the stock emitter writes, plus where it wrote it. The
+ * branches mirror emit_mov_imm64()/emit_mov_imm32() rather than inspecting the
+ * emitted bytes, so the location is exact by construction.
+ */
+static void emit_mov_imm64_tracked(u8 **pprog, u32 dst_reg,
+				   const u32 imm32_hi, const u32 imm32_lo,
+				   u8 **operand, u16 *width)
+{
+	u64 imm64 = ((u64)imm32_hi << 32) | (u32)imm32_lo;
+	u8 *start = *pprog;
+
+	emit_mov_imm64(pprog, dst_reg, imm32_hi, imm32_lo);
+	if (!is_uimm32(imm64) && !is_simm32(imm64)) {
+		*operand = start + 2;	/* REX + opcode, then the imm64 */
+		*width = 8;
+		return;
+	}
+	if (!imm32_lo) {
+		*operand = start;	/* xor form carries no immediate */
+		*width = 0;
+		return;
+	}
+	*operand = *pprog - 4;		/* every other form ends with imm32 */
+	*width = 4;
 }
 
 static void emit_mov_reg(u8 **pprog, bool is64, u32 dst_reg, u32 src_reg)
@@ -1750,6 +1805,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	u32 stack_depth;
 	int err;
 
+	ctx->reloc_count = 0;
 	stack_depth = bpf_prog->aux->stack_depth;
 	priv_stack_ptr = bpf_prog->aux->priv_stack_ptr;
 	if (priv_stack_ptr) {
@@ -1785,9 +1841,17 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 			push_r12(&prog);
 		push_callee_regs(&prog, callee_regs_used);
 	}
-	if (arena_vm_start)
-		emit_mov_imm64(&prog, X86_REG_R12,
-			       arena_vm_start >> 32, (u32) arena_vm_start);
+	if (arena_vm_start) {
+		u8 *operand;
+		u16 width;
+
+		emit_mov_imm64_tracked(&prog, X86_REG_R12,
+				       arena_vm_start >> 32, (u32) arena_vm_start,
+				       &operand, &width);
+		jit_note_reloc(ctx, proglen, temp, operand,
+			       BPF_JIT_RELOC_ARENA_BASE, width, arena_vm_start,
+			       -1);
+	}
 
 	if (priv_frame_ptr)
 		emit_priv_frame_ptr(&prog, priv_frame_ptr);
@@ -1962,7 +2026,21 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 			break;
 
 		case BPF_LD | BPF_IMM | BPF_DW:
-			emit_mov_imm64(&prog, dst_reg, insn[1].imm, insn[0].imm);
+			if (insn->src_reg) {
+				u8 *operand;
+				u16 width;
+
+				emit_mov_imm64_tracked(&prog, dst_reg,
+						       insn[1].imm, insn[0].imm,
+						       &operand, &width);
+				jit_note_reloc(ctx, proglen, temp, operand,
+					       BPF_JIT_RELOC_PSEUDO_IMM64, width,
+					       ((u64)(u32)insn[1].imm << 32) |
+					       (u32)insn[0].imm, i);
+			} else {
+				emit_mov_imm64(&prog, dst_reg, insn[1].imm,
+					       insn[0].imm);
+			}
 			insn++;
 			i++;
 			break;
@@ -2532,13 +2610,23 @@ populate_extable:
 
 		/* call */
 		case BPF_JMP | BPF_CALL: {
+			u8 *call_site;
+
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				call_site = prog;
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
 							 image ? ip : NULL);
 				if (err)
 					return err;
+				/* The KOperation's own emitter owns these bytes;
+				 * record the site so a placement refuses rather
+				 * than assumes it can move them.
+				 */
+				jit_note_reloc(ctx, proglen, temp, call_site,
+					       BPF_JIT_RELOC_KOP_CALL,
+					       (u16)(prog - call_site), imm32, i);
 				break;
 			}
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
@@ -2552,8 +2640,16 @@ populate_extable:
 				ip += 2;
 			}
 			ip += x86_call_depth_emit_accounting(&prog, func, ip);
+			call_site = prog;
 			if (emit_call(&prog, func, ip))
 				return -EINVAL;
+			jit_note_reloc(ctx, proglen, temp, call_site + 1,
+				       src_reg == BPF_PSEUDO_CALL ?
+					       BPF_JIT_RELOC_INTERNAL_CALL :
+				       src_reg == BPF_PSEUDO_KFUNC_CALL ?
+					       BPF_JIT_RELOC_KFUNC_CALL :
+					       BPF_JIT_RELOC_HELPER_CALL,
+				       4, (u64)(unsigned long)func, i);
 			if (priv_frame_ptr)
 				pop_r9(&prog);
 			break;
@@ -3878,6 +3974,16 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 	}
 	ctx.cleanup_addr = proglen;
 skip_init_addrs:
+	/* eBPFOS: one record per instruction is an upper bound -- an instruction
+	 * emits at most one operand this kernel resolved -- plus the prologue's
+	 * arena base. The pointer is never stored in jit_data, so a later extra
+	 * pass allocates its own and the converged pass always owns what it
+	 * recorded.
+	 */
+	ctx.reloc_max = prog->len + 1;
+	ctx.relocs = kvcalloc(ctx.reloc_max, sizeof(*ctx.relocs), GFP_KERNEL);
+	if (!ctx.relocs)
+		ctx.reloc_max = 0;
 
 	/*
 	 * JITed image shrinks with every pass and the loop iterates
@@ -3958,6 +4064,9 @@ out_image:
 		} else {
 			jit_data->addrs = addrs;
 			jit_data->ctx = ctx;
+			jit_data->ctx.relocs = NULL;
+			jit_data->ctx.reloc_count = 0;
+			jit_data->ctx.reloc_max = 0;
 			jit_data->proglen = proglen;
 			jit_data->image = image;
 			jit_data->header = header;
@@ -3982,7 +4091,16 @@ out_image:
 		prog->bpf_func = (void *)image + cfi_get_offset();
 		prog->jited = 1;
 		prog->jited_len = proglen - cfi_get_offset();
+		if (ctx.relocs && ctx.reloc_count) {
+			kvfree(prog->jit_relocs);
+			prog->jit_relocs = ctx.relocs;
+			prog->jit_reloc_cnt = ctx.reloc_count;
+			ctx.relocs = NULL;
+			ctx.reloc_max = 0;
+		}
 	}
+	kvfree(ctx.relocs);
+	ctx.relocs = NULL;
 
 	if (!image || !prog->is_func || extra_pass) {
 		if (image)
@@ -4026,6 +4144,9 @@ bool bpf_jit_supports_percpu_insn(void)
 
 void bpf_jit_free(struct bpf_prog *prog)
 {
+	kvfree(prog->jit_relocs);
+	prog->jit_relocs = NULL;
+	prog->jit_reloc_cnt = 0;
 	if (prog->jited) {
 		struct x64_jit_data *jit_data = prog->aux->jit_data;
 		struct bpf_binary_header *hdr;

@@ -6722,7 +6722,36 @@ struct bpf_prog_info {
 	__u32 attach_btf_obj_id;
 	__u32 attach_btf_id;
 	__u32 :32;
+	/* eBPFOS: where the JIT wrote operands that are only meaningful in the
+	 * kernel that produced them. A frozen image can be placed elsewhere
+	 * without matching byte patterns only if these are known exactly.
+	 */
+	__u32 nr_jited_relocs;
+	__u32 jited_reloc_rec_size;
+	__aligned_u64 jited_relocs;
 } __attribute__((aligned(8)));
+
+enum bpf_jit_reloc_kind {
+	BPF_JIT_RELOC_HELPER_CALL	= 1,
+	BPF_JIT_RELOC_KFUNC_CALL	= 2,
+	BPF_JIT_RELOC_INTERNAL_CALL	= 3,
+	BPF_JIT_RELOC_PSEUDO_IMM64	= 4,
+	BPF_JIT_RELOC_ARENA_BASE	= 5,
+	BPF_JIT_RELOC_KOP_CALL		= 6,
+};
+
+/* One operand the JIT emitted whose value belongs to the emitting kernel.
+ * @offset is inside this function's jited image, @value is exactly what the
+ * JIT wrote, and @width is 4 for a rel32 displacement or 8 for an immediate.
+ */
+struct bpf_jit_reloc {
+	__u32 offset;
+	__u16 kind;
+	__u16 width;
+	__u64 value;
+	__u32 insn_index;
+	__u32 function_index;
+};
 
 struct bpf_map_info {
 	__u32 type;

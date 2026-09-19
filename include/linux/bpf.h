@@ -1990,6 +1990,9 @@ struct bpf_prog {
 		u8 digest[SHA256_DIGEST_SIZE];
 		u8 tag[BPF_TAG_SIZE];
 	};
+	/* eBPFOS: operands the JIT emitted that only this kernel can resolve. */
+	struct bpf_jit_reloc *jit_relocs;
+	u32 jit_reloc_cnt;
 	struct bpf_prog_stats __percpu *stats;
 	u8 __percpu		*active;	/* u8[BPF_NR_CONTEXTS] for recursion protection */
 	unsigned int		(*bpf_func)(const void *ctx,
