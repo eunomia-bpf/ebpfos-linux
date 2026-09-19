@@ -637,6 +637,9 @@ static int ebpfos_validate_component_call_descriptor(
 	u32 flags = le32_to_cpu(descriptor->flags);
 	u64 capabilities = le64_to_cpu(descriptor->capability_mask);
 	u64 effects = le64_to_cpu(descriptor->effect_mask);
+	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
+	u32 resource_count = le32_to_cpu(descriptor->resource_count);
+	u64 canonical_bytes;
 
 	if (!(le32_to_cpu(policy->domain_mask) &
 	      EBPFOS_COMPONENT_DOMAIN_COMPONENT_MASK) ||
@@ -711,7 +714,7 @@ static int ebpfos_validate_component_call_descriptor(
 	    le32_to_cpu(descriptor->max_ctx_offset) !=
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
 	    le32_to_cpu(descriptor->max_tail_calls) ||
-	    le32_to_cpu(descriptor->resource_count) ||
+	    resource_count > 1 ||
 	    le64_to_cpu(descriptor->max_call_bytes) !=
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
 	    EBPFOS_COMPONENT_CALL_CONTEXT_SIZE >
@@ -719,12 +722,33 @@ static int ebpfos_validate_component_call_descriptor(
 	    EBPFOS_COMPONENT_CALL_CONTEXT_SIZE >
 		le64_to_cpu(policy->max_call_bytes))
 		return -ERANGE;
-	return ebpfos_all_zero(&descriptor->resource,
-			       sizeof(descriptor->resource)) &&
-	       ebpfos_all_zero(descriptor->reserved,
-			       sizeof(descriptor->reserved)) &&
-	       !memcmp(descriptor->initial_map_sha256, ebpfos_empty_sha256,
-		       SHA256_DIGEST_SIZE) ? 0 : -EINVAL;
+	if (!ebpfos_all_zero(descriptor->reserved,
+			    sizeof(descriptor->reserved)))
+		return -EINVAL;
+	if (!resource_count)
+		return ebpfos_all_zero(resource, sizeof(*resource)) &&
+		       !memcmp(descriptor->initial_map_sha256,
+			       ebpfos_empty_sha256, SHA256_DIGEST_SIZE) ? 0 : -EINVAL;
+
+	canonical_bytes = round_up(le32_to_cpu(resource->value_size), 8U);
+	if (le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP ||
+	    le32_to_cpu(resource->flags) != EBPFOS_RESOURCE_F_ALL ||
+	    le32_to_cpu(resource->map_type) != BPF_MAP_TYPE_ARRAY ||
+	    le32_to_cpu(resource->key_size) != sizeof(u32) ||
+	    !le32_to_cpu(resource->value_size) ||
+	    le32_to_cpu(resource->max_entries) != 1 ||
+	    le32_to_cpu(resource->map_flags) ||
+	    le32_to_cpu(resource->reserved0) ||
+	    le64_to_cpu(resource->map_extra) ||
+	    le64_to_cpu(resource->logical_bytes) !=
+		    sizeof(u32) + le32_to_cpu(resource->value_size) ||
+	    le64_to_cpu(resource->canonical_bytes) != canonical_bytes ||
+	    canonical_bytes > le64_to_cpu(policy->max_map_bytes) ||
+	    !ebpfos_all_zero(resource->reserved, sizeof(resource->reserved)) ||
+	    !ebpfos_nonzero(descriptor->initial_map_sha256,
+			    SHA256_DIGEST_SIZE))
+		return -EINVAL;
+	return 0;
 }
 
 static int ebpfos_validate_descriptor(
@@ -1240,6 +1264,10 @@ static int ebpfos_measure_program(
 			    SHA256_DIGEST_SIZE)))
 			return error ?: -EKEYREJECTED;
 	}
+	if (le32_to_cpu(descriptor->resource_count))
+		return ebpfos_measure_map(prog, map, descriptor,
+					  expected_identity, calculate_hash,
+					  map_digest);
 	if (map)
 		return -EXDEV;
 	mutex_lock(&prog->aux->used_maps_mutex);

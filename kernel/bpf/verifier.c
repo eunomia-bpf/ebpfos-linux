@@ -18765,9 +18765,9 @@ static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
 			       sizeof(aux->ebpfos_kop_semantic_set_sha256));
 			aux->ebpfos_kop_requirements_valid = true;
 		}
-		if (env->used_map_cnt || env->used_btf_cnt) {
+		if (env->used_map_cnt > 1 || env->used_btf_cnt) {
 			verbose(env,
-				"eBPFOS component-call programs are mapless\n");
+				"eBPFOS component-call programs accept at most one typed state map\n");
 			return -EINVAL;
 		}
 		return 0;
@@ -18903,8 +18903,25 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	}
 	if (component) {
 		if (call_component) {
-			verbose(env, "eBPFOS component-call programs are mapless\n");
-			return -EINVAL;
+			if (env->used_map_cnt) {
+				verbose(env,
+					"eBPFOS component-call programs cannot reference more than one state map\n");
+				return -EINVAL;
+			}
+			if (map->map_type != BPF_MAP_TYPE_ARRAY ||
+			    map->key_size != sizeof(u32) || map->max_entries != 1 ||
+			    map->map_flags || map->map_extra || map->inner_map_meta ||
+			    map->btf || map->record || map->excl || map->excl_prog_sha) {
+				verbose(env,
+					"eBPFOS component state requires one exact ordinary ARRAY map\n");
+				return -EINVAL;
+			}
+			if (!READ_ONCE(map->frozen)) {
+				verbose(env,
+					"eBPFOS component state map must be frozen before program load\n");
+				return -EPERM;
+			}
+			goto component_map_valid;
 		}
 		if (env->used_map_cnt) {
 			verbose(env,
@@ -18915,6 +18932,8 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 		if (err)
 			return err;
 	}
+
+component_map_valid:
 
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)

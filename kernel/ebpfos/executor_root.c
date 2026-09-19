@@ -159,8 +159,8 @@ static int ebpfos_executor_root_role_fill(
 	}
 	descriptor = ebpfos_binding_descriptor(binding);
 	component = descriptor &&
-		!le32_to_cpu(descriptor->resource_count) &&
-		!ebpfos_binding_map(binding) &&
+		(le32_to_cpu(descriptor->resource_count) ==
+		 !!ebpfos_binding_map(binding)) &&
 		ebpfos_binding_prog(binding) &&
 		ebpfos_binding_prog(binding)->aux->ebpfos_component;
 	if (ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
