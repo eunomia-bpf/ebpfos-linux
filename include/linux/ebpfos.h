@@ -387,4 +387,8 @@ static inline long ebpfos_koperation_result_ioctl(void __user *argp,
 static inline void ebpfos_koperation_release(void **txn_slot) { }
 #endif
 
+#ifdef CONFIG_EBPFOS_JIT_PLACE
+long ebpfos_jit_place_ioctl(void __user *argp);
+#endif
+
 #endif /* _LINUX_EBPFOS_H */

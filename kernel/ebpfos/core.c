@@ -70,6 +70,10 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_admission_info_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_RUNTIME_INFO:
 		return ebpfos_admission_runtime_info_ioctl(argp);
+#ifdef CONFIG_EBPFOS_JIT_PLACE
+	case EBPFOS_IOC_JIT_PLACE:
+		return ebpfos_jit_place_ioctl(argp);
+#endif
 	case EBPFOS_IOC_KOPERATION_PREPARE_EXPERIMENTAL:
 		mutex_lock(&state->koperation_txn_lock);
 		result = ebpfos_koperation_prepare_ioctl(

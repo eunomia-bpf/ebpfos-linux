@@ -54,3 +54,15 @@ config EBPFOS_KUNIT_TEST
 	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS
 	depends on EBPFOS && KUNIT
 	default KUNIT_ALL_TESTS
+
+config EBPFOS_JIT_PLACE
+	bool "Run a verified program's JIT output from a second address"
+	depends on EBPFOS && BPF_JIT && X86_64
+	default n
+	help
+	  Copy a live, verified and JITed program's image to a second address,
+	  rebind the displacements the move changes, rebuild its fault fixups
+	  there, and run it from the copy. This is the mechanism a successor
+	  image needs to execute upstream JIT output it did not produce in
+	  place; it takes no native bytes from userspace and never substitutes
+	  a target. Not needed for ordinary operation.

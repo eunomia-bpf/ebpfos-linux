@@ -618,7 +618,8 @@ static void jit_note_reloc(struct jit_context *ctx, int proglen, const u8 *temp,
 	 * left empty rather than truncated into a different symbol.
 	 */
 	if ((kind == BPF_JIT_RELOC_HELPER_CALL ||
-	     kind == BPF_JIT_RELOC_KFUNC_CALL) && ctx->symbol_scratch &&
+	     kind == BPF_JIT_RELOC_KFUNC_CALL ||
+	     kind == BPF_JIT_RELOC_THUNK_JUMP) && ctx->symbol_scratch &&
 	    !lookup_symbol_name((unsigned long)value, ctx->symbol_scratch) &&
 	    strlen(ctx->symbol_scratch) < sizeof(record->symbol))
 		strscpy(record->symbol, ctx->symbol_scratch,
@@ -783,12 +784,21 @@ static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
 	*pprog = prog;
 }
 
-static void emit_return(u8 **pprog, u8 *ip)
+static void emit_return(u8 **pprog, u8 *ip, struct jit_context *ctx,
+			int proglen, const u8 *temp)
 {
 	u8 *prog = *pprog;
 
 	if (cpu_wants_rethunk()) {
+		u8 *site = prog;
+
 		emit_jump(&prog, x86_return_thunk, ip);
+		/* The epilogue's return goes through kernel text, so the
+		 * displacement moves with the code like any call's.
+		 */
+		jit_note_reloc(ctx, proglen, temp, site + 1,
+			       BPF_JIT_RELOC_THUNK_JUMP, 4,
+			       (u64)(unsigned long)x86_return_thunk, -1);
 	} else {
 		EMIT1(0xC3);		/* ret */
 		if (IS_ENABLED(CONFIG_MITIGATION_SLS))
@@ -3045,7 +3055,8 @@ emit_jmp:
 			EMIT1(0xC9);         /* leave */
 			bpf_prog->aux->ksym.fp_end = prog - temp;
 
-			emit_return(&prog, image + addrs[i - 1] + (prog - temp));
+			emit_return(&prog, image + addrs[i - 1] + (prog - temp),
+				    ctx, proglen, temp);
 			break;
 
 		default:
@@ -3803,7 +3814,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		/* skip our return address and return to parent */
 		EMIT4(0x48, 0x83, 0xC4, 8); /* add rsp, 8 */
 	}
-	emit_return(&prog, image + (prog - (u8 *)rw_image));
+	emit_return(&prog, image + (prog - (u8 *)rw_image), NULL, 0, NULL);
 	/* Make sure the trampoline generation logic doesn't overflow */
 	if (WARN_ON_ONCE(prog > (u8 *)rw_image_end - BPF_INSN_SAFETY)) {
 		ret = -EFAULT;

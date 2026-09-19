@@ -6751,6 +6751,11 @@ enum bpf_jit_reloc_kind {
 	 * must refuse the image rather than assume the rest is complete.
 	 */
 	BPF_JIT_RELOC_UNDESCRIBED	= 10,
+	/* A jump the mitigations put in the epilogue or an indirect branch:
+	 * a displacement to kernel text like any other, and just as fatal to
+	 * move without rebinding.
+	 */
+	BPF_JIT_RELOC_THUNK_JUMP	= 11,
 };
 
 /* One operand the JIT emitted whose value belongs to the emitting kernel.
