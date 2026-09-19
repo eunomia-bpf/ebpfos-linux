@@ -650,19 +650,49 @@ static int ebpfos_executor_method_validate(
 		import->discriminator_value ? 0 : -EACCES;
 }
 
+static bool ebpfos_executor_provider_supported(const struct bpf_prog *provider)
+{
+	return provider && provider->aux && provider->aux->ebpfos_component &&
+	       provider->type == BPF_PROG_TYPE_SYSCALL && provider->sleepable;
+}
+
+static int ebpfos_executor_provider_run(struct ebpfos_binding *binding,
+		struct bpf_prog *provider, void *context, u32 *status)
+{
+	struct bpf_tramp_run_ctx run_ctx = {};
+	u64 start;
+	int error;
+
+	if (!binding || !ebpfos_executor_provider_supported(provider) ||
+	    !context || !status)
+		return -EOPNOTSUPP;
+	start = __bpf_prog_enter_sleepable_recur(provider, &run_ctx);
+	if (!start) {
+		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+		return -EBUSY;
+	}
+	error = ebpfos_binding_invocation_enter(binding);
+	if (error) {
+		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+		return error;
+	}
+	*status = bpf_prog_run(provider, context);
+	__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
+	ebpfos_binding_invocation_exit(binding);
+	return 0;
+}
+
 noinline int bpf_ebpfos_executor_root_call_impl(
 	void *call_data, u32 call_data__sz, struct bpf_prog_aux *aux)
 {
 	struct ebpfos_executor_call *call = call_data;
 	struct ebpfos_executor_root_role_snapshot role = {};
 	struct ebpfos_executor_import import = {};
-	struct bpf_tramp_run_ctx run_ctx = {};
 	const struct ebpfos_component_desc_v1 *descriptor;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *provider;
 	u64 epoch = 0;
 	u32 status;
-	u64 start;
 	bool retried = false;
 	int error;
 
@@ -679,9 +709,7 @@ retry_lookup:
 		return -ENOENT;
 	descriptor = ebpfos_binding_descriptor(binding);
 	provider = ebpfos_binding_prog(binding);
-	if (!descriptor || !provider || !provider->aux ||
-	    !provider->aux->ebpfos_component ||
-	    provider->type != BPF_PROG_TYPE_SYSCALL || !provider->sleepable) {
+	if (!descriptor || !ebpfos_executor_provider_supported(provider)) {
 		error = -EOPNOTSUPP;
 		goto out_put;
 	}
@@ -711,15 +739,9 @@ retry_lookup:
 	 * replace and RCU-retire the old immutable bundle concurrently, but its
 	 * program remains alive until this exact invocation has returned.
 	 */
-	start = __bpf_prog_enter_sleepable_recur(provider, &run_ctx);
-	if (!start) {
-		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
-		error = -EBUSY;
-		goto out_put;
-	}
-	error = ebpfos_binding_invocation_enter(binding);
+	error = ebpfos_executor_provider_run(binding, provider, call->context,
+					     &status);
 	if (error) {
-		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
 		if (error == -ESHUTDOWN) {
 			ebpfos_binding_put(binding);
 			if (call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH)
@@ -733,9 +755,6 @@ retry_lookup:
 		}
 		goto out_put;
 	}
-	status = bpf_prog_run(provider, call->context);
-	__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
-	ebpfos_binding_invocation_exit(binding);
 	call->observed_epoch = epoch;
 	call->provider_prog_id = role.prog_id;
 	call->provider_status = status;
@@ -1026,6 +1045,70 @@ static void ebpfos_executor_method_test(struct kunit *test)
 			-EPROTO);
 }
 
+static unsigned int ebpfos_executor_test_provider(
+	const void *context, const struct bpf_insn *insn)
+{
+	struct ebpfos_component_call_frame *frame = (void *)context;
+	u64 input, output;
+
+	memcpy(&input, frame->input, sizeof(input));
+	output = input + 7;
+	memcpy(frame->output, &output, sizeof(output));
+	frame->status = 0;
+	frame->output_size = sizeof(output);
+	return 0x2a;
+}
+
+static void ebpfos_executor_test_prog_free(void *value)
+{
+	bpf_prog_free(value);
+}
+
+static void ebpfos_executor_provider_run_test(struct kunit *test)
+{
+	struct ebpfos_component_call_frame frame = {
+		.version = EBPFOS_COMPONENT_CALL_ABI_VERSION,
+		.input_size = sizeof(u64),
+		.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE,
+	};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u64 input = 35, output = 0;
+	u32 status = U32_MAX;
+
+	provider = bpf_prog_alloc(bpf_prog_size(1), 0);
+	KUNIT_ASSERT_NOT_NULL(test, provider);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(
+		test, ebpfos_executor_test_prog_free, provider), 0);
+	provider->type = BPF_PROG_TYPE_SYSCALL;
+	provider->sleepable = true;
+	provider->aux->ebpfos_component = true;
+	provider->bpf_func = ebpfos_executor_test_provider;
+	refcount_set(&binding.refs, 1);
+	atomic64_set(&binding.invocation_state, 0);
+	memcpy(frame.input, &input, sizeof(input));
+
+	KUNIT_ASSERT_EQ(test, ebpfos_executor_provider_run(
+		&binding, provider, &frame, &status), 0);
+	memcpy(&output, frame.output, sizeof(output));
+	KUNIT_EXPECT_EQ(test, status, (u32)0x2a);
+	KUNIT_EXPECT_EQ(test, frame.output_size, (u32)sizeof(output));
+	KUNIT_EXPECT_EQ(test, output, (u64)42);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 0U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 1ULL);
+
+	/* An ordinary syscall program is not a component-call callee. */
+	provider->aux->ebpfos_component = false;
+	status = U32_MAX;
+	memset(frame.output, 0, sizeof(frame.output));
+	frame.output_size = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_provider_run(
+		&binding, provider, &frame, &status), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, status, U32_MAX);
+	KUNIT_EXPECT_EQ(test, frame.output_size, 0U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 1ULL);
+}
+
 static void ebpfos_executor_root_manifest_test(struct kunit *test)
 {
 	struct ebpfos_executor_root_manifest *manifest;
@@ -1083,6 +1166,7 @@ static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_request_test),
 	KUNIT_CASE(ebpfos_executor_root_call_size_test),
 	KUNIT_CASE(ebpfos_executor_method_test),
+	KUNIT_CASE(ebpfos_executor_provider_run_test),
 	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
 };
