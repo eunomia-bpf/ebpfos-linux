@@ -1312,7 +1312,11 @@ enum bpf_perf_event_type {
 
 /* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
 #define BPF_F_EBPFOS_META	(1U << 9)
-/* Restrict a sleepable syscall program to the typed component-call ABI. */
+/* Restrict a sleepable syscall program to the typed component-call ABI.
+ * The verifier may use inductive state containment for memory safety of
+ * component backedges; component admission remains responsible for their
+ * independent progress/termination contract.
+ */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
