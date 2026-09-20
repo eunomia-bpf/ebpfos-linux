@@ -24,6 +24,7 @@
 #include <asm/extable.h>
 #include <crypto/sha2.h>
 #include <linux/ktime.h>
+#include <linux/rcupdate_trace.h>
 
 #define EBPFOS_JIT_PLACE_MAX_CONTEXT 4096
 
@@ -253,7 +254,7 @@ struct ebpfos_jit_placed_function {
 	u8 *rw_image;
 	struct exception_table_entry *extable;
 	bpf_func_t saved_func;
-	struct exception_table_entry *saved_extable;
+	struct bpf_prog *owner;
 };
 
 struct ebpfos_jit_placement {
@@ -465,41 +466,64 @@ out_free:
 	return error;
 }
 
-/* Point every function of the program at an image and let fixup lookup find
- * them there.
+/* Make fixup lookup find the copy, without ever taking it away from the
+ * original.
  *
- * bpf_ksym_del() unlinks with list_del_rcu(), which deliberately leaves the
- * node's forward pointer intact so a concurrent reader can finish walking. The
- * node therefore cannot be reused until those readers are gone, and re-adding it
- * before that is what bpf_ksym_add()'s warning is about. One grace period covers
- * the whole forest, so the symbols come out first and go back in afterwards
- * rather than paying for a wait per function.
+ * search_bpf_extables() resolves a faulting address to the program that owns it
+ * through kallsyms, so an image that is executing must always have a symbol. The
+ * program's own symbol keeps covering the image the JIT produced; each copy gets
+ * a symbol of its own, carrying that copy's fixups, registered before anything
+ * points at it and removed only once nobody can still be inside it. That leaves
+ * no instant where an arena fault in either image has nowhere to land -- which
+ * is exactly what a four-vCPU guest finds if there is one.
  */
-static void ebpfos_jit_place_resymbolise(struct bpf_prog *prog,
-					 struct ebpfos_jit_placement *placement,
-					 bool placed)
+static int ebpfos_jit_place_publish_symbols(struct bpf_prog *prog,
+					    struct ebpfos_jit_placement *placement)
 {
 	u32 index;
 
-	for (index = 0; index < placement->count; index++)
-		bpf_prog_kallsyms_del(ebpfos_jit_place_function(prog, index));
-	synchronize_rcu();
 	for (index = 0; index < placement->count; index++) {
 		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
 		struct ebpfos_jit_placed_function *slot =
 			&placement->functions[index];
+		/* one page: the shell carries no instructions of its own, and a
+		 * zero size rounds to a zero-byte allocation, which fails
+		 */
+		struct bpf_prog *owner = bpf_prog_alloc(1, GFP_KERNEL);
 
-		INIT_LIST_HEAD(&function->aux->ksym.lnode);
-		if (placed) {
-			slot->saved_func = function->bpf_func;
-			slot->saved_extable = function->aux->extable;
-			function->bpf_func = (bpf_func_t)slot->image;
-			function->aux->extable = slot->extable;
-		} else {
-			function->bpf_func = slot->saved_func;
-			function->aux->extable = slot->saved_extable;
-		}
-		bpf_prog_kallsyms_add(function);
+		if (!owner)
+			return -ENOMEM;
+		owner->type = function->type;
+		owner->jited = 1;
+		owner->jited_len = function->jited_len;
+		owner->bpf_func = (bpf_func_t)slot->image;
+		owner->aux->extable = slot->extable;
+		owner->aux->num_exentries = function->aux->num_exentries;
+		strscpy(owner->aux->name, "ebpfos_placed",
+			sizeof(owner->aux->name));
+		slot->owner = owner;
+		bpf_prog_kallsyms_add(owner);
+	}
+	return 0;
+}
+
+static void ebpfos_jit_place_retire_symbols(struct ebpfos_jit_placement *placement)
+{
+	u32 index;
+
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *owner = placement->functions[index].owner;
+
+		if (!owner)
+			continue;
+		bpf_prog_kallsyms_del(owner);
+		/* the copy's memory is this placement's, not the shell's */
+		owner->jited = 0;
+		owner->bpf_func = NULL;
+		owner->aux->extable = NULL;
+		owner->aux->num_exentries = 0;
+		bpf_prog_free(owner);
+		placement->functions[index].owner = NULL;
 	}
 }
 
@@ -508,13 +532,27 @@ static void ebpfos_jit_place_resymbolise(struct bpf_prog *prog,
  * are its own throughout, so what is measured is the placed bytes and nothing
  * else.
  */
-static void ebpfos_jit_place_run(struct bpf_prog *prog,
-				 struct ebpfos_jit_placement *placement,
-				 void *context, u32 *retval)
+static int ebpfos_jit_place_run(struct bpf_prog *prog,
+				struct ebpfos_jit_placement *placement,
+				void *context, u32 *retval)
 {
 	bpf_func_t saved_entry = prog->bpf_func;
+	u32 index;
+	int error;
 
-	ebpfos_jit_place_resymbolise(prog, placement, true);
+	error = ebpfos_jit_place_publish_symbols(prog, placement);
+	if (error) {
+		ebpfos_jit_place_retire_symbols(placement);
+		return error;
+	}
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *slot =
+			&placement->functions[index];
+
+		slot->saved_func = function->bpf_func;
+		function->bpf_func = (bpf_func_t)slot->image;
+	}
 	/* A split program enters through its first function; an unsplit one is
 	 * that function.
 	 */
@@ -526,8 +564,23 @@ static void ebpfos_jit_place_run(struct bpf_prog *prog,
 	rcu_read_unlock_trace();
 	migrate_enable();
 
-	ebpfos_jit_place_resymbolise(prog, placement, false);
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+
+		function->bpf_func = placement->functions[index].saved_func;
+	}
 	prog->bpf_func = saved_entry;
+
+	/* Putting the program back does not get anyone out of the copy: a
+	 * caller that read bpf_func before the swap back can still be inside
+	 * those bytes, and on more than one CPU it will be. Wait for both entry
+	 * paths -- sleepable programs run under RCU tasks trace, the rest under
+	 * classic RCU -- before the copy and its symbol may go away.
+	 */
+	synchronize_rcu_tasks_trace();
+	synchronize_rcu();
+	ebpfos_jit_place_retire_symbols(placement);
+	return 0;
 }
 
 long ebpfos_jit_place_ioctl(void __user *argp)
@@ -612,25 +665,30 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 	started = ktime_get();
 	error = ebpfos_jit_place_build(prog, &placement);
 	if (!error) {
-		ebpfos_jit_place_run(prog, &placement, context, &retval);
-		request.place_ns = ktime_to_ns(ktime_sub(ktime_get(), started));
-		request.placed_address =
-			(u64)(unsigned long)placement.functions[0].image;
-		request.jited_bytes = 0;
-		request.relocations = 0;
-		request.exentries = 0;
-		for (index = 0; index < placement.count; index++) {
-			struct bpf_prog *function =
-				ebpfos_jit_place_function(prog, index);
+		error = ebpfos_jit_place_run(prog, &placement, context, &retval);
+		if (!error) {
+			request.place_ns =
+				ktime_to_ns(ktime_sub(ktime_get(), started));
+			request.placed_address =
+				(u64)(unsigned long)placement.functions[0].image;
+			request.source_address =
+				(u64)(unsigned long)prog->bpf_func;
+			request.jited_bytes = 0;
+			request.relocations = 0;
+			request.exentries = 0;
+			for (index = 0; index < placement.count; index++) {
+				struct bpf_prog *function =
+					ebpfos_jit_place_function(prog, index);
 
-			request.jited_bytes += function->jited_len;
-			request.relocations += function->jit_reloc_cnt;
-			request.exentries += function->aux->num_exentries;
+				request.jited_bytes += function->jited_len;
+				request.relocations += function->jit_reloc_cnt;
+				request.exentries +=
+					function->aux->num_exentries;
+			}
+			request.functions = placement.count;
+			request.retval = retval;
 		}
-		request.functions = placement.count;
-		request.retval = retval;
 		ebpfos_jit_place_release(&placement);
-		request.source_address = (u64)(unsigned long)prog->bpf_func;
 	}
 	mutex_unlock(&ebpfos_jit_place_lock);
 	if (!error && request.context_size &&
