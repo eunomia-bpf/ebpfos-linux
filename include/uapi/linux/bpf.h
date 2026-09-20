@@ -6756,6 +6756,11 @@ enum bpf_jit_reloc_kind {
 	 * move without rebinding.
 	 */
 	BPF_JIT_RELOC_THUNK_JUMP	= 11,
+	/* A KOperation sequence whose emitter declares it position
+	 * independent: the bytes carry no address, so a placement moves them
+	 * unchanged instead of refusing them.
+	 */
+	BPF_JIT_RELOC_KOP_CALL_PIC	= 12,
 };
 
 /* One operand the JIT emitted whose value belongs to the emitting kernel.

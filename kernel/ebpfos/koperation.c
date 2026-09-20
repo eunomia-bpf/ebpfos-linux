@@ -620,6 +620,10 @@ static struct bpf_kop ebpfos_kprog_machine = {
 	.effect_mask = EBPFOS_EFFECT_KPROG_MACHINE_STATE,
 	.requirements = ebpfos_kprog_machine_requirements,
 	.instantiate_insn = ebpfos_kprog_machine_instantiate,
+	/* Register and immediate code with rel8 jumps inside the sequence: no
+	 * address of this kernel appears in it.
+	 */
+	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_machine_emit_x86,
 };
 
@@ -662,6 +666,10 @@ static struct bpf_kop ebpfos_kprog_terminal = {
 	},
 	.requirements = ebpfos_kprog_terminal_requirements,
 	.instantiate_insn = ebpfos_kprog_terminal_instantiate,
+	/* Register and immediate code with rel8 jumps inside the sequence: no
+	 * address of this kernel appears in it.
+	 */
+	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_terminal_emit_x86,
 };
 
@@ -707,6 +715,10 @@ static struct bpf_kop ebpfos_kprog_bounded_memset = {
 	},
 	.requirements = ebpfos_kprog_bounded_memset_requirements,
 	.instantiate_insn = ebpfos_kprog_bounded_memset_instantiate,
+	/* Register and immediate code with rel8 jumps inside the sequence: no
+	 * address of this kernel appears in it.
+	 */
+	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_bounded_memset_emit_x86,
 };
 

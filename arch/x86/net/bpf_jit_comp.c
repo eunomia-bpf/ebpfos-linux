@@ -638,7 +638,7 @@ static void jit_note_symbol(struct jit_context *ctx, const char *symbol)
 static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
-			      const u8 *final_ip)
+			      const u8 *final_ip, bool *position_independent)
 {
 	const struct bpf_kop *kop;
 	u8 scratch[BPF_MAX_INSN_SIZE];
@@ -652,6 +652,8 @@ static int emit_kop_desc_call(u8 **pprog,
 		return ret;
 	if (!kop || !kop->emit_x86)
 		return -EOPNOTSUPP;
+	if (position_independent)
+		*position_independent = kop->position_independent;
 	if (kop->max_emit_bytes > BPF_MAX_INSN_SIZE)
 		return -E2BIG;
 
@@ -2716,18 +2718,23 @@ populate_extable:
 
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				bool movable = false;
+
 				call_site = prog;
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
-							 image ? ip : NULL);
+							 image ? ip : NULL,
+							 &movable);
 				if (err)
 					return err;
-				/* The KOperation's own emitter owns these bytes;
-				 * record the site so a placement refuses rather
-				 * than assumes it can move them.
+				/* The KOperation's own emitter owns these bytes,
+				 * so only it can say whether they mean the same
+				 * thing elsewhere. Record which it said.
 				 */
 				jit_note_reloc(ctx, proglen, temp, call_site,
-					       BPF_JIT_RELOC_KOP_CALL,
+					       movable ?
+						       BPF_JIT_RELOC_KOP_CALL_PIC :
+						       BPF_JIT_RELOC_KOP_CALL,
 					       (u16)(prog - call_site), imm32, i);
 				break;
 			}

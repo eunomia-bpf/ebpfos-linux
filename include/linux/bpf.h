@@ -1087,6 +1087,13 @@ struct bpf_kop {
 	 */
 	bool noreturn_native_backedge;
 	/*
+	 * The emitter's bytes mean the same thing wherever they sit: no
+	 * absolute address, no displacement that leaves the emitted sequence.
+	 * Only the emitter can say this about its own output, and saying it is
+	 * what lets a placed image carry the sequence unchanged.
+	 */
+	bool position_independent;
+	/*
 	 * Sealed component admission binds this verifier-visible operation
 	 * identity before its native emitter can become reachable.  These fields
 	 * describe one canonical eBPF semantic operation, not a native fallback.

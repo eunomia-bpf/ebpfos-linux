@@ -326,6 +326,11 @@ static int ebpfos_jit_place_reloc(struct bpf_prog *prog,
 	case BPF_JIT_RELOC_PRIV_STACK:
 		/* An absolute address of this kernel, and this is this kernel. */
 		return 0;
+	case BPF_JIT_RELOC_KOP_CALL_PIC:
+		/* The emitter that owns these bytes says they mean the same
+		 * thing elsewhere, so they move unchanged.
+		 */
+		return 0;
 	default:
 		/* A KOperation sequence or an emission the table cannot
 		 * describe: refuse rather than move bytes blindly.
