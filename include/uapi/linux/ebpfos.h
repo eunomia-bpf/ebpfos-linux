@@ -268,7 +268,11 @@ struct ebpfos_admission_identity_v1 {
  * relocated for the move and its fault fixups are rebuilt there. @prog_fd names
  * a program this kernel verified and JITed; no native bytes are supplied.
  */
-#define EBPFOS_JIT_PLACE_VERSION 1U
+#define EBPFOS_JIT_PLACE_VERSION 2U
+/* Place without an export to authenticate against. The placement is then only
+ * as good as the program fd it was handed, which is why it must be asked for.
+ */
+#define EBPFOS_JIT_PLACE_F_NO_ARTIFACT (1U << 0)
 
 struct ebpfos_ioc_jit_place {
 	__u32 version;
@@ -276,6 +280,17 @@ struct ebpfos_ioc_jit_place {
 	__s32 prog_fd;
 	__u32 context_size;
 	__aligned_u64 context;
+	/* The EBPFJIT4 export of this same program. It is authenticated against
+	 * the image and tables this kernel holds; the bytes that get placed are
+	 * the kernel's own, never these. Zero to place without an export.
+	 */
+	__aligned_u64 artifact;
+	__u64 artifact_size;
+	/* The arena the placed code must run against. -1 accepts the program's
+	 * own; anything else must be that same arena.
+	 */
+	__s32 arena_map_fd;
+	__u32 authenticated;
 	__aligned_u64 placed_address;
 	__aligned_u64 source_address;
 	__u32 jited_bytes;

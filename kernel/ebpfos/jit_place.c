@@ -22,10 +22,163 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <asm/extable.h>
+#include <crypto/sha2.h>
 
 #define EBPFOS_JIT_PLACE_MAX_CONTEXT 4096
 
 static DEFINE_MUTEX(ebpfos_jit_place_lock);
+
+/* The frozen export's ABI, as cmd/ebpfos-upstream-jit-compiler.c writes it. The
+ * export is read only to check that it describes the program this kernel holds:
+ * every byte that ends up executing comes from that program's own image.
+ */
+#define EBPFOS_JIT_ARTIFACT_MAGIC "EBPFJIT4"
+#define EBPFOS_JIT_ARTIFACT_VERSION 4U
+#define EBPFOS_JIT_ARTIFACT_MAX (16U << 20)
+
+struct ebpfos_jit_artifact_header {
+	unsigned char magic[8];
+	__u32 version;
+	__u32 header_bytes;
+	__u32 compiler_calls;
+	__u32 flags;
+	__u32 program_id;
+	__u32 reserved;
+	__u64 request_bytes;
+	__u64 xlated_bytes;
+	__u64 jited_bytes;
+	__u64 jited_address;
+	__u64 cpu_features[4];
+	unsigned char program_tag[8];
+	unsigned char request_sha256[32];
+	unsigned char xlated_sha256[32];
+	unsigned char jited_sha256[32];
+	char verifier_source_sha256[65];
+	char x86_jit_source_sha256[65];
+	unsigned char reserved_tail[6];
+	__u32 function_count;
+	__u32 function_record_bytes;
+	unsigned char functions_sha256[32];
+	__u32 relocation_count;
+	__u32 relocation_record_bytes;
+	unsigned char relocations_sha256[32];
+	__u32 exception_count;
+	__u32 exception_record_bytes;
+	unsigned char exceptions_sha256[32];
+};
+
+struct ebpfos_jit_artifact_function {
+	__u64 address;
+	__u64 offset;
+	__u32 bytes;
+	__u32 reserved;
+};
+
+static int ebpfos_jit_artifact_digest(const void *data, size_t len,
+				      const unsigned char *expected)
+{
+	unsigned char digest[SHA256_DIGEST_SIZE];
+
+	sha256(data, len, digest);
+	return memcmp(digest, expected, sizeof(digest)) ? -EBADMSG : 0;
+}
+
+/* Does this export describe the program this kernel is holding? Nothing is read
+ * out of it into the placement; it either matches what the kernel already has,
+ * or the placement is refused.
+ */
+static int ebpfos_jit_artifact_authenticate(const struct bpf_prog *prog,
+					    const void *artifact, size_t size)
+{
+	const struct ebpfos_jit_artifact_header *header = artifact;
+	const struct ebpfos_jit_artifact_function *functions;
+	const struct bpf_jit_reloc *relocations;
+	const struct bpf_jit_exentry *exceptions;
+	size_t functions_bytes, relocations_bytes, exceptions_bytes;
+	size_t code_start, code_end, translated_end;
+	const u8 *entry = (const u8 *)prog->bpf_func;
+	u32 index;
+	int error;
+
+	if (size < sizeof(*header) || size > EBPFOS_JIT_ARTIFACT_MAX)
+		return -EINVAL;
+	if (memcmp(header->magic, EBPFOS_JIT_ARTIFACT_MAGIC,
+		   sizeof(header->magic)) ||
+	    header->version != EBPFOS_JIT_ARTIFACT_VERSION ||
+	    header->header_bytes != sizeof(*header))
+		return -EINVAL;
+	if (header->function_record_bytes != sizeof(*functions) ||
+	    header->relocation_record_bytes != sizeof(*relocations) ||
+	    header->exception_record_bytes != sizeof(*exceptions))
+		return -EINVAL;
+	functions_bytes = (size_t)header->function_count * sizeof(*functions);
+	relocations_bytes = (size_t)header->relocation_count * sizeof(*relocations);
+	exceptions_bytes = (size_t)header->exception_count * sizeof(*exceptions);
+	code_start = sizeof(*header) + functions_bytes;
+	if (code_start < sizeof(*header) || header->jited_bytes > size)
+		return -EINVAL;
+	code_end = code_start + header->jited_bytes;
+	translated_end = code_end + header->xlated_bytes;
+	if (code_end < code_start || translated_end < code_end ||
+	    translated_end + relocations_bytes + exceptions_bytes != size)
+		return -EINVAL;
+
+	/* the image */
+	if (header->program_id != prog->aux->id ||
+	    header->jited_bytes != prog->jited_len ||
+	    header->jited_address != (u64)(unsigned long)entry ||
+	    header->function_count != 1)
+		return -EBADMSG;
+	functions = artifact + sizeof(*header);
+	if (functions[0].address != (u64)(unsigned long)entry ||
+	    functions[0].offset || functions[0].bytes != prog->jited_len ||
+	    functions[0].reserved)
+		return -EBADMSG;
+	error = ebpfos_jit_artifact_digest(functions, functions_bytes,
+					   header->functions_sha256);
+	if (error)
+		return error;
+	error = ebpfos_jit_artifact_digest(artifact + code_start,
+					   header->jited_bytes,
+					   header->jited_sha256);
+	if (error)
+		return error;
+	if (memcmp(artifact + code_start, entry, prog->jited_len))
+		return -EBADMSG;
+
+	/* the tables it will be placed with */
+	if (header->relocation_count != prog->jit_reloc_cnt ||
+	    header->exception_count != prog->aux->num_exentries)
+		return -EBADMSG;
+	relocations = artifact + translated_end;
+	error = ebpfos_jit_artifact_digest(relocations, relocations_bytes,
+					   header->relocations_sha256);
+	if (error)
+		return error;
+	for (index = 0; index < header->relocation_count; index++)
+		if (memcmp(&relocations[index], &prog->jit_relocs[index],
+			   sizeof(*relocations)))
+			return -EBADMSG;
+	exceptions = (const void *)relocations + relocations_bytes;
+	error = ebpfos_jit_artifact_digest(exceptions, exceptions_bytes,
+					   header->exceptions_sha256);
+	if (error)
+		return error;
+	for (index = 0; index < header->exception_count; index++) {
+		const struct exception_table_entry *live =
+			&prog->aux->extable[index];
+		const u8 *faulting = (const u8 *)&live->insn + live->insn;
+
+		if (exceptions[index].insn_offset != (u32)(faulting - entry) ||
+		    exceptions[index].fixup != live->fixup ||
+		    exceptions[index].data != live->data ||
+		    exceptions[index].function_index)
+			return -EBADMSG;
+	}
+	return 0;
+}
+
+
 
 static void ebpfos_jit_place_fill(void *area, unsigned int size)
 {
@@ -236,8 +389,11 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.version != EBPFOS_JIT_PLACE_VERSION || request.flags ||
-	    request.reserved ||
+	if (request.version != EBPFOS_JIT_PLACE_VERSION ||
+	    (request.flags & ~EBPFOS_JIT_PLACE_F_NO_ARTIFACT) ||
+	    request.authenticated || request.reserved ||
+	    (request.artifact_size &&
+	     (request.flags & EBPFOS_JIT_PLACE_F_NO_ARTIFACT)) ||
 	    request.context_size > EBPFOS_JIT_PLACE_MAX_CONTEXT)
 		return -EINVAL;
 	prog = bpf_prog_get(request.prog_fd);
@@ -245,6 +401,42 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 		return PTR_ERR(prog);
 	if (!ebpfos_jit_place_supported(prog)) {
 		error = -EOPNOTSUPP;
+		goto out_put;
+	}
+	if (request.arena_map_fd != -1) {
+		/* The placed code carries the arena base the JIT resolved, so
+		 * the caller may only name the arena the program already uses.
+		 */
+		struct bpf_map *arena = bpf_map_get(request.arena_map_fd);
+
+		if (IS_ERR(arena)) {
+			error = PTR_ERR(arena);
+			goto out_put;
+		}
+		/* aux->arena is the same object as the map, as the verifier
+		 * itself stores it.
+		 */
+		error = (void *)arena == (void *)prog->aux->arena ? 0 : -EXDEV;
+		bpf_map_put(arena);
+		if (error)
+			goto out_put;
+	}
+	if (request.artifact_size) {
+		void *artifact = memdup_user(u64_to_user_ptr(request.artifact),
+					     request.artifact_size);
+
+		if (IS_ERR(artifact)) {
+			error = PTR_ERR(artifact);
+			goto out_put;
+		}
+		error = ebpfos_jit_artifact_authenticate(prog, artifact,
+							 request.artifact_size);
+		kfree(artifact);
+		if (error)
+			goto out_put;
+		request.authenticated = 1;
+	} else if (!(request.flags & EBPFOS_JIT_PLACE_F_NO_ARTIFACT)) {
+		error = -EINVAL;
 		goto out_put;
 	}
 	if (request.context_size < prog->aux->max_ctx_offset) {
