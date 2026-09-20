@@ -28,6 +28,38 @@
 
 static DEFINE_MUTEX(ebpfos_jit_place_lock);
 
+/* The canonical program is a forest: the verifier splits it into subprograms and
+ * the JIT compiles each into its own image. Everything below works on that
+ * forest, with a single-function program as the one-element case.
+ */
+static u32 ebpfos_jit_place_count(const struct bpf_prog *prog)
+{
+	return prog->aux->func_cnt ? : 1;
+}
+
+static struct bpf_prog *ebpfos_jit_place_function(struct bpf_prog *prog,
+						  u32 index)
+{
+	return prog->aux->func_cnt ? prog->aux->func[index] : prog;
+}
+
+static bool ebpfos_jit_place_supported(struct bpf_prog *prog)
+{
+	u32 index;
+
+	if (!prog->jited || !prog->bpf_func || bpf_prog_was_classic(prog))
+		return false;
+	for (index = 0; index < ebpfos_jit_place_count(prog); index++) {
+		const struct bpf_prog *function =
+			ebpfos_jit_place_function(prog, index);
+
+		if (!function->jited || !function->jited_len ||
+		    !function->bpf_func || function->jit_reloc_incomplete)
+			return false;
+	}
+	return true;
+}
+
 /* The frozen export's ABI, as cmd/ebpfos-upstream-jit-compiler.c writes it. The
  * export is read only to check that it describes the program this kernel holds:
  * every byte that ends up executing comes from that program's own image.
@@ -87,7 +119,7 @@ static int ebpfos_jit_artifact_digest(const void *data, size_t len,
  * out of it into the placement; it either matches what the kernel already has,
  * or the placement is refused.
  */
-static int ebpfos_jit_artifact_authenticate(const struct bpf_prog *prog,
+static int ebpfos_jit_artifact_authenticate(struct bpf_prog *prog,
 					    const void *artifact, size_t size)
 {
 	const struct ebpfos_jit_artifact_header *header = artifact;
@@ -97,7 +129,7 @@ static int ebpfos_jit_artifact_authenticate(const struct bpf_prog *prog,
 	size_t functions_bytes, relocations_bytes, exceptions_bytes;
 	size_t code_start, code_end, translated_end;
 	const u8 *entry = (const u8 *)prog->bpf_func;
-	u32 index;
+	u32 index, offset, relocation, exception;
 	int error;
 
 	if (size < sizeof(*header) || size > EBPFOS_JIT_ARTIFACT_MAX)
@@ -123,17 +155,12 @@ static int ebpfos_jit_artifact_authenticate(const struct bpf_prog *prog,
 	    translated_end + relocations_bytes + exceptions_bytes != size)
 		return -EINVAL;
 
-	/* the image */
+	/* the image, function by function in the order the export lists them */
 	if (header->program_id != prog->aux->id ||
-	    header->jited_bytes != prog->jited_len ||
 	    header->jited_address != (u64)(unsigned long)entry ||
-	    header->function_count != 1)
+	    header->function_count != ebpfos_jit_place_count(prog))
 		return -EBADMSG;
 	functions = artifact + sizeof(*header);
-	if (functions[0].address != (u64)(unsigned long)entry ||
-	    functions[0].offset || functions[0].bytes != prog->jited_len ||
-	    functions[0].reserved)
-		return -EBADMSG;
 	error = ebpfos_jit_artifact_digest(functions, functions_bytes,
 					   header->functions_sha256);
 	if (error)
@@ -143,37 +170,70 @@ static int ebpfos_jit_artifact_authenticate(const struct bpf_prog *prog,
 					   header->jited_sha256);
 	if (error)
 		return error;
-	if (memcmp(artifact + code_start, entry, prog->jited_len))
+	for (index = 0, offset = 0, relocation = 0, exception = 0;
+	     index < header->function_count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		const u8 *function_entry = (const u8 *)function->bpf_func;
+
+		if (functions[index].address != (u64)(unsigned long)function_entry ||
+		    functions[index].offset != offset ||
+		    functions[index].bytes != function->jited_len ||
+		    functions[index].reserved)
+			return -EBADMSG;
+		if (offset + function->jited_len > header->jited_bytes ||
+		    memcmp(artifact + code_start + offset, function_entry,
+			   function->jited_len))
+			return -EBADMSG;
+		offset += function->jited_len;
+		relocation += function->jit_reloc_cnt;
+		exception += function->aux->num_exentries;
+	}
+	if (offset != header->jited_bytes ||
+	    header->relocation_count != relocation ||
+	    header->exception_count != exception)
 		return -EBADMSG;
 
-	/* the tables it will be placed with */
-	if (header->relocation_count != prog->jit_reloc_cnt ||
-	    header->exception_count != prog->aux->num_exentries)
-		return -EBADMSG;
+	/* the tables it will be placed with, likewise per function */
 	relocations = artifact + translated_end;
 	error = ebpfos_jit_artifact_digest(relocations, relocations_bytes,
 					   header->relocations_sha256);
 	if (error)
 		return error;
-	for (index = 0; index < header->relocation_count; index++)
-		if (memcmp(&relocations[index], &prog->jit_relocs[index],
-			   sizeof(*relocations)))
-			return -EBADMSG;
 	exceptions = (const void *)relocations + relocations_bytes;
 	error = ebpfos_jit_artifact_digest(exceptions, exceptions_bytes,
 					   header->exceptions_sha256);
 	if (error)
 		return error;
-	for (index = 0; index < header->exception_count; index++) {
-		const struct exception_table_entry *live =
-			&prog->aux->extable[index];
-		const u8 *faulting = (const u8 *)&live->insn + live->insn;
+	for (index = 0, relocation = 0, exception = 0;
+	     index < header->function_count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		const u8 *function_entry = (const u8 *)function->bpf_func;
+		u32 entry_index;
 
-		if (exceptions[index].insn_offset != (u32)(faulting - entry) ||
-		    exceptions[index].fixup != live->fixup ||
-		    exceptions[index].data != live->data ||
-		    exceptions[index].function_index)
-			return -EBADMSG;
+		for (entry_index = 0; entry_index < function->jit_reloc_cnt;
+		     entry_index++, relocation++) {
+			struct bpf_jit_reloc expected =
+				function->jit_relocs[entry_index];
+
+			expected.function_index = index;
+			if (memcmp(&relocations[relocation], &expected,
+				   sizeof(expected)))
+				return -EBADMSG;
+		}
+		for (entry_index = 0;
+		     entry_index < function->aux->num_exentries;
+		     entry_index++, exception++) {
+			const struct exception_table_entry *live =
+				&function->aux->extable[entry_index];
+			const u8 *faulting = (const u8 *)&live->insn + live->insn;
+
+			if (exceptions[exception].insn_offset !=
+				    (u32)(faulting - function_entry) ||
+			    exceptions[exception].fixup != live->fixup ||
+			    exceptions[exception].data != live->data ||
+			    exceptions[exception].function_index != index)
+				return -EBADMSG;
+		}
 	}
 	return 0;
 }
@@ -185,14 +245,67 @@ static void ebpfos_jit_place_fill(void *area, unsigned int size)
 	memset(area, 0xcc, size);
 }
 
+struct ebpfos_jit_placed_function {
+	struct bpf_binary_header *header;
+	struct bpf_binary_header *rw_header;
+	u8 *image;
+	u8 *rw_image;
+	struct exception_table_entry *extable;
+	bpf_func_t saved_func;
+	struct exception_table_entry *saved_extable;
+};
+
+struct ebpfos_jit_placement {
+	struct ebpfos_jit_placed_function *functions;
+	u32 count;
+};
+
+static void ebpfos_jit_place_release(struct ebpfos_jit_placement *placement)
+{
+	u32 index;
+
+	for (index = 0; index < placement->count; index++) {
+		struct ebpfos_jit_placed_function *function =
+			&placement->functions[index];
+
+		if (function->header)
+			bpf_jit_binary_pack_free(function->header,
+						 function->rw_header);
+	}
+	kfree(placement->functions);
+	memset(placement, 0, sizeof(*placement));
+}
+
+/* Where a function's code ended up, for an address that pointed into it. */
+static const u8 *ebpfos_jit_place_moved(struct bpf_prog *prog,
+					const struct ebpfos_jit_placement *placement,
+					u64 address)
+{
+	u32 index;
+
+	for (index = 0; index < placement->count; index++) {
+		const struct bpf_prog *function =
+			ebpfos_jit_place_function(prog, index);
+		u64 start = (u64)(unsigned long)function->bpf_func;
+
+		if (address >= start && address < start + function->jited_len)
+			return placement->functions[index].image +
+			       (address - start);
+	}
+	return NULL;
+}
+
 /* Rebind one recorded operand for the move. An operand whose value is an
  * address in this kernel keeps that value; what changes is every displacement
  * whose site or target moved.
  */
-static int ebpfos_jit_place_reloc(u8 *rw_image, const u8 *source_entry,
+static int ebpfos_jit_place_reloc(struct bpf_prog *prog,
+				  const struct ebpfos_jit_placement *placement,
+				  u8 *rw_image, const u8 *source_entry,
 				  const u8 *placed_entry, u32 jited_len,
 				  const struct bpf_jit_reloc *reloc)
 {
+	const u8 *moved;
 	const u8 *source_site;
 	const u8 *placed_site;
 	s64 target;
@@ -226,10 +339,12 @@ static int ebpfos_jit_place_reloc(u8 *rw_image, const u8 *source_entry,
 	target = (s64)(unsigned long)source_site + 4 + stored;
 	if (target != (s64)reloc->value)
 		return -EBADFD;
-	if (target >= (s64)(unsigned long)source_entry &&
-	    target < (s64)(unsigned long)source_entry + jited_len)
-		/* The target moved with the code. */
-		target += placed_entry - source_entry;
+	/* A target inside any of the program's own functions moved with it; a
+	 * target outside them is kernel text and stays where it is.
+	 */
+	moved = ebpfos_jit_place_moved(prog, placement, (u64)target);
+	if (moved)
+		target = (s64)(unsigned long)moved;
 	displacement = target - ((s64)(unsigned long)placed_site + 4);
 	if (displacement < S32_MIN || displacement > S32_MAX)
 		return -ERANGE;
@@ -262,71 +377,81 @@ static void ebpfos_jit_place_extable(struct exception_table_entry *placed_table,
 	}
 }
 
-static bool ebpfos_jit_place_supported(const struct bpf_prog *prog)
-{
-	return prog->jited && prog->jited_len && prog->bpf_func &&
-	       !prog->aux->func_cnt && !prog->jit_reloc_incomplete &&
-	       !bpf_prog_was_classic(prog);
-}
-
-struct ebpfos_jit_placement {
-	struct bpf_binary_header *header;
-	struct bpf_binary_header *rw_header;
-	u8 *image;
-	u8 *rw_image;
-	struct exception_table_entry *extable;
-	u32 image_bytes;
-};
-
-static void ebpfos_jit_place_release(struct ebpfos_jit_placement *placement)
-{
-	if (placement->header)
-		bpf_jit_binary_pack_free(placement->header, placement->rw_header);
-	memset(placement, 0, sizeof(*placement));
-}
-
 static int ebpfos_jit_place_build(struct bpf_prog *prog,
 				  struct ebpfos_jit_placement *placement)
 {
 	u32 align = __alignof__(struct exception_table_entry);
-	u32 exentries = prog->aux->num_exentries;
-	const u8 *source_entry = (const u8 *)prog->bpf_func;
-	u32 table_offset = roundup(prog->jited_len, align);
-	struct exception_table_entry *rw_table = NULL;
-	u32 total = table_offset + exentries * sizeof(*rw_table);
-	u32 index;
+	u32 count = ebpfos_jit_place_count(prog);
+	u32 index, entry;
 	int error;
 
 	memset(placement, 0, sizeof(*placement));
-	placement->header = bpf_jit_binary_pack_alloc(total, &placement->image,
-						      align,
-						      &placement->rw_header,
-						      &placement->rw_image,
-						      ebpfos_jit_place_fill,
-						      false);
-	if (!placement->header)
+	placement->functions = kcalloc(count, sizeof(*placement->functions),
+				       GFP_KERNEL);
+	if (!placement->functions)
 		return -ENOMEM;
-	placement->image_bytes = total;
-	memcpy(placement->rw_image, source_entry, prog->jited_len);
-	for (index = 0; index < prog->jit_reloc_cnt; index++) {
-		error = ebpfos_jit_place_reloc(placement->rw_image, source_entry,
-					       placement->image, prog->jited_len,
-					       &prog->jit_relocs[index]);
+	placement->count = count;
+
+	/* Allocate and copy every function first: a call between two of them
+	 * cannot be rebound until both have addresses.
+	 */
+	for (index = 0; index < count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *placed =
+			&placement->functions[index];
+		u32 exentries = function->aux->num_exentries;
+		u32 table_offset = roundup(function->jited_len, align);
+		u32 total = table_offset +
+			exentries * sizeof(struct exception_table_entry);
+
+		placed->header = bpf_jit_binary_pack_alloc(total, &placed->image,
+							   align,
+							   &placed->rw_header,
+							   &placed->rw_image,
+							   ebpfos_jit_place_fill,
+							   false);
+		if (!placed->header) {
+			error = -ENOMEM;
+			goto out_free;
+		}
+		memcpy(placed->rw_image, (const u8 *)function->bpf_func,
+		       function->jited_len);
+		if (exentries)
+			placed->extable = (void *)placed->image + table_offset;
+	}
+
+	for (index = 0; index < count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *placed =
+			&placement->functions[index];
+		const u8 *source_entry = (const u8 *)function->bpf_func;
+		u32 exentries = function->aux->num_exentries;
+
+		for (entry = 0; entry < function->jit_reloc_cnt; entry++) {
+			error = ebpfos_jit_place_reloc(prog, placement,
+						       placed->rw_image,
+						       source_entry, placed->image,
+						       function->jited_len,
+						       &function->jit_relocs[entry]);
+			if (error)
+				goto out_free;
+		}
+		if (exentries) {
+			u32 table_offset = roundup(function->jited_len, align);
+
+			ebpfos_jit_place_extable(placed->extable,
+						 function->aux->extable,
+						 exentries, source_entry,
+						 placed->image,
+						 (void *)placed->rw_image +
+							 table_offset);
+		}
+		error = bpf_jit_binary_pack_finalize(placed->header,
+						     placed->rw_header);
 		if (error)
 			goto out_free;
+		placed->rw_header = NULL;
 	}
-	if (exentries) {
-		placement->extable = (void *)placement->image + table_offset;
-		rw_table = (void *)placement->rw_image + table_offset;
-		ebpfos_jit_place_extable(placement->extable, prog->aux->extable,
-					 exentries, source_entry,
-					 placement->image, rw_table);
-	}
-	error = bpf_jit_binary_pack_finalize(placement->header,
-					     placement->rw_header);
-	if (error)
-		goto out_free;
-	placement->rw_header = NULL;
 	return 0;
 
 out_free:
@@ -334,7 +459,7 @@ out_free:
 	return error;
 }
 
-/* Point the program at an image and let fixup lookup find it there.
+/* Point a program at an image and let fixup lookup find it there.
  *
  * bpf_ksym_del() unlinks with list_del_rcu(), which deliberately leaves the
  * node's forward pointer intact so a concurrent reader can finish walking. The
@@ -353,19 +478,33 @@ static void ebpfos_jit_place_resymbolise(struct bpf_prog *prog, bpf_func_t entry
 	bpf_prog_kallsyms_add(prog);
 }
 
-/* Swap the program onto the placed image, run it once from there, and put it
- * back. The program's maps, arena and reference counts are its own throughout,
- * so what is measured is the placed bytes and nothing else.
+/* Swap every function of the program onto its placed image, run it once from
+ * there, and put them all back. The program's maps, arena and reference counts
+ * are its own throughout, so what is measured is the placed bytes and nothing
+ * else.
  */
 static void ebpfos_jit_place_run(struct bpf_prog *prog,
 				 struct ebpfos_jit_placement *placement,
 				 void *context, u32 *retval)
 {
-	struct exception_table_entry *saved_extable = prog->aux->extable;
-	bpf_func_t saved_func = prog->bpf_func;
+	bpf_func_t saved_entry = prog->bpf_func;
+	u32 index;
 
-	ebpfos_jit_place_resymbolise(prog, (bpf_func_t)placement->image,
-				     placement->extable);
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *placed =
+			&placement->functions[index];
+
+		placed->saved_func = function->bpf_func;
+		placed->saved_extable = function->aux->extable;
+		ebpfos_jit_place_resymbolise(function,
+					     (bpf_func_t)placed->image,
+					     placed->extable);
+	}
+	/* A split program enters through its first function; an unsplit one is
+	 * that function.
+	 */
+	prog->bpf_func = (bpf_func_t)placement->functions[0].image;
 
 	migrate_disable();
 	rcu_read_lock_trace();
@@ -373,7 +512,15 @@ static void ebpfos_jit_place_run(struct bpf_prog *prog,
 	rcu_read_unlock_trace();
 	migrate_enable();
 
-	ebpfos_jit_place_resymbolise(prog, saved_func, saved_extable);
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *placed =
+			&placement->functions[index];
+
+		ebpfos_jit_place_resymbolise(function, placed->saved_func,
+					     placed->saved_extable);
+	}
+	prog->bpf_func = saved_entry;
 }
 
 long ebpfos_jit_place_ioctl(void __user *argp)
@@ -383,6 +530,7 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 	struct bpf_prog *prog;
 	void *context = NULL;
 	u32 retval = 0;
+	u32 index;
 	int error;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -456,10 +604,20 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 	error = ebpfos_jit_place_build(prog, &placement);
 	if (!error) {
 		ebpfos_jit_place_run(prog, &placement, context, &retval);
-		request.placed_address = (u64)(unsigned long)placement.image;
-		request.jited_bytes = prog->jited_len;
-		request.relocations = prog->jit_reloc_cnt;
-		request.exentries = prog->aux->num_exentries;
+		request.placed_address =
+			(u64)(unsigned long)placement.functions[0].image;
+		request.jited_bytes = 0;
+		request.relocations = 0;
+		request.exentries = 0;
+		for (index = 0; index < placement.count; index++) {
+			struct bpf_prog *function =
+				ebpfos_jit_place_function(prog, index);
+
+			request.jited_bytes += function->jited_len;
+			request.relocations += function->jit_reloc_cnt;
+			request.exentries += function->aux->num_exentries;
+		}
+		request.functions = placement.count;
 		request.retval = retval;
 		ebpfos_jit_place_release(&placement);
 		request.source_address = (u64)(unsigned long)prog->bpf_func;

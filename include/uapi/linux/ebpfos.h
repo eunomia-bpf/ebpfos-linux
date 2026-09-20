@@ -297,7 +297,8 @@ struct ebpfos_ioc_jit_place {
 	__u32 relocations;
 	__u32 exentries;
 	__u32 retval;
-	__u64 reserved;
+	__u32 functions;
+	__u32 reserved;
 };
 
 #define EBPFOS_IOC_POLICY_ACTIVATE \
