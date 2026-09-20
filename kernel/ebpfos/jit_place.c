@@ -23,6 +23,7 @@
 #include <linux/uaccess.h>
 #include <asm/extable.h>
 #include <crypto/sha2.h>
+#include <linux/ktime.h>
 
 #define EBPFOS_JIT_PLACE_MAX_CONTEXT 4096
 
@@ -459,23 +460,42 @@ out_free:
 	return error;
 }
 
-/* Point a program at an image and let fixup lookup find it there.
+/* Point every function of the program at an image and let fixup lookup find
+ * them there.
  *
  * bpf_ksym_del() unlinks with list_del_rcu(), which deliberately leaves the
  * node's forward pointer intact so a concurrent reader can finish walking. The
  * node therefore cannot be reused until those readers are gone, and re-adding it
- * before that is what bpf_ksym_add()'s warning is about. Waiting for the grace
- * period and reinitialising the node is what makes a second registration legal.
+ * before that is what bpf_ksym_add()'s warning is about. One grace period covers
+ * the whole forest, so the symbols come out first and go back in afterwards
+ * rather than paying for a wait per function.
  */
-static void ebpfos_jit_place_resymbolise(struct bpf_prog *prog, bpf_func_t entry,
-					 struct exception_table_entry *extable)
+static void ebpfos_jit_place_resymbolise(struct bpf_prog *prog,
+					 struct ebpfos_jit_placement *placement,
+					 bool placed)
 {
-	bpf_prog_kallsyms_del(prog);
+	u32 index;
+
+	for (index = 0; index < placement->count; index++)
+		bpf_prog_kallsyms_del(ebpfos_jit_place_function(prog, index));
 	synchronize_rcu();
-	INIT_LIST_HEAD(&prog->aux->ksym.lnode);
-	prog->bpf_func = entry;
-	prog->aux->extable = extable;
-	bpf_prog_kallsyms_add(prog);
+	for (index = 0; index < placement->count; index++) {
+		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
+		struct ebpfos_jit_placed_function *slot =
+			&placement->functions[index];
+
+		INIT_LIST_HEAD(&function->aux->ksym.lnode);
+		if (placed) {
+			slot->saved_func = function->bpf_func;
+			slot->saved_extable = function->aux->extable;
+			function->bpf_func = (bpf_func_t)slot->image;
+			function->aux->extable = slot->extable;
+		} else {
+			function->bpf_func = slot->saved_func;
+			function->aux->extable = slot->saved_extable;
+		}
+		bpf_prog_kallsyms_add(function);
+	}
 }
 
 /* Swap every function of the program onto its placed image, run it once from
@@ -488,19 +508,8 @@ static void ebpfos_jit_place_run(struct bpf_prog *prog,
 				 void *context, u32 *retval)
 {
 	bpf_func_t saved_entry = prog->bpf_func;
-	u32 index;
 
-	for (index = 0; index < placement->count; index++) {
-		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
-		struct ebpfos_jit_placed_function *placed =
-			&placement->functions[index];
-
-		placed->saved_func = function->bpf_func;
-		placed->saved_extable = function->aux->extable;
-		ebpfos_jit_place_resymbolise(function,
-					     (bpf_func_t)placed->image,
-					     placed->extable);
-	}
+	ebpfos_jit_place_resymbolise(prog, placement, true);
 	/* A split program enters through its first function; an unsplit one is
 	 * that function.
 	 */
@@ -512,14 +521,7 @@ static void ebpfos_jit_place_run(struct bpf_prog *prog,
 	rcu_read_unlock_trace();
 	migrate_enable();
 
-	for (index = 0; index < placement->count; index++) {
-		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
-		struct ebpfos_jit_placed_function *placed =
-			&placement->functions[index];
-
-		ebpfos_jit_place_resymbolise(function, placed->saved_func,
-					     placed->saved_extable);
-	}
+	ebpfos_jit_place_resymbolise(prog, placement, false);
 	prog->bpf_func = saved_entry;
 }
 
@@ -531,6 +533,7 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 	void *context = NULL;
 	u32 retval = 0;
 	u32 index;
+	ktime_t started;
 	int error;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -601,9 +604,11 @@ long ebpfos_jit_place_ioctl(void __user *argp)
 		}
 	}
 	mutex_lock(&ebpfos_jit_place_lock);
+	started = ktime_get();
 	error = ebpfos_jit_place_build(prog, &placement);
 	if (!error) {
 		ebpfos_jit_place_run(prog, &placement, context, &retval);
+		request.place_ns = ktime_to_ns(ktime_sub(ktime_get(), started));
 		request.placed_address =
 			(u64)(unsigned long)placement.functions[0].image;
 		request.jited_bytes = 0;

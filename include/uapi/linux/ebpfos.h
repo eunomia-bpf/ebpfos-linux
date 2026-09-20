@@ -299,6 +299,10 @@ struct ebpfos_ioc_jit_place {
 	__u32 retval;
 	__u32 functions;
 	__u32 reserved;
+	/* How long the placement itself took: allocation, rebinding, fixups and
+	 * the two symbol swaps, but not the run.
+	 */
+	__u64 place_ns;
 };
 
 #define EBPFOS_IOC_POLICY_ACTIVATE \
