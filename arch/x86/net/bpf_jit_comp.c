@@ -2779,7 +2779,9 @@ populate_extable:
 			break;
 		}
 
-		case BPF_JMP | BPF_TAIL_CALL:
+		case BPF_JMP | BPF_TAIL_CALL: {
+			u8 *tail_call_site = prog;
+
 			if (imm32)
 				emit_bpf_tail_call_direct(bpf_prog,
 							  &bpf_prog->aux->poke_tab[imm32 - 1],
@@ -2795,7 +2797,17 @@ populate_extable:
 							    stack_depth,
 							    ip,
 							    ctx);
+			/* A tail call carries the program array, the counter and
+			 * the entry it jumps to, all as addresses of this
+			 * kernel, and none of them is described here. Say so, so
+			 * a placement refuses the image instead of moving bytes
+			 * nothing describes.
+			 */
+			jit_note_reloc(ctx, proglen, temp, tail_call_site,
+				       BPF_JIT_RELOC_UNDESCRIBED,
+				       (u16)(prog - tail_call_site), imm32, i);
 			break;
+		}
 
 			/* cond jump */
 		case BPF_JMP | BPF_JEQ | BPF_X:
