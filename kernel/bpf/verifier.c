@@ -3676,6 +3676,37 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	return 0;
 }
 
+static int check_btf_subprog_layout_before_kop_lowering(struct bpf_verifier_env *env)
+{
+	struct bpf_prog_aux *aux = env->prog->aux;
+	u32 i;
+
+	if (!aux->func_info)
+		return 0;
+	if (aux->func_info_cnt != env->subprog_cnt) {
+		verbose(env, "number of funcs in func_info doesn't match number of subprogs\n");
+		return -EINVAL;
+	}
+	for (i = 0; i < aux->func_info_cnt; i++) {
+		if (aux->func_info[i].insn_off != env->subprog_info[i].start) {
+			verbose(env, "func_info BTF section doesn't match subprog layout in BPF program\n");
+			return -EINVAL;
+		}
+	}
+	return 0;
+}
+
+static void sync_btf_subprog_layout_after_kop_lowering(struct bpf_verifier_env *env)
+{
+	struct bpf_prog_aux *aux = env->prog->aux;
+	u32 i;
+
+	if (!aux->func_info)
+		return;
+	for (i = 0; i < aux->func_info_cnt; i++)
+		aux->func_info[i].insn_off = env->subprog_info[i].start;
+}
+
 static int check_subprogs(struct bpf_verifier_env *env)
 {
 	int i, subprog_start, subprog_end, off, cur_subprog = 0;
@@ -20777,10 +20808,15 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	ret = add_subprog_and_kfunc(env);
 	if (ret < 0)
 		goto skip_full_check;
+	ret = check_btf_subprog_layout_before_kop_lowering(env);
+	if (ret < 0)
+		goto skip_full_check;
 
 	ret = lower_kop_proof_regions(env);
 	if (ret < 0)
 		goto skip_full_check;
+	if (env->kop_call_cnt)
+		sync_btf_subprog_layout_after_kop_lowering(env);
 
 	env->explored_states = kvzalloc_objs(struct list_head,
 					     state_htab_size(env),
