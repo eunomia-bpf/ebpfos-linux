@@ -576,7 +576,8 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 
 	if (!call || call_data__sz < sizeof(*call) ||
 	    call->version != EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION ||
-	    call->flags & ~EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH ||
+	    (call->flags & ~(EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH |
+			     EBPFOS_EXECUTOR_CALL_F_CONTINUATION)) ||
 	    !call->method_id || !call->object_id || !call->role_type ||
 	    !call->context_size ||
 	    call->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
@@ -656,30 +657,760 @@ static bool ebpfos_executor_provider_supported(const struct bpf_prog *provider)
 	       provider->type == BPF_PROG_TYPE_SYSCALL && provider->sleepable;
 }
 
-static int ebpfos_executor_provider_run(struct ebpfos_binding *binding,
-		struct bpf_prog *provider, void *context, u32 *status)
+/*
+ * Run one admitted provider.  The lease is the caller's: an ordinary call takes
+ * it here for the duration of this single invocation, while a continuation has
+ * already taken it at session open and must not take it again, because a second
+ * enter() would be a second lease that no retirement accounting expects.  The
+ * two wrappers share this body so both paths run the provider identically.
+ */
+static int ebpfos_executor_provider_run_leased(struct bpf_prog *provider,
+		void *context, u32 *status)
 {
 	struct bpf_tramp_run_ctx run_ctx = {};
 	u64 start;
-	int error;
 
-	if (!binding || !ebpfos_executor_provider_supported(provider) ||
-	    !context || !status)
+	if (!ebpfos_executor_provider_supported(provider) || !context || !status)
 		return -EOPNOTSUPP;
 	start = __bpf_prog_enter_sleepable_recur(provider, &run_ctx);
 	if (!start) {
 		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
 		return -EBUSY;
 	}
-	error = ebpfos_binding_invocation_enter(binding);
-	if (error) {
-		__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
-		return error;
-	}
 	*status = bpf_prog_run(provider, context);
 	__bpf_prog_exit_sleepable_recur(provider, 0, &run_ctx);
-	ebpfos_binding_invocation_exit(binding);
 	return 0;
+}
+
+static int ebpfos_executor_provider_run(struct ebpfos_binding *binding,
+		struct bpf_prog *provider, void *context, u32 *status)
+{
+	int error;
+
+	/*
+	 * A provider that cannot run must not consume an invocation entry: the
+	 * lease is taken only once the call is known to be dispatchable, so a
+	 * refused provider leaves the binding's counters exactly as it found
+	 * them.
+	 */
+	if (!binding || !ebpfos_executor_provider_supported(provider) ||
+	    !context || !status)
+		return -EOPNOTSUPP;
+	error = ebpfos_binding_invocation_enter(binding);
+	if (error)
+		return error;
+	error = ebpfos_executor_provider_run_leased(provider, context, status);
+	ebpfos_binding_invocation_exit(binding);
+	return error;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Private continuation session.
+ * ---------------------------------------------------------------------------
+ *
+ * A continuation is one logical operation spanning several independently
+ * verified component programs.  The session that drives it is a value of one
+ * top-level dispatcher call: never published, never reachable from a program or
+ * from userspace, and holding no handle a caller could replay.  That is
+ * deliberate.  A session a caller could name and re-enter would need a
+ * registry, a lookup and a generation check, and each of those is attack
+ * surface for forgeable authority; a value that lives and dies inside one call
+ * has none.
+ *
+ * What the session does own is the epoch pin.  An ordinary call resolves one
+ * role and runs it, and between two such calls publication may replace the
+ * bundle and retire the bindings the first call used.  For a continuation that
+ * is wrong: the operation may already have produced visible effects, so it must
+ * finish wholly on the bundle it started on.  The session therefore acquires,
+ * once and atomically under the root lock, a reference and an invocation lease
+ * for every distinct binding it will need -- the entry binding included --
+ * while the active bundle still matches the epoch the call named.  Those leases
+ * are what make retirement wait: ebpfos_binding_retire() sets
+ * EBPFOS_BINDING_RETIRED and a later enter() fails, but a lease taken here was
+ * already counted, so the pinned provider stays runnable to the end.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * One pinned step: the binding, its snapshot, and the authenticated edge that
+ * authorizes reaching it.
+ */
+struct ebpfos_continuation_step {
+	struct ebpfos_binding *binding;
+	struct ebpfos_executor_root_role_snapshot snapshot;
+	struct ebpfos_continuation_edge edge;
+	/* The lease is taken once per distinct binding, not once per edge. */
+	bool lease_held;
+	/*
+	 * The import this step was authenticated against, kept from acquisition
+	 * so the discriminator can be re-checked on the frame the provider
+	 * actually receives without re-entering admission.  Re-validating
+	 * against the same frozen import is the same decision, made once.
+	 */
+	struct ebpfos_executor_import import;
+	/* The frame this step was addressed with, for its discriminator check. */
+	const struct ebpfos_component_call_frame *frame;
+};
+
+/*
+ * READY: the next ordinal may be claimed.
+ * EXECUTING: exactly one claim is in flight.
+ * CONSUMED: the chain reached a terminal disposition.
+ * POISONED: a structural or provider failure made the session unusable.  A
+ *           poisoned session is never resumed: the operation may have produced
+ *           visible effects, so continuing it would make those ambiguous.
+ */
+enum ebpfos_continuation_state {
+	EBPFOS_SESSION_READY = 1,
+	EBPFOS_SESSION_EXECUTING = 2,
+	EBPFOS_SESSION_CONSUMED = 3,
+	EBPFOS_SESSION_POISONED = 4,
+};
+
+struct ebpfos_continuation_session {
+	u64 object_id;
+	u64 epoch;
+	u8 component_id[16];
+	/*
+	 * The session's state, as one atomic word and nothing else.  A second,
+	 * plain mirror would be a place for two writers to disagree, so the
+	 * atomic word is the only source of truth and every transition is a
+	 * single cmpxchg on it.
+	 */
+	atomic_t state;
+	u32 step_count;
+	struct ebpfos_continuation_step *steps;
+	/*
+	 * The generation is the chain's own counter, distinct from the epoch and
+	 * from any ordinal: it is claimed with the ordinal so exactly one
+	 * concurrent claimant can win, and it advances only after a
+	 * structurally valid step completion.
+	 */
+	atomic64_t generation;
+	u8 boundary_digest[32];
+};
+
+/*
+ * Release every lease and reference the acquisition took, each exactly once.
+ * The inverse of acquisition, in reverse order, so a session torn down for any
+ * reason gives back exactly what it took.
+ */
+static bool ebpfos_continuation_nonzero(const u8 *data, size_t size)
+{
+	return memchr_inv(data, 0, size) != NULL;
+}
+
+/*
+ * Make a session unusable, once and atomically.
+ *
+ * Every structural or provider failure funnels through here, so there is exactly
+ * one place a session becomes poisoned and exactly one transition to reason
+ * about.  A session that is already CONSUMED stays consumed: a terminal
+ * completion is a different outcome from a failure, and the caller must be able
+ * to tell which happened.
+ */
+static void ebpfos_continuation_poison(struct ebpfos_continuation_session *s)
+{
+	atomic_cmpxchg(&s->state, EBPFOS_SESSION_READY,
+		       EBPFOS_SESSION_POISONED);
+	atomic_cmpxchg(&s->state, EBPFOS_SESSION_EXECUTING,
+		       EBPFOS_SESSION_POISONED);
+}
+
+static u32 ebpfos_continuation_state(
+	const struct ebpfos_continuation_session *s)
+{
+	return (u32)atomic_read(&s->state);
+}
+
+static void ebpfos_continuation_release(struct ebpfos_continuation_session *s)
+{
+	u32 index;
+
+	if (!s || !s->steps)
+		return;
+	for (index = 0; index < s->step_count; index++) {
+		if (!s->steps[index].lease_held)
+			continue;
+		ebpfos_binding_invocation_exit(s->steps[index].binding);
+		ebpfos_binding_put(s->steps[index].binding);
+		s->steps[index].lease_held = false;
+		s->steps[index].binding = NULL;
+	}
+}
+
+/*
+ * Resolve and lease every step of the chain, atomically, from one bundle.
+ *
+ * The lock is taken exactly once.  Under it the active pointer, object identity
+ * and epoch are verified, every edge is resolved from *that* immutable bundle,
+ * and a reference plus one invocation lease is taken for each distinct target
+ * binding.  Two properties follow, and both are the point:
+ *
+ *   - Deduplication: several edges composed from one component resolve to one
+ *     binding, and that binding is leased once.  Leasing it per edge would both
+ *     violate "one lease per distinct binding" and burn the invocation counter.
+ *   - Atomicity against publication: publication swaps the active pointer and
+ *     retires removed bindings under this same lock, so either every lease is
+ *     acquired here first and the chain runs wholly on the old epoch, or
+ *     publication won and this open fails stale.  A mixed-epoch chain is not
+ *     representable.  After this returns successfully the active root is never
+ *     consulted again.
+ */
+static int ebpfos_continuation_acquire(
+	struct bpf_prog_aux *aux, struct ebpfos_continuation_session *session,
+	u32 edge_count)
+{
+	struct ebpfos_executor_root_bundle *bundle;
+	unsigned long flags;
+	u32 index, prior;
+	int error = 0;
+
+	spin_lock_irqsave(&ebpfos_executor_root.lock, flags);
+	bundle = rcu_dereference_protected(
+		ebpfos_executor_root.active,
+		lockdep_is_held(&ebpfos_executor_root.lock));
+	if (!bundle || bundle->object_id != session->object_id ||
+	    bundle->epoch != session->epoch) {
+		error = -ESTALE;
+		goto out;
+	}
+	for (index = 0; index < edge_count; index++) {
+		struct ebpfos_continuation_step *step = &session->steps[index];
+		const struct ebpfos_continuation_edge *edge = &step->edge;
+		const struct ebpfos_component_desc_v1 *descriptor;
+		struct ebpfos_executor_import import = {};
+		struct ebpfos_binding *binding = NULL;
+		bool reused = false;
+		u32 role;
+
+		for (role = 0; role < bundle->role_count; role++) {
+			if (bundle->roles[role].snapshot.role_type <
+			    edge->destination_role_type)
+				continue;
+			if (bundle->roles[role].snapshot.role_type !=
+			    edge->destination_role_type)
+				break;
+			binding = bundle->roles[role].binding;
+			step->snapshot = bundle->roles[role].snapshot;
+			break;
+		}
+		if (!binding || step->snapshot.role_type !=
+				edge->destination_role_type ||
+		    !step->snapshot.prog_id) {
+			error = -ENOENT;
+			goto out;
+		}
+		descriptor = ebpfos_binding_descriptor(binding);
+		if (!descriptor || !ebpfos_executor_provider_supported(
+			    ebpfos_binding_prog(binding))) {
+			error = -EOPNOTSUPP;
+			goto out;
+		}
+		if (ebpfos_binding_prog(binding)->aux == aux) {
+			error = -ELOOP;
+			goto out;
+		}
+		/*
+		 * The destination is authenticated against the caller's frozen
+		 * imports and the pinned provider, exactly as an ordinary call
+		 * is: an edge can reach nowhere a direct call could not.  The
+		 * content and contract digests the edge carries must be the ones
+		 * that provider actually implements.
+		 */
+		error = ebpfos_admission_import_validate(
+			aux, session->object_id, edge->destination_role_type,
+			edge->destination_method_id, descriptor,
+			&step->snapshot, &import);
+		if (error)
+			goto out;
+		/*
+		 * The dispatcher hands every continuation step the same fixed
+		 * component frame, so a step whose import was admitted for a
+		 * different context ABI cannot be driven by it.  The ordinary
+		 * call path checks this against the entry provider; a chained
+		 * step would otherwise skip the check entirely and receive a
+		 * frame shaped for a different contract.  Refused before the
+		 * import is cached or its lease taken.
+		 */
+		if (import.context_size !=
+		    sizeof(struct ebpfos_component_call_frame)) {
+			error = -EMSGSIZE;
+			goto out;
+		}
+		step->import = import;
+		if (memcmp(edge->destination_contract_digest,
+			   import.contract_digest, SHA256_DIGEST_SIZE) ||
+		    memcmp(edge->destination_content_digest,
+			   step->snapshot.content_digest, SHA256_DIGEST_SIZE) ||
+		    memcmp(edge->destination_component_id,
+			   descriptor->component_id,
+			   sizeof(edge->destination_component_id))) {
+			error = -EPROTOTYPE;
+			goto out;
+		}
+		/*
+		 * Two edges may resolve to one binding.  Every step records the
+		 * pointer so the driver can run it, but only one step owns the
+		 * lease and the extra reference: a second enter() would be a
+		 * second lease no retirement accounting expects, and a second
+		 * get() would leak a reference on teardown.
+		 */
+		for (prior = 0; prior < index; prior++)
+			reused |= session->steps[prior].binding == binding;
+		step->binding = binding;
+		if (reused)
+			continue;
+		error = ebpfos_binding_invocation_enter(binding);
+		if (error) {
+			step->binding = NULL;
+			goto out;
+		}
+		ebpfos_binding_get(binding);
+		step->lease_held = true;
+	}
+out:
+	spin_unlock_irqrestore(&ebpfos_executor_root.lock, flags);
+	return error;
+}
+
+/*
+ * Claim the next transition.
+ *
+ * The session is confined to one dispatcher call and driven by one loop, so
+ * there is no second thread to race; the claim is a single atomic
+ * READY -> EXECUTING transition anyway, so the invariant does not depend on that
+ * confinement staying true.  The claim captures the generation it will execute,
+ * and the generation advances only on a valid completion, so an abandoned step
+ * leaves the chain where it was rather than looking like a step that ran.
+ */
+static int ebpfos_continuation_claim(
+	struct ebpfos_continuation_session *session,
+	struct ebpfos_continuation_step **step, u64 *generation)
+{
+	u64 ordinal;
+
+	if (!session || !step || !generation || !session->steps)
+		return -EINVAL;
+	/* One compare-and-swap is the whole claim: exactly one caller wins it. */
+	if (atomic_cmpxchg(&session->state, EBPFOS_SESSION_READY,
+			   EBPFOS_SESSION_EXECUTING) !=
+	    EBPFOS_SESSION_READY)
+		return ebpfos_continuation_state(session) ==
+			       EBPFOS_SESSION_EXECUTING ? -EBUSY : -EALREADY;
+	ordinal = atomic64_read(&session->generation);
+	if (ordinal >= session->step_count) {
+		ebpfos_continuation_poison(session);
+		return -EPROTOTYPE;
+	}
+	*step = &session->steps[(u32)ordinal];
+	*generation = ordinal;
+	return 0;
+}
+
+/*
+ * Complete a claimed step.  The generation advances only after a structurally
+ * valid provider response, and a terminal disposition consumes the chain.
+ */
+static int ebpfos_continuation_complete(
+	struct ebpfos_continuation_session *session, u64 generation,
+	u32 disposition)
+{
+	switch (disposition) {
+	case EBPFOS_CONTINUATION_DISPOSITION_CONTINUE:
+		/*
+		 * A continue past the last authenticated edge has nowhere to go,
+		 * so the chain is poisoned rather than silently ending: the
+		 * operation is incomplete and cannot be resumed.
+		 */
+		if (generation + 1 >= session->step_count) {
+			ebpfos_continuation_poison(session);
+			return -EPROTOTYPE;
+		}
+		atomic64_set(&session->generation, generation + 1);
+		atomic_set(&session->state, EBPFOS_SESSION_READY);
+		return 0;
+	case EBPFOS_CONTINUATION_DISPOSITION_COMPLETE:
+	case EBPFOS_CONTINUATION_DISPOSITION_ERROR:
+		atomic_set(&session->state, EBPFOS_SESSION_CONSUMED);
+		return 0;
+	default:
+		ebpfos_continuation_poison(session);
+		return -EPROTO;
+	}
+}
+
+/*
+ * Whether a provider's response is a complete, well-formed answer for the step
+ * it was given.
+ *
+ * A provider that writes nothing leaves the kernel's own prewritten request in
+ * place, so the marker and the exact size are what distinguish a real answer
+ * from silence.  The echoed ordinal and generation bind the answer to this step,
+ * so a stale or duplicated response names a step that is not running.
+ */
+static bool ebpfos_executor_continuation_response_valid(
+	const struct ebpfos_component_call_frame *frame, u64 ordinal,
+	u64 generation)
+{
+	struct ebpfos_continuation_transition response = {};
+
+	if (frame->output_size != EBPFOS_CONTINUATION_RESPONSE_SIZE)
+		return false;
+	memcpy(&response, frame->output, sizeof(response));
+	if (response.magic != EBPFOS_CONTINUATION_RESPONSE_MAGIC ||
+	    response.response_size != EBPFOS_CONTINUATION_RESPONSE_SIZE ||
+	    response.ordinal != ordinal ||
+	    response.generation != generation ||
+	    response.reserved || response.reserved2)
+		return false;
+	return response.disposition == EBPFOS_CONTINUATION_DISPOSITION_CONTINUE ||
+	       response.disposition == EBPFOS_CONTINUATION_DISPOSITION_COMPLETE ||
+	       response.disposition == EBPFOS_CONTINUATION_DISPOSITION_ERROR;
+}
+
+/*
+ * Apply one import's discriminator rule to a component frame.
+ *
+ * `ebpfos_executor_method_validate()` reads the discriminator out of an
+ * `ebpfos_executor_call`'s trailing context.  A continuation step has no such
+ * call: it has the component frame it just framed.  Rather than fabricate a call
+ * with a flexible array, the same rule is applied to the frame's bytes, so both
+ * paths decide the discriminator identically and neither silently skips it.
+ */
+static int ebpfos_continuation_discriminator_check(
+	const struct ebpfos_component_call_frame *frame, u64 method_id,
+	const struct ebpfos_executor_import *import)
+{
+	const u8 *value;
+	u64 discriminator;
+
+	if (!frame || !import || method_id != import->method_id ||
+	    import->discriminator_offset > EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
+	    import->discriminator_size > EBPFOS_COMPONENT_CALL_CONTEXT_SIZE -
+		import->discriminator_offset)
+		return -EPROTO;
+	value = (const u8 *)frame + import->discriminator_offset;
+	switch (import->discriminator_size) {
+	case 1:
+		discriminator = *value;
+		break;
+	case 2:
+		discriminator = get_unaligned_le16(value);
+		break;
+	case 4:
+		discriminator = get_unaligned_le32(value);
+		break;
+	case 8:
+		discriminator = get_unaligned_le64(value);
+		break;
+	default:
+		return -EPROTO;
+	}
+	return (discriminator & import->discriminator_mask) ==
+		import->discriminator_value ? 0 : -EACCES;
+}
+
+/*
+ * Validate the frame and the request before either is used.
+ *
+ * Everything here is untrusted input.  The context size is checked first because
+ * reading the frame at all is only sound once the admitted context is known to
+ * be a whole frame; the frame's own version, flags, object, epoch and method are
+ * then checked against what the caller was admitted for, so a caller cannot name
+ * one object or method in the call and another in the frame.
+ */
+static int ebpfos_executor_continuation_frame_validate(
+	const struct ebpfos_executor_call *call, u64 epoch,
+	struct ebpfos_component_call_frame *frame,
+	struct ebpfos_continuation_request *request)
+{
+	if (call->context_size != sizeof(*frame))
+		return -EMSGSIZE;
+	if (frame->version != EBPFOS_COMPONENT_CALL_ABI_VERSION ||
+	    frame->flags ||
+	    frame->object_id != call->object_id ||
+	    frame->epoch != epoch ||
+	    frame->method_id != call->method_id ||
+	    frame->input_size != sizeof(*request) ||
+	    frame->output_capacity < EBPFOS_CONTINUATION_RESPONSE_SIZE)
+		return -EINVAL;
+	memcpy(request, frame->input, sizeof(*request));
+	if (request->reserved ||
+	    !ebpfos_continuation_nonzero(request->component_id,
+					 sizeof(request->component_id)) ||
+	    !ebpfos_continuation_nonzero(request->boundary_digest,
+					 sizeof(request->boundary_digest)) ||
+	    (request->requested_disposition !=
+			EBPFOS_CONTINUATION_DISPOSITION_CONTINUE &&
+	     request->requested_disposition !=
+			EBPFOS_CONTINUATION_DISPOSITION_COMPLETE &&
+	     request->requested_disposition !=
+			EBPFOS_CONTINUATION_DISPOSITION_ERROR))
+		return -EINVAL;
+	return 0;
+}
+
+/*
+ * Validate one step's method against the discriminant in the context actually
+ * sent to it.
+ *
+ * The step's import was authenticated at acquisition, but the import only says
+ * which method this step is *allowed* to serve.  A context naming a different
+ * method would make the provider act on one identity while the session believes
+ * another, so the discriminator is re-checked on the frame the provider is about
+ * to receive, using the same rule an ordinary call uses.
+ */
+static int ebpfos_continuation_step_method(
+	struct ebpfos_continuation_step *step)
+{
+	return ebpfos_continuation_discriminator_check(
+		step->frame, step->edge.destination_method_id, &step->import);
+}
+
+/*
+ * Drive one top-level call's continuation.
+ *
+ * The order is the whole point, and it is the reverse of trusting the caller.
+ * The frame and request are validated before either is used.  The first
+ * authenticated edge must then agree with the entry the ordinary call path
+ * already admitted, and the chain must be continuous: every step starts from the
+ * component identity the previous step produced, so edges from unrelated
+ * operations cannot be spliced into one sequence.
+ *
+ * Every provider runs under a frame built for *its* step -- destination object,
+ * epoch, method and the record it is admitted for -- and its discriminator is
+ * re-checked after that framing, so a step cannot be sent a context that names
+ * a different method than the one its import authorized.  A response is
+ * accepted only if the provider produced one.
+ *
+ * Three status layers stay distinct.  A negative return here is a dispatcher or
+ * session failure: routing, epoch, replay, identity, structure.  `*status` is
+ * the program-level result of the last provider that actually entered.  The
+ * frame's `status` and `result` are what that provider's own logic reported, and
+ * are never overwritten to mean something else.
+ */
+/*
+ * Drive the authenticated chain to completion, one pinned step at a time.
+ *
+ * This is the whole execution path of a continuation: claim the next
+ * generation, frame the step, check its discriminator, run its provider, and
+ * validate what that provider reported.  It is a separate function so it can be
+ * exercised end to end with real provider entry rather than only through its
+ * validators, which is where the defects this replaced were hiding.
+ *
+ * Frames are staged in temporary storage and committed only when the step's
+ * provider is about to enter, so a pre-entry refusal leaves the last executed
+ * provider's frame status and result exactly as that provider left them.  The
+ * scalars a step reports are carried into the next step's request, since those
+ * values are the continuation's state.  Identity and status are attributed to a
+ * provider only once it actually ran.
+ */
+static int ebpfos_continuation_drive(
+	struct bpf_prog_aux *aux, struct ebpfos_continuation_session *session,
+	struct ebpfos_component_call_frame *frame, u32 *status, u32 *prog_id)
+{
+	struct ebpfos_continuation_transition response = {};
+	u32 slot;
+	int error;
+
+	(void)aux;
+	*status = 0;
+	/*
+	 * The scalars one step reports are the next step's input, so they are
+	 * carried forward explicitly: only the ordinal, generation and step
+	 * identity are refreshed per iteration, and the values a provider
+	 * validated survive into the request the next provider receives.
+	 */
+	memset(&response, 0, sizeof(response));
+	for (;;) {
+		struct ebpfos_continuation_step *step = NULL;
+		struct bpf_prog *provider;
+		struct ebpfos_component_call_frame staged = {};
+		u32 step_status = 0;
+		u64 generation = 0;
+
+		error = ebpfos_continuation_claim(session, &step, &generation);
+		if (error)
+			break;
+		staged.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+		staged.object_id = session->object_id;
+		staged.epoch = session->epoch;
+		staged.method_id = step->edge.destination_method_id;
+		staged.input_size = sizeof(response);
+		staged.output_capacity = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+		response.ordinal = step->edge.ordinal;
+		response.generation = generation;
+		response.magic = 0;
+		response.response_size = 0;
+		response.disposition = 0;
+		response.transport_kind = step->edge.transport_kind;
+		response.result = 0;
+		response.reserved = 0;
+		response.reserved2 = 0;
+		memcpy(staged.input, &response, sizeof(response));
+		step->frame = &staged;
+		error = ebpfos_continuation_step_method(step);
+		if (error) {
+			ebpfos_continuation_poison(session);
+			break;
+		}
+		provider = ebpfos_binding_prog(step->binding);
+		if (!provider) {
+			ebpfos_continuation_poison(session);
+			error = -ENOENT;
+			break;
+		}
+		/*
+		 * The provider runs against the staged frame, and the live frame
+		 * is written only once the runner confirms the provider actually
+		 * entered.  A pre-entry refusal -- a recursion-busy enter, an
+		 * unsupported provider -- therefore leaves the previous
+		 * provider's frame status, result and output exactly as that
+		 * provider left them.
+		 */
+		error = ebpfos_executor_provider_run_leased(provider, &staged,
+							    &step_status);
+		if (error) {
+			ebpfos_continuation_poison(session);
+			break;
+		}
+		memcpy(frame, &staged, sizeof(*frame));
+		*status = step_status;
+		*prog_id = step->snapshot.prog_id;
+		if (!ebpfos_executor_continuation_response_valid(
+				frame, step->edge.ordinal, generation)) {
+			ebpfos_continuation_poison(session);
+			error = -EPROTO;
+			break;
+		}
+		memcpy(&response, frame->output, sizeof(response));
+		if (response.disposition != step->edge.disposition ||
+		    response.transport_kind != step->edge.transport_kind) {
+			ebpfos_continuation_poison(session);
+			error = -EPROTOTYPE;
+			break;
+		}
+		for (slot = 0; slot < EBPFOS_CONTINUATION_SCALAR_SLOTS; slot++) {
+			u64 limit = step->edge.scalar_limit[slot];
+
+			if (limit ? response.scalar[slot] > limit
+				  : response.scalar[slot] != 0) {
+				error = -ERANGE;
+				break;
+			}
+		}
+		if (error) {
+			ebpfos_continuation_poison(session);
+			break;
+		}
+		error = ebpfos_continuation_complete(session, generation,
+						     response.disposition);
+		if (error)
+			break;
+		if (ebpfos_continuation_state(session) != EBPFOS_SESSION_READY)
+			break;
+	}
+	if (ebpfos_continuation_state(session) == EBPFOS_SESSION_POISONED &&
+	    !error)
+		error = -EPROTO;
+	return error;
+}
+
+static int ebpfos_executor_continuation_call(
+	struct bpf_prog_aux *aux, const struct ebpfos_executor_call *call,
+	u64 epoch, u32 *status, u32 *prog_id)
+{
+	struct ebpfos_component_call_frame *frame = (void *)call->context;
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_continuation_edge edge = {};
+	struct ebpfos_continuation_request request = {};
+	u32 count = 0, index;
+	int error;
+
+	error = ebpfos_executor_continuation_frame_validate(call, epoch, frame,
+							    &request);
+	if (error)
+		return error;
+	error = ebpfos_admission_continuation_count(aux, &count);
+	if (error)
+		return error;
+	/*
+	 * No authenticated edges is a refusal, not an empty success: a caller
+	 * that asks to continue something it never declared must be told so.
+	 */
+	if (!count || request.requested_disposition !=
+			EBPFOS_CONTINUATION_DISPOSITION_CONTINUE)
+		return -EKEYREJECTED;
+	session.steps = kcalloc(count, sizeof(*session.steps), GFP_KERNEL);
+	if (!session.steps)
+		return -ENOMEM;
+	session.object_id = call->object_id;
+	session.epoch = epoch;
+	memcpy(session.component_id, request.component_id,
+	       sizeof(session.component_id));
+	session.step_count = count;
+	memcpy(session.boundary_digest, request.boundary_digest,
+	       sizeof(session.boundary_digest));
+	atomic_set(&session.state, EBPFOS_SESSION_READY);
+	atomic64_set(&session.generation, 0);
+	for (index = 0; index < count; index++) {
+		error = ebpfos_admission_continuation_edge(aux, index, &edge);
+		if (error)
+			goto out_free;
+		if (memcmp(edge.boundary_digest, session.boundary_digest,
+			   sizeof(edge.boundary_digest))) {
+			error = -EPROTOTYPE;
+			goto out_free;
+		}
+		session.steps[index].edge = edge;
+	}
+	/*
+	 * The chain must begin at the component the caller named and be
+	 * continuous thereafter, so a manifest cannot splice unrelated edges.
+	 */
+	if (memcmp(session.steps[0].edge.source_component_id,
+		   session.component_id, sizeof(session.component_id))) {
+		error = -EPROTOTYPE;
+		goto out_free;
+	}
+	for (index = 1; index < count; index++)
+		if (memcmp(session.steps[index].edge.source_component_id,
+			   session.steps[index - 1].edge.destination_component_id,
+			   sizeof(session.steps[index].edge.source_component_id))) {
+			error = -EPROTOTYPE;
+			goto out_free;
+		}
+	/*
+	 * The first destination must be the entry the caller was already
+	 * admitted to, or the chain would start somewhere the ordinary call path
+	 * never validated.  Its disposition must be the one the caller asked
+	 * for, or the request and the manifest disagree about what this call is.
+	 */
+	if (session.steps[0].edge.destination_role_type != call->role_type ||
+	    session.steps[0].edge.destination_method_id != call->method_id ||
+	    session.steps[0].edge.disposition != request.requested_disposition) {
+		error = -EPROTOTYPE;
+		goto out_free;
+	}
+	error = ebpfos_continuation_acquire(aux, &session, count);
+	if (error) {
+		/*
+		 * A partial acquisition must give back what it took, or a
+		 * refused open would strand leases on bindings the caller never
+		 * reached -- including a retired one, which would then never
+		 * become collectable.
+		 */
+		ebpfos_continuation_release(&session);
+		goto out_free;
+	}
+	error = ebpfos_continuation_drive(aux, &session, frame, status,
+					  prog_id);
+	ebpfos_continuation_release(&session);
+out_free:
+	kfree(session.steps);
+	return error;
 }
 
 noinline int bpf_ebpfos_executor_root_call_impl(
@@ -731,9 +1462,40 @@ retry_lookup:
 		error = -EMSGSIZE;
 		goto out_put;
 	}
+	/*
+	 * The discriminator check is not optional on either path: it is what
+	 * stops a caller naming one method and sending another.  A
+	 * continuation call is admitted exactly as an ordinary one is, then
+	 * drives a private session rather than this single provider.
+	 */
 	error = ebpfos_executor_method_validate(call, &import);
 	if (error)
 		goto out_put;
+	/*
+	 * A continuation call drives a private session rather than this one
+	 * provider.  The role the caller named is the entry step, so it is
+	 * validated exactly as above first; the session then pins every
+	 * further step on this same epoch.
+	 */
+	if (call->flags & EBPFOS_EXECUTOR_CALL_F_CONTINUATION) {
+		u32 continuation_prog_id = 0;
+
+		error = ebpfos_executor_continuation_call(
+			aux, call, epoch, &status, &continuation_prog_id);
+		/*
+		 * A dispatcher or session failure before any provider ran leaves
+		 * all three reports zero, so a caller cannot mistake a protocol
+		 * failure for a provider result.  Once a provider did run, its
+		 * own status and identity are reported even though the call
+		 * still returns the structural error.
+		 */
+		if (continuation_prog_id) {
+			call->observed_epoch = epoch;
+			call->provider_prog_id = continuation_prog_id;
+			call->provider_status = status;
+		}
+		goto out_put;
+	}
 	/*
 	 * The binding reference is the in-flight epoch pin.  Publication may
 	 * replace and RCU-retire the old immutable bundle concurrently, but its
@@ -1160,6 +1922,913 @@ static void ebpfos_executor_root_manifest_test(struct kunit *test)
 		manifest, target), -EPROTOTYPE);
 }
 
+
+/*
+ * A continuation session pinned to a published bundle.
+ *
+ * The session is a value of one call's frame, so these tests drive the state
+ * machine directly.  The honest questions are whether the state transition, the
+ * generation, the lease accounting and the response validation behave under
+ * replay, skipping, abandonment, concurrency and retirement.
+ */
+static void ebpfos_continuation_generation_test(struct kunit *test)
+{
+	struct ebpfos_continuation_step steps[3] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_continuation_step *step = NULL;
+	u64 generation = 0;
+
+	steps[0].edge.ordinal = 10;
+	steps[1].edge.ordinal = 20;
+	steps[2].edge.ordinal = 30;
+	session.step_count = 3;
+	session.steps = steps;
+	atomic_set(&session.state, EBPFOS_SESSION_READY);
+	atomic64_set(&session.generation, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation), 0);
+	KUNIT_EXPECT_PTR_EQ(test, step, &steps[0]);
+	KUNIT_EXPECT_EQ(test, generation, 0ULL);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_EXECUTING);
+	/* A claim while one is in flight is refused as busy. */
+	KUNIT_EXPECT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation),
+			-EBUSY);
+	/*
+	 * The generation advances only on a valid completion, so an abandoned
+	 * step leaves the chain where it was.
+	 */
+	KUNIT_EXPECT_EQ(test, (u64)atomic64_read(&session.generation), 0ULL);
+	KUNIT_ASSERT_EQ(test, ebpfos_continuation_complete(
+		&session, 0, EBPFOS_CONTINUATION_DISPOSITION_CONTINUE), 0);
+	KUNIT_EXPECT_EQ(test, (u64)atomic64_read(&session.generation), 1ULL);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_READY);
+	/* Replaying a completed generation must fail. */
+	KUNIT_ASSERT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation), 0);
+	KUNIT_EXPECT_EQ(test, generation, 1ULL);
+	KUNIT_EXPECT_PTR_EQ(test, step, &steps[1]);
+	KUNIT_ASSERT_EQ(test, ebpfos_continuation_complete(
+		&session, 1, EBPFOS_CONTINUATION_DISPOSITION_CONTINUE), 0);
+	KUNIT_ASSERT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation), 0);
+	KUNIT_EXPECT_PTR_EQ(test, step, &steps[2]);
+	/* A terminal disposition consumes the chain on completion. */
+	KUNIT_ASSERT_EQ(test, ebpfos_continuation_complete(
+		&session, 2, EBPFOS_CONTINUATION_DISPOSITION_COMPLETE), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_CONSUMED);
+	/* Use after terminal completion stays refused. */
+	KUNIT_EXPECT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation),
+			-EALREADY);
+}
+
+/*
+ * A continue past the last authenticated edge has nowhere to go, so the chain
+ * is poisoned rather than silently ending: the operation is incomplete and must
+ * not be resumable.
+ */
+static void ebpfos_continuation_terminal_boundary_test(struct kunit *test)
+{
+	struct ebpfos_continuation_step steps[1] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_continuation_step *step = NULL;
+	u64 generation = 0;
+
+	steps[0].edge.ordinal = 5;
+	session.step_count = 1;
+	session.steps = steps;
+	atomic_set(&session.state, EBPFOS_SESSION_READY);
+	atomic64_set(&session.generation, 0);
+	KUNIT_ASSERT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_complete(
+		&session, 0, EBPFOS_CONTINUATION_DISPOSITION_CONTINUE),
+		-EPROTOTYPE);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+	KUNIT_EXPECT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation),
+			-EALREADY);
+}
+
+/* An out-of-vocabulary disposition poisons rather than advancing. */
+static void ebpfos_continuation_disposition_test(struct kunit *test)
+{
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_continuation_step *step = NULL;
+	u64 generation = 0;
+
+	steps[0].edge.ordinal = 1;
+	steps[1].edge.ordinal = 2;
+	session.step_count = 2;
+	session.steps = steps;
+	atomic_set(&session.state, EBPFOS_SESSION_READY);
+	atomic64_set(&session.generation, 0);
+	KUNIT_ASSERT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation), 0);
+	KUNIT_EXPECT_EQ(test,
+			ebpfos_continuation_complete(&session, 0, 0), -EPROTO);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+	/* A poisoned session never becomes usable again. */
+	KUNIT_EXPECT_EQ(test,
+			ebpfos_continuation_claim(&session, &step, &generation),
+			-EALREADY);
+}
+
+/*
+ * A response is accepted only when the provider actually produced one, at the
+ * exact size and for this step.  Silence must not read as success, which is why
+ * the marker and the echoed ordinal/generation are required.
+ */
+static void ebpfos_continuation_response_validity_test(struct kunit *test)
+{
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_continuation_transition response = {};
+
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	response.magic = EBPFOS_CONTINUATION_RESPONSE_MAGIC;
+	response.response_size = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	response.ordinal = 1;
+	response.generation = 0;
+	response.disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE;
+	memcpy(frame.output, &response, sizeof(response));
+	frame.output_size = 0;
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	frame.output_size = sizeof(response) - 1;
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	frame.output_size = sizeof(response) + 1;
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	frame.output_size = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	KUNIT_EXPECT_TRUE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	/* A response for another step is stale, not valid. */
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 2, 0));
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 1));
+	response.reserved = 1;
+	memcpy(frame.output, &response, sizeof(response));
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+	response.reserved = 0;
+	response.disposition = 0;
+	memcpy(frame.output, &response, sizeof(response));
+	KUNIT_EXPECT_FALSE(test, ebpfos_executor_continuation_response_valid(
+		&frame, 1, 0));
+}
+
+/*
+ * Releasing gives back exactly the leases taken.  A step that shared another
+ * step's binding holds the pointer but owns no lease, so it must not release
+ * one: that is what keeps the accounting exactly-once.
+ */
+static void ebpfos_continuation_release_test(struct kunit *test)
+{
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_continuation_step steps[3] = {};
+	struct ebpfos_binding binding = {};
+
+	refcount_set(&binding.refs, 2);
+	atomic64_set(&binding.invocation_state, 0);
+	steps[0].binding = &binding;
+	steps[0].lease_held = true;
+	/* A reused step holds the pointer but no lease of its own. */
+	steps[1].binding = &binding;
+	steps[1].lease_held = false;
+	KUNIT_ASSERT_EQ(test, ebpfos_binding_invocation_enter(&binding), 0);
+	session.steps = steps;
+	session.step_count = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 1U);
+	ebpfos_continuation_release(&session);
+	/* Exactly one lease was given back, not two. */
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 0U);
+	KUNIT_EXPECT_FALSE(test, steps[0].lease_held);
+	KUNIT_EXPECT_NULL(test, steps[0].binding);
+	KUNIT_EXPECT_EQ(test, refcount_read(&binding.refs), 1);
+}
+
+/*
+ * A retired binding cannot be leased.  This is the publication-before-open
+ * direction: once publication retires a removed binding, a session that did not
+ * already hold its lease cannot take one.
+ */
+static void ebpfos_continuation_retired_binding_test(struct kunit *test)
+{
+	struct ebpfos_binding binding = {};
+
+	refcount_set(&binding.refs, 1);
+	atomic64_set(&binding.invocation_state, 0);
+	ebpfos_binding_retire(&binding, 9);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&binding),
+			-ESHUTDOWN);
+	KUNIT_EXPECT_TRUE(test, ebpfos_binding_is_retired(&binding));
+}
+
+/*
+ * A lease taken before retirement still counts, which is how a continuation that
+ * opened first completes wholly on its own epoch.
+ */
+static void ebpfos_continuation_lease_before_retirement_test(struct kunit *test)
+{
+	struct ebpfos_binding binding = {};
+
+	refcount_set(&binding.refs, 1);
+	atomic64_set(&binding.invocation_state, 0);
+	KUNIT_ASSERT_EQ(test, ebpfos_binding_invocation_enter(&binding), 0);
+	ebpfos_binding_retire(&binding, 9);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 1U);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_enter(&binding),
+			-ESHUTDOWN);
+	ebpfos_binding_invocation_exit(&binding);
+	KUNIT_EXPECT_EQ(test, ebpfos_binding_active_invocations(&binding), 0U);
+}
+
+static void ebpfos_executor_continuation_call_size_test(struct kunit *test)
+{
+	struct ebpfos_executor_call *call;
+	size_t size = sizeof(*call) + 64;
+
+	call = kunit_kzalloc(test, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, call);
+	call->version = EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION;
+	call->object_id = 7;
+	call->role_type = 9;
+	call->method_id = 1;
+	call->context_size = 64;
+	call->flags = EBPFOS_EXECUTOR_CALL_F_CONTINUATION;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), 0);
+	/* The epoch expectation composes with the continuation flag. */
+	call->flags = EBPFOS_EXECUTOR_CALL_F_CONTINUATION |
+		      EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH;
+	call->expected_epoch = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), 0);
+	/* An unknown flag is still refused. */
+	call->flags = BIT(3);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+	call->flags = EBPFOS_EXECUTOR_CALL_F_CONTINUATION | BIT(3);
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+	/* A continuation call must still declare its method and object. */
+	call->flags = EBPFOS_EXECUTOR_CALL_F_CONTINUATION;
+	call->method_id = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+}
+
+/*
+ * The frame and request are validated before either is used.
+ *
+ * Everything here is untrusted input, so a malformed frame must fail before a
+ * value is read out of it: a context too small to hold a frame, or a frame whose
+ * version, flags, object, epoch or method disagrees with the call, is refused
+ * rather than partially consumed.
+ */
+static void ebpfos_executor_continuation_frame_test(struct kunit *test)
+{
+	struct ebpfos_executor_call *call;
+	struct ebpfos_component_call_frame *frame;
+	struct ebpfos_continuation_request request = {};
+	size_t size = sizeof(*call) + sizeof(*frame);
+	u64 epoch = 5;
+
+	call = kunit_kzalloc(test, size, GFP_KERNEL);
+	frame = kunit_kzalloc(test, sizeof(*frame), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, call);
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	call->object_id = 7;
+	call->method_id = 1;
+	call->context_size = sizeof(*frame);
+	frame->version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	frame->object_id = call->object_id;
+	frame->epoch = epoch;
+	frame->method_id = call->method_id;
+	memset(request.component_id, 0x11, sizeof(request.component_id));
+	memset(request.boundary_digest, 0x22, sizeof(request.boundary_digest));
+	request.requested_disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE;
+	frame->input_size = sizeof(request);
+	frame->output_capacity = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	memcpy(frame->input, &request, sizeof(request));
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), 0);
+	call->context_size = sizeof(*frame) - 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EMSGSIZE);
+	call->context_size = sizeof(*frame);
+	frame->object_id = call->object_id + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->object_id = call->object_id;
+	frame->epoch = epoch + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->epoch = epoch;
+	frame->method_id = call->method_id + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->method_id = call->method_id;
+	frame->version = EBPFOS_COMPONENT_CALL_ABI_VERSION + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	frame->flags = 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->flags = 0;
+	frame->input_size = sizeof(request) + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->input_size = sizeof(request);
+	frame->output_capacity = EBPFOS_CONTINUATION_RESPONSE_SIZE - 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	frame->output_capacity = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	request.reserved = 1;
+	memcpy(frame->input, &request, sizeof(request));
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	request.reserved = 0;
+	request.requested_disposition = 0;
+	memcpy(frame->input, &request, sizeof(request));
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	request.requested_disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE;
+	memset(request.component_id, 0, sizeof(request.component_id));
+	memcpy(frame->input, &request, sizeof(request));
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+	memset(request.component_id, 0x11, sizeof(request.component_id));
+	memset(request.boundary_digest, 0, sizeof(request.boundary_digest));
+	memcpy(frame->input, &request, sizeof(request));
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_continuation_frame_validate(
+		call, epoch, frame, &request), -EINVAL);
+}
+
+/*
+ * A step's discriminator is checked against the frame it was actually addressed
+ * with.  The import says which method the step may serve; a frame that names
+ * another one would have the provider act on a different identity than the
+ * session believes, so it is refused before the provider runs.
+ */
+static void ebpfos_executor_continuation_step_method_test(struct kunit *test)
+{
+	struct ebpfos_executor_import import = {
+		.method_id = 5,
+		.context_size = EBPFOS_COMPONENT_CALL_CONTEXT_SIZE,
+		.discriminator_offset = 8,
+		.discriminator_size = 8,
+		.discriminator_value = 5,
+		.discriminator_mask = U64_MAX,
+	};
+	struct ebpfos_component_call_frame *frame;
+
+	frame = kunit_kzalloc(test, sizeof(*frame), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	frame->method_id = import.method_id;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_discriminator_check(
+		frame, import.method_id, &import), 0);
+	frame->method_id = import.method_id + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_discriminator_check(
+		frame, import.method_id, &import), -EACCES);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_discriminator_check(
+		frame, import.method_id + 1, &import), -EPROTO);
+	import.discriminator_size = 3;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_discriminator_check(
+		frame, import.method_id, &import), -EPROTO);
+	import.discriminator_size = 8;
+	import.discriminator_offset = EBPFOS_COMPONENT_CALL_CONTEXT_SIZE;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_discriminator_check(
+		frame, import.method_id, &import), -EPROTO);
+}
+
+/*
+ * End-to-end continuation chain, driven through the real execution path.
+ *
+ * The validators and the isolated state helpers are tested above, but those
+ * cannot catch a defect that only appears when a provider actually runs: a NULL
+ * step frame, a response that never arrives, scalars that fail to cross a step
+ * boundary, or a failure that overwrites the reports of the provider that did
+ * run.  These cases drive `ebpfos_continuation_drive()` with real fake
+ * providers, so the whole path is exercised rather than its pieces.
+ */
+struct ebpfos_continuation_test_plan {
+	/* What step n reports back. */
+	u32 disposition;
+	u64 scalar0;
+	u32 frame_status;
+	/* Whether the provider writes a response at all. */
+	bool respond;
+};
+
+static struct ebpfos_continuation_test_plan *ebpfos_continuation_test_state;
+/* What each step actually observed in its request, for cross-step assertions. */
+static u64 ebpfos_continuation_test_observed[2];
+static u32 ebpfos_continuation_test_observed_count;
+
+/*
+ * Hold a program's recursion slot for the duration of one drive, and give it
+ * back on every exit path.
+ *
+ * `__bpf_prog_enter_sleepable_recur()` takes this per-CPU slot and refuses with
+ * -EBUSY when it is already held -- the genuine pre-entry refusal path, taken
+ * when the same program is already running here.  Holding it from the test
+ * produces a real pre-entry -EBUSY without a mock.
+ *
+ * The counter is per-CPU, so the hold, the drive and the release must all run on
+ * one CPU or the release would decrement a different CPU's counter and leave
+ * the held one permanently raised.  `migrate_disable()` is the right primitive
+ * for that: it pins the task to its CPU without disabling preemption, which is
+ * exactly what the production sleepable path relies on when it calls
+ * `might_fault()` after `migrate_disable()`.  `guard(migrate)()` scopes it to
+ * this function, so cleanup is structural and cannot be skipped by an early
+ * return or an error path.
+ *
+ * The caller's regions are pinned the same way; see the per-test `guard(migrate)()`.
+ */
+static void ebpfos_continuation_test_hold_recursion(struct bpf_prog *provider)
+{
+	guard(migrate)();
+	this_cpu_inc(*(int __percpu *)provider->active);
+}
+
+static void ebpfos_continuation_test_release_recursion(
+	struct bpf_prog *provider)
+{
+	guard(migrate)();
+	this_cpu_dec(*(int __percpu *)provider->active);
+}
+
+/*
+ * The provider's own recursion counter on this CPU.
+ *
+ * A per-CPU value is only meaningful while the task cannot migrate, so the
+ * caller must already be inside a migration-pinned region: this asserts that
+ * rather than taking its own nested guard, which would silently read whichever
+ * CPU the task happened to be on.  A non-zero value after a release is a leak
+ * that would refuse every later entry of that program; a negative one is the
+ * underflow a release on a different CPU produces.
+ */
+static int ebpfos_continuation_test_recursion_count(
+	struct bpf_prog *provider)
+{
+	lockdep_assert_preemption_enabled();
+	/*
+	 * `migration_disabled` is the task-level pin `migrate_disable()` sets, so
+	 * this both documents and enforces the caller's obligation: a read
+	 * outside a pinned region would be a per-CPU value of unknown CPU.
+	 */
+	WARN_ON_ONCE(!current->migration_disabled);
+	return this_cpu_read(*(int __percpu *)provider->active);
+}
+
+static unsigned int ebpfos_continuation_test_provider(
+	const void *context, const struct bpf_insn *insn)
+{
+	const struct ebpfos_component_call_frame *in = context;
+	struct ebpfos_component_call_frame *frame = (void *)context;
+	struct ebpfos_continuation_transition request = {};
+	struct ebpfos_continuation_transition response = {};
+	u64 index;
+
+	memcpy(&request, in->input, sizeof(request));
+	/*
+	 * Record what this step actually received, so a test can prove the
+	 * previous step's scalar really crossed the boundary into this one.
+	 */
+	index = request.generation > 1 ? 1 : request.generation;
+	if (ebpfos_continuation_test_observed_count < 2)
+		ebpfos_continuation_test_observed[
+			ebpfos_continuation_test_observed_count++] =
+			request.scalar[0];
+	/*
+	 * The provider answers the step it was given: it echoes the ordinal and
+	 * generation it received, so a response can never be mistaken for
+	 * another step's.
+	 */
+	response.ordinal = request.ordinal;
+	response.generation = request.generation;
+	response.transport_kind = request.transport_kind;
+	if (!ebpfos_continuation_test_state)
+		return 0;
+	(void)index;
+	response.disposition =
+		ebpfos_continuation_test_state[index].disposition;
+	response.scalar[0] = ebpfos_continuation_test_state[index].scalar0;
+	/*
+	 * A provider that does not answer leaves the frame untouched, which is
+	 * exactly the silence the driver must not read as success.
+	 */
+	if (!ebpfos_continuation_test_state[index].respond)
+		return 0x11;
+	response.magic = EBPFOS_CONTINUATION_RESPONSE_MAGIC;
+	response.response_size = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	memcpy(frame->output, &response, sizeof(response));
+	frame->status = ebpfos_continuation_test_state[index].frame_status;
+	frame->output_size = EBPFOS_CONTINUATION_RESPONSE_SIZE;
+	return 0x22;
+}
+
+static struct bpf_prog *ebpfos_continuation_test_prog(struct kunit *test)
+{
+	struct bpf_prog *provider;
+
+	provider = bpf_prog_alloc(bpf_prog_size(1), 0);
+	KUNIT_ASSERT_NOT_NULL(test, provider);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(
+		test, ebpfos_executor_test_prog_free, provider), 0);
+	provider->type = BPF_PROG_TYPE_SYSCALL;
+	provider->sleepable = true;
+	provider->aux->ebpfos_component = true;
+	provider->bpf_func = ebpfos_continuation_test_provider;
+	return provider;
+}
+
+/*
+ * Build a two-step session and bind one fake provider to both steps, so the
+ * chain genuinely runs: step one continues and step two terminates.
+ */
+static void ebpfos_continuation_chain_setup(
+	struct kunit *test, struct ebpfos_continuation_session *session,
+	struct ebpfos_continuation_step *steps,
+	struct ebpfos_binding *binding, struct bpf_prog *provider)
+{
+	steps[0].binding = binding;
+	steps[1].binding = binding;
+	binding->prog = provider;
+	refcount_set(&binding->refs, 1);
+	atomic64_set(&binding->invocation_state, 0);
+	session->step_count = 2;
+	session->steps = steps;
+	atomic_set(&session->state, EBPFOS_SESSION_READY);
+	atomic64_set(&session->generation, 0);
+	steps[0].edge.ordinal = 1;
+	steps[0].edge.destination_method_id = 5;
+	steps[0].edge.disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE;
+	steps[0].edge.transport_kind = EBPFOS_CONTINUATION_TRANSPORT_SCALAR;
+	/*
+	 * A real bound, not zero: a zero limit means the slot must be returned
+	 * as zero, so a chain that carries a cursor needs the edge to declare
+	 * the range it admits.  Step two inherits this through the copy below.
+	 */
+	steps[0].edge.scalar_limit[0] = 65536;
+	steps[0].import.method_id = 5;
+	steps[0].import.discriminator_offset = offsetof(
+		struct ebpfos_component_call_frame, method_id);
+	steps[0].import.discriminator_size = 8;
+	steps[0].import.discriminator_value = 5;
+	steps[0].import.discriminator_mask = U64_MAX;
+	steps[0].snapshot.prog_id = 11;
+	steps[1].edge = steps[0].edge;
+	steps[1].import = steps[0].import;
+	steps[1].snapshot = steps[0].snapshot;
+	steps[1].edge.ordinal = 2;
+	steps[1].edge.disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE;
+	steps[1].snapshot.prog_id = 12;
+}
+
+/*
+ * The chain completes and step two receives step one's scalar.
+ *
+ * This is the cross-step assertion: the fake provider records the input each
+ * step was actually given, so a chain that silently dropped the carried scalar
+ * would fail here even though every per-step validator passed.
+ */
+static void ebpfos_continuation_chain_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE,
+		  .scalar0 = 7, .frame_status = 0x100, .respond = true },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .scalar0 = 9, .frame_status = 0x200, .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	ebpfos_continuation_test_state = plan;
+	ebpfos_continuation_test_observed_count = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), 0);
+	ebpfos_continuation_test_state = NULL;
+	/* Both steps ran, and the second saw the first step's scalar. */
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_test_observed_count, 2U);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_test_observed[0], 0ULL);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_test_observed[1], 7ULL);
+	KUNIT_EXPECT_EQ(test, status, 0x22U);
+	KUNIT_EXPECT_EQ(test, prog_id, 12U);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_CONSUMED);
+	KUNIT_EXPECT_EQ(test, frame.status, 0x200);
+	KUNIT_EXPECT_EQ(test, (u64)atomic64_read(&session.generation), 1ULL);
+}
+
+/* A provider that writes nothing must not be read as a completed step. */
+static void ebpfos_continuation_silence_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE,
+		  .respond = false },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	ebpfos_continuation_test_state = plan;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), -EPROTO);
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+	KUNIT_EXPECT_EQ(test, prog_id, 11U);
+}
+
+/* A scalar beyond its edge's limit is refused, whatever the disposition. */
+static void ebpfos_continuation_scalar_bound_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE,
+		  .scalar0 = 1000, .respond = true },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	steps[0].edge.scalar_limit[0] = 100;
+	ebpfos_continuation_test_state = plan;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), -ERANGE);
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+}
+
+/* A disposition the edge does not admit is a wrong answer, not accepted. */
+static void ebpfos_continuation_disposition_mismatch_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	ebpfos_continuation_test_state = plan;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), -EPROTOTYPE);
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+}
+
+/*
+ * A second step refused before entry preserves everything the first reported.
+ *
+ * Two distinct providers are used so the refusal is genuinely a *second* step:
+ * the first runs and succeeds, the second's recursion slot is held so its entry
+ * refuses, and the caller must still see the first provider's frame status,
+ * result, output and identity exactly as that provider left them.  Sharing one
+ * provider could not express this, because holding its slot would refuse the
+ * first step too.
+ */
+static void ebpfos_continuation_pre_entry_preservation_test(struct kunit *test)
+{
+	/*
+	 * The plan, the steps, the frame and the bindings are all large, so they
+	 * are allocated rather than stacked: a kernel stack frame this size is a
+	 * defect in itself, and the other continuation cases already keep theirs
+	 * within the limit.
+	 */
+	struct ebpfos_continuation_test_plan *plan;
+	struct ebpfos_continuation_step *steps;
+	struct ebpfos_continuation_session *session;
+	struct ebpfos_component_call_frame *frame;
+	struct ebpfos_binding *first_binding, *second_binding;
+	struct bpf_prog *first, *second;
+	u32 status = 0, prog_id = 0;
+	u64 output_after_first;
+	int error, held = 0, released = -1;
+
+	plan = kunit_kzalloc(test, sizeof(*plan) * 2, GFP_KERNEL);
+	steps = kunit_kzalloc(test, sizeof(*steps) * 2, GFP_KERNEL);
+	session = kunit_kzalloc(test, sizeof(*session), GFP_KERNEL);
+	frame = kunit_kzalloc(test, sizeof(*frame), GFP_KERNEL);
+	first_binding = kunit_kzalloc(test, sizeof(*first_binding), GFP_KERNEL);
+	second_binding = kunit_kzalloc(test, sizeof(*second_binding), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, plan);
+	KUNIT_ASSERT_NOT_NULL(test, steps);
+	KUNIT_ASSERT_NOT_NULL(test, session);
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, first_binding);
+	KUNIT_ASSERT_NOT_NULL(test, second_binding);
+	plan[0].disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE;
+	plan[0].scalar0 = 7;
+	plan[0].frame_status = 0x100;
+	plan[0].respond = true;
+	plan[1].disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE;
+	plan[1].frame_status = 0x200;
+	plan[1].respond = true;
+
+	first = ebpfos_continuation_test_prog(test);
+	second = ebpfos_continuation_test_prog(test);
+	/*
+	 * Step one is served by `first` and step two by `second`, so the two
+	 * bindings are distinct and the second can be refused on its own.
+	 */
+	ebpfos_continuation_chain_setup(test, session, steps, first_binding,
+					first);
+	steps[1].binding = second_binding;
+	second_binding->prog = second;
+	refcount_set(&second_binding->refs, 1);
+	atomic64_set(&second_binding->invocation_state, 0);
+	ebpfos_continuation_test_state = plan;
+	/*
+	 * Hold the *second* provider's recursion slot.  Step one runs normally,
+	 * and step two is refused before it enters.
+	 *
+	 * The whole hold -> drive -> release sequence runs migration-pinned: the
+	 * slot is per-CPU, so if the task migrated between the hold and the
+	 * release the release would decrement a different CPU's counter and
+	 * leave the held one permanently raised.  `guard(migrate)()` does not
+	 * disable preemption, so the sleepable provider inside the drive can
+	 * still run and sleep normally.
+	 */
+	{
+		guard(migrate)();
+
+		ebpfos_continuation_test_hold_recursion(second);
+		/*
+		 * Both counts are read inside this region, on the CPU that holds
+		 * the slot.  Reading the count after leaving the guard would be
+		 * meaningless: the task may then be inspecting a different CPU's
+		 * per-CPU counter, which is exactly the migration hazard the
+		 * region exists to remove.
+		 */
+		held = ebpfos_continuation_test_recursion_count(second);
+		error = ebpfos_continuation_drive(NULL, session, frame, &status,
+						  &prog_id);
+		ebpfos_continuation_test_release_recursion(second);
+		released = ebpfos_continuation_test_recursion_count(second);
+	}
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, held, 1);
+	/*
+	 * The held slot was given back on the CPU it was taken on: no leak
+	 * (which would refuse every later entry of this program) and no
+	 * underflow (which is what a release on another CPU produces).
+	 */
+	KUNIT_EXPECT_EQ(test, released, 0);
+	KUNIT_EXPECT_EQ(test, error, -EBUSY);
+	/* Step one ran, so the reports are step one's, not step two's. */
+	KUNIT_EXPECT_EQ(test, status, 0x22U);
+	KUNIT_EXPECT_EQ(test, prog_id, 11U);
+	/* The first provider's frame status and output survived the refusal. */
+	KUNIT_EXPECT_EQ(test, frame->status, 0x100);
+	KUNIT_EXPECT_EQ(test, frame->output_size,
+			EBPFOS_CONTINUATION_RESPONSE_SIZE);
+	memcpy(&output_after_first, frame->output, sizeof(u64));
+	KUNIT_EXPECT_EQ(test, output_after_first,
+			(u64)EBPFOS_CONTINUATION_RESPONSE_MAGIC);
+	/* And the session is unusable afterwards. */
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(session),
+			EBPFOS_SESSION_POISONED);
+}
+
+/*
+ * The runner itself refuses before entry with -EBUSY, and nothing is attributed.
+ *
+ * The refusal is produced by the real recursion-busy check the runner performs,
+ * not by a mock: the provider's own recursion slot is held on this CPU, so
+ * `__bpf_prog_enter_sleepable_recur()` returns zero and the runner reports
+ * -EBUSY before any provider code executes.
+ */
+static void ebpfos_continuation_busy_entry_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE,
+		  .scalar0 = 7, .respond = true },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+	int error, held = 0, released = -1;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	ebpfos_continuation_test_state = plan;
+	ebpfos_continuation_test_observed_count = 0;
+	/*
+	 * Hold -> drive -> release as one migration-pinned region.  The recursion
+	 * slot is per-CPU, so the hold and the release must happen on the CPU the
+	 * drive refused on, or the release would land on another CPU's counter.
+	 */
+	{
+		guard(migrate)();
+
+		ebpfos_continuation_test_hold_recursion(provider);
+		/*
+		 * Both counts are read inside this region, on the CPU that holds
+		 * the slot: `held` proves the -EBUSY below comes from a genuinely
+		 * raised counter, and `released` proves it was given back there.
+		 * Reading either after leaving the guard would be meaningless,
+		 * because the task may then be inspecting another CPU's counter.
+		 */
+		held = ebpfos_continuation_test_recursion_count(provider);
+		error = ebpfos_continuation_drive(NULL, &session, &frame,
+						  &status, &prog_id);
+		ebpfos_continuation_test_release_recursion(provider);
+		released = ebpfos_continuation_test_recursion_count(provider);
+	}
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, held, 1);
+	KUNIT_EXPECT_EQ(test, released, 0);
+	KUNIT_EXPECT_EQ(test, error, -EBUSY);
+	/* The provider never ran, so nothing observed and nothing attributed. */
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_test_observed_count, 0U);
+	KUNIT_EXPECT_EQ(test, prog_id, 0U);
+	KUNIT_EXPECT_EQ(test, status, 0U);
+	KUNIT_EXPECT_EQ(test, frame.status, 0);
+	KUNIT_EXPECT_EQ(test, frame.output_size, 0U);
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+	/* And the session cannot be resumed after the refusal. */
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), -EALREADY);
+}
+
+/* A per-step discriminator mismatch is refused before the provider enters. */
+static void ebpfos_continuation_step_refusal_test(struct kunit *test)
+{
+	struct ebpfos_continuation_test_plan plan[2] = {
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_CONTINUE,
+		  .respond = true },
+		{ .disposition = EBPFOS_CONTINUATION_DISPOSITION_COMPLETE,
+		  .respond = true },
+	};
+	struct ebpfos_continuation_step steps[2] = {};
+	struct ebpfos_continuation_session session = {};
+	struct ebpfos_component_call_frame frame = {};
+	struct ebpfos_binding binding = {};
+	struct bpf_prog *provider;
+	u32 status = 0, prog_id = 0;
+
+	provider = ebpfos_continuation_test_prog(test);
+	ebpfos_continuation_chain_setup(test, &session, steps, &binding,
+					provider);
+	steps[0].edge.destination_method_id = 6;
+	ebpfos_continuation_test_state = plan;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_drive(
+		NULL, &session, &frame, &status, &prog_id), -EPROTO);
+	ebpfos_continuation_test_state = NULL;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_state(&session),
+			EBPFOS_SESSION_POISONED);
+	KUNIT_EXPECT_EQ(test, prog_id, 0U);
+}
+
 static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_compare_test),
 	KUNIT_CASE(ebpfos_executor_root_retained_binding_test),
@@ -1167,6 +2836,23 @@ static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_call_size_test),
 	KUNIT_CASE(ebpfos_executor_method_test),
 	KUNIT_CASE(ebpfos_executor_provider_run_test),
+	KUNIT_CASE(ebpfos_continuation_generation_test),
+	KUNIT_CASE(ebpfos_continuation_terminal_boundary_test),
+	KUNIT_CASE(ebpfos_continuation_disposition_test),
+	KUNIT_CASE(ebpfos_continuation_response_validity_test),
+	KUNIT_CASE(ebpfos_continuation_release_test),
+	KUNIT_CASE(ebpfos_continuation_retired_binding_test),
+	KUNIT_CASE(ebpfos_continuation_lease_before_retirement_test),
+	KUNIT_CASE(ebpfos_executor_continuation_call_size_test),
+	KUNIT_CASE(ebpfos_executor_continuation_frame_test),
+	KUNIT_CASE(ebpfos_executor_continuation_step_method_test),
+	KUNIT_CASE(ebpfos_continuation_chain_test),
+	KUNIT_CASE(ebpfos_continuation_silence_test),
+	KUNIT_CASE(ebpfos_continuation_scalar_bound_test),
+	KUNIT_CASE(ebpfos_continuation_disposition_mismatch_test),
+	KUNIT_CASE(ebpfos_continuation_pre_entry_preservation_test),
+	KUNIT_CASE(ebpfos_continuation_busy_entry_test),
+	KUNIT_CASE(ebpfos_continuation_step_refusal_test),
 	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
 };

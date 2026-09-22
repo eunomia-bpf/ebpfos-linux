@@ -2,7 +2,7 @@
 obj-$(CONFIG_EBPFOS) += admission.o admission_certificates.o component_graph.o executor_root.o core.o
 obj-$(CONFIG_EBPFOS_RUNTIME_ROOT) += runtime_root.o runtime_syscall_64.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o koperation-generated.o
-obj-$(CONFIG_EBPFOS_KUNIT_TEST) += koperation_kunit.o
+obj-$(CONFIG_EBPFOS_KUNIT_TEST) += koperation_kunit.o continuation_kunit.o
 obj-$(CONFIG_EBPFOS_JIT_PLACE) += jit_place.o
 
 EBPFOS_KOPERATION_GENERATOR ?= $(srctree)/scripts/ebpfos-koperation-gen.py

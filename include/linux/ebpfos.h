@@ -165,6 +165,174 @@ struct ebpfos_component_call_frame {
 #define EBPFOS_EXECUTOR_IMPORT_MANIFEST_SCHEMA 0x4558494d414e0001ULL
 #define EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES 64U
 #define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH BIT(0)
+/*
+ * The call drives a private continuation session instead of one provider.  The
+ * flag selects the session path, so a caller that does not set it keeps exactly
+ * the single-provider behaviour it had before.
+ */
+#define EBPFOS_EXECUTOR_CALL_F_CONTINUATION BIT(1)
+
+/*
+ * Continuation sessions.
+ *
+ * One logical OS operation may span several independently verified component
+ * programs, each published as its own role.  A source loop whose trip count
+ * exceeds the verifier's unroll budget cannot be one program, so it becomes a
+ * sequence of transitions through a private continuation session.
+ *
+ * The session is kernel-private for one top-level dispatcher call.  It is
+ * deliberately not a userspace- or BPF-visible registry: a handle a caller could
+ * retain and replay would be forgeable authority, not a sealed token.  What
+ * crosses a program boundary is only an authenticated relation -- an ordinal, a
+ * boundary identity, a source and destination identity, and bounded scalars.
+ *
+ * P2 carries no live mapping.  kmap_local_page() establishes task/CPU-local
+ * mapping state with nesting and lifetime constraints, so a mapping cannot be
+ * retained across a return from one independently invoked provider and resumed
+ * in another; hiding its address behind a token would not make that lifetime
+ * valid.  A later extraction must cut only at a mapping-free boundary, or keep
+ * acquire/use/kunmap inside one synchronous provider.
+ */
+/*
+ * The caller's metadata map carries two frozen records: the import manifest at
+ * key 0 and, for a caller that takes authenticated continuation transitions,
+ * the continuation edge manifest at key 1.  The keys are ABI, so the parent
+ * serializer and the kernel cannot disagree about where an edge list lives.  A
+ * map with only the import entry is valid: it declares no continuation edges,
+ * and a call that claims one against that absence is refused.
+ */
+#define EBPFOS_EXECUTOR_METADATA_KEY_IMPORT 0U
+#define EBPFOS_EXECUTOR_METADATA_KEY_CONTINUATION 1U
+
+#define EBPFOS_CONTINUATION_ABI_VERSION 1U
+
+/*
+ * Generic dispositions.  A disposition says only how the operation continues,
+ * never what the operation is about: a page step, an argument step and a
+ * finalization step are all CONTINUE until they are COMPLETE.  Workload- or
+ * subsystem-specific vocabulary belongs in authenticated component data, not in
+ * the kernel ABI, so no component may be recognized by its disposition.
+ */
+#define EBPFOS_CONTINUATION_DISPOSITION_CONTINUE 1U
+#define EBPFOS_CONTINUATION_DISPOSITION_COMPLETE 2U
+#define EBPFOS_CONTINUATION_DISPOSITION_ERROR 3U
+
+/*
+ * Transport kinds.  Only values that have an authenticated meaning inside
+ * another program's frame are admitted.  A live pointer, a page reference and a
+ * local mapping are deliberately *absent* rather than merely discouraged, so a
+ * manifest that tries to carry one has no representable kind and is refused at
+ * seal time instead of failing later at dispatch.
+ *
+ * P2 admits scalars only.  An arena-relative offset is not admitted yet: it is
+ * only an offset when an authenticated arena identity and extent bound it, and
+ * until that mechanism exists an arbitrary integer relabelled as an "offset"
+ * would be indistinguishable from a smuggled address.  Admitting the name
+ * before the proof would make the vocabulary claim more than it can enforce,
+ * so the kind is added together with its identity, not before it.
+ */
+#define EBPFOS_CONTINUATION_TRANSPORT_SCALAR 1U
+
+#define EBPFOS_CONTINUATION_EDGE_MAX_ENTRIES 64U
+#define EBPFOS_CONTINUATION_SCALAR_SLOTS 4U
+
+/*
+ * One authenticated continuation edge.
+ *
+ * `source_component_id` is the identity that must have just executed and
+ * `destination_component_id` the identity the step must resolve to; both are
+ * compared against the pinned provider's own authenticated identity at
+ * resolution time.  `boundary_digest` is the continuation boundary the whole
+ * chain belongs to, so a caller cannot mix edges from two boundaries.
+ *
+ * `scalar_limit` bounds the cursor values a step may report.  It is a *range*,
+ * not a capability bitmap: range validation and authority validation are
+ * separate domains and are never compared against each other.
+ */
+struct ebpfos_continuation_edge {
+	u64 ordinal;
+	/*
+	 * Full component identities, not a truncated word.  The descriptor
+	 * carries component_id as 16 bytes, and a 64-bit alias of it would name
+	 * a different identity than the one the kernel authenticates, so the
+	 * edge stores what the descriptor stores.
+	 */
+	u8 source_component_id[16];
+	u8 destination_component_id[16];
+	u64 destination_role_type;
+	u32 destination_method_id;
+	u32 disposition;
+	u32 transport_kind;
+	u32 reserved;
+	/*
+	 * Upper bounds on the scalars a step may report.  Zero means the slot is
+	 * unused and its returned value must be zero; a nonzero limit bounds the
+	 * value inclusively.
+	 */
+	u64 scalar_limit[EBPFOS_CONTINUATION_SCALAR_SLOTS];
+	u8 boundary_digest[32];
+	u8 destination_content_digest[32];
+	u8 destination_contract_digest[32];
+};
+
+struct ebpfos_continuation_manifest {
+	u32 version;
+	u32 edge_count;
+	u32 flags;
+	u32 reserved;
+	u8 session_digest[32];
+	struct ebpfos_continuation_edge
+		edges[EBPFOS_CONTINUATION_EDGE_MAX_ENTRIES];
+};
+
+/*
+ * What the caller asks for: the identity the chain starts from, the boundary it
+ * belongs to, and the disposition it wants the entry step to attempt.  This is
+ * untrusted input and is range-checked before it selects anything.
+ */
+struct ebpfos_continuation_request {
+	u8 component_id[16];
+	u32 requested_disposition;
+	u32 reserved;
+	u8 boundary_digest[32];
+};
+
+/*
+ * The record the kernel writes before each step and reads back after it.  The
+ * ordinal, generation, disposition and transport kind are *distinct* fields:
+ * an epoch is not a component identity, a generation is not an ordinal, and
+ * reusing one for another is how a caller would smuggle a value across
+ * meanings.  The scalars are the bounded cursor values the step reports.
+ */
+/*
+ * The transition record, which is both the request the kernel writes and the
+ * response the provider writes back.
+ *
+ * The kernel clears it, fills the request fields, and requires on read-back that
+ * the provider set `magic` and `response_size` itself.  Without an explicit
+ * marker a provider that wrote nothing would leave the kernel's own prewritten
+ * record in place, and a no-op would be indistinguishable from a completed
+ * step: silence must be a protocol failure, not a silent success.
+ *
+ * `ordinal` and `generation` are echoed so the response is bound to the exact
+ * step it answers -- a stale or duplicated response names a step that is not
+ * the one running.
+ */
+struct ebpfos_continuation_transition {
+	u64 magic;
+	u64 ordinal;
+	u64 generation;
+	u64 scalar[EBPFOS_CONTINUATION_SCALAR_SLOTS];
+	u32 disposition;
+	u32 transport_kind;
+	u32 response_size;
+	s32 result;
+	u32 reserved;
+	u32 reserved2;
+};
+
+#define EBPFOS_CONTINUATION_RESPONSE_MAGIC 0x454250434f4e5452ULL
+#define EBPFOS_CONTINUATION_RESPONSE_SIZE 	((u32)sizeof(struct ebpfos_continuation_transition))
 
 struct ebpfos_executor_import {
 	u64 object_id;
@@ -338,6 +506,17 @@ void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
 				  struct ebpfos_admission_identity_v1 *identity);
 struct ebpfos_binding *ebpfos_executor_root_binding_get(
 	u64 object_id, u64 role_type, u64 *epoch);
+/*
+ * Validate one continuation edge manifest against the caller it describes.
+ * Exposed so the KUnit suite can exercise manifest corruption directly; the
+ * sealer is its only production caller.
+ */
+int ebpfos_continuation_manifest_validate(
+	const struct ebpfos_continuation_manifest *manifest,
+	const struct ebpfos_component_desc_v1 *caller);
+int ebpfos_admission_continuation_count(struct bpf_prog_aux *aux, u32 *count);
+int ebpfos_admission_continuation_edge(struct bpf_prog_aux *aux, u32 index,
+				       struct ebpfos_continuation_edge *edge);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
 #else

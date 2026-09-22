@@ -207,6 +207,13 @@ struct ebpfos_prog_identity {
 	u32 seal_state;
 	struct ebpfos_component_desc_v1 descriptor;
 	struct ebpfos_executor_import_manifest *imports;
+	/*
+	 * The authenticated continuation edges this program may take, frozen
+	 * beside its imports.  An edge is validated once, at seal time, so a
+	 * transition can never be inferred from a name or an address at call
+	 * time.
+	 */
+	struct ebpfos_continuation_manifest *continuations;
 	u8 content_digest[SHA256_DIGEST_SIZE];
 	u8 program_digest[SHA256_DIGEST_SIZE];
 	u8 map_digest[SHA256_DIGEST_SIZE];
@@ -336,13 +343,136 @@ static int ebpfos_executor_import_manifest_validate(
 	return 0;
 }
 
+/*
+ * Validate and freeze the authenticated continuation edges of one caller.
+ *
+ * The edge list is ordered and exact, and it is the *only* thing that
+ * authorizes a transition, so every defect is refused here at seal time rather
+ * than discovered at dispatch.  Ordinals are strictly increasing and may not
+ * reach U64_MAX: the state machine advances an ordinal by one, and admitting a
+ * value that would wrap would make "strictly greater than the last" false for
+ * the successor.  Both component identities and all three digests must be
+ * nonzero, the disposition and transport kind must be in the generic
+ * vocabulary, and a scalar limit is range-checked as a range -- it is never
+ * compared against a capability bitmap, because those are different domains.
+ */
+int ebpfos_continuation_manifest_validate(
+	const struct ebpfos_continuation_manifest *manifest,
+	const struct ebpfos_component_desc_v1 *caller)
+{
+	u64 prior_ordinal = 0;
+	u32 index, arg;
+
+	if (!manifest || !caller ||
+	    manifest->version != EBPFOS_CONTINUATION_ABI_VERSION ||
+	    !manifest->edge_count ||
+	    manifest->edge_count > EBPFOS_CONTINUATION_EDGE_MAX_ENTRIES ||
+	    manifest->flags || manifest->reserved ||
+	    !ebpfos_nonzero(manifest->session_digest,
+			    sizeof(manifest->session_digest)))
+		return -EPROTO;
+	for (index = 0; index < EBPFOS_CONTINUATION_EDGE_MAX_ENTRIES; index++) {
+		const struct ebpfos_continuation_edge *edge =
+			&manifest->edges[index];
+
+		if (index >= manifest->edge_count) {
+			/*
+			 * A trailing entry that is not wholly zero is a
+			 * manifest that means something the count does not
+			 * describe, so it is refused rather than ignored.
+			 */
+			if (memchr_inv(edge, 0, sizeof(*edge)))
+				return -EPROTO;
+			continue;
+		}
+		if (!edge->ordinal || edge->ordinal == U64_MAX ||
+		    !ebpfos_nonzero(edge->source_component_id,
+				    sizeof(edge->source_component_id)) ||
+		    !ebpfos_nonzero(edge->destination_component_id,
+				    sizeof(edge->destination_component_id)) ||
+		    !edge->destination_role_type ||
+		    !edge->destination_method_id ||
+		    edge->reserved ||
+		    (edge->disposition !=
+				EBPFOS_CONTINUATION_DISPOSITION_CONTINUE &&
+		     edge->disposition !=
+				EBPFOS_CONTINUATION_DISPOSITION_COMPLETE &&
+		     edge->disposition !=
+				EBPFOS_CONTINUATION_DISPOSITION_ERROR) ||
+		    edge->transport_kind != EBPFOS_CONTINUATION_TRANSPORT_SCALAR ||
+		    !ebpfos_nonzero(edge->boundary_digest,
+				    sizeof(edge->boundary_digest)) ||
+		    !ebpfos_nonzero(edge->destination_content_digest,
+				    sizeof(edge->destination_content_digest)) ||
+		    !ebpfos_nonzero(edge->destination_contract_digest,
+				    sizeof(edge->destination_contract_digest)) ||
+		    (index && edge->ordinal <= prior_ordinal))
+			return -EPROTO;
+		/*
+		 * A scalar limit bounds a cursor inclusively; zero means the slot
+		 * is unused and must be returned as zero.  U64_MAX would make the
+		 * bound vacuous, so it is refused rather than treated as
+		 * "unbounded".  The caller's capability and effect masks are
+		 * deliberately not consulted: a numeric range is not a capability
+		 * declaration.
+		 */
+		for (arg = 0; arg < EBPFOS_CONTINUATION_SCALAR_SLOTS; arg++)
+			if (edge->scalar_limit[arg] == U64_MAX)
+				return -EPROTO;
+		prior_ordinal = edge->ordinal;
+	}
+	return 0;
+}
+
+/*
+ * Freeze the continuation edges from the caller's own metadata map.
+ *
+ * The record lives beside the import manifest, under its own key, in the same
+ * immutable metadata map.  An absent record is not an error: a caller that takes
+ * no continuation transitions simply has none, and the call path refuses a
+ * continuation claim against that absence rather than reading it as permission.
+ */
+static int ebpfos_continuation_manifest_copy(
+	struct bpf_map *map, const struct ebpfos_component_desc_v1 *descriptor,
+	struct ebpfos_continuation_manifest **result)
+{
+	struct ebpfos_continuation_manifest *copy;
+	const void *value;
+	u32 key = EBPFOS_EXECUTOR_METADATA_KEY_CONTINUATION;
+	int error;
+
+	*result = NULL;
+	if (le32_to_cpu(descriptor->use) !=
+	    EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER || !map)
+		return 0;
+	copy = kzalloc_obj(*copy, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	rcu_read_lock();
+	value = map->ops->map_lookup_elem(map, &key);
+	if (value)
+		memcpy(copy, value, sizeof(*copy));
+	rcu_read_unlock();
+	if (!value) {
+		kfree(copy);
+		return 0;
+	}
+	error = ebpfos_continuation_manifest_validate(copy, descriptor);
+	if (error) {
+		kfree(copy);
+		return error;
+	}
+	*result = copy;
+	return 0;
+}
+
 static int ebpfos_executor_import_manifest_copy(
 	struct bpf_map *map, const struct ebpfos_component_desc_v1 *descriptor,
 	struct ebpfos_executor_import_manifest **result)
 {
 	struct ebpfos_executor_import_manifest *copy;
 	const void *value;
-	u32 key = 0;
+	u32 key = EBPFOS_EXECUTOR_METADATA_KEY_IMPORT;
 	int error;
 
 	if (le32_to_cpu(descriptor->use) !=
@@ -843,6 +973,7 @@ void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity)
 {
 	if (identity && refcount_dec_and_test(&identity->refs)) {
 		kfree(identity->imports);
+		kfree(identity->continuations);
 		kfree(identity);
 	}
 }
@@ -1476,6 +1607,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct ebpfos_admission *admission = NULL;
 	struct ebpfos_binding *binding = NULL;
 	struct ebpfos_executor_import_manifest *imports = NULL;
+	struct ebpfos_continuation_manifest *continuations = NULL;
 	struct bpf_prog *prog = NULL;
 	struct bpf_map *map = NULL;
 	struct file *admission_file = NULL;
@@ -1542,6 +1674,16 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 						     &imports);
 	if (error)
 		goto out_put_map;
+	/*
+	 * The continuation edges come from the same immutable metadata map, so
+	 * they are frozen against exactly the imports above.  A caller with no
+	 * edge entry freezes NULL, which is a caller that may take no
+	 * continuation transition.
+	 */
+	error = ebpfos_continuation_manifest_copy(map, &request.descriptor,
+						  &continuations);
+	if (error)
+		goto out_free_imports;
 	ebpfos_descriptor_content_digest(&request.descriptor, content_digest);
 	error = ebpfos_grant_id_alloc(&grant_id);
 	if (error)
@@ -1555,6 +1697,8 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	}
 	identity->imports = imports;
 	imports = NULL;
+	identity->continuations = continuations;
+	continuations = NULL;
 	binding = ebpfos_binding_alloc_bpf(prog, map, identity, grant_id);
 	if (!binding) {
 		error = -ENOMEM;
@@ -1661,6 +1805,7 @@ out_put_binding:
 out_put_identity:
 	ebpfos_prog_identity_put(identity);
 out_free_imports:
+	kfree(continuations);
 	kfree(imports);
 out_put_map:
 	if (map)
@@ -2135,6 +2280,61 @@ int ebpfos_admission_import_validate(
 	return 0;
 }
 
+/*
+ * How many authenticated continuation edges the sealed caller has.  Zero is a
+ * valid answer: it means this caller may take no continuation transition, and
+ * the call path refuses a continuation claim against that count rather than
+ * reading the absence as permission.
+ */
+int ebpfos_admission_continuation_count(struct bpf_prog_aux *aux, u32 *count)
+{
+	struct ebpfos_prog_identity *identity;
+	const struct ebpfos_continuation_manifest *manifest;
+
+	if (!aux || !aux->prog || !count)
+		return -EINVAL;
+	if (!aux->ebpfos_meta || aux->prog->type != BPF_PROG_TYPE_SYSCALL ||
+	    !aux->prog->sleepable)
+		return -EACCES;
+	identity = READ_ONCE(aux->ebpfos_identity);
+	if (!identity || READ_ONCE(identity->seal_state) != EBPFOS_PROG_SEALED)
+		return -EKEYREJECTED;
+	manifest = identity->continuations;
+	if (!manifest || manifest->version != EBPFOS_CONTINUATION_ABI_VERSION) {
+		*count = 0;
+		return 0;
+	}
+	*count = manifest->edge_count;
+	return 0;
+}
+
+/*
+ * Copy the edge at `index`, in the manifest's own stored order.  The order is
+ * validated strictly increasing in ordinal at seal time, so index order is
+ * ordinal order and a caller may rely on it when opening a session.
+ */
+int ebpfos_admission_continuation_edge(struct bpf_prog_aux *aux, u32 index,
+				       struct ebpfos_continuation_edge *edge)
+{
+	struct ebpfos_prog_identity *identity;
+	const struct ebpfos_continuation_manifest *manifest;
+
+	if (!aux || !aux->prog || !edge)
+		return -EINVAL;
+	if (!aux->ebpfos_meta || aux->prog->type != BPF_PROG_TYPE_SYSCALL ||
+	    !aux->prog->sleepable)
+		return -EACCES;
+	identity = READ_ONCE(aux->ebpfos_identity);
+	if (!identity || READ_ONCE(identity->seal_state) != EBPFOS_PROG_SEALED)
+		return -EKEYREJECTED;
+	manifest = identity->continuations;
+	if (!manifest || manifest->version != EBPFOS_CONTINUATION_ABI_VERSION ||
+	    index >= manifest->edge_count)
+		return -ENOENT;
+	*edge = manifest->edges[index];
+	return 0;
+}
+
 int ebpfos_admission_stage_bundle_locked(
 	struct ebpfos_admission **grants,
 	struct ebpfos_binding *const *predecessors, unsigned int count)
@@ -2150,6 +2350,7 @@ int ebpfos_admission_stage_bundle_locked(
 		return -EINVAL;
 	replacing = !!predecessors[0];
 	for (index = 0; index < count; index++) {
+
 		struct ebpfos_admission *grant = grants[index];
 		const struct ebpfos_component_desc_v1 *descriptor;
 		bool mapless;
