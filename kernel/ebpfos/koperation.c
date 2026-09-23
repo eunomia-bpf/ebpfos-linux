@@ -451,6 +451,7 @@ __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_machine_register(void) { }
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
 __bpf_kfunc void bpf_ebpfos_kprog_bounded_memset(void) { }
+__bpf_kfunc void bpf_ebpfos_kprog_compiler_barrier(void) { }
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_machine_ids)
@@ -464,6 +465,10 @@ BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
 BTF_KFUNCS_START(ebpfos_kprog_bounded_memory_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_bounded_memset)
 BTF_KFUNCS_END(ebpfos_kprog_bounded_memory_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_compiler_barrier_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kprog_compiler_barrier)
+BTF_KFUNCS_END(ebpfos_kprog_compiler_barrier_ids)
 
 /* sha256("ebpfos-koperation-bounded-memset-v1:x86_64:arena-bound:last-byte-proof:rep-stosb") */
 static const u8 ebpfos_kprog_bounded_memset_semantic_sha256[
@@ -744,6 +749,110 @@ static const struct btf_kfunc_id_set ebpfos_kprog_bounded_memory_set = {
 	.kop_descs = ebpfos_kprog_bounded_memory_descs,
 };
 
+/*
+ * sha256("ebpfos-koperation-compiler-barrier-v1:x86_64:empty-asm:memory-clobber")
+ *
+ * Linux's barrier() is an empty asm with a memory clobber: it orders the
+ * compiler and emits no machine instruction at all.  Exposing it as a
+ * KOperation is what lets an independently verified component keep the
+ * barriers its source contains instead of having them discarded, and the
+ * native emitter below emits nothing because nothing is what the operation
+ * compiles to -- not because its semantics are unimplemented.
+ */
+static const u8 ebpfos_kprog_compiler_barrier_semantic_sha256[
+	SHA256_DIGEST_SIZE] = {
+	0x2b, 0xc2, 0xd4, 0x35, 0x69, 0x14, 0x29, 0x2d,
+	0x09, 0x70, 0x48, 0x14, 0xb0, 0x9f, 0x60, 0x8e,
+	0x55, 0xc6, 0xb4, 0x11, 0xba, 0x3a, 0xe2, 0x85,
+	0xdc, 0xc5, 0xe8, 0xf8, 0xb1, 0xbe, 0xd5, 0x08,
+};
+
+/*
+ * The operation takes no operands, so exactly one sidecar value names it.
+ * Accepting any other payload would admit a second, undescribed instance of
+ * an operation that has only one.
+ */
+#define EBPFOS_KPROG_COMPILER_BARRIER_PAYLOAD 1ULL
+
+static bool ebpfos_kprog_compiler_barrier_payload(u64 payload)
+{
+	return payload == EBPFOS_KPROG_COMPILER_BARRIER_PAYLOAD;
+}
+
+static int ebpfos_kprog_compiler_barrier_instantiate(
+	u64 payload, struct bpf_insn *insns)
+{
+	u32 effect_tag;
+
+	if (!insns || !ebpfos_kprog_compiler_barrier_payload(payload))
+		return -EINVAL;
+	effect_tag = get_unaligned_le32(
+		ebpfos_kprog_compiler_barrier_semantic_sha256) & S32_MAX;
+	insns[0] = BPF_MOV64_IMM(BPF_REG_0, effect_tag);
+	return 1;
+}
+
+static int ebpfos_kprog_compiler_barrier_emit_x86(
+	u8 *image, u32 *offset, bool emit, u64 payload,
+	const struct bpf_prog *prog, const u8 *final_ip)
+{
+	(void)image;
+	(void)emit;
+	(void)prog;
+	(void)final_ip;
+	if (!offset || !ebpfos_kprog_compiler_barrier_payload(payload))
+		return -EINVAL;
+	/* barrier() constrains the compiler, not the machine: it has no
+	 * instruction.  *offset is left where it was and no byte is written.
+	 */
+	return 0;
+}
+
+static struct bpf_kop ebpfos_kprog_compiler_barrier = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 0,
+	.capability_mask = EBPFOS_CAP_KPROG_COMPILER_BARRIER,
+	.effect_mask = EBPFOS_EFFECT_KPROG_COMPILER_ORDERING,
+	.semantic_sha256 = {
+		0x2b, 0xc2, 0xd4, 0x35, 0x69, 0x14, 0x29, 0x2d,
+		0x09, 0x70, 0x48, 0x14, 0xb0, 0x9f, 0x60, 0x8e,
+		0x55, 0xc6, 0xb4, 0x11, 0xba, 0x3a, 0xe2, 0x85,
+		0xdc, 0xc5, 0xe8, 0xf8, 0xb1, 0xbe, 0xd5, 0x08,
+	},
+	.instantiate_insn = ebpfos_kprog_compiler_barrier_instantiate,
+	/* An empty sequence says the same thing at every address. */
+	.position_independent = true,
+	.emit_x86 = ebpfos_kprog_compiler_barrier_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_compiler_barrier_descs[] = {
+	&ebpfos_kprog_compiler_barrier,
+};
+
+static int ebpfos_kprog_compiler_barrier_filter(const struct bpf_prog *prog,
+						u32 kfunc_id)
+{
+	bool own_id = btf_id_set8_contains(&ebpfos_kprog_compiler_barrier_ids,
+					   kfunc_id);
+
+	if (!own_id)
+		return 0;
+	if (!prog || !prog->aux)
+		return 1;
+	/* An admitted component may keep its own barriers.  Any other program
+	 * has no component identity to bind the ordering effect to.
+	 */
+	if (prog->aux->ebpfos_component)
+		return 0;
+	return prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
+}
+
+static const struct btf_kfunc_id_set ebpfos_kprog_compiler_barrier_set = {
+	.set = &ebpfos_kprog_compiler_barrier_ids,
+	.filter = ebpfos_kprog_compiler_barrier_filter,
+	.kop_descs = ebpfos_kprog_compiler_barrier_descs,
+};
+
 static int __init ebpfos_kprog_register(void)
 {
 	int error;
@@ -806,8 +915,12 @@ static int __init ebpfos_kprog_register(void)
 					  &ebpfos_kprog_terminal_set);
 	if (error)
 		return error;
+	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					  &ebpfos_kprog_bounded_memory_set);
+	if (error)
+		return error;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_bounded_memory_set);
+					 &ebpfos_kprog_compiler_barrier_set);
 }
 late_initcall(ebpfos_kprog_register);
 
