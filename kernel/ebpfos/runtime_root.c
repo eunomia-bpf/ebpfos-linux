@@ -277,6 +277,7 @@ struct ebpfos_runtime_successor_state {
 };
 
 #define EBPFOS_RUNTIME_SUCCESSOR_MAX_BYTES (64ULL << 20)
+#define EBPFOS_RUNTIME_LAYOUT_ARENA_USER_BASE ((1ULL << 44) + (1ULL << 25))
 
 static struct ebpfos_runtime_successor_state ebpfos_runtime_successor = {
 	.lock = __MUTEX_INITIALIZER(ebpfos_runtime_successor.lock),
@@ -2739,13 +2740,19 @@ static int ebpfos_runtime_successor_validate(
 			leaf & _PAGE_RW, !(leaf & _PAGE_NX));
 		if (error)
 			return error;
+		alias = EBPFOS_RUNTIME_LAYOUT_ARENA_USER_BASE +
+			(virtual - request->virtual_base);
+		error = ebpfos_runtime_successor_mapping_page(
+			request, image, alias, physical,
+			leaf & _PAGE_RW, !(leaf & _PAGE_NX));
+		if (error)
+			return error;
 		mapped++;
 	}
-	/* Every owned image page has one generated, authority-preserving direct-map
-	 * view of the same physical backing.  The bridge and acknowledgement pages
-	 * are members of that generic alias set rather than exceptional mappings.
+	/* Each owned page has both direct-map and arena views of its backing.
+	 * The bridge and acknowledgement pages are members of the direct-map set.
 	 */
-	if (mapped * 2 != request->mapped_pages)
+	if (mapped * 3 != request->mapped_pages)
 		return -EPROTO;
 	error = ebpfos_runtime_successor_root_page(
 		request, image, request->lstar, false, true);
