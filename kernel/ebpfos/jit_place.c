@@ -17,6 +17,7 @@
  */
 #include <linux/bpf.h>
 #include <linux/ebpfos.h>
+#include <linux/extable.h>
 #include <linux/filter.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -477,6 +478,92 @@ out_free:
  * no instant where an arena fault in either image has nowhere to land -- which
  * is exactly what a four-vCPU guest finds if there is one.
  */
+/* Placed regions whose faults the successor's own fault path must resolve.
+ *
+ * bpf_prog_kallsyms_add() makes a region findable through
+ * search_bpf_extables(), which reaches it via bpf_prog_ksym_find().  That
+ * works in the donor kernel and stops working at handoff: the successor image
+ * carries exc_page_fault, fixup_exception and search_exception_tables, and
+ * does not carry search_bpf_extables or bpf_prog_ksym_find, so in the
+ * successor that arm compiles to the inline stub in linux/extable.h and
+ * returns NULL.  A placed region that faults after handoff would have nowhere
+ * to land, which is why such code is kept non-enterable.
+ *
+ * So the region is also recorded here, in a list search_exception_tables()
+ * consults directly.  This arm needs neither CONFIG_BPF_JIT nor kallsyms, so
+ * it is present on both sides of the handoff and answers the same way.
+ *
+ * Fault context reads it, so the list is RCU-walked and only ever published
+ * after the region's entries are complete.
+ */
+struct ebpfos_jit_fault_region {
+	struct list_head node;
+	unsigned long start;
+	unsigned long end;
+	const struct exception_table_entry *extable;
+	size_t num_exentries;
+	struct rcu_head rcu;
+};
+
+static LIST_HEAD(ebpfos_jit_fault_regions);
+static DEFINE_SPINLOCK(ebpfos_jit_fault_lock);
+
+/* Consulted by search_exception_tables() after the kernel and module tables.
+ * Returns the entry covering addr, or NULL.
+ */
+const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr)
+{
+	const struct exception_table_entry *entry = NULL;
+	struct ebpfos_jit_fault_region *region;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(region, &ebpfos_jit_fault_regions, node) {
+		if (addr < region->start || addr >= region->end)
+			continue;
+		entry = search_extable(region->extable, region->num_exentries,
+				       addr);
+		break;
+	}
+	rcu_read_unlock();
+	return entry;
+}
+
+static int ebpfos_jit_record_fault_region(void *image, u32 image_len,
+					  const struct exception_table_entry *extable,
+					  u32 num_exentries)
+{
+	struct ebpfos_jit_fault_region *region;
+
+	if (!num_exentries)
+		return 0;
+	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	if (!region)
+		return -ENOMEM;
+	region->start = (unsigned long)image;
+	region->end = region->start + image_len;
+	region->extable = extable;
+	region->num_exentries = num_exentries;
+	spin_lock(&ebpfos_jit_fault_lock);
+	list_add_rcu(&region->node, &ebpfos_jit_fault_regions);
+	spin_unlock(&ebpfos_jit_fault_lock);
+	return 0;
+}
+
+static void ebpfos_jit_forget_fault_region(void *image)
+{
+	struct ebpfos_jit_fault_region *region;
+
+	spin_lock(&ebpfos_jit_fault_lock);
+	list_for_each_entry(region, &ebpfos_jit_fault_regions, node)
+		if (region->start == (unsigned long)image) {
+			list_del_rcu(&region->node);
+			spin_unlock(&ebpfos_jit_fault_lock);
+			kfree_rcu(region, rcu);
+			return;
+		}
+	spin_unlock(&ebpfos_jit_fault_lock);
+}
+
 /* Install one region of placed native code into the fault path Linux already
  * has.
  *
@@ -493,7 +580,7 @@ out_free:
  * ebpfos_jit_remove_fault_region() once nobody can still be inside the region.
  */
 struct bpf_prog *ebpfos_jit_install_fault_region(
-	enum bpf_prog_type type, void *image, u32 image_len,
+	u32 prog_type, void *image, u32 image_len,
 	struct exception_table_entry *extable, u32 num_exentries)
 {
 	struct bpf_prog *owner;
@@ -503,13 +590,21 @@ struct bpf_prog *ebpfos_jit_install_fault_region(
 	owner = bpf_prog_alloc(1, GFP_KERNEL);
 	if (!owner)
 		return ERR_PTR(-ENOMEM);
-	owner->type = type;
+	owner->type = prog_type;
 	owner->jited = 1;
 	owner->jited_len = image_len;
 	owner->bpf_func = (bpf_func_t)image;
 	owner->aux->extable = extable;
 	owner->aux->num_exentries = num_exentries;
 	strscpy(owner->aux->name, "ebpfos_placed", sizeof(owner->aux->name));
+	/* Record before publishing the symbol: once either lookup can reach the
+	 * region, both must already resolve its faults.
+	 */
+	if (ebpfos_jit_record_fault_region(image, image_len, extable,
+					   num_exentries)) {
+		bpf_prog_free(owner);
+		return ERR_PTR(-ENOMEM);
+	}
 	bpf_prog_kallsyms_add(owner);
 	return owner;
 }
@@ -519,6 +614,7 @@ void ebpfos_jit_remove_fault_region(struct bpf_prog *owner)
 	if (IS_ERR_OR_NULL(owner))
 		return;
 	bpf_prog_kallsyms_del(owner);
+	ebpfos_jit_forget_fault_region(owner->bpf_func);
 	/* the region's memory belongs to whoever placed it, not to the shell,
 	 * so the shell is emptied before it is freed
 	 */

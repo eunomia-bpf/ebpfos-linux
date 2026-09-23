@@ -579,9 +579,22 @@ long ebpfos_jit_place_ioctl(void __user *argp);
  */
 struct exception_table_entry;
 struct bpf_prog *ebpfos_jit_install_fault_region(
-	enum bpf_prog_type type, void *image, u32 image_len,
+	u32 prog_type, void *image, u32 image_len,
 	struct exception_table_entry *extable, u32 num_exentries);
 void ebpfos_jit_remove_fault_region(struct bpf_prog *owner);
+
+/* Consulted by search_exception_tables() after the kernel and module tables.
+ * Unlike search_bpf_extables() this needs neither CONFIG_BPF_JIT nor kallsyms,
+ * so a placed region resolves its faults on both sides of the handoff.
+ */
+const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr);
+#else
+struct exception_table_entry;
+static inline const struct exception_table_entry *
+ebpfos_jit_search_extables(unsigned long addr)
+{
+	return NULL;
+}
 #endif
 
 #endif /* _LINUX_EBPFOS_H */

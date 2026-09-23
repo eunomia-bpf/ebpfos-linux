@@ -6,6 +6,7 @@
 #include <linux/elf.h>
 #include <linux/ftrace.h>
 #include <linux/memory.h>
+#include <linux/ebpfos.h>
 #include <linux/extable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -60,6 +61,8 @@ const struct exception_table_entry *search_exception_tables(unsigned long addr)
 		e = search_module_extables(addr);
 	if (!e)
 		e = search_bpf_extables(addr);
+	if (!e)
+		e = ebpfos_jit_search_extables(addr);
 	return e;
 }
 
