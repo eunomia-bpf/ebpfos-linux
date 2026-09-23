@@ -588,6 +588,27 @@ void ebpfos_jit_remove_fault_region(struct bpf_prog *owner);
  * so a placed region resolves its faults on both sides of the handoff.
  */
 const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr);
+
+/* A placed region, resolvable both before and after handoff.
+ *
+ * The donor adds records at run time; an image builder publishes them
+ * statically by filling one of ebpfos_jit_static_fault_regions and linking
+ * ebpfos_jit_fault_regions to it, because after handoff nothing is running
+ * that would add them.  The layout is read from DWARF rather than restated.
+ */
+struct ebpfos_jit_fault_region {
+	struct list_head node;
+	unsigned long start;
+	unsigned long end;
+	const struct exception_table_entry *extable;
+	size_t num_exentries;
+	struct rcu_head rcu;
+};
+
+#define EBPFOS_JIT_STATIC_FAULT_REGIONS 8U
+extern struct list_head ebpfos_jit_fault_regions;
+extern struct ebpfos_jit_fault_region
+	ebpfos_jit_static_fault_regions[EBPFOS_JIT_STATIC_FAULT_REGIONS];
 #else
 struct exception_table_entry;
 static inline const struct exception_table_entry *

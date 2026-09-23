@@ -496,17 +496,26 @@ out_free:
  * Fault context reads it, so the list is RCU-walked and only ever published
  * after the region's entries are complete.
  */
-struct ebpfos_jit_fault_region {
-	struct list_head node;
-	unsigned long start;
-	unsigned long end;
-	const struct exception_table_entry *extable;
-	size_t num_exentries;
-	struct rcu_head rcu;
-};
 
-static LIST_HEAD(ebpfos_jit_fault_regions);
+/* The list is global, and so is a small array of records, because a placed
+ * region has to be resolvable after handoff as well as before it.
+ *
+ * Before handoff the donor adds records at run time, from the placement ioctl.
+ * After handoff there is no donor to do that: the successor executes its own
+ * image, with its own copy of this list, which nothing running would ever
+ * populate.  So a region placed into the image is published there statically --
+ * the image builder fills a record and links the head to it, exactly as it
+ * already fills other typed objects it materializes.  Both symbols are global
+ * so the builder can find them; on the donor side the array is simply unused.
+ */
+LIST_HEAD(ebpfos_jit_fault_regions);
 static DEFINE_SPINLOCK(ebpfos_jit_fault_lock);
+
+/* Storage for regions published into an image rather than added at run time.
+ * Zeroed here; a record is live only once the list head reaches it.
+ */
+struct ebpfos_jit_fault_region
+	ebpfos_jit_static_fault_regions[EBPFOS_JIT_STATIC_FAULT_REGIONS];
 
 /* Consulted by search_exception_tables() after the kernel and module tables.
  * Returns the entry covering addr, or NULL.
