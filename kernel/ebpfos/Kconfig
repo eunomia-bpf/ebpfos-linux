@@ -37,7 +37,8 @@ config EBPFOS_RUNTIME_ROOT
 
 config EBPFOS_BUILD
 	bool
-	default y if EBPFOS || EBPFOS_RUNTIME_ROOT || EBPFOS_KOPERATION
+	default y if EBPFOS || EBPFOS_RUNTIME_ROOT || EBPFOS_KOPERATION || \
+		     EBPFOS_JIT_FAULT_REGIONS
 
 config EBPFOS_KOPERATION
 	bool "eBPFOS generated x86-64 KOperation executor"
@@ -55,9 +56,23 @@ config EBPFOS_KUNIT_TEST
 	depends on EBPFOS && KUNIT
 	default KUNIT_ALL_TESTS
 
+config EBPFOS_JIT_FAULT_REGIONS
+	bool "Resolve faults inside placed native code"
+	depends on X86_64
+	default n
+	help
+	  Carry a registry of placed native code regions and their fault fixup
+	  tables, and consult it from search_exception_tables() after the
+	  kernel, module and BPF tables.  A region is added at run time by the
+	  placement mechanism, or published into an image that has to resolve
+	  its own placed code's faults with nothing running to add it.  This
+	  needs neither BPF nor kallsyms and pulls in no component runtime, so
+	  a successor image can carry the lookup alone.
+
 config EBPFOS_JIT_PLACE
 	bool "Run a verified program's JIT output from a second address"
 	depends on EBPFOS && BPF_JIT && X86_64
+	select EBPFOS_JIT_FAULT_REGIONS
 	default n
 	help
 	  Copy a live, verified and JITed program's image to a second address,

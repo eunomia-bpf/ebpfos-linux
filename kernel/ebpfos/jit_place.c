@@ -482,96 +482,10 @@ out_free:
  *
  * bpf_prog_kallsyms_add() makes a region findable through
  * search_bpf_extables(), which reaches it via bpf_prog_ksym_find().  That
- * works in the donor kernel and stops working at handoff: the successor image
- * carries exc_page_fault, fixup_exception and search_exception_tables, and
- * does not carry search_bpf_extables or bpf_prog_ksym_find, so in the
- * successor that arm compiles to the inline stub in linux/extable.h and
- * returns NULL.  A placed region that faults after handoff would have nowhere
- * to land, which is why such code is kept non-enterable.
- *
- * So the region is also recorded here, in a list search_exception_tables()
- * consults directly.  This arm needs neither CONFIG_BPF_JIT nor kallsyms, so
- * it is present on both sides of the handoff and answers the same way.
- *
- * Fault context reads it, so the list is RCU-walked and only ever published
- * after the region's entries are complete.
+ * works in the donor kernel and stops working at handoff, so the region is
+ * also recorded in the registry in jit_fault.c, which search_exception_tables()
+ * consults directly and which a successor image carries without any of this.
  */
-
-/* The list is global, and so is a small array of records, because a placed
- * region has to be resolvable after handoff as well as before it.
- *
- * Before handoff the donor adds records at run time, from the placement ioctl.
- * After handoff there is no donor to do that: the successor executes its own
- * image, with its own copy of this list, which nothing running would ever
- * populate.  So a region placed into the image is published there statically --
- * the image builder fills a record and links the head to it, exactly as it
- * already fills other typed objects it materializes.  Both symbols are global
- * so the builder can find them; on the donor side the array is simply unused.
- */
-LIST_HEAD(ebpfos_jit_fault_regions);
-static DEFINE_SPINLOCK(ebpfos_jit_fault_lock);
-
-/* Storage for regions published into an image rather than added at run time.
- * Zeroed here; a record is live only once the list head reaches it.
- */
-struct ebpfos_jit_fault_region
-	ebpfos_jit_static_fault_regions[EBPFOS_JIT_STATIC_FAULT_REGIONS];
-
-/* Consulted by search_exception_tables() after the kernel and module tables.
- * Returns the entry covering addr, or NULL.
- */
-const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr)
-{
-	const struct exception_table_entry *entry = NULL;
-	struct ebpfos_jit_fault_region *region;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(region, &ebpfos_jit_fault_regions, node) {
-		if (addr < region->start || addr >= region->end)
-			continue;
-		entry = search_extable(region->extable, region->num_exentries,
-				       addr);
-		break;
-	}
-	rcu_read_unlock();
-	return entry;
-}
-
-static int ebpfos_jit_record_fault_region(void *image, u32 image_len,
-					  const struct exception_table_entry *extable,
-					  u32 num_exentries)
-{
-	struct ebpfos_jit_fault_region *region;
-
-	if (!num_exentries)
-		return 0;
-	region = kzalloc(sizeof(*region), GFP_KERNEL);
-	if (!region)
-		return -ENOMEM;
-	region->start = (unsigned long)image;
-	region->end = region->start + image_len;
-	region->extable = extable;
-	region->num_exentries = num_exentries;
-	spin_lock(&ebpfos_jit_fault_lock);
-	list_add_rcu(&region->node, &ebpfos_jit_fault_regions);
-	spin_unlock(&ebpfos_jit_fault_lock);
-	return 0;
-}
-
-static void ebpfos_jit_forget_fault_region(void *image)
-{
-	struct ebpfos_jit_fault_region *region;
-
-	spin_lock(&ebpfos_jit_fault_lock);
-	list_for_each_entry(region, &ebpfos_jit_fault_regions, node)
-		if (region->start == (unsigned long)image) {
-			list_del_rcu(&region->node);
-			spin_unlock(&ebpfos_jit_fault_lock);
-			kfree_rcu(region, rcu);
-			return;
-		}
-	spin_unlock(&ebpfos_jit_fault_lock);
-}
 
 /* Install one region of placed native code into the fault path Linux already
  * has.

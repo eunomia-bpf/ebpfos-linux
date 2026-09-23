@@ -38,6 +38,16 @@ config X86_64
 	select EXECMEM if DYNAMIC_FTRACE
 	select ACPI_MRRM if ACPI
 
+config X86_BPF_EXTABLE
+	def_bool y
+	depends on X86_64
+	depends on BPF_JIT || EBPFOS_JIT_FAULT_REGIONS
+	help
+	  Build the handler that applies an EX_TYPE_BPF fault fixup.  The JIT
+	  emits those entries, but the kernel that applies them need not be the
+	  one that emitted them: placed native code carries its entries into an
+	  image built without a JIT, which still has to resume the access.
+
 config FORCE_DYNAMIC_FTRACE
 	def_bool y
 	depends on X86_32

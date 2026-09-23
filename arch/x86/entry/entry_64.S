@@ -552,8 +552,13 @@ __irqentry_text_start:
 #include <asm/idtentry.h>
 
 #ifdef CONFIG_EBPFOS_RUNTIME_ROOT
-	/* One policy-free entry body serves every generator-owned vector stub. */
-	idtentry_irq X86_TRAP_OTHER ebpfos_runtime_irq_vector
+	/* One policy-free entry body serves every generator-owned vector stub.
+	 *
+	 * idtentry.h undefines X86_TRAP_OTHER at its end, so spell the same
+	 * "not a trap vector" marker value here rather than a name that is no
+	 * longer defined at this point.
+	 */
+	idtentry_irq 0xFFFF ebpfos_runtime_irq_vector
 #endif
 
 	__ALIGN

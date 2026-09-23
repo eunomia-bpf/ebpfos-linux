@@ -568,32 +568,19 @@ static inline long ebpfos_koperation_result_ioctl(void __user *argp,
 static inline void ebpfos_koperation_release(void **txn_slot) { }
 #endif
 
-#ifdef CONFIG_EBPFOS_JIT_PLACE
-long ebpfos_jit_place_ioctl(void __user *argp);
-
-/* Install a region of placed native code into the fault path Linux already
- * has: fixup_exception() -> search_exception_tables() -> search_bpf_extables()
- * finds the owning program with bpf_prog_ksym_find() and searches its
- * aux->extable.  The region becomes fault-handling because a kallsyms-visible
- * program covers it and carries its exception entries, not because anything
- * was appended to it.  Retire the returned owner once nobody can still be
- * inside the region.
- */
 struct exception_table_entry;
-struct bpf_prog *ebpfos_jit_install_fault_region(
-	u32 prog_type, void *image, u32 image_len,
-	struct exception_table_entry *extable, u32 num_exentries);
-void ebpfos_jit_remove_fault_region(struct bpf_prog *owner);
 
-/* Consulted by search_exception_tables() after the kernel and module tables.
- * Unlike search_bpf_extables() this needs neither CONFIG_BPF_JIT nor kallsyms,
- * so a placed region resolves its faults on both sides of the handoff.
- */
-const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr);
-
-/* A placed region, resolvable both before and after handoff.
+/* The registry of placed native code regions and their fault fixups.
  *
- * The donor adds records at run time; an image builder publishes them
+ * It is configured on its own, without the placement mechanism, because a
+ * successor image needs the lookup and nothing else: it has to resolve faults
+ * in code it did not place and has no BPF, no kallsyms and no component
+ * runtime to do it with.
+ */
+#ifdef CONFIG_EBPFOS_JIT_FAULT_REGIONS
+/* A placed region, resolvable both before and after a handoff.
+ *
+ * A donor adds records at run time; an image builder publishes them
  * statically by filling one of ebpfos_jit_static_fault_regions and linking
  * ebpfos_jit_fault_regions to it, because after handoff nothing is running
  * that would add them.  The layout is read from DWARF rather than restated.
@@ -611,13 +598,41 @@ struct ebpfos_jit_fault_region {
 extern struct list_head ebpfos_jit_fault_regions;
 extern struct ebpfos_jit_fault_region
 	ebpfos_jit_static_fault_regions[EBPFOS_JIT_STATIC_FAULT_REGIONS];
+
+/* Consulted by search_exception_tables() after the kernel, module and BPF
+ * tables.  Unlike search_bpf_extables() this needs neither CONFIG_BPF_JIT nor
+ * kallsyms, so a placed region resolves its faults on both sides of a handoff.
+ */
+const struct exception_table_entry *ebpfos_jit_search_extables(unsigned long addr);
+
+int ebpfos_jit_record_fault_region(void *image, u32 image_len,
+				   const struct exception_table_entry *extable,
+				   u32 num_exentries);
+void ebpfos_jit_forget_fault_region(void *image);
 #else
-struct exception_table_entry;
 static inline const struct exception_table_entry *
 ebpfos_jit_search_extables(unsigned long addr)
 {
 	return NULL;
 }
+#endif
+
+#ifdef CONFIG_EBPFOS_JIT_PLACE
+long ebpfos_jit_place_ioctl(void __user *argp);
+
+/* Install a region of placed native code into the fault path Linux already
+ * has: fixup_exception() -> search_exception_tables() -> search_bpf_extables()
+ * finds the owning program with bpf_prog_ksym_find() and searches its
+ * aux->extable.  The region becomes fault-handling because a kallsyms-visible
+ * program covers it and carries its exception entries, not because anything
+ * was appended to it.  It is recorded in the registry above as well, which is
+ * the arm that keeps answering after a handoff.  Retire the returned owner
+ * once nobody can still be inside the region.
+ */
+struct bpf_prog *ebpfos_jit_install_fault_region(
+	u32 prog_type, void *image, u32 image_len,
+	struct exception_table_entry *extable, u32 num_exentries);
+void ebpfos_jit_remove_fault_region(struct bpf_prog *owner);
 #endif
 
 #endif /* _LINUX_EBPFOS_H */

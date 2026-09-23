@@ -28,6 +28,8 @@ obj-y				:=  init.o init_$(BITS).o fault.o ioremap.o extable.o mmap.o \
 
 obj-y				+= pat/
 
+obj-$(CONFIG_X86_BPF_EXTABLE)	+= bpf_extable.o
+
 # Make sure __phys_addr has no stackprotector
 CFLAGS_physaddr.o		:= -fno-stack-protector
 

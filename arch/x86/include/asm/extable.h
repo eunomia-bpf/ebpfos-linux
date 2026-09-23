@@ -50,7 +50,7 @@ static inline void __noreturn ex_handler_msr_mce(struct pt_regs *regs, bool wrms
 }
 #endif
 
-#if defined(CONFIG_BPF_JIT) && defined(CONFIG_X86_64)
+#ifdef CONFIG_X86_BPF_EXTABLE
 bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs);
 #else
 static inline bool ex_handler_bpf(const struct exception_table_entry *x,
