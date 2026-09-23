@@ -568,6 +568,20 @@ static inline void ebpfos_koperation_release(void **txn_slot) { }
 
 #ifdef CONFIG_EBPFOS_JIT_PLACE
 long ebpfos_jit_place_ioctl(void __user *argp);
+
+/* Install a region of placed native code into the fault path Linux already
+ * has: fixup_exception() -> search_exception_tables() -> search_bpf_extables()
+ * finds the owning program with bpf_prog_ksym_find() and searches its
+ * aux->extable.  The region becomes fault-handling because a kallsyms-visible
+ * program covers it and carries its exception entries, not because anything
+ * was appended to it.  Retire the returned owner once nobody can still be
+ * inside the region.
+ */
+struct exception_table_entry;
+struct bpf_prog *ebpfos_jit_install_fault_region(
+	enum bpf_prog_type type, void *image, u32 image_len,
+	struct exception_table_entry *extable, u32 num_exentries);
+void ebpfos_jit_remove_fault_region(struct bpf_prog *owner);
 #endif
 
 #endif /* _LINUX_EBPFOS_H */

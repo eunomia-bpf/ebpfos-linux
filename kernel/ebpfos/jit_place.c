@@ -477,6 +477,58 @@ out_free:
  * no instant where an arena fault in either image has nowhere to land -- which
  * is exactly what a four-vCPU guest finds if there is one.
  */
+/* Install one region of placed native code into the fault path Linux already
+ * has.
+ *
+ * fixup_exception() -> search_exception_tables() -> search_bpf_extables()
+ * resolves a faulting address with bpf_prog_ksym_find() and then searches that
+ * program's aux->extable. So a region becomes fault-handling by owning a
+ * kallsyms-visible bpf_prog whose image covers it and whose extable is the
+ * region's own -- nothing else, and no bytes appended to the region itself.
+ *
+ * The shell carries no instructions: bpf_prog_alloc(1) because a zero size
+ * rounds to a zero-byte allocation, which fails.
+ *
+ * Returns the owner, which the caller retires with
+ * ebpfos_jit_remove_fault_region() once nobody can still be inside the region.
+ */
+struct bpf_prog *ebpfos_jit_install_fault_region(
+	enum bpf_prog_type type, void *image, u32 image_len,
+	struct exception_table_entry *extable, u32 num_exentries)
+{
+	struct bpf_prog *owner;
+
+	if (!image || !image_len || (num_exentries && !extable))
+		return ERR_PTR(-EINVAL);
+	owner = bpf_prog_alloc(1, GFP_KERNEL);
+	if (!owner)
+		return ERR_PTR(-ENOMEM);
+	owner->type = type;
+	owner->jited = 1;
+	owner->jited_len = image_len;
+	owner->bpf_func = (bpf_func_t)image;
+	owner->aux->extable = extable;
+	owner->aux->num_exentries = num_exentries;
+	strscpy(owner->aux->name, "ebpfos_placed", sizeof(owner->aux->name));
+	bpf_prog_kallsyms_add(owner);
+	return owner;
+}
+
+void ebpfos_jit_remove_fault_region(struct bpf_prog *owner)
+{
+	if (IS_ERR_OR_NULL(owner))
+		return;
+	bpf_prog_kallsyms_del(owner);
+	/* the region's memory belongs to whoever placed it, not to the shell,
+	 * so the shell is emptied before it is freed
+	 */
+	owner->jited = 0;
+	owner->bpf_func = NULL;
+	owner->aux->extable = NULL;
+	owner->aux->num_exentries = 0;
+	bpf_prog_free(owner);
+}
+
 static int ebpfos_jit_place_publish_symbols(struct bpf_prog *prog,
 					    struct ebpfos_jit_placement *placement)
 {
@@ -486,23 +538,13 @@ static int ebpfos_jit_place_publish_symbols(struct bpf_prog *prog,
 		struct bpf_prog *function = ebpfos_jit_place_function(prog, index);
 		struct ebpfos_jit_placed_function *slot =
 			&placement->functions[index];
-		/* one page: the shell carries no instructions of its own, and a
-		 * zero size rounds to a zero-byte allocation, which fails
-		 */
-		struct bpf_prog *owner = bpf_prog_alloc(1, GFP_KERNEL);
+		struct bpf_prog *owner = ebpfos_jit_install_fault_region(
+			function->type, slot->image, function->jited_len,
+			slot->extable, function->aux->num_exentries);
 
-		if (!owner)
-			return -ENOMEM;
-		owner->type = function->type;
-		owner->jited = 1;
-		owner->jited_len = function->jited_len;
-		owner->bpf_func = (bpf_func_t)slot->image;
-		owner->aux->extable = slot->extable;
-		owner->aux->num_exentries = function->aux->num_exentries;
-		strscpy(owner->aux->name, "ebpfos_placed",
-			sizeof(owner->aux->name));
+		if (IS_ERR(owner))
+			return PTR_ERR(owner);
 		slot->owner = owner;
-		bpf_prog_kallsyms_add(owner);
 	}
 	return 0;
 }
@@ -514,15 +556,7 @@ static void ebpfos_jit_place_retire_symbols(struct ebpfos_jit_placement *placeme
 	for (index = 0; index < placement->count; index++) {
 		struct bpf_prog *owner = placement->functions[index].owner;
 
-		if (!owner)
-			continue;
-		bpf_prog_kallsyms_del(owner);
-		/* the copy's memory is this placement's, not the shell's */
-		owner->jited = 0;
-		owner->bpf_func = NULL;
-		owner->aux->extable = NULL;
-		owner->aux->num_exentries = 0;
-		bpf_prog_free(owner);
+		ebpfos_jit_remove_fault_region(owner);
 		placement->functions[index].owner = NULL;
 	}
 }
