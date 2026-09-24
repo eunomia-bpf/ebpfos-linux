@@ -220,16 +220,20 @@ struct ebpfos_component_call_frame {
 #define EBPFOS_CONTINUATION_DISPOSITION_ERROR 3U
 
 /*
- * Transport kinds.  Only values with an authenticated meaning in another
- * program's frame are admitted.  Live pointers and local mappings are absent.
- * An arena range is not a pointer: both endpoint programs must reference
- * exactly one identical loaded arena map covering the declared extent, and
- * every returned offset and length is checked before the next program enters.
- * Kernel-object pointers still require stable object handles and are not
- * representable by the arena kind.
+ * Transport kinds.  Only values that have an authenticated meaning inside
+ * another program's frame are admitted.  A live pointer, a page reference and a
+ * local mapping are deliberately *absent* rather than merely discouraged, so a
+ * manifest that tries to carry one has no representable kind and is refused at
+ * seal time instead of failing later at dispatch.
+ *
+ * P2 admits scalars only.  An arena-relative offset is not admitted yet: it is
+ * only an offset when an authenticated arena identity and extent bound it, and
+ * until that mechanism exists an arbitrary integer relabelled as an "offset"
+ * would be indistinguishable from a smuggled address.  Admitting the name
+ * before the proof would make the vocabulary claim more than it can enforce,
+ * so the kind is added together with its identity, not before it.
  */
 #define EBPFOS_CONTINUATION_TRANSPORT_SCALAR 1U
-#define EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE 2U
 
 #define EBPFOS_CONTINUATION_EDGE_MAX_ENTRIES 64U
 #define EBPFOS_CONTINUATION_SCALAR_SLOTS 4U
@@ -246,10 +250,6 @@ struct ebpfos_component_call_frame {
  * `scalar_limit` bounds the cursor values a step may report.  It is a *range*,
  * not a capability bitmap: range validation and authority validation are
  * separate domains and are never compared against each other.
- * For ARENA_RANGE, scalar_limit[0] is the admitted extent in bytes, and
- * scalar_limit[1] is the maximum range
- * length, and response scalar[0:1] carry offset and length.  Slots 2 and 3
- * remain ordinary bounded scalars.
  */
 struct ebpfos_continuation_edge {
 	u64 ordinal;
@@ -265,7 +265,6 @@ struct ebpfos_continuation_edge {
 	u32 destination_method_id;
 	u32 disposition;
 	u32 transport_kind;
-	/* Reserved; zero for every transport kind. */
 	u32 reserved;
 	/*
 	 * Upper bounds on the scalars a step may report.  Zero means the slot is
