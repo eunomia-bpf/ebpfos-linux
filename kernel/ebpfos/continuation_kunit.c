@@ -382,12 +382,7 @@ static void ebpfos_continuation_manifest_broken_chain_test(struct kunit *test)
 			0);
 }
 
-/*
- * The transport vocabulary admits scalars only.  An arena offset is only an
- * offset once an authenticated arena identity and extent bound it, so until
- * that exists the kind is absent rather than merely discouraged: a value that
- * cannot be proven to have meaning in another frame is not representable.
- */
+/* A range requires a shared loaded arena and bounded extent, not a raw pointer. */
 static void ebpfos_continuation_manifest_transport_test(struct kunit *test)
 {
 	struct ebpfos_continuation_manifest *manifest;
@@ -413,6 +408,36 @@ static void ebpfos_continuation_manifest_transport_test(struct kunit *test)
 								    caller),
 			-EPROTO);
 }
+static void ebpfos_continuation_manifest_arena_test(struct kunit *test)
+{
+	struct ebpfos_continuation_manifest *manifest;
+	struct ebpfos_component_desc_v1 *caller;
+
+	manifest = kunit_kzalloc(test, sizeof(*manifest), GFP_KERNEL);
+	caller = kunit_kzalloc(test, sizeof(*caller), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, manifest);
+	KUNIT_ASSERT_NOT_NULL(test, caller);
+	ebpfos_continuation_caller(caller);
+	ebpfos_continuation_manifest(manifest);
+	manifest->edges[0].transport_kind =
+		EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE;
+	manifest->edges[0].scalar_limit[0] = 8192;
+	manifest->edges[0].scalar_limit[1] = 4096;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_manifest_validate(manifest,
+							    caller), 0);
+	manifest->edges[0].scalar_limit[1] = 8193;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_manifest_validate(manifest,
+							    caller), -EPROTO);
+	manifest->edges[0].scalar_limit[1] = 4096;
+	manifest->edges[0].reserved = 17;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_manifest_validate(manifest,
+							    caller), -EPROTO);
+	manifest->edges[0].reserved = 0;
+	manifest->edges[0].transport_kind = EBPFOS_CONTINUATION_TRANSPORT_SCALAR;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_manifest_validate(manifest,
+							    caller), 0);
+}
+
 
 /*
  * Byte-identity is authenticated, not aliased.  The descriptor carries a
@@ -452,6 +477,7 @@ static struct kunit_case ebpfos_continuation_manifest_cases[] = {
 	KUNIT_CASE(ebpfos_continuation_manifest_shared_destination_test),
 	KUNIT_CASE(ebpfos_continuation_manifest_broken_chain_test),
 	KUNIT_CASE(ebpfos_continuation_manifest_transport_test),
+	KUNIT_CASE(ebpfos_continuation_manifest_arena_test),
 	KUNIT_CASE(ebpfos_continuation_manifest_identity_bytes_test),
 	{}
 };

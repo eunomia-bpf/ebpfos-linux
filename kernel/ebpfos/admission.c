@@ -392,14 +392,16 @@ int ebpfos_continuation_manifest_validate(
 				    sizeof(edge->destination_component_id)) ||
 		    !edge->destination_role_type ||
 		    !edge->destination_method_id ||
-		    edge->reserved ||
 		    (edge->disposition !=
 				EBPFOS_CONTINUATION_DISPOSITION_CONTINUE &&
 		     edge->disposition !=
 				EBPFOS_CONTINUATION_DISPOSITION_COMPLETE &&
 		     edge->disposition !=
 				EBPFOS_CONTINUATION_DISPOSITION_ERROR) ||
-		    edge->transport_kind != EBPFOS_CONTINUATION_TRANSPORT_SCALAR ||
+		    edge->reserved ||
+		    (edge->transport_kind != EBPFOS_CONTINUATION_TRANSPORT_SCALAR &&
+		     edge->transport_kind !=
+				EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE) ||
 		    !ebpfos_nonzero(edge->boundary_digest,
 				    sizeof(edge->boundary_digest)) ||
 		    !ebpfos_nonzero(edge->destination_content_digest,
@@ -408,6 +410,12 @@ int ebpfos_continuation_manifest_validate(
 				    sizeof(edge->destination_contract_digest)) ||
 		    (index && edge->ordinal <= prior_ordinal))
 			return -EPROTO;
+		if (edge->transport_kind ==
+		    EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE) {
+			if (!edge->scalar_limit[0] || !edge->scalar_limit[1] ||
+			    edge->scalar_limit[1] > edge->scalar_limit[0])
+				return -EPROTO;
+		}
 		/*
 		 * A scalar limit bounds a cursor inclusively; zero means the slot
 		 * is unused and must be returned as zero.  U64_MAX would make the

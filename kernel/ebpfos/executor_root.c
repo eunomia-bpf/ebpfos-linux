@@ -976,6 +976,88 @@ out:
 }
 
 /*
+ * Loaded programs retain their maps and their used_maps lists are frozen.
+ * An arena range is meaningful across a boundary only when the endpoints
+ * share exactly one actual arena map covering the declared extent.
+ */
+static bool ebpfos_continuation_shared_arena(struct bpf_prog_aux *source,
+					      struct bpf_prog_aux *target,
+					      u64 extent)
+{
+	struct bpf_map *match = NULL, *map;
+	u32 index, peer;
+
+	if (!source || !target || !extent)
+		return false;
+	for (index = 0; index < source->used_map_cnt; index++) {
+		map = source->used_maps[index];
+		if (!map || map->map_type != BPF_MAP_TYPE_ARENA ||
+		    (u64)map->max_entries * PAGE_SIZE < extent)
+			continue;
+		for (peer = 0; peer < target->used_map_cnt; peer++) {
+			if (target->used_maps[peer] != map)
+				continue;
+			if (match && match != map)
+				return false;
+			match = map;
+			break;
+		}
+	}
+	return match != NULL;
+}
+
+static int ebpfos_continuation_arenas_validate(
+	struct bpf_prog_aux *caller, struct ebpfos_continuation_session *session)
+{
+	struct bpf_prog_aux *source = caller, *target;
+	const struct ebpfos_continuation_edge *edge;
+	struct bpf_prog *prog;
+	u32 index;
+
+	for (index = 0; index < session->step_count; index++) {
+		edge = &session->steps[index].edge;
+		prog = ebpfos_binding_prog(session->steps[index].binding);
+		if (!prog || !prog->aux)
+			return -EOPNOTSUPP;
+		target = prog->aux;
+		if (edge->transport_kind ==
+		    EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE &&
+		    !ebpfos_continuation_shared_arena(source, target,
+						       edge->scalar_limit[0]))
+			return -EACCES;
+		source = target;
+	}
+	return 0;
+}
+
+static int ebpfos_continuation_transport_validate(
+	const struct ebpfos_continuation_edge *edge,
+	const struct ebpfos_continuation_transition *response)
+{
+	u32 slot = 0;
+
+	if (edge->transport_kind ==
+	    EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE) {
+		u64 offset = response->scalar[0];
+		u64 length = response->scalar[1];
+		u64 extent = edge->scalar_limit[0];
+
+		if (!length || length > edge->scalar_limit[1] ||
+		    offset >= extent || length > extent - offset)
+			return -ERANGE;
+		slot = 2;
+	}
+	for (; slot < EBPFOS_CONTINUATION_SCALAR_SLOTS; slot++) {
+		u64 limit = edge->scalar_limit[slot];
+
+		if (limit ? response->scalar[slot] > limit :
+		    response->scalar[slot] != 0)
+			return -ERANGE;
+	}
+	return 0;
+}
+
+/*
  * Claim the next transition.
  *
  * The session is confined to one dispatcher call and driven by one loop, so
@@ -1212,7 +1294,6 @@ static int ebpfos_continuation_drive(
 	struct ebpfos_component_call_frame *frame, u32 *status, u32 *prog_id)
 {
 	struct ebpfos_continuation_transition response = {};
-	u32 slot;
 	int error;
 
 	(void)aux;
@@ -1292,15 +1373,8 @@ static int ebpfos_continuation_drive(
 			error = -EPROTOTYPE;
 			break;
 		}
-		for (slot = 0; slot < EBPFOS_CONTINUATION_SCALAR_SLOTS; slot++) {
-			u64 limit = step->edge.scalar_limit[slot];
-
-			if (limit ? response.scalar[slot] > limit
-				  : response.scalar[slot] != 0) {
-				error = -ERANGE;
-				break;
-			}
-		}
+		error = ebpfos_continuation_transport_validate(
+			&step->edge, &response);
 		if (error) {
 			ebpfos_continuation_poison(session);
 			break;
@@ -1405,8 +1479,10 @@ static int ebpfos_executor_continuation_call(
 		ebpfos_continuation_release(&session);
 		goto out_free;
 	}
-	error = ebpfos_continuation_drive(aux, &session, frame, status,
-					  prog_id);
+	error = ebpfos_continuation_arenas_validate(aux, &session);
+	if (!error)
+		error = ebpfos_continuation_drive(aux, &session, frame, status,
+						  prog_id);
 	ebpfos_continuation_release(&session);
 out_free:
 	kfree(session.steps);
@@ -2828,6 +2904,104 @@ static void ebpfos_continuation_step_refusal_test(struct kunit *test)
 			EBPFOS_SESSION_POISONED);
 	KUNIT_EXPECT_EQ(test, prog_id, 0U);
 }
+static void ebpfos_continuation_arena_binding_test(struct kunit *test)
+{
+	struct bpf_prog_aux *caller, *provider_aux;
+	struct bpf_map *arena, *other;
+	struct bpf_prog *provider;
+	struct ebpfos_binding *binding;
+	struct ebpfos_continuation_step *step;
+	struct ebpfos_continuation_session *session;
+	struct bpf_map *caller_maps[2], *provider_maps[2];
+
+	caller = kunit_kzalloc(test, sizeof(*caller), GFP_KERNEL);
+	provider_aux = kunit_kzalloc(test, sizeof(*provider_aux), GFP_KERNEL);
+	arena = kunit_kzalloc(test, sizeof(*arena), GFP_KERNEL);
+	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
+	provider = kunit_kzalloc(test, sizeof(*provider), GFP_KERNEL);
+	binding = kunit_kzalloc(test, sizeof(*binding), GFP_KERNEL);
+	step = kunit_kzalloc(test, sizeof(*step), GFP_KERNEL);
+	session = kunit_kzalloc(test, sizeof(*session), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, caller);
+	KUNIT_ASSERT_NOT_NULL(test, provider_aux);
+	KUNIT_ASSERT_NOT_NULL(test, arena);
+	KUNIT_ASSERT_NOT_NULL(test, other);
+	KUNIT_ASSERT_NOT_NULL(test, provider);
+	KUNIT_ASSERT_NOT_NULL(test, binding);
+	KUNIT_ASSERT_NOT_NULL(test, step);
+	KUNIT_ASSERT_NOT_NULL(test, session);
+	mutex_init(&caller->used_maps_mutex);
+	mutex_init(&provider_aux->used_maps_mutex);
+	arena->map_type = BPF_MAP_TYPE_ARENA;
+	arena->max_entries = 2;
+	caller_maps[0] = arena;
+	provider_maps[0] = arena;
+	caller->used_maps = caller_maps;
+	caller->used_map_cnt = 1;
+	provider_aux->used_maps = provider_maps;
+	provider_aux->used_map_cnt = 1;
+	provider->aux = provider_aux;
+	binding->prog = provider;
+	step->binding = binding;
+	step->edge.transport_kind =
+		EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE;
+	step->edge.scalar_limit[0] = 2 * PAGE_SIZE;
+	session->step_count = 1;
+	session->steps = step;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_arenas_validate(caller,
+							   session), 0);
+	arena->max_entries = 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_arenas_validate(caller,
+							   session), -EACCES);
+	arena->max_entries = 2;
+	other->map_type = arena->map_type;
+	other->max_entries = arena->max_entries;
+	provider_maps[0] = other;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_arenas_validate(caller,
+							   session), -EACCES);
+	provider_maps[0] = arena;
+	caller_maps[1] = other;
+	provider_maps[1] = other;
+	caller->used_map_cnt = 2;
+	provider_aux->used_map_cnt = 2;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_arenas_validate(caller,
+							   session), -EACCES);
+	caller->used_map_cnt = 1;
+	provider_aux->used_map_cnt = 1;
+	arena->map_type = BPF_MAP_TYPE_ARRAY;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_arenas_validate(caller,
+							   session), -EACCES);
+}
+
+static void ebpfos_continuation_arena_range_test(struct kunit *test)
+{
+	struct ebpfos_continuation_edge edge = {};
+	struct ebpfos_continuation_transition response = {};
+
+	edge.transport_kind = EBPFOS_CONTINUATION_TRANSPORT_ARENA_RANGE;
+	edge.scalar_limit[0] = 8192;
+	edge.scalar_limit[1] = 4096;
+	response.scalar[0] = 4096;
+	response.scalar[1] = 4096;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_transport_validate(&edge,
+							       &response), 0);
+	response.scalar[0] = 8191;
+	response.scalar[1] = 2;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_transport_validate(&edge,
+							       &response), -ERANGE);
+	response.scalar[0] = U64_MAX;
+	response.scalar[1] = 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_transport_validate(&edge,
+							       &response), -ERANGE);
+	response.scalar[0] = 0;
+	response.scalar[1] = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_transport_validate(&edge,
+							       &response), -ERANGE);
+	response.scalar[1] = 4097;
+	KUNIT_EXPECT_EQ(test, ebpfos_continuation_transport_validate(&edge,
+							       &response), -ERANGE);
+}
+
 
 static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_compare_test),
@@ -2852,6 +3026,8 @@ static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_continuation_disposition_mismatch_test),
 	KUNIT_CASE(ebpfos_continuation_pre_entry_preservation_test),
 	KUNIT_CASE(ebpfos_continuation_busy_entry_test),
+	KUNIT_CASE(ebpfos_continuation_arena_binding_test),
+	KUNIT_CASE(ebpfos_continuation_arena_range_test),
 	KUNIT_CASE(ebpfos_continuation_step_refusal_test),
 	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
