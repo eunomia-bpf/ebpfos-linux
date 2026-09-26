@@ -8348,9 +8348,9 @@ static void maybe_widen_reg(struct bpf_verifier_env *env,
 	__mark_reg_unknown(env, rcur);
 }
 
-static int widen_imprecise_scalars(struct bpf_verifier_env *env,
-				   struct bpf_verifier_state *old,
-				   struct bpf_verifier_state *cur)
+int widen_imprecise_scalars(struct bpf_verifier_env *env,
+			   struct bpf_verifier_state *old,
+			   struct bpf_verifier_state *cur)
 {
 	struct bpf_func_state *fold, *fcur;
 	int i, fr, num_slots;

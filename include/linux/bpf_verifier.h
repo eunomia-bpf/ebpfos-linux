@@ -1119,6 +1119,9 @@ void bpf_mark_reg_not_init(const struct bpf_verifier_env *env,
 void bpf_mark_reg_unknown_imprecise(struct bpf_reg_state *reg);
 void bpf_mark_all_scalars_precise(struct bpf_verifier_env *env,
 				  struct bpf_verifier_state *st);
+int widen_imprecise_scalars(struct bpf_verifier_env *env,
+			   struct bpf_verifier_state *old,
+			   struct bpf_verifier_state *cur);
 void bpf_clear_singular_ids(struct bpf_verifier_env *env, struct bpf_verifier_state *st);
 int bpf_mark_chain_precision(struct bpf_verifier_env *env,
 			     struct bpf_verifier_state *starting_state,
