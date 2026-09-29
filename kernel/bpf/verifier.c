@@ -8355,7 +8355,15 @@ int widen_imprecise_scalars(struct bpf_verifier_env *env,
 	struct bpf_func_state *fold, *fcur;
 	int i, fr, num_slots;
 
-	for (fr = old->curframe; fr >= 0; fr--) {
+	/* Callers that compare the states with states_equal() (callback,
+	 * may_goto and iterator loops) are guaranteed to have equal frame
+	 * depths.  The eBPFOS backedge path calls this unconditionally, where
+	 * the arriving state may be shallower than the explored head (e.g. the
+	 * head was recorded in an inner frame).  cur->frame[fr] is then NULL
+	 * and dereferencing it faults, so only widen over the frames the two
+	 * states have in common.
+	 */
+	for (fr = min(old->curframe, cur->curframe); fr >= 0; fr--) {
 		fold = old->frame[fr];
 		fcur = cur->frame[fr];
 
