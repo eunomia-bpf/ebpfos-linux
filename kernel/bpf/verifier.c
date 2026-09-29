@@ -4447,8 +4447,15 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 			return -EACCES;
 		}
 		if (state != cur && reg->type == PTR_TO_STACK) {
-			verbose(env, "cannot spill pointers to stack into stack frame of the caller\n");
-			return -EINVAL;
+			/* An admitted program may temporarily link a callee's
+			 * stack object through an ancestor's stack. Verify that
+			 * every such link is gone before the callee returns.
+			 */
+			if (!env->prog->aux->ebpfos_component &&
+			    !env->prog->aux->ebpfos_invariants) {
+				verbose(env, "cannot spill pointers to stack into stack frame of the caller\n");
+				return -EINVAL;
+			}
 		}
 		save_register_state(env, state, spi, reg, size);
 	} else {
@@ -10518,7 +10525,7 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	struct bpf_func_state *caller, *callee;
 	struct bpf_reg_state *r0;
 	bool in_callback_fn;
-	int err;
+	int err, frame, slot;
 
 	callee = state->frame[state->curframe];
 	r0 = &callee->regs[BPF_REG_0];
@@ -10534,6 +10541,24 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	}
 
 	caller = state->frame[state->curframe - 1];
+	if (env->prog->aux->ebpfos_component ||
+	    env->prog->aux->ebpfos_invariants) {
+		for (frame = 0; frame < state->curframe; frame++) {
+			struct bpf_func_state *ancestor = state->frame[frame];
+
+			for (slot = 0; slot < ancestor->allocated_stack / BPF_REG_SIZE;
+			     slot++) {
+				struct bpf_stack_state *stack = &ancestor->stack[slot];
+
+				if (bpf_is_spilled_reg(stack) &&
+				    stack->spilled_ptr.type == PTR_TO_STACK &&
+				    stack->spilled_ptr.frameno == callee->frameno) {
+					verbose(env, "stack pointer to returning frame remains in caller stack\n");
+					return -EINVAL;
+				}
+			}
+		}
+	}
 	if (callee->in_callback_fn) {
 		if (r0->type != SCALAR_VALUE) {
 			verbose(env, "R0 not a scalar value\n");
