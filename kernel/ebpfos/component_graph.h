@@ -18,6 +18,7 @@ struct ebpfos_component_gate {
 
 void ebpfos_component_gate_init(struct ebpfos_component_gate *gate);
 void ebpfos_component_gate_enter(struct ebpfos_component_gate *gate);
+bool ebpfos_component_gate_try_enter(struct ebpfos_component_gate *gate);
 void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate);
 int ebpfos_component_gate_engage(struct ebpfos_component_gate *gate);
 void ebpfos_component_gate_abort(struct ebpfos_component_gate *gate);

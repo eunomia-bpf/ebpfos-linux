@@ -14,46 +14,67 @@ void ebpfos_component_gate_init(struct ebpfos_component_gate *gate)
 
 void ebpfos_component_gate_enter(struct ebpfos_component_gate *gate)
 {
+	unsigned long flags;
+
 	for (;;) {
-		spin_lock(&gate->lock);
+		spin_lock_irqsave(&gate->lock, flags);
 		if (!gate->draining) {
 			gate->acquired++;
-			spin_unlock(&gate->lock);
+			spin_unlock_irqrestore(&gate->lock, flags);
 			return;
 		}
-		spin_unlock(&gate->lock);
+		spin_unlock_irqrestore(&gate->lock, flags);
 		wait_event(gate->waitq, !READ_ONCE(gate->draining));
 	}
 }
 
+bool ebpfos_component_gate_try_enter(struct ebpfos_component_gate *gate)
+{
+	unsigned long flags;
+	bool acquired;
+
+	spin_lock_irqsave(&gate->lock, flags);
+	acquired = !gate->draining;
+	if (acquired)
+		gate->acquired++;
+	spin_unlock_irqrestore(&gate->lock, flags);
+	return acquired;
+}
+
 void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate)
 {
-	spin_lock(&gate->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&gate->lock, flags);
 	if (WARN_ON_ONCE(!gate->acquired)) {
-		spin_unlock(&gate->lock);
+		spin_unlock_irqrestore(&gate->lock, flags);
 		return;
 	}
 	gate->acquired--;
-	spin_unlock(&gate->lock);
+	spin_unlock_irqrestore(&gate->lock, flags);
 	wake_up_all(&gate->waitq);
 }
 int ebpfos_component_gate_engage(struct ebpfos_component_gate *gate)
 {
-	spin_lock(&gate->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&gate->lock, flags);
 	if (gate->draining) {
-		spin_unlock(&gate->lock);
+		spin_unlock_irqrestore(&gate->lock, flags);
 		return -EBUSY;
 	}
 	gate->draining = true;
-	spin_unlock(&gate->lock);
+	spin_unlock_irqrestore(&gate->lock, flags);
 	wait_event(gate->waitq, !READ_ONCE(gate->acquired));
 	return 0;
 }
 
 void ebpfos_component_gate_abort(struct ebpfos_component_gate *gate)
 {
-	spin_lock(&gate->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&gate->lock, flags);
 	gate->draining = false;
-	spin_unlock(&gate->lock);
+	spin_unlock_irqrestore(&gate->lock, flags);
 	wake_up_all(&gate->waitq);
 }
