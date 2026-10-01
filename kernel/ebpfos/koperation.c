@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
+#include "koperation_xadd64.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -36,9 +37,8 @@ static int ebpfos_kop_xadd64_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	if (!insns || !ebpfos_kop_xadd64_payload(payload))
 		return -EINVAL;
-	insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_2);
-	insns[1] = BPF_ATOMIC_OP(BPF_DW, BPF_ADD | BPF_FETCH,
-				 BPF_REG_1, BPF_REG_0, 0);
+	insns[0] = EBPFOS_KOP_XADD64_PROOF0;
+	insns[1] = EBPFOS_KOP_XADD64_PROOF1;
 	return 2;
 }
 
@@ -47,8 +47,7 @@ static int ebpfos_kop_xadd64_emit_x86(u8 *image, u32 *offset, bool emit,
 				      const u8 *final_ip)
 {
 	/* BPF r1=RDI, r2=RSI, r0=RAX. lock xaddq (%rdi),%rax. */
-	static const u8 native[] = { 0x48, 0x89, 0xf0,
-				     0xf0, 0x48, 0x0f, 0xc1, 0x07 };
+	static const u8 native[] = EBPFOS_KOP_XADD64_NATIVE_BYTES;
 
 	(void)prog;
 	(void)final_ip;
@@ -63,13 +62,7 @@ static int ebpfos_kop_xadd64_emit_x86(u8 *image, u32 *offset, bool emit,
 static struct bpf_kop ebpfos_kop_xadd64 = {
 	.max_insn_cnt = 2,
 	.max_emit_bytes = 8,
-	/* sha256("kop-xadd64-v1:seqcst:old=atomic_fetch_add_u64(ptr,delta)") */
-	.semantic_sha256 = {
-		0x35, 0x60, 0xe3, 0xfd, 0x93, 0x9d, 0x3d, 0x17,
-		0x5a, 0xbd, 0x3e, 0x60, 0x6d, 0x2b, 0x63, 0xca,
-		0xba, 0x42, 0xd7, 0xe8, 0x68, 0x35, 0x7a, 0xcd,
-		0xf4, 0x29, 0xaa, 0x05, 0xea, 0x36, 0xd7, 0x0c,
-	},
+	.semantic_sha256 = EBPFOS_KOP_XADD64_SEMANTIC_SHA256,
 	.instantiate_insn = ebpfos_kop_xadd64_instantiate,
 	.emit_x86 = ebpfos_kop_xadd64_emit_x86,
 };
