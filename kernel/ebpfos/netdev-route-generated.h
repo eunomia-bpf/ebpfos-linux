@@ -8,5 +8,6 @@
 	X(set_rx_mode_async, 3) \
 	X(set_mac_address, 4) \
 	X(get_stats64, 5) \
-	X(change_carrier, 6)
+	X(change_carrier, 6) \
+	X(get_iflink, 7)
 #endif

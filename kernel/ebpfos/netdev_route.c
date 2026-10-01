@@ -36,7 +36,7 @@ struct ebpfos_netdev_route {
 	atomic64_t component_entries;
 	atomic64_t faults;
 	atomic64_t delegated_entries;
-	atomic64_t method_entries[7];
+	atomic64_t method_entries[8];
 	bool draining;
 	bool component;
 	u64 handle;
@@ -300,6 +300,24 @@ static int ebpfos_netdev_route_change_carrier(struct net_device *dev,
 	return result;
 }
 
+static int ebpfos_netdev_route_get_iflink(const struct net_device *dev)
+{
+	struct ebpfos_netdev_route *route = READ_ONCE(dev->ebpfos_route);
+	s32 status = 0;
+	int result;
+
+	if (ebpfos_netdev_route_config_begin(route) &&
+	    !ebpfos_netdev_route_config_call(route, 7, NULL, 0, NULL, NULL,
+					     &status))
+		result = status;
+	else {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->ndo_get_iflink(dev);
+	}
+	ebpfos_netdev_route_finish(route);
+	return result;
+}
+
 static struct ebpfos_netdev_route *ebpfos_netdev_route_get(
 						 struct net_device *dev)
 {
@@ -341,8 +359,8 @@ static int ebpfos_netdev_route_attach(struct net_device *dev,
 	if (!handle || !role || ebpfos_netdev_route_get(dev))
 		return -EINVAL;
 	if (!method_mask)
-		method_mask = 0x7e;
-	if (method_mask & ~0x7eULL)
+		method_mask = 0xfe;
+	if (method_mask & ~0xfeULL)
 		return -EINVAL;
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)
@@ -369,7 +387,7 @@ static int ebpfos_netdev_route_attach(struct net_device *dev,
 	spin_lock_init(&route->lock);
 	init_waitqueue_head(&route->drained);
 	atomic_set(&route->active, 0);
-	for (int method = 1; method <= 6; ++method)
+	for (int method = 1; method <= 7; ++method)
 		atomic64_set(&route->method_entries[method], 0);
 	list_add(&route->list, &ebpfos_netdev_routes);
 	WRITE_ONCE(dev->ebpfos_route, route);
@@ -455,7 +473,7 @@ static long ebpfos_netdev_route_ioctl(struct file *control,
 		request.delegated_entries =
 			atomic64_read(&route->delegated_entries);
 		request.method_mask = route->method_mask;
-		for (int method = 1; method <= 6; ++method)
+		for (int method = 1; method <= 7; ++method)
 			request.method_entries[method] =
 				atomic64_read(&route->method_entries[method]);
 		result = copy_to_user((void __user *)argument, &request,

@@ -1034,6 +1034,22 @@ __bpf_kfunc s64 bpf_ebpfos_effect_net_peer_rx_mode(u64 handle)
 	return mode;
 }
 
+__bpf_kfunc s64 bpf_ebpfos_effect_net_peer_ifindex(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct net_device *peer;
+	s64 ifindex;
+
+	if (!scope || !scope->netdev ||
+	    !scope->netdev->netdev_ops->ndo_get_peer_dev)
+		return -EPERM;
+	rcu_read_lock();
+	peer = scope->netdev->netdev_ops->ndo_get_peer_dev(scope->netdev);
+	ifindex = peer ? READ_ONCE(peer->ifindex) : 0;
+	rcu_read_unlock();
+	return ifindex;
+}
+
 /* A registered ops-table handle keeps private NAPI, XDP and page-pool state
  * in its native owner until those callbacks can be separately componentized.
  */
@@ -1097,6 +1113,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_carrier_set, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_forward, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_rx_mode, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_ifindex, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_native_xmit, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
