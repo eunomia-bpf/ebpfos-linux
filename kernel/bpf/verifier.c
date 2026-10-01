@@ -31,7 +31,6 @@
 #include <linux/trace_events.h>
 #include <linux/kallsyms.h>
 #include <linux/ebpfos.h>
-#include <linux/ebpfos_services.h>
 #include <crypto/sha2.h>
 
 #include "disasm.h"
@@ -3006,11 +3005,11 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	int err;
 
 	prog_aux = env->prog->aux;
-	if (!kop_call &&
-	    ((prog_aux->ebpfos_component &&
-	      (offset || !ebpfos_effect_kfunc_allowed(func_id))) ||
-	     (prog_aux->ebpfos_meta &&
-	      !ebpfos_executor_root_kfunc_allowed(func_id)))) {
+	/* Component kfuncs use the stock program-type set and its filters.
+	 * The eBPFOS L1 services are registered in that set for components only.
+	 */
+	if (!kop_call && prog_aux->ebpfos_meta &&
+	    !ebpfos_executor_root_kfunc_allowed(func_id)) {
 		verbose(env, "eBPFOS program cannot call this kernel function\n");
 		return -EACCES;
 	}
@@ -18738,12 +18737,13 @@ static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
 
 	if (!aux->ebpfos_meta && !aux->ebpfos_component)
 		return 0;
-	if (aux->btf || aux->func_info || aux->func_info_aux ||
-	    aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
-	    aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
-	    aux->used_btf_cnt || aux->kfunc_btf_tab) {
+	if (aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
+	    (aux->ebpfos_meta &&
+	     (aux->btf || aux->func_info || aux->func_info_aux ||
+	      aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
+	      aux->used_btf_cnt || aux->kfunc_btf_tab))) {
 		verbose(env,
-			"eBPFOS components cannot carry BTF or attach metadata\n");
+			"eBPFOS program cannot carry this BTF or attach metadata\n");
 		return -EINVAL;
 	}
 	if (aux->ebpfos_component) {

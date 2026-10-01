@@ -2939,8 +2939,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))
 		return -EOPNOTSUPP;
-	if ((attr->prog_flags &
-	     (BPF_F_EBPFOS_META | BPF_F_EBPFOS_COMPONENT)) &&
+	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
 	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->prog_btf_fd || attr->func_info_rec_size ||
 	     attr->func_info || attr->func_info_cnt ||
@@ -2949,6 +2948,13 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	     attr->attach_prog_fd || attr->core_relo_cnt ||
 	     attr->core_relos || attr->core_relo_rec_size ||
 	     attr->fd_array || attr->fd_array_cnt))
+		return -EINVAL;
+	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
+	    (attr->expected_attach_type || attr->prog_ifindex ||
+	     attr->attach_btf_id || attr->attach_prog_fd ||
+	     attr->core_relo_cnt || attr->core_relos ||
+	     attr->core_relo_rec_size || attr->fd_array ||
+	     attr->fd_array_cnt))
 		return -EINVAL;
 
 	bpf_prog_load_fixup_attach_type(attr);
