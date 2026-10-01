@@ -11,6 +11,7 @@
 #include <linux/unaligned.h>
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
+#include <asm/current.h>
 #endif
 #include "koperation_xadd64.generated.h"
 #include "koperation_atomic64.generated.h"
@@ -19,6 +20,7 @@
 #include "koperation_compiler_barrier.generated.h"
 #include "koperation_tzcnt64.generated.h"
 #include "koperation_load32.generated.h"
+#include "koperation_current_task.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -46,6 +48,10 @@ __bpf_kfunc u64 bpf_ebpfos_kop_tzcnt64(u64 value)
 __bpf_kfunc u32 bpf_ebpfos_kop_load32(u32 *ptr)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
+}
+__bpf_kfunc struct task_struct *bpf_ebpfos_kop_current_task(void)
+{
+	return NULL; /* Only the verified proof or its bound JIT emission executes. */
 }
 __bpf_kfunc_end_defs();
 
@@ -80,6 +86,86 @@ BTF_KFUNCS_END(ebpfos_kprog_tzcnt64_ids)
 BTF_KFUNCS_START(ebpfos_kprog_load32_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_load32)
 BTF_KFUNCS_END(ebpfos_kprog_load32_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_current_task_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_current_task)
+BTF_KFUNCS_END(ebpfos_kprog_current_task_ids)
+
+static int ebpfos_kop_current_task_instantiate(u64 payload,
+					       struct bpf_insn *insns)
+{
+	if (!insns || ebpfos_kprog_current_task_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_current_task_ids.pairs[0].id)
+		return -EINVAL;
+	insns[0] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				BPF_FUNC_get_current_task_btf);
+	return 1;
+}
+
+static int ebpfos_kop_current_task_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	static const u8 digest[SHA256_DIGEST_SIZE] =
+		EBPFOS_KOP_CURRENT_TASK_SEMANTIC_SHA256;
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    ebpfos_kprog_current_task_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_current_task_ids.pairs[0].id)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, digest, sizeof(digest));
+	return 0;
+}
+
+static int ebpfos_kop_current_task_emit_x86(u8 *image, u32 *offset,
+			bool emit, u64 payload, const struct bpf_prog *prog,
+			const u8 *final_ip)
+{
+	static const u8 prefix[] = EBPFOS_KOP_CURRENT_TASK_NATIVE_PREFIX;
+#ifdef CONFIG_X86
+	unsigned long address = (unsigned long)&current_task;
+#endif
+
+	(void)prog;
+	(void)final_ip;
+#ifndef CONFIG_X86
+	return -EOPNOTSUPP;
+#else
+	if ((unsigned long)(long)(s32)address != address)
+		return -ERANGE;
+#endif
+	if (!offset || (emit && !image) ||
+	    ebpfos_kprog_current_task_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_current_task_ids.pairs[0].id)
+		return -EINVAL;
+	if (emit) {
+		memcpy(image + *offset, prefix, sizeof(prefix));
+#ifdef CONFIG_X86
+		put_unaligned_le32((u32)address, image + *offset + sizeof(prefix));
+#endif
+	}
+	*offset += sizeof(prefix) + sizeof(u32);
+	return sizeof(prefix) + sizeof(u32);
+}
+
+static struct bpf_kop ebpfos_kop_current_task = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 9,
+	.requirements = ebpfos_kop_current_task_requirements,
+	.instantiate_insn = ebpfos_kop_current_task_instantiate,
+	.emit_x86 = ebpfos_kop_current_task_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_current_task_descs[] = {
+	&ebpfos_kop_current_task,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_current_task_set = {
+	.set = &ebpfos_kprog_current_task_ids,
+	.kop_descs = ebpfos_kprog_current_task_descs,
+};
 
 static int ebpfos_kop_load32_instantiate(u64 payload, struct bpf_insn *insns)
 {
@@ -800,7 +886,11 @@ static int __init ebpfos_kprog_register(void)
 					 &ebpfos_kprog_tzcnt64_set);
 	if (err)
 		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_load32_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_load32_set);
+					 &ebpfos_kprog_current_task_set);
 }
 late_initcall(ebpfos_kprog_register);

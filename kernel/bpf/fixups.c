@@ -138,6 +138,15 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			u8 operation = BPF_OP(insn->code);
 			s64 target;
 
+			/* The typed current-task helper is a read-only proof step.
+			 * The ordinary verifier still checks its program-type and BTF
+			 * result rules after proof substitution.
+			 */
+			if (operation == BPF_CALL &&
+			    insn->code == (BPF_JMP | BPF_CALL) &&
+			    !insn->dst_reg && !insn->src_reg && !insn->off &&
+			    insn->imm == BPF_FUNC_get_current_task_btf)
+				continue;
 			if (operation == BPF_CALL || operation == BPF_EXIT) {
 				if (env)
 					verbose(env, "kop proof sequence cannot contain calls or exits\n");
