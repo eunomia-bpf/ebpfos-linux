@@ -97,14 +97,17 @@ static void ebpfos_netdev_route_work(struct work_struct *work)
 			error = -EPROTO;
 	}
 	if (error) {
+		netdev_tx_t fallback;
+
 		atomic64_inc(&route->faults);
 		WRITE_ONCE(route->component, false);
 		if (pending) {
 			local_bh_disable();
-			if (ebpfos_netdev_route_linux_xmit(route, item->skb) ==
-			    NETDEV_TX_BUSY)
-				dev_kfree_skb_any(item->skb);
+			fallback = ebpfos_netdev_route_linux_xmit(route,
+							  item->skb);
 			local_bh_enable();
+			if (fallback == NETDEV_TX_BUSY)
+				dev_queue_xmit(item->skb);
 		}
 	} else {
 		atomic64_inc(&route->component_entries);
