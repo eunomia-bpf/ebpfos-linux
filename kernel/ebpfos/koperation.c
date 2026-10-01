@@ -150,7 +150,17 @@ static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
 	insns[n++] = BPF_ALU64_IMM(BPF_ARSH, BPF_REG_4, 6);
 	insns[n++] = BPF_ALU64_IMM(BPF_LSH, BPF_REG_4, 3);
 	insns[n++] = BPF_ALU64_REG(BPF_ADD, BPF_REG_3, BPF_REG_4);
-	if (spec->op == EBPFOS_KOP_BIT64_TEST) {
+	if (spec->op == EBPFOS_KOP_BIT64_RESET_NOLOCK) {
+		insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 1);
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
+		insns[n++] = BPF_ALU64_REG(BPF_LSH, BPF_REG_0, BPF_REG_4);
+		insns[n++] = BPF_ALU64_IMM(BPF_XOR, BPF_REG_0, -1);
+		insns[n++] = BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_3, 0);
+		insns[n++] = BPF_ALU64_REG(BPF_AND, BPF_REG_4, BPF_REG_0);
+		insns[n++] = BPF_STX_MEM(BPF_DW, BPF_REG_3, BPF_REG_4, 0);
+		insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 0);
+	} else if (spec->op == EBPFOS_KOP_BIT64_TEST) {
 		insns[n++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0);
 		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
 		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
