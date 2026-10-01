@@ -563,6 +563,43 @@ __bpf_kfunc int bpf_ebpfos_effect_iter_revert(u64 handle, u32 count)
 	return 0;
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_iter_advance(u64 handle, u64 count)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (scope && scope->iter && count <= iov_iter_count(scope->iter))
+		iov_iter_advance(scope->iter, count);
+}
+
+__bpf_kfunc u64 bpf_ebpfos_effect_iter_zero(u64 handle, u64 count)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->iter || count > PAGE_SIZE)
+		return 0;
+	return iov_iter_zero(count, scope->iter);
+}
+
+__bpf_kfunc u64 bpf_ebpfos_effect_clear_user(u64 handle, u64 user_addr,
+					      u64 count)
+{
+	if (!ebpfos_effect_current(handle) || count > PAGE_SIZE ||
+	    !access_ok((void __user *)(unsigned long)user_addr, count))
+		return count;
+	return clear_user((void __user *)(unsigned long)user_addr, count);
+}
+
+__bpf_kfunc u64 bpf_ebpfos_effect_task_flags(u64 handle)
+{
+	return ebpfos_effect_current(handle) ?
+		READ_ONCE(current_thread_info()->flags) : 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_cond_resched(u64 handle)
+{
+	return ebpfos_effect_current(handle) ? cond_resched() : -EPERM;
+}
+
 __bpf_kfunc long bpf_ebpfos_effect_tty_emit(u64 handle, const void *src,
 					     u32 src__sz, u32 flags)
 {
@@ -980,6 +1017,11 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_wake, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_poll, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_iter, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_iter_revert, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_iter_advance, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_iter_zero, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_clear_user, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_task_flags, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_cond_resched, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_tty_emit, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_iter, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_peek, KF_SLEEPABLE)
