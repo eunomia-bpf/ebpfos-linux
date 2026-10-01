@@ -11,6 +11,8 @@ struct ebpfos_bops_route_request {
 	__u64 handle;
 	__u64 role;
 	__u64 linux_entries;
+	__u64 component_entries;
+	__u64 faults;
 };
 
 #define EBPFOS_BOPS_ROUTE_IOC_ATTACH _IOW('E', 0x76, struct ebpfos_bops_route_request)

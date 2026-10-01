@@ -27,6 +27,8 @@ struct ebpfos_bops_route {
 	struct block_device_operations routed;
 	struct ebpfos_component_gate gate;
 	atomic64_t linux_entries;
+	atomic64_t component_entries;
+	atomic64_t faults;
 	bool component;
 	u64 handle;
 	u64 role;
@@ -48,6 +50,7 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 		container_of(ops, struct ebpfos_bops_route, routed);
 	struct ebpfos_component_call_frame frame = {};
 	struct ebpfos_bops_input input;
+	struct bvec_iter original_iter = bio->bi_iter;
 	struct ebpfos_effect_scope *scope;
 	u64 epoch = 0;
 	u32 provider_id = 0, provider_status = 0;
@@ -81,11 +84,15 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 		error = -EPROTO;
 	if (error)
 		goto fail;
+	atomic64_inc(&route->component_entries);
 	bio_endio(bio);
 	goto out;
 fail:
-	bio->bi_status = BLK_STS_IOERR;
-	bio_endio(bio);
+	atomic64_inc(&route->faults);
+	WRITE_ONCE(route->component, false);
+	bio->bi_iter = original_iter;
+	atomic64_inc(&route->linux_entries);
+	route->original->submit_bio(bio);
 out:
 	ebpfos_component_gate_exit(&route->gate);
 }
@@ -137,6 +144,8 @@ static int ebpfos_bops_route_attach(struct gendisk *disk, u64 handle, u64 role)
 	route->role = role;
 	ebpfos_component_gate_init(&route->gate);
 	atomic64_set(&route->linux_entries, 0);
+	atomic64_set(&route->component_entries, 0);
+	atomic64_set(&route->faults, 0);
 	WRITE_ONCE(disk->fops, &route->routed);
 unlock:
 	blk_mq_unfreeze_queue(disk->queue, memflags);
@@ -225,6 +234,9 @@ static long ebpfos_bops_route_ioctl(struct file *control,
 		break;
 	case EBPFOS_BOPS_ROUTE_IOC_STATS:
 		request.linux_entries = atomic64_read(&route->linux_entries);
+		request.component_entries =
+			atomic64_read(&route->component_entries);
+		request.faults = atomic64_read(&route->faults);
 		result = copy_to_user((void __user *)argument, &request,
 				      sizeof(request)) ? -EFAULT : 0;
 		break;
