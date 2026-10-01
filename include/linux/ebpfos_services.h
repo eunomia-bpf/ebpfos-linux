@@ -33,6 +33,8 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter(u64 handle,
 					     struct file *file,
 					     struct iov_iter *iter,
 					     struct poll_table_struct *table);
+void ebpfos_effect_scope_set_nowait(struct ebpfos_effect_scope *scope,
+					    bool nowait);
 struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
 						   struct bio *bio);
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope);

@@ -121,6 +121,8 @@ static int ebpfos_fops_route_invoke(struct ebpfos_fops_route *route,
 	scope = ebpfos_effect_scope_enter(route->handle, file, iter, table);
 	if (IS_ERR(scope))
 		return PTR_ERR(scope);
+	ebpfos_effect_scope_set_nowait(scope, route->wait &&
+					    (frame->flags & 1U));
 	error = ebpfos_fops_route_call(route->handle, route->role, frame,
 				      &epoch, &provider_id, &provider_status);
 	if (ebpfos_effect_scope_exit(scope) && !error)

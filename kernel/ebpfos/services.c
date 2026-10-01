@@ -82,6 +82,7 @@ struct ebpfos_effect_scope {
 	bool net_timestamp_pending;
 	size_t copied_from_iter;
 	bool locked;
+	bool nowait;
 };
 
 /* tty_ioctl is retained in the generic route's copied file_operations. */
@@ -296,6 +297,12 @@ out_free_scope:
 	return ERR_PTR(error);
 }
 
+void ebpfos_effect_scope_set_nowait(struct ebpfos_effect_scope *scope,
+					    bool nowait)
+{
+	scope->nowait = nowait;
+}
+
 struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
 						   struct bio *bio)
 {
@@ -477,6 +484,8 @@ __bpf_kfunc int bpf_ebpfos_effect_wait(u64 handle, u32 slot, u64 seen)
 		return -EINVAL;
 	if (scope->locked)
 		return -EDEADLK;
+	if (scope->nowait)
+		return -EAGAIN;
 	wait = &scope->object->wait[slot];
 	return wait_event_interruptible(wait->queue,
 			atomic64_read(&wait->sequence) != seen);
@@ -492,6 +501,8 @@ __bpf_kfunc int bpf_ebpfos_effect_wait_locked(u64 handle, u32 slot)
 
 	if (!scope || !scope->locked || slot >= EBPFOS_EFFECT_WAIT_SLOTS)
 		return -EINVAL;
+	if (scope->nowait)
+		return -EAGAIN;
 	wait = &scope->object->wait[slot];
 	seen = atomic64_read(&wait->sequence);
 	scope->locked = false;
