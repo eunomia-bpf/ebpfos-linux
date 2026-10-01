@@ -19208,12 +19208,6 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 				goto next_insn;
 
 			if (insn[0].src_reg == BPF_PSEUDO_BTF_ID) {
-				if (env->prog->aux->ebpfos_meta ||
-				    env->prog->aux->ebpfos_component) {
-					verbose(env,
-						"eBPFOS provider cannot use BPF_PSEUDO_BTF_ID\n");
-					return -EACCES;
-				}
 				aux = &env->insn_aux_data[i];
 				err = check_pseudo_btf_id(env, insn, aux);
 				if (err)

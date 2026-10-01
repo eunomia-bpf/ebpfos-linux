@@ -4833,7 +4833,7 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	prog = bpf_prog_get(attr->test.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->ebpfos_component || prog->aux->kop_terminal_effect ||
+	if (prog->aux->kop_terminal_effect ||
 	    (prog->aux->ebpfos_meta &&
 	     !ebpfos_admission_meta_program(prog))) {
 		ret = -EPERM;
@@ -6572,8 +6572,7 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 		prog = bpf_prog_get_type(attr->test.prog_fd, BPF_PROG_TYPE_SYSCALL);
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
-		if (prog->aux->ebpfos_component ||
-		    prog->aux->kop_terminal_effect ||
+		if (prog->aux->kop_terminal_effect ||
 		    (prog->aux->ebpfos_meta &&
 		     !ebpfos_admission_meta_program(prog))) {
 			bpf_prog_put(prog);
