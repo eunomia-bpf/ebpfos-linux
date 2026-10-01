@@ -2604,6 +2604,7 @@ struct net_device {
 	struct hlist_head neighbours[NEIGH_NR_TABLES];
 
 	struct hwtstamp_provider __rcu	*hwprov;
+	void			*ebpfos_route; /* Stable L1 route while ops are replaced. */
 
 	u8			priv[] ____cacheline_aligned
 				       __counted_by(priv_len);
