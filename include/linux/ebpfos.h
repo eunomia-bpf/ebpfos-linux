@@ -32,6 +32,8 @@ struct ebpfos_binding {
 	u64 retirement_snapshot;
 	struct bpf_prog *prog;
 	struct bpf_map *map;
+	struct bpf_map **maps;
+	u32 map_count;
 	struct ebpfos_prog_identity *prog_identity;
 	u64 grant_id;
 	u64 policy_generation;

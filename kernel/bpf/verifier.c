@@ -18787,12 +18787,6 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 			MAX_USED_MAPS);
 		return -E2BIG;
 	}
-	if (component && env->used_map_cnt) {
-		verbose(env,
-			"eBPFOS component-call descriptor supports at most one state map\n");
-		return -EINVAL;
-	}
-
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)
 		return err;

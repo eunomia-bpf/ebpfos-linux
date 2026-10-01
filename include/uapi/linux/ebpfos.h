@@ -201,8 +201,9 @@ struct ebpfos_ioc_admission_seal {
 	__s32 prog_fd;
 	__s32 map_fd;
 	__u32 flags;
-	__u32 reserved0;
-	__aligned_u64 reserved1;
+	/* Zero keeps the legacy map_fd path; otherwise map_fds names every map. */
+	__u32 map_count;
+	__aligned_u64 map_fds;
 	struct ebpfos_component_desc_v1 descriptor;
 	__s32 admission_fd;
 	__u32 admission_state;

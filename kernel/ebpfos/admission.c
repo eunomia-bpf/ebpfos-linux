@@ -2,6 +2,7 @@
 #include <crypto/sha2.h>
 #include <linux/anon_inodes.h>
 #include <linux/bpf.h>
+#include <linux/bpf_verifier.h>
 #include <linux/build_bug.h>
 #include <linux/capability.h>
 #include <linux/ebpfos.h>
@@ -130,7 +131,7 @@ EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, policy_record_digest, 32);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, reserved_root, 64);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, staged_grants, 96);
 static_assert(sizeof(struct ebpfos_ioc_admission_seal) == 1168);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, reserved1, 16);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, map_fds, 16);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, descriptor, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, admission_fd, 1048);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, grant_id, 1056);
@@ -272,8 +273,6 @@ static int ebpfos_validate_component_call_descriptor(
 	const struct ebpfos_component_desc_v1 *descriptor)
 {
 	u32 flags = le32_to_cpu(descriptor->flags);
-	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
-	u32 resource_count = le32_to_cpu(descriptor->resource_count);
 
 	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
 	    le32_to_cpu(descriptor->domain) !=
@@ -292,21 +291,8 @@ static int ebpfos_validate_component_call_descriptor(
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
 	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL)
 		return -EPROTO;
-	if (resource_count > 1)
-		return -ERANGE;
 	if (!ebpfos_all_zero(descriptor->reserved,
 			    sizeof(descriptor->reserved)))
-		return -EINVAL;
-	if (!resource_count)
-		return ebpfos_all_zero(resource, sizeof(*resource)) ? 0 : -EINVAL;
-
-	if ((le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP &&
-	     le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_MAP) ||
-	    le32_to_cpu(resource->flags) & ~EBPFOS_RESOURCE_F_ALL ||
-	    !le32_to_cpu(resource->map_type) ||
-	    !le32_to_cpu(resource->max_entries) ||
-	    le32_to_cpu(resource->reserved0) ||
-	    !ebpfos_all_zero(resource->reserved, sizeof(resource->reserved)))
 		return -EINVAL;
 	return 0;
 }
@@ -407,12 +393,15 @@ struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding)
 
 void ebpfos_binding_put(struct ebpfos_binding *binding)
 {
+	u32 i;
+
 	if (!binding || !refcount_dec_and_test(&binding->refs))
 		return;
 	if (binding->prog)
 		bpf_prog_put(binding->prog);
-	if (binding->map)
-		bpf_map_put(binding->map);
+	for (i = 0; i < binding->map_count; i++)
+		bpf_map_put(binding->maps[i]);
+	kfree(binding->maps);
 	ebpfos_prog_identity_put(binding->prog_identity);
 	kfree(binding);
 }
@@ -554,7 +543,8 @@ struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd)
 }
 
 static struct ebpfos_binding *
-ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map *map,
+ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
+			 u32 map_count,
 			 struct ebpfos_prog_identity *identity, u64 grant_id)
 {
 	const struct ebpfos_component_desc_v1 *descriptor =
@@ -568,7 +558,9 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map *map,
 	atomic64_set(&binding->invocation_state, 0);
 	atomic64_set(&binding->map_rehashes, 0);
 	binding->prog = prog;
-	binding->map = map;
+	binding->maps = maps;
+	binding->map_count = map_count;
+	binding->map = map_count ? maps[0] : NULL;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
 	binding->grant_id = grant_id;
 	binding->policy_generation =
@@ -577,7 +569,7 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map *map,
 	binding->kind = EBPFOS_ADMITTED_BINDING_BPF;
 	binding->use = le32_to_cpu(descriptor->use);
 	binding->prog_id = prog->aux->id;
-	binding->map_id = map ? map->id : 0;
+	binding->map_id = binding->map ? binding->map->id : 0;
 	memcpy(binding->realm_id, descriptor->realm_id,
 	       sizeof(binding->realm_id));
 	memcpy(binding->policy_digest, descriptor->policy_record_digest,
@@ -705,88 +697,55 @@ static bool ebpfos_map_owner_matches(struct bpf_prog *prog,
 	return matches;
 }
 
-static bool ebpfos_map_tuple_matches(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	const struct bpf_map *map)
+static int ebpfos_check_program(struct bpf_prog *prog,
+				struct bpf_map *const *maps, u32 map_count,
+				struct ebpfos_prog_identity *expected_identity)
 {
-	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
-
-	return map->map_type == le32_to_cpu(resource->map_type) &&
-	       /* Nested maps and program arrays need package-wide leases. */
-	       !map->inner_map_meta && map->map_type != BPF_MAP_TYPE_PROG_ARRAY &&
-	       map->key_size == le32_to_cpu(resource->key_size) &&
-	       map->value_size == le32_to_cpu(resource->value_size) &&
-	       map->max_entries == le32_to_cpu(resource->max_entries) &&
-	       map->map_flags == le32_to_cpu(resource->map_flags) &&
-	       map->map_extra == le64_to_cpu(resource->map_extra);
-}
-
-static int ebpfos_check_map_lease(struct bpf_prog *prog, struct bpf_map *map,
-			      const struct ebpfos_component_desc_v1 *descriptor,
-			      struct ebpfos_prog_identity *expected_identity)
-{
+	u32 i, j;
 	bool externally_reachable;
 	int error = 0;
 
+	if (!prog->aux->ebpfos_component ||
+	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable)
+		return -EKEYREJECTED;
 	mutex_lock(&prog->aux->used_maps_mutex);
-	if (prog->aux->used_map_cnt != 1 ||
-	    prog->aux->used_maps[0] != map ||
-	    !ebpfos_map_tuple_matches(descriptor, map) ||
-	    !ebpfos_map_owner_matches(prog, map)) {
+	if (prog->aux->used_map_cnt != map_count ||
+	    (expected_identity &&
+	     READ_ONCE(prog->aux->ebpfos_identity) != expected_identity)) {
 		error = -EXDEV;
 		goto out_unlock_maps;
 	}
-	if (expected_identity &&
-	    READ_ONCE(prog->aux->ebpfos_identity) != expected_identity) {
-		error = -EKEYREJECTED;
-		goto out_unlock_maps;
+	for (i = 0; i < map_count; i++) {
+		struct bpf_map *map = maps[i];
+		bool found = false;
+
+		/* Nested maps and program arrays need package-wide leases. */
+		if (map->inner_map_meta || map->map_type == BPF_MAP_TYPE_PROG_ARRAY ||
+		    !ebpfos_map_owner_matches(prog, map)) {
+			error = -EXDEV;
+			goto out_unlock_maps;
+		}
+		for (j = 0; j < map_count; j++)
+			if (prog->aux->used_maps[j] == map) {
+				found = true;
+				break;
+			}
+		if (!found) {
+			error = -EXDEV;
+			goto out_unlock_maps;
+		}
+		for (j = 0; j < i; j++)
+			if (maps[j] == map) {
+				error = -EINVAL;
+				goto out_unlock_maps;
+			}
 	}
 	mutex_lock(&prog->aux->ext_mutex);
 	externally_reachable = prog->aux->is_extended ||
 			       prog->aux->prog_array_member_cnt;
 	mutex_unlock(&prog->aux->ext_mutex);
-	if (externally_reachable) {
+	if (externally_reachable)
 		error = -EBUSY;
-		goto out_unlock_maps;
-	}
-out_unlock_maps:
-	mutex_unlock(&prog->aux->used_maps_mutex);
-	return error;
-}
-
-static int ebpfos_check_program(
-	struct bpf_prog *prog, struct bpf_map *map,
-	const struct ebpfos_component_desc_v1 *descriptor,
-	struct ebpfos_prog_identity *expected_identity)
-{
-	bool component = le32_to_cpu(descriptor->domain) ==
-			 EBPFOS_COMPONENT_DOMAIN_COMPONENT;
-	bool externally_reachable;
-	int error = 0;
-
-	if (!component || !prog->aux->ebpfos_component ||
-	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable)
-		return -EKEYREJECTED;
-	if (le32_to_cpu(descriptor->resource_count))
-		return ebpfos_check_map_lease(prog, map, descriptor,
-					      expected_identity);
-	if (map)
-		return -EXDEV;
-	mutex_lock(&prog->aux->used_maps_mutex);
-	if (prog->aux->used_map_cnt ||
-	    (expected_identity &&
-	     READ_ONCE(prog->aux->ebpfos_identity) != expected_identity)) {
-		error = expected_identity ? -EKEYREJECTED : -EXDEV;
-		goto out_unlock_maps;
-	}
-	mutex_lock(&prog->aux->ext_mutex);
-	externally_reachable = prog->aux->is_extended ||
-			       prog->aux->prog_array_member_cnt;
-	mutex_unlock(&prog->aux->ext_mutex);
-	if (externally_reachable) {
-		error = -EBUSY;
-		goto out_unlock_maps;
-	}
 out_unlock_maps:
 	mutex_unlock(&prog->aux->used_maps_mutex);
 	return error;
@@ -932,12 +891,13 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct ebpfos_admission *admission = NULL;
 	struct ebpfos_binding *binding = NULL;
 	struct bpf_prog *prog = NULL;
-	struct bpf_map *map = NULL;
+	struct bpf_map **maps = NULL;
 	struct file *admission_file = NULL;
+	int *map_fds = NULL;
 	u8 content_digest[SHA256_DIGEST_SIZE];
 	u8 map_digest[SHA256_DIGEST_SIZE] = {};
 	u64 grant_id;
-	bool mapless;
+	u32 map_count, i;
 	int fd = -1;
 	int error;
 
@@ -945,7 +905,10 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || request.reserved0 || request.reserved1)
+	if (request.flags || request.map_fd < -1 ||
+	    request.map_count > MAX_USED_MAPS ||
+	    (request.map_count ? (request.map_fd != -1 || !request.map_fds) :
+				(request.map_fds != 0)))
 		return -EINVAL;
 	error = ebpfos_validate_descriptor(&request.descriptor);
 	if (error)
@@ -954,21 +917,35 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 				     false);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	mapless = !le32_to_cpu(request.descriptor.resource_count);
-	if (mapless) {
-		if (request.map_fd != -1) {
-			error = -EINVAL;
-			goto out_put_prog;
-		}
-	} else {
-		map = bpf_map_get(request.map_fd);
-		if (IS_ERR(map)) {
-			error = PTR_ERR(map);
-			map = NULL;
+	map_count = request.map_count ? request.map_count :
+		    (request.map_fd >= 0 ? 1 : 0);
+	if (request.map_count) {
+		map_fds = memdup_user(u64_to_user_ptr(request.map_fds),
+				      sizeof(*map_fds) * map_count);
+		if (IS_ERR(map_fds)) {
+			error = PTR_ERR(map_fds);
+			map_fds = NULL;
 			goto out_put_prog;
 		}
 	}
-	error = ebpfos_check_program(prog, map, &request.descriptor, NULL);
+	if (map_count) {
+		maps = kcalloc(map_count, sizeof(*maps), GFP_KERNEL);
+		if (!maps) {
+			error = -ENOMEM;
+			goto out_put_map;
+		}
+		for (i = 0; i < map_count; i++) {
+			maps[i] = bpf_map_get(map_fds ? map_fds[i] : request.map_fd);
+			if (IS_ERR(maps[i])) {
+				error = PTR_ERR(maps[i]);
+				maps[i] = NULL;
+				goto out_put_map;
+			}
+		}
+	}
+	kfree(map_fds);
+	map_fds = NULL;
+	error = ebpfos_check_program(prog, maps, map_count, NULL);
 	if (error)
 		goto out_put_map;
 	ebpfos_descriptor_content_digest(&request.descriptor, content_digest);
@@ -982,14 +959,15 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		error = -ENOMEM;
 		goto out_put_map;
 	}
-	binding = ebpfos_binding_alloc_bpf(prog, map, identity, grant_id);
+	binding = ebpfos_binding_alloc_bpf(prog, maps, map_count, identity,
+					   grant_id);
 	if (!binding) {
 		error = -ENOMEM;
 		goto out_put_identity;
 	}
-	/* Binding ownership now covers the references obtained from both FDs. */
+	/* Binding owns the program and all map references. */
 	prog = NULL;
-	map = NULL;
+	maps = NULL;
 	admission = ebpfos_admission_alloc(binding, grant_id);
 	if (!admission) {
 		error = -ENOMEM;
@@ -1024,12 +1002,12 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	mutex_lock(&ebpfos_publish_gate);
 	mutex_lock(&ebpfos_seal_lock);
 	prog = admission->binding->prog;
-	map = admission->binding->map;
+	maps = admission->binding->maps;
 	if (READ_ONCE(prog->aux->ebpfos_identity)) {
 		error = -EALREADY;
 		goto out_unlock_seal;
 	}
-	error = ebpfos_check_program(prog, map, &identity->descriptor, NULL);
+	error = ebpfos_check_program(prog, maps, map_count, NULL);
 	if (error)
 		goto out_unlock_seal;
 	WRITE_ONCE(prog->aux->ebpfos_identity, identity);
@@ -1065,7 +1043,7 @@ out_unlock_seal:
 	mutex_unlock(&ebpfos_publish_gate);
 out_release_file:
 	prog = NULL;
-	map = NULL;
+	maps = NULL;
 	fput(admission_file);
 	admission_file = NULL;
 	admission = NULL;
@@ -1079,8 +1057,13 @@ out_put_binding:
 out_put_identity:
 	ebpfos_prog_identity_put(identity);
 out_put_map:
-	if (map)
-		bpf_map_put(map);
+	if (maps) {
+		for (i = 0; i < map_count; i++)
+			if (maps[i])
+				bpf_map_put(maps[i]);
+		kfree(maps);
+	}
+	kfree(map_fds);
 out_put_prog:
 	if (prog)
 		bpf_prog_put(prog);
@@ -1218,9 +1201,9 @@ static int ebpfos_admission_owner_recheck(struct ebpfos_admission *admission)
 	if (READ_ONCE(binding->prog_identity->seal_state) !=
 	    EBPFOS_PROG_SEALED)
 		return -EKEYREJECTED;
-	return ebpfos_check_program(binding->prog, binding->map,
-				       &binding->prog_identity->descriptor,
-				       binding->prog_identity);
+	return ebpfos_check_program(binding->prog, binding->maps,
+				    binding->map_count,
+				    binding->prog_identity);
 }
 
 int ebpfos_admission_stage_bundle_locked(
@@ -1237,27 +1220,18 @@ int ebpfos_admission_stage_bundle_locked(
 		return -EINVAL;
 	for (index = 0; index < count; index++) {
 		struct ebpfos_admission *grant = grants[index];
-		const struct ebpfos_component_desc_v1 *descriptor;
-		bool mapless;
 		u32 state;
 
 		if (!grant || !grant->grant_id || !grant->binding ||
 		    !grant->binding->prog_id)
 			return -EINVAL;
-		descriptor = ebpfos_binding_descriptor(grant->binding);
-		if (!descriptor)
-			return -EUCLEAN;
-		mapless = !le32_to_cpu(descriptor->resource_count);
-		if (mapless != (!grant->binding->map && !grant->binding->map_id))
+		if (!!grant->binding->map_count != !!grant->binding->map)
 			return -EUCLEAN;
 		for (prior = 0; prior < index; prior++)
 			if (grant == grants[prior] ||
 			    grant->grant_id == grants[prior]->grant_id ||
 			    grant->binding == grants[prior]->binding ||
-			    grant->binding->prog_id == grants[prior]->binding->prog_id ||
-			    (grant->binding->map_id &&
-			     grant->binding->map_id ==
-				grants[prior]->binding->map_id))
+			    grant->binding->prog_id == grants[prior]->binding->prog_id)
 				return -EUCLEAN;
 		spin_lock(&grant->state_lock);
 		state = grant->state;
