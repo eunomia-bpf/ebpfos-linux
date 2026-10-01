@@ -63,6 +63,9 @@ struct ebpfos_effect_scope {
 	u64 bio_bytes;
 	struct net_device *netdev;
 	struct sk_buff *skb;
+	u32 net_stats_bytes;
+	bool net_stats_pending;
+	bool net_timestamp_pending;
 	size_t copied_from_iter;
 	bool locked;
 };
@@ -644,7 +647,29 @@ __bpf_kfunc s64 bpf_ebpfos_effect_net_skb_len(u64 handle)
 	return scope && scope->skb ? scope->skb->len : -EPERM;
 }
 
-__bpf_kfunc int bpf_ebpfos_effect_net_tx_complete(u64 handle)
+__bpf_kfunc int bpf_ebpfos_effect_net_lstats_add(u64 handle, u32 bytes)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->netdev || !scope->skb ||
+	    bytes != scope->skb->len || scope->net_stats_pending)
+		return -EINVAL;
+	scope->net_stats_bytes = bytes;
+	scope->net_stats_pending = true;
+	return 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_tx_timestamp(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->skb || scope->net_timestamp_pending)
+		return -EINVAL;
+	scope->net_timestamp_pending = true;
+	return 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_consume_skb(u64 handle)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
 	struct sk_buff *skb;
@@ -653,10 +678,24 @@ __bpf_kfunc int bpf_ebpfos_effect_net_tx_complete(u64 handle)
 		return -EPERM;
 	skb = scope->skb;
 	scope->skb = NULL;
-	dev_lstats_add(scope->netdev, skb->len);
-	skb_tx_timestamp(skb);
+	if (scope->net_stats_pending)
+		dev_lstats_add(scope->netdev, scope->net_stats_bytes);
+	if (scope->net_timestamp_pending)
+		skb_tx_timestamp(skb);
 	dev_kfree_skb(skb);
 	return 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_tx_complete(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->netdev || !scope->skb)
+		return -EPERM;
+	scope->net_stats_pending = true;
+	scope->net_stats_bytes = scope->skb->len;
+	scope->net_timestamp_pending = true;
+	return bpf_ebpfos_effect_net_consume_skb(handle);
 }
 
 __bpf_kfunc_end_defs();
@@ -686,6 +725,9 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_len, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_consume_skb, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_l1_services)
 
