@@ -371,6 +371,27 @@ __bpf_kfunc int bpf_ebpfos_effect_wait(u64 handle, u32 slot, u64 seen)
 			atomic64_read(&wait->sequence) != seen);
 }
 
+/* Enter with the object lock held; return with it held even on a signal. */
+__bpf_kfunc int bpf_ebpfos_effect_wait_locked(u64 handle, u32 slot)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_effect_wait *wait;
+	u64 seen;
+	int ret;
+
+	if (!scope || !scope->locked || slot >= EBPFOS_EFFECT_WAIT_SLOTS)
+		return -EINVAL;
+	wait = &scope->object->wait[slot];
+	seen = atomic64_read(&wait->sequence);
+	scope->locked = false;
+	mutex_unlock(&scope->object->lock);
+	ret = wait_event_interruptible(wait->queue,
+			atomic64_read(&wait->sequence) != seen);
+	mutex_lock(&scope->object->lock);
+	scope->locked = true;
+	return ret;
+}
+
 __bpf_kfunc int bpf_ebpfos_effect_wake(u64 handle, u32 slot, u32 mask)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -645,6 +666,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_lock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_unlock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_sequence, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait_locked, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wake, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_poll, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_iter, KF_SLEEPABLE)
