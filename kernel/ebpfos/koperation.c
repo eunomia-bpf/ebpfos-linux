@@ -10,12 +10,17 @@
 #include <linux/string.h>
 #include <linux/unaligned.h>
 #include "koperation_xadd64.generated.h"
+#include "koperation_atomic64.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
 __bpf_kfunc u64 bpf_ebpfos_kop_xadd64(u64 *ptr, u64 delta)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_atomic64(u64 *ptr, u64 value, u64 expected)
+{
+	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
 __bpf_kfunc_end_defs();
 
@@ -26,6 +31,107 @@ BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
 BTF_KFUNCS_START(ebpfos_kprog_atomic_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_xadd64)
 BTF_KFUNCS_END(ebpfos_kprog_atomic_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_atomic64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_atomic64)
+BTF_KFUNCS_END(ebpfos_kprog_atomic64_ids)
+
+static const struct ebpfos_kop_atomic64_spec *
+ebpfos_kop_atomic64_spec(u64 payload)
+{
+	u8 op = payload & 0xff;
+	u32 i;
+
+	if (ebpfos_kprog_atomic64_ids.cnt != 1 ||
+	    payload >> 8 != ebpfos_kprog_atomic64_ids.pairs[0].id)
+		return NULL;
+	for (i = 0; i < ARRAY_SIZE(ebpfos_kop_atomic64_specs); i++)
+		if (ebpfos_kop_atomic64_specs[i].op == op)
+			return &ebpfos_kop_atomic64_specs[i];
+	return NULL;
+}
+
+static int ebpfos_kop_atomic64_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	const struct ebpfos_kop_atomic64_spec *spec =
+		ebpfos_kop_atomic64_spec(payload);
+
+	if (!insns || !spec)
+		return -EINVAL;
+	switch (spec->op) {
+	case EBPFOS_KOP_ATOMIC64_CMPXCHG:
+		insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_3);
+		insns[1] = BPF_ATOMIC_OP(BPF_DW, BPF_CMPXCHG,
+					 BPF_REG_1, BPF_REG_2, 0);
+		break;
+	case EBPFOS_KOP_ATOMIC64_XCHG:
+	case EBPFOS_KOP_ATOMIC64_ADD:
+		insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_2);
+		insns[1] = BPF_ATOMIC_OP(BPF_DW,
+			spec->op == EBPFOS_KOP_ATOMIC64_XCHG ? BPF_XCHG :
+			BPF_ADD | BPF_FETCH, BPF_REG_1, BPF_REG_0, 0);
+		break;
+	case EBPFOS_KOP_ATOMIC64_INC:
+	case EBPFOS_KOP_ATOMIC64_DEC:
+		insns[0] = BPF_MOV64_IMM(BPF_REG_0,
+			spec->op == EBPFOS_KOP_ATOMIC64_INC ? 1 : -1);
+		insns[1] = BPF_ATOMIC_OP(BPF_DW, BPF_ADD | BPF_FETCH,
+					 BPF_REG_1, BPF_REG_0, 0);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 2;
+}
+
+static int ebpfos_kop_atomic64_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_kop_atomic64_spec *spec =
+		ebpfos_kop_atomic64_spec(payload);
+
+	if (!spec || !capability_mask || !effect_mask || !semantic_sha256)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
+					u64 payload, const struct bpf_prog *prog,
+					const u8 *final_ip)
+{
+	const struct ebpfos_kop_atomic64_spec *spec =
+		ebpfos_kop_atomic64_spec(payload);
+
+	(void)prog;
+	(void)final_ip;
+	if (!spec || !offset || (emit && !image))
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, spec->native, spec->native_len);
+	*offset += spec->native_len;
+	return spec->native_len;
+}
+
+static struct bpf_kop ebpfos_kop_atomic64 = {
+	.max_insn_cnt = 2,
+	.max_emit_bytes = 12,
+	.requirements = ebpfos_kop_atomic64_requirements,
+	.instantiate_insn = ebpfos_kop_atomic64_instantiate,
+	.emit_x86 = ebpfos_kop_atomic64_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_atomic64_descs[] = {
+	&ebpfos_kop_atomic64,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_atomic64_set = {
+	.set = &ebpfos_kprog_atomic64_ids,
+	.kop_descs = ebpfos_kprog_atomic64_descs,
+};
 
 static bool ebpfos_kop_xadd64_payload(u64 payload)
 {
@@ -181,7 +287,11 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_terminal_set);
 	if (err)
 		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_atomic_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_atomic_set);
+					 &ebpfos_kprog_atomic64_set);
 }
 late_initcall(ebpfos_kprog_register);
