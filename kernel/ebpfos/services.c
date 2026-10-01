@@ -75,6 +75,8 @@ struct ebpfos_effect_scope {
 	u64 bio_bytes;
 	struct net_device *netdev;
 	struct sk_buff *skb;
+	netdev_tx_t (*net_native_xmit)(struct sk_buff *, struct net_device *);
+	bool net_native_delegated;
 	void *net_addr;
 	struct rtnl_link_stats64 *net_stats;
 	u32 net_stats_bytes;
@@ -349,7 +351,10 @@ int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 
 struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
 						 struct net_device *dev,
-						 struct sk_buff *skb)
+						 struct sk_buff *skb,
+						 netdev_tx_t (*native_xmit)(
+							struct sk_buff *,
+							struct net_device *))
 {
 	struct ebpfos_effect_scope *scope;
 
@@ -360,7 +365,13 @@ struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
 		return scope;
 	scope->netdev = dev;
 	scope->skb = skb;
+	scope->net_native_xmit = native_xmit;
 	return scope;
+}
+
+bool ebpfos_effect_net_delegated(struct ebpfos_effect_scope *scope)
+{
+	return scope->net_native_delegated;
 }
 
 struct ebpfos_effect_scope *ebpfos_effect_net_config_scope_enter(u64 handle,
@@ -1004,6 +1015,45 @@ __bpf_kfunc int bpf_ebpfos_effect_net_peer_forward(u64 handle)
 	return 0; /* dev_forward_skb consumes the skb on success or drop. */
 }
 
+/* Return the peer receive mode without exposing driver-private queue state. */
+__bpf_kfunc s64 bpf_ebpfos_effect_net_peer_rx_mode(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct net_device *peer;
+	s64 mode;
+
+	if (!scope || !scope->netdev ||
+	    !scope->netdev->netdev_ops->ndo_get_peer_dev)
+		return -EPERM;
+	rcu_read_lock();
+	peer = scope->netdev->netdev_ops->ndo_get_peer_dev(scope->netdev);
+	mode = !peer ? 1 :
+		(!!(peer->wanted_features & NETIF_F_GRO) << 1) |
+		(!!dev_xdp_prog_count(peer) << 2);
+	rcu_read_unlock();
+	return mode;
+}
+
+/* A registered ops-table handle keeps private NAPI, XDP and page-pool state
+ * in its native owner until those callbacks can be separately componentized.
+ */
+__bpf_kfunc int bpf_ebpfos_effect_net_native_xmit(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	netdev_tx_t result;
+
+	if (!scope || !scope->skb || !scope->net_native_xmit)
+		return -EPERM;
+	local_bh_disable();
+	result = scope->net_native_xmit(scope->skb, scope->netdev);
+	local_bh_enable();
+	if (result == NETDEV_TX_BUSY)
+		return -EAGAIN;
+	scope->skb = NULL;
+	scope->net_native_delegated = true;
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_l1_services)
@@ -1046,6 +1096,8 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_set_mac_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_carrier_set, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_forward, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_rx_mode, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_native_xmit, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_consume_skb, KF_SLEEPABLE)

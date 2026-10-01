@@ -3,6 +3,7 @@
 #define _LINUX_EBPFOS_SERVICES_H
 
 #include <linux/types.h>
+#include <linux/netdevice.h>
 
 struct file;
 struct bio;
@@ -40,11 +41,14 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope);
 struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
 					 struct net_device *dev,
-					 struct sk_buff *skb);
+					 struct sk_buff *skb,
+					 netdev_tx_t (*native_xmit)(struct sk_buff *,
+							    struct net_device *));
 struct ebpfos_effect_scope *ebpfos_effect_net_config_scope_enter(u64 handle,
 		struct net_device *dev, void *addr,
 		struct rtnl_link_stats64 *stats);
 bool ebpfos_effect_net_skb_pending(struct ebpfos_effect_scope *scope);
+bool ebpfos_effect_net_delegated(struct ebpfos_effect_scope *scope);
 
 /* Native fops can attach poll/fasync to an effect object. */
 void ebpfos_effect_poll(u64 handle, u32 slot, struct file *file,

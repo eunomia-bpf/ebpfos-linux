@@ -35,6 +35,7 @@ struct ebpfos_netdev_route {
 	atomic64_t linux_entries;
 	atomic64_t component_entries;
 	atomic64_t faults;
+	atomic64_t delegated_entries;
 	atomic64_t method_entries[7];
 	bool draining;
 	bool component;
@@ -85,7 +86,8 @@ static void ebpfos_netdev_route_work(struct work_struct *work)
 	frame.object_id = route->handle;
 	frame.input_size = sizeof(bytes);
 	memcpy(frame.input, &bytes, sizeof(bytes));
-	scope = ebpfos_effect_net_scope_enter(route->handle, route->dev, item->skb);
+	scope = ebpfos_effect_net_scope_enter(route->handle, route->dev,
+		item->skb, route->original->ndo_start_xmit);
 	if (IS_ERR(scope)) {
 		error = PTR_ERR(scope);
 	} else {
@@ -93,6 +95,8 @@ static void ebpfos_netdev_route_work(struct work_struct *work)
 					       &epoch, &provider_id,
 					       &provider_status);
 		pending = ebpfos_effect_net_skb_pending(scope);
+		if (ebpfos_effect_net_delegated(scope))
+			atomic64_inc(&route->delegated_entries);
 		if (ebpfos_effect_scope_exit(scope) && !error)
 			error = -EPROTO;
 		if (!error && (provider_status || frame.status ||
@@ -448,6 +452,8 @@ static long ebpfos_netdev_route_ioctl(struct file *control,
 		request.linux_entries = atomic64_read(&route->linux_entries);
 		request.component_entries = atomic64_read(&route->component_entries);
 		request.faults = atomic64_read(&route->faults);
+		request.delegated_entries =
+			atomic64_read(&route->delegated_entries);
 		request.method_mask = route->method_mask;
 		for (int method = 1; method <= 6; ++method)
 			request.method_entries[method] =
