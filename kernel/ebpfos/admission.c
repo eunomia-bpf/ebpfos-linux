@@ -269,18 +269,13 @@ static int ebpfos_validate_policy_record(
 }
 
 static int ebpfos_validate_component_call_descriptor(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	const struct ebpfos_policy_record_v1 *policy,
-	const u8 policy_digest[SHA256_DIGEST_SIZE])
+	const struct ebpfos_component_desc_v1 *descriptor)
 {
-	u32 policy_flags = le32_to_cpu(policy->flags);
 	u32 flags = le32_to_cpu(descriptor->flags);
 	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
 	u32 resource_count = le32_to_cpu(descriptor->resource_count);
 
 	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
-	    !!(flags & EBPFOS_COMPONENT_F_TEST_ONLY) !=
-		!!(policy_flags & EBPFOS_POLICY_F_TEST_ONLY) ||
 	    le32_to_cpu(descriptor->domain) !=
 		EBPFOS_COMPONENT_DOMAIN_COMPONENT ||
 	    le32_to_cpu(descriptor->use) != EBPFOS_COMPONENT_USE_CALL_PROVIDER ||
@@ -290,40 +285,11 @@ static int ebpfos_validate_component_call_descriptor(
 		EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL ||
 	    le32_to_cpu(descriptor->reserved0))
 		return -EACCES;
-	if (memcmp(descriptor->realm_id, policy->realm_id,
-		   sizeof(descriptor->realm_id)) ||
-	    le64_to_cpu(descriptor->policy_generation) !=
-		le64_to_cpu(policy->generation) ||
-	    memcmp(descriptor->policy_record_digest, policy_digest,
-		   SHA256_DIGEST_SIZE) ||
-	    memcmp(descriptor->host_policy_sha256, policy->host_policy_sha256,
-		   SHA256_DIGEST_SIZE))
-		return -ESTALE;
-	if (!ebpfos_nonzero(descriptor->component_id,
-			    sizeof(descriptor->component_id)) ||
-	    !le64_to_cpu(descriptor->component_version) ||
-	    !le64_to_cpu(descriptor->provider_type_id) ||
-	    !le64_to_cpu(descriptor->transition_id) ||
-	    !le64_to_cpu(descriptor->predecessor_policy_generation) ||
-	    !ebpfos_nonzero(descriptor->predecessor_policy_digest,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->predecessor_content_digest,
-			    SHA256_DIGEST_SIZE))
-		return -EINVAL;
-	if (!ebpfos_nonzero(descriptor->contract_sha256, SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->interface_sha256, SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->authority_sha256, SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
-			    SHA256_DIGEST_SIZE))
-		return -EINVAL;
 	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_COMPONENT_CALL_ABI_ID ||
 	    le32_to_cpu(descriptor->abi_version) !=
 		EBPFOS_COMPONENT_CALL_ABI_VERSION ||
 	    le32_to_cpu(descriptor->context_size) !=
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
-	    !le64_to_cpu(descriptor->runtime_schema_u64) ||
 	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL ||
 	    le32_to_cpu(descriptor->semantic_prog_flags) !=
 		EBPFOS_COMPONENT_CALL_PROG_FLAGS)
@@ -348,9 +314,7 @@ static int ebpfos_validate_component_call_descriptor(
 }
 
 static int ebpfos_validate_descriptor(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	const struct ebpfos_policy_record_v1 *policy,
-	const u8 policy_digest[SHA256_DIGEST_SIZE])
+	const struct ebpfos_component_desc_v1 *descriptor)
 {
 	if (memcmp(descriptor->magic, EBPFOS_COMPONENT_DESC_V1_MAGIC,
 		   sizeof(descriptor->magic)) ||
@@ -362,8 +326,7 @@ static int ebpfos_validate_descriptor(
 
 	switch (le32_to_cpu(descriptor->domain)) {
 	case EBPFOS_COMPONENT_DOMAIN_COMPONENT:
-		return ebpfos_validate_component_call_descriptor(
-			descriptor, policy, policy_digest);
+		return ebpfos_validate_component_call_descriptor(descriptor);
 	default:
 		return -EACCES;
 	}
@@ -978,8 +941,7 @@ static int ebpfos_descriptor_policy_snapshot(
 		*policy = ebpfos_policy.record;
 		memcpy(policy_digest, ebpfos_policy.digest,
 		       SHA256_DIGEST_SIZE);
-		error = ebpfos_validate_descriptor(descriptor, policy,
-						   policy_digest);
+		error = ebpfos_validate_descriptor(descriptor);
 	}
 	mutex_unlock(&ebpfos_publish_gate);
 	return error;
