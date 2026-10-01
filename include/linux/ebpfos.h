@@ -129,18 +129,11 @@ struct ebpfos_executor_root_role_snapshot {
 };
 
 #ifdef CONFIG_EBPFOS
-long ebpfos_policy_activate_ioctl(void __user *argp);
-long ebpfos_policy_status_ioctl(void __user *argp);
 long ebpfos_admission_seal_ioctl(void __user *argp);
 long ebpfos_admission_info_ioctl(void __user *argp);
 long ebpfos_admission_runtime_info_ioctl(void __user *argp);
 void ebpfos_admission_gate_lock(void);
 void ebpfos_admission_gate_unlock(void);
-bool ebpfos_policy_enforcing(void);
-bool ebpfos_policy_enforcing_locked(void);
-int ebpfos_policy_identity_validate_locked(
-	u64 generation, const u8 realm_id[16], const u8 policy_digest[32],
-	const u8 host_policy_digest[32], u32 required_flags);
 struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd);
 void ebpfos_admission_put(struct ebpfos_admission *admission);
 int ebpfos_admission_stage_bundle_locked(

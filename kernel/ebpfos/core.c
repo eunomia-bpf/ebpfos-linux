@@ -58,10 +58,6 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case EBPFOS_IOC_VERSION:
 		return ebpfos_ioctl_version(argp);
-	case EBPFOS_IOC_POLICY_ACTIVATE:
-		return ebpfos_policy_activate_ioctl(argp);
-	case EBPFOS_IOC_POLICY_STATUS:
-		return ebpfos_policy_status_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_SEAL:
 		return ebpfos_admission_seal_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_INFO:

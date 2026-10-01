@@ -16,7 +16,6 @@
 #include <linux/overflow.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
-#include <linux/seqlock.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -26,33 +25,6 @@
 
 #define EBPFOS_ASSERT_OFFSET(_type, _field, _offset) \
 	static_assert(offsetof(struct _type, _field) == (_offset))
-
-static_assert(sizeof(struct ebpfos_policy_record_v1) ==
-	      EBPFOS_POLICY_RECORD_V1_SIZE);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, magic, 0);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, format_version, 8);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, header_size, 10);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, total_size, 12);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, flags, 16);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, domain_mask, 20);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, realm_id, 24);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, generation, 40);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, previous_record_digest, 48);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, host_policy_sha256, 80);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, verifier_profile_mask, 112);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, capability_ceiling, 120);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, effect_ceiling, 128);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_static_insns, 136);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_verified_insns, 140);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_stack_depth, 144);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_context_size, 148);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_resources, 152);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, reserved0, 156);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_map_bytes, 160);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, max_call_bytes, 168);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, kernel_abi_sha256, 176);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, native_bootstrap_sha256, 208);
-EBPFOS_ASSERT_OFFSET(ebpfos_policy_record_v1, reserved, 240);
 
 static_assert(sizeof(struct ebpfos_resource_desc_v1) ==
 	      EBPFOS_RESOURCE_DESC_V1_SIZE);
@@ -123,13 +95,6 @@ EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_call_bytes, 568);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, resource, 576);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved, 672);
 
-static_assert(sizeof(struct ebpfos_ioc_policy_activate) == 272);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_activate, reserved, 256);
-static_assert(sizeof(struct ebpfos_ioc_policy_status) == 128);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, generation, 24);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, policy_record_digest, 32);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, reserved_root, 64);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, staged_grants, 96);
 static_assert(sizeof(struct ebpfos_ioc_admission_seal) == 1168);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, map_fds, 16);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, descriptor, 24);
@@ -155,7 +120,6 @@ static_assert((BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE) ==
 	      EBPFOS_COMPONENT_CALL_PROG_FLAGS);
 static_assert(sizeof(struct ebpfos_component_call_frame) ==
 	      EBPFOS_COMPONENT_CALL_CONTEXT_SIZE);
-static const u8 ebpfos_policy_domain[] = "eBPFOS-policy-v1";
 static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
 
 enum ebpfos_prog_seal_state {
@@ -181,32 +145,17 @@ struct ebpfos_admission {
 	u32 state;
 };
 
-struct ebpfos_policy {
-	struct ebpfos_policy_record_v1 record;
-	u8 digest[SHA256_DIGEST_SIZE];
-	u32 state;
-};
-
 static DEFINE_MUTEX(ebpfos_publish_gate);
 static DEFINE_MUTEX(ebpfos_seal_lock);
-static struct ebpfos_policy ebpfos_policy;
 static u64 ebpfos_staged_grants;
 static DEFINE_SPINLOCK(ebpfos_grant_id_lock);
 static u64 ebpfos_next_grant_id;
-static u64 ebpfos_active_policy_generation;
-static seqcount_mutex_t ebpfos_policy_epoch_seq =
-	SEQCNT_MUTEX_ZERO(ebpfos_policy_epoch_seq, &ebpfos_publish_gate);
 
 static const struct file_operations ebpfos_admission_fops;
 
 static bool ebpfos_all_zero(const void *data, size_t size)
 {
 	return !memchr_inv(data, 0, size);
-}
-
-static bool ebpfos_nonzero(const void *data, size_t size)
-{
-	return !!memchr_inv(data, 0, size);
 }
 
 static void ebpfos_hash_parts(const u8 *domain, size_t domain_size,
@@ -224,14 +173,6 @@ static void ebpfos_hash_parts(const u8 *domain, size_t domain_size,
 	sha256_final(&context, digest);
 }
 
-static void ebpfos_policy_digest(
-	const struct ebpfos_policy_record_v1 *record,
-	u8 digest[SHA256_DIGEST_SIZE])
-{
-	ebpfos_hash_parts(ebpfos_policy_domain, sizeof(ebpfos_policy_domain),
-			  record, sizeof(*record), NULL, 0, digest);
-}
-
 static void ebpfos_descriptor_content_digest(
 	const struct ebpfos_component_desc_v1 *descriptor,
 	u8 digest[SHA256_DIGEST_SIZE])
@@ -239,34 +180,6 @@ static void ebpfos_descriptor_content_digest(
 	ebpfos_hash_parts(ebpfos_content_domain,
 			  sizeof(ebpfos_content_domain), descriptor,
 			  sizeof(*descriptor), NULL, 0, digest);
-}
-
-static int ebpfos_validate_policy_record(
-	const struct ebpfos_policy_record_v1 *record)
-{
-	u32 flags = le32_to_cpu(record->flags);
-
-	if (memcmp(record->magic, EBPFOS_POLICY_RECORD_V1_MAGIC,
-		   sizeof(record->magic)) ||
-	    le16_to_cpu(record->format_version) !=
-		EBPFOS_ADMISSION_FORMAT_VERSION ||
-	    le16_to_cpu(record->header_size) != sizeof(*record) ||
-	    le32_to_cpu(record->total_size) != sizeof(*record))
-		return -EPROTO;
-	if (flags & ~EBPFOS_POLICY_F_ALL)
-		return -EACCES;
-	if (!le64_to_cpu(record->generation) ||
-	    !ebpfos_nonzero(record->realm_id, sizeof(record->realm_id)) ||
-	    !ebpfos_nonzero(record->host_policy_sha256,
-			    sizeof(record->host_policy_sha256)))
-		return -EINVAL;
-	if (le32_to_cpu(record->reserved0) ||
-	    !ebpfos_all_zero(record->reserved, sizeof(record->reserved)))
-		return -EINVAL;
-	if (!ebpfos_all_zero(record->native_bootstrap_sha256,
-			     sizeof(record->native_bootstrap_sha256)))
-		return -EINVAL;
-	return 0;
 }
 
 static int ebpfos_validate_component_call_descriptor(
@@ -323,50 +236,6 @@ void ebpfos_admission_gate_lock(void)
 void ebpfos_admission_gate_unlock(void)
 {
 	mutex_unlock(&ebpfos_publish_gate);
-}
-
-bool ebpfos_policy_enforcing(void)
-{
-	return READ_ONCE(ebpfos_policy.state) == EBPFOS_POLICY_ACTIVE;
-}
-
-bool ebpfos_policy_enforcing_locked(void)
-{
-	lockdep_assert_held(&ebpfos_publish_gate);
-	return ebpfos_policy.state == EBPFOS_POLICY_ACTIVE;
-}
-
-static bool ebpfos_policy_matches_locked(
-	u64 generation, const u8 realm_id[16],
-	const u8 digest[SHA256_DIGEST_SIZE])
-{
-	lockdep_assert_held(&ebpfos_publish_gate);
-	return ebpfos_policy.state == EBPFOS_POLICY_ACTIVE &&
-	       le64_to_cpu(ebpfos_policy.record.generation) == generation &&
-	       !memcmp(ebpfos_policy.record.realm_id, realm_id,
-		       sizeof(ebpfos_policy.record.realm_id)) &&
-	       !memcmp(ebpfos_policy.digest, digest, SHA256_DIGEST_SIZE);
-}
-
-int ebpfos_policy_identity_validate_locked(
-	u64 generation, const u8 realm_id[16],
-	const u8 policy_digest[SHA256_DIGEST_SIZE],
-	const u8 host_policy_digest[SHA256_DIGEST_SIZE], u32 required_flags)
-{
-	u32 flags;
-
-	lockdep_assert_held(&ebpfos_publish_gate);
-	if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE)
-		return -EACCES;
-	if (!ebpfos_policy_matches_locked(generation, realm_id, policy_digest) ||
-	    memcmp(ebpfos_policy.record.host_policy_sha256,
-		   host_policy_digest, SHA256_DIGEST_SIZE))
-		return -ESTALE;
-	flags = le32_to_cpu(ebpfos_policy.record.flags);
-	if (required_flags & ~EBPFOS_POLICY_F_ALL ||
-	    (flags & required_flags) != required_flags)
-		return -EACCES;
-	return 0;
 }
 
 static struct ebpfos_prog_identity *
@@ -749,86 +618,6 @@ static int ebpfos_check_program(struct bpf_prog *prog,
 out_unlock_maps:
 	mutex_unlock(&prog->aux->used_maps_mutex);
 	return error;
-}
-
-long ebpfos_policy_activate_ioctl(void __user *argp)
-{
-	struct ebpfos_ioc_policy_activate request;
-	u8 digest[SHA256_DIGEST_SIZE];
-	u64 generation;
-	int error;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-	if (copy_from_user(&request, argp, sizeof(request)))
-		return -EFAULT;
-	if (request.flags || !ebpfos_all_zero(request.reserved,
-					     sizeof(request.reserved)))
-		return -EINVAL;
-	error = ebpfos_validate_policy_record(&request.record);
-	if (error)
-		return error;
-	ebpfos_policy_digest(&request.record, digest);
-	generation = le64_to_cpu(request.record.generation);
-
-	mutex_lock(&ebpfos_publish_gate);
-	if (ebpfos_staged_grants) {
-		error = -EBUSY;
-		goto out_unlock;
-	}
-	if (ebpfos_policy.state == EBPFOS_POLICY_INACTIVE) {
-		if (generation != 1 ||
-		    !ebpfos_all_zero(request.record.previous_record_digest,
-				     SHA256_DIGEST_SIZE)) {
-			error = -ESTALE;
-			goto out_unlock;
-		}
-	} else {
-		if (memcmp(request.record.realm_id,
-			   ebpfos_policy.record.realm_id,
-			   sizeof(request.record.realm_id))) {
-			error = -EXDEV;
-			goto out_unlock;
-		}
-		if (generation <=
-		    le64_to_cpu(ebpfos_policy.record.generation) ||
-		    memcmp(request.record.previous_record_digest,
-			   ebpfos_policy.digest, SHA256_DIGEST_SIZE)) {
-			error = -ESTALE;
-			goto out_unlock;
-		}
-	}
-	write_seqcount_begin(&ebpfos_policy_epoch_seq);
-	ebpfos_policy.record = request.record;
-	memcpy(ebpfos_policy.digest, digest, sizeof(ebpfos_policy.digest));
-	WRITE_ONCE(ebpfos_active_policy_generation, generation);
-	WRITE_ONCE(ebpfos_policy.state, EBPFOS_POLICY_ACTIVE);
-	write_seqcount_end(&ebpfos_policy_epoch_seq);
-	error = 0;
-out_unlock:
-	mutex_unlock(&ebpfos_publish_gate);
-	return error;
-}
-
-long ebpfos_policy_status_ioctl(void __user *argp)
-{
-	struct ebpfos_ioc_policy_status status = { 0 };
-
-	mutex_lock(&ebpfos_publish_gate);
-	status.state = ebpfos_policy.state;
-	if (ebpfos_policy.state == EBPFOS_POLICY_ACTIVE) {
-		status.policy_flags = le32_to_cpu(ebpfos_policy.record.flags);
-		memcpy(status.realm_id, ebpfos_policy.record.realm_id,
-		       sizeof(status.realm_id));
-		status.generation =
-			le64_to_cpu(ebpfos_policy.record.generation);
-		memcpy(status.policy_record_digest, ebpfos_policy.digest,
-		       sizeof(status.policy_record_digest));
-	}
-	status.staged_grants = ebpfos_staged_grants;
-	status.reserved0 = 0;
-	mutex_unlock(&ebpfos_publish_gate);
-	return copy_to_user(argp, &status, sizeof(status)) ? -EFAULT : 0;
 }
 
 static struct ebpfos_prog_identity *
