@@ -77,6 +77,16 @@ struct ebpfos_component_call_frame {
 #define EBPFOS_COMPONENT_CALL_CONTEXT_SIZE \
 	((u32)sizeof(struct ebpfos_component_call_frame))
 
+/* Non-sleepable raw-tracepoint providers read arguments and return a status. */
+#define EBPFOS_COMPONENT_IRQ_ABI_ID 0x454243414c4c0002ULL
+#define EBPFOS_COMPONENT_IRQ_ABI_VERSION 1U
+#define EBPFOS_COMPONENT_IRQ_ARG_COUNT 12U
+struct ebpfos_component_irq_frame {
+	u64 args[EBPFOS_COMPONENT_IRQ_ARG_COUNT];
+};
+#define EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE \
+	((u32)sizeof(struct ebpfos_component_irq_frame))
+
 #define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH BIT(0)
 
 struct ebpfos_executor_call {

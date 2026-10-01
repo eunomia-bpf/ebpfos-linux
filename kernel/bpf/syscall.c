@@ -2940,8 +2940,10 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
-	    (type != BPF_PROG_TYPE_SYSCALL ||
-	     !(attr->prog_flags & BPF_F_SLEEPABLE)))
+	    !((type == BPF_PROG_TYPE_SYSCALL &&
+	       (attr->prog_flags & BPF_F_SLEEPABLE)) ||
+	      (type == BPF_PROG_TYPE_RAW_TRACEPOINT &&
+	       !(attr->prog_flags & BPF_F_SLEEPABLE))))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))

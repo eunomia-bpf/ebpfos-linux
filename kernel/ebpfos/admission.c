@@ -115,6 +115,9 @@ static_assert((BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE) ==
 	      EBPFOS_COMPONENT_CALL_PROG_FLAGS);
 static_assert(sizeof(struct ebpfos_component_call_frame) ==
 	      EBPFOS_COMPONENT_CALL_CONTEXT_SIZE);
+static_assert(EBPFOS_COMPONENT_IRQ_ARG_COUNT == MAX_BPF_FUNC_ARGS);
+static_assert(sizeof(struct ebpfos_component_irq_frame) ==
+	      EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE);
 static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
 
 enum ebpfos_prog_seal_state {
@@ -172,21 +175,30 @@ static void ebpfos_descriptor_content_digest(
 			  sizeof(*descriptor), NULL, 0, digest);
 }
 
-static int ebpfos_validate_component_call_descriptor(
+static int ebpfos_validate_component_descriptor(
 	const struct ebpfos_component_desc_v1 *descriptor)
 {
+	u64 abi_id = le64_to_cpu(descriptor->abi_id);
+	u32 context_size = le32_to_cpu(descriptor->context_size);
+	u32 prog_type = le32_to_cpu(descriptor->prog_type);
+
 	if (le32_to_cpu(descriptor->domain) !=
 		EBPFOS_COMPONENT_DOMAIN_COMPONENT ||
 	    le32_to_cpu(descriptor->use) != EBPFOS_COMPONENT_USE_CALL_PROVIDER)
 		return -EACCES;
-	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_COMPONENT_CALL_ABI_ID ||
-	    le32_to_cpu(descriptor->abi_version) !=
-		EBPFOS_COMPONENT_CALL_ABI_VERSION ||
-	    le32_to_cpu(descriptor->context_size) !=
-		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
-	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL)
-		return -EPROTO;
-	return 0;
+	if (prog_type == BPF_PROG_TYPE_SYSCALL &&
+	    abi_id == EBPFOS_COMPONENT_CALL_ABI_ID &&
+	    le32_to_cpu(descriptor->abi_version) ==
+		EBPFOS_COMPONENT_CALL_ABI_VERSION &&
+	    context_size == EBPFOS_COMPONENT_CALL_CONTEXT_SIZE)
+		return 0;
+	if (prog_type == BPF_PROG_TYPE_RAW_TRACEPOINT &&
+	    abi_id == EBPFOS_COMPONENT_IRQ_ABI_ID &&
+	    le32_to_cpu(descriptor->abi_version) ==
+		EBPFOS_COMPONENT_IRQ_ABI_VERSION &&
+	    context_size == EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE)
+		return 0;
+	return -EPROTO;
 }
 
 static int ebpfos_validate_descriptor(
@@ -202,7 +214,7 @@ static int ebpfos_validate_descriptor(
 
 	switch (le32_to_cpu(descriptor->domain)) {
 	case EBPFOS_COMPONENT_DOMAIN_COMPONENT:
-		return ebpfos_validate_component_call_descriptor(descriptor);
+		return ebpfos_validate_component_descriptor(descriptor);
 	default:
 		return -EACCES;
 	}
@@ -478,7 +490,8 @@ static int ebpfos_check_program(struct bpf_prog *prog,
 	int error = 0;
 
 	if (!prog->aux->ebpfos_component ||
-	    prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable)
+	    !((prog->type == BPF_PROG_TYPE_SYSCALL && prog->sleepable) ||
+	      (prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT && !prog->sleepable)))
 		return -EKEYREJECTED;
 	mutex_lock(&prog->aux->used_maps_mutex);
 	if (prog->aux->used_map_cnt != map_count ||
@@ -605,8 +618,8 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	error = ebpfos_validate_descriptor(&request.descriptor);
 	if (error)
 		return error;
-	prog = bpf_prog_get_type_dev(request.prog_fd, BPF_PROG_TYPE_SYSCALL,
-				     false);
+	prog = bpf_prog_get_type_dev(request.prog_fd,
+		le32_to_cpu(request.descriptor.prog_type), false);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
 	map_count = request.map_count ? request.map_count :
