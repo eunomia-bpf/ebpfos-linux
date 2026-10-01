@@ -28,12 +28,13 @@
 #include <linux/wait.h>
 #include <linux/xarray.h>
 #include <uapi/linux/ebpfos_block_effect.h>
+#include <uapi/linux/ebpfos_locked_section.h>
 #if IS_ENABLED(CONFIG_KUNIT)
 #include <kunit/test.h>
 #endif
 
 #define EBPFOS_EFFECT_WAIT_SLOTS 8
-#define EBPFOS_EFFECT_IRQ_SLOTS 8
+#define EBPFOS_EFFECT_IRQ_SLOTS EBPFOS_LOCKED_U64_SLOTS
 #define EBPFOS_EFFECT_COPY_MAX 256
 
 struct ebpfos_effect_wait {
@@ -52,6 +53,7 @@ struct ebpfos_effect_object {
 	atomic_t logical_refs;
 	struct mutex lock;
 	raw_spinlock_t irq_locks[EBPFOS_EFFECT_IRQ_SLOTS];
+	u64 irq_values[EBPFOS_EFFECT_IRQ_SLOTS];
 	struct mutex block_pages_lock;
 	struct xarray block_pages;
 	struct fasync_struct *fasync;
@@ -477,6 +479,31 @@ __bpf_kfunc u64 bpf_ebpfos_effect_irq_cmpxchg(u64 handle, u32 kind,
 	return observed;
 }
 
+/* The lock and IRQ-off interval contain only one scalar load and store. */
+__bpf_kfunc int bpf_ebpfos_effect_locked_u64_irqsave(u64 handle, u32 slot,
+				       void *request, u32 request__sz)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_locked_u64_request *transaction = request;
+	unsigned long flags;
+	u64 observed, expected, desired;
+
+	if (!scope)
+		return -EPERM;
+	if (slot >= EBPFOS_EFFECT_IRQ_SLOTS || !request ||
+	    request__sz != sizeof(*transaction))
+		return -EINVAL;
+	expected = transaction->expected;
+	desired = transaction->desired;
+	raw_spin_lock_irqsave(&scope->object->irq_locks[slot], flags);
+	observed = scope->object->irq_values[slot];
+	if (observed == expected)
+		scope->object->irq_values[slot] = desired;
+	raw_spin_unlock_irqrestore(&scope->object->irq_locks[slot], flags);
+	transaction->observed = observed;
+	return observed == expected ? 0 : 1;
+}
+
 __bpf_kfunc s64 bpf_ebpfos_effect_sequence(u64 handle, u32 slot)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -889,6 +916,50 @@ __bpf_kfunc s64 bpf_ebpfos_effect_net_skb_len(u64 handle)
 	return scope && scope->skb ? scope->skb->len : -EPERM;
 }
 
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_data_len(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->skb ? scope->skb->data_len : -EPERM;
+}
+
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_headlen(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->skb ? skb_headlen(scope->skb) : -EPERM;
+}
+
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_queue_mapping(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->skb ? skb_get_queue_mapping(scope->skb) : -EPERM;
+}
+
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_might_realloc(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->skb)
+		return -EPERM;
+#if IS_ENABLED(CONFIG_FAIL_SKB_REALLOC)
+	skb_might_realloc(scope->skb);
+#endif
+	return 0;
+}
+
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_pull_tail(u64 handle, u32 delta)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->skb)
+		return -EPERM;
+	if (delta > scope->skb->len)
+		return 0;
+	return !!__pskb_pull_tail(scope->skb, delta);
+}
+
 __bpf_kfunc int bpf_ebpfos_effect_net_validate_addr(u64 handle)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -1076,6 +1147,7 @@ BTF_KFUNCS_START(ebpfos_l1_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_lock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_unlock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_irq_cmpxchg, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_locked_u64_irqsave, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_sequence, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait_locked, KF_SLEEPABLE)
@@ -1107,6 +1179,11 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_len, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_data_len, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_headlen, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_queue_mapping, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_might_realloc, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_pull_tail, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_validate_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_set_mac_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
@@ -1228,6 +1305,50 @@ static void ebpfos_effect_copy_test(struct kunit *test)
 	ebpfos_effect_handle_put(0xeffec8);
 }
 
+static void ebpfos_effect_locked_section_test(struct kunit *test)
+{
+	struct ebpfos_locked_u64_request request = {
+		.expected = 0, .desired = 7,
+	};
+	struct ebpfos_effect_scope *scope;
+	unsigned long flags;
+	bool stayed_disabled;
+	int result;
+
+	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffeca), 0);
+	scope = ebpfos_effect_scope_enter(0xeffeca, NULL, NULL, NULL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(scope));
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffec9, 0, &request, sizeof(request)), -EPERM);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffeca, EBPFOS_LOCKED_U64_SLOTS, &request,
+		sizeof(request)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffeca, 0, &request, sizeof(request) - 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffeca, 0, &request, sizeof(request)), 0);
+	KUNIT_EXPECT_EQ(test, request.observed, 0ULL);
+	request.desired = 9;
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffeca, 0, &request, sizeof(request)), 1);
+	KUNIT_EXPECT_EQ(test, request.observed, 7ULL);
+	request.expected = 7;
+	local_irq_save(flags);
+	result = bpf_ebpfos_effect_locked_u64_irqsave(0xeffeca, 0,
+						      &request, sizeof(request));
+	stayed_disabled = irqs_disabled();
+	local_irq_restore(flags);
+	KUNIT_EXPECT_EQ(test, result, 0);
+	KUNIT_EXPECT_TRUE(test, stayed_disabled);
+	KUNIT_EXPECT_EQ(test, request.observed, 7ULL);
+	request.expected = 0;
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_locked_u64_irqsave(
+		0xeffeca, 0, &request, sizeof(request)), 1);
+	KUNIT_EXPECT_EQ(test, request.observed, 9ULL);
+	KUNIT_EXPECT_EQ(test, ebpfos_effect_scope_exit(scope), 0);
+	ebpfos_effect_handle_put(0xeffeca);
+}
+
 static void ebpfos_effect_bio_test(struct kunit *test)
 {
 	struct ebpfos_block_segment segment;
@@ -1285,6 +1406,7 @@ static void ebpfos_effect_bio_test(struct kunit *test)
 static struct kunit_case ebpfos_effect_cases[] = {
 	KUNIT_CASE(ebpfos_effect_scope_test),
 	KUNIT_CASE(ebpfos_effect_copy_test),
+	KUNIT_CASE(ebpfos_effect_locked_section_test),
 	KUNIT_CASE(ebpfos_effect_bio_test),
 	{}
 };
