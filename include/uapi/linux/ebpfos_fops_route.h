@@ -27,5 +27,6 @@ struct ebpfos_fops_route_request {
 	_IOW('E', 0x75, struct ebpfos_fops_route_request)
 
 #define EBPFOS_FOPS_ROUTE_F_COMPONENT 1U
+#define EBPFOS_FOPS_ROUTE_F_EXTENDED 2U
 
 #endif
