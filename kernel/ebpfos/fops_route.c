@@ -2,6 +2,7 @@
 /* Generated file_operations boundary. No pipe-specific hook is used here. */
 #include <linux/atomic.h>
 #include <linux/capability.h>
+#include <linux/ebpfos.h>
 #include <linux/ebpfos_fops_route.h>
 #include <linux/errno.h>
 #include <linux/file.h>
@@ -54,8 +55,9 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 {
 	struct file *file = iocb->ki_filp;
 	struct ebpfos_fops_route *route = READ_ONCE(file->f_ebpfos_route);
-	struct ebpfos_fops_route_frame frame;
-	size_t before, after;
+	struct ebpfos_component_call_frame frame = {};
+	size_t before, copied = 0, count;
+	u64 consumed = 0;
 	u64 epoch = 0;
 	u32 provider_id = 0, provider_status = 0;
 	int error;
@@ -74,25 +76,62 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 		return result;
 	}
 	before = iov_iter_count(iter);
-	frame = (struct ebpfos_fops_route_frame) {
-		.version = EBPFOS_FOPS_ROUTE_FRAME_VERSION,
-		.method = method,
-		.handle = route->handle,
-		.requested = before,
-	};
+	frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	frame.method_id = method;
+	frame.object_id = route->handle;
+	frame.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE;
+	memcpy(frame.input, &before, sizeof(before));
+	frame.input_size = sizeof(before);
+	if (method == 2 && before) {
+		count = min_t(size_t, before,
+			      EBPFOS_COMPONENT_CALL_INPUT_SIZE - sizeof(before));
+		copied = copy_from_iter(frame.input + sizeof(before), count,
+					iter);
+		if (!copied) {
+			error = -EFAULT;
+			goto out;
+		}
+		frame.input_size += copied;
+	}
 	error = ebpfos_fops_route_call(route->handle, route->role, &frame,
 				      &epoch, &provider_id, &provider_status);
-	after = iov_iter_count(iter);
-	/* A provider cannot claim bytes it did not copy through the terminal
-	 * effect. This also rejects a status-only placeholder. */
-	if (!error && (provider_status || frame.result > (s64)before ||
-		(frame.result >= 0 && (s64)(before - after) != frame.result) ||
-		(frame.result < 0 && before != after)))
+	if (error || provider_status || frame.output_size >
+	    EBPFOS_COMPONENT_CALL_OUTPUT_SIZE ||
+	    (method == 1 && frame.output_size > before)) {
+		error = error ?: -EPROTO;
+		goto revert;
+	}
+	if (frame.status) {
+		error = frame.status < 0 ? frame.status : -EPROTO;
+		goto revert;
+	}
+	if (method == 1) {
+		count = copy_to_iter(frame.output, frame.output_size, iter);
+		if (count != frame.output_size) {
+			error = -EFAULT;
+			goto out;
+		}
+		consumed = count;
+	} else if (method == 2 && frame.output_size == sizeof(consumed)) {
+		memcpy(&consumed, frame.output, sizeof(consumed));
+		if (consumed > copied) {
+			error = -EPROTO;
+			goto revert;
+		}
+		iov_iter_revert(iter, copied - consumed);
+	} else {
 		error = -EPROTO;
+		goto revert;
+	}
+	goto out;
+revert:
+	if (copied)
+		iov_iter_revert(iter, copied);
+out:
 	ebpfos_component_gate_exit(&route->gate);
 	if (atomic_dec_and_test(&route->active))
 		wake_up_all(&route->drained);
-	return error ? error : frame.result;
+	return error ? error : consumed;
 }
 
 #define EBPFOS_DEFINE_ITER(name, method_id) \
@@ -179,8 +218,8 @@ int ebpfos_fops_route_detach(struct file *file)
 		return -ENOENT;
 	}
 	route = file->f_ebpfos_route;
-	/* Caller has closed the generic gate, so no new VFS entry can cache
-	 * the routed table. Existing routed calls finish before restoration. */
+	/* Caller excludes new VFS acquisition. Existing routed calls finish
+	 * before restoration. */
 	wait_event(route->drained, !atomic_read(&route->active));
 	WRITE_ONCE(file->f_op, route->original);
 	WRITE_ONCE(file->f_ebpfos_route, NULL);
