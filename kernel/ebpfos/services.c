@@ -10,6 +10,7 @@
 #include <linux/fs.h>
 #include <linux/highmem.h>
 #include <linux/limits.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/net_tstamp.h>
@@ -64,6 +65,17 @@ struct ebpfos_effect_task {
 	struct ebpfos_effect_scope *top;
 };
 
+struct ebpfos_effect_mutex {
+	refcount_t pins;
+	struct mutex lock;
+};
+
+struct ebpfos_effect_held_mutex {
+	struct list_head link;
+	struct ebpfos_effect_mutex *mutex;
+	u64 key;
+};
+
 struct ebpfos_effect_scope {
 	u64 handle;
 	struct ebpfos_effect_object *object;
@@ -87,6 +99,7 @@ struct ebpfos_effect_scope {
 	size_t copied_from_iter;
 	bool locked;
 	bool nowait;
+	struct list_head held_mutexes;
 };
 
 /* tty_ioctl is retained in the generic route's copied file_operations. */
@@ -95,6 +108,52 @@ extern long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static DEFINE_XARRAY(ebpfos_effect_objects);
 static DEFINE_MUTEX(ebpfos_effect_objects_lock);
 static DEFINE_XARRAY(ebpfos_effect_tasks);
+static DEFINE_XARRAY(ebpfos_effect_mutexes);
+static DEFINE_MUTEX(ebpfos_effect_mutexes_lock);
+static atomic64_t ebpfos_effect_next_mutex_key = ATOMIC64_INIT(0);
+
+static struct ebpfos_effect_mutex *ebpfos_effect_mutex_get(u64 key)
+{
+	struct ebpfos_effect_mutex *mutex;
+	int error;
+
+	if (!key)
+		return ERR_PTR(-EINVAL);
+	mutex_lock(&ebpfos_effect_mutexes_lock);
+	mutex = xa_load(&ebpfos_effect_mutexes, key);
+	if (mutex) {
+		refcount_inc(&mutex->pins);
+		goto out;
+	}
+	mutex = kzalloc_obj(*mutex);
+	if (!mutex) {
+		mutex = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+	refcount_set(&mutex->pins, 1);
+	mutex_init(&mutex->lock);
+	error = xa_insert(&ebpfos_effect_mutexes, key, mutex, GFP_KERNEL);
+	if (error) {
+		kfree(mutex);
+		mutex = ERR_PTR(error);
+	}
+out:
+	mutex_unlock(&ebpfos_effect_mutexes_lock);
+	return mutex;
+}
+
+static void ebpfos_effect_mutex_put(u64 key, struct ebpfos_effect_mutex *mutex)
+{
+	bool last;
+
+	mutex_lock(&ebpfos_effect_mutexes_lock);
+	last = refcount_dec_and_test(&mutex->pins);
+	if (last)
+		xa_erase(&ebpfos_effect_mutexes, key);
+	mutex_unlock(&ebpfos_effect_mutexes_lock);
+	if (last)
+		kfree(mutex);
+}
 
 static void ebpfos_effect_object_destroy(struct ebpfos_effect_object *object)
 {
@@ -287,6 +346,7 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter(u64 handle,
 		}
 	}
 	scope->handle = handle;
+	INIT_LIST_HEAD(&scope->held_mutexes);
 	scope->task = task;
 	scope->previous = task->top;
 	scope->file = file;
@@ -324,6 +384,7 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
 
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 {
+	struct ebpfos_effect_held_mutex *held, *next;
 	struct ebpfos_effect_task *task;
 	int error = 0;
 
@@ -334,6 +395,13 @@ int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 		return -EINVAL;
 	if (scope->locked) {
 		mutex_unlock(&scope->object->lock);
+		error = -EPROTO;
+	}
+	list_for_each_entry_safe(held, next, &scope->held_mutexes, link) {
+		list_del(&held->link);
+		mutex_unlock(&held->mutex->lock);
+		ebpfos_effect_mutex_put(held->key, held->mutex);
+		kfree(held);
 		error = -EPROTO;
 	}
 	if (scope->bio) {
@@ -459,6 +527,64 @@ __bpf_kfunc int bpf_ebpfos_effect_unlock(u64 handle)
 	scope->locked = false;
 	mutex_unlock(&scope->object->lock);
 	return 0;
+}
+
+/* An explicit lock key survives across calls; the scope owns its held pin. */
+__bpf_kfunc u64 bpf_ebpfos_effect_mutex_new(u64 handle)
+{
+	u64 key;
+
+	if (!ebpfos_effect_current(handle))
+		return 0;
+	key = atomic64_inc_return(&ebpfos_effect_next_mutex_key);
+	return key & BIT_ULL(63) ? 0 : key;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_mutex_lock(u64 handle, u64 key)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_effect_held_mutex *held;
+	struct ebpfos_effect_mutex *mutex;
+	struct ebpfos_effect_scope *outer;
+
+	if (!scope || !key)
+		return -EINVAL;
+	for (outer = scope; outer; outer = outer->previous)
+		list_for_each_entry(held, &outer->held_mutexes, link)
+			if (held->key == key)
+				return -EDEADLK;
+	held = kzalloc_obj(*held);
+	if (!held)
+		return -ENOMEM;
+	mutex = ebpfos_effect_mutex_get(key);
+	if (IS_ERR(mutex)) {
+		kfree(held);
+		return PTR_ERR(mutex);
+	}
+	mutex_lock(&mutex->lock);
+	held->key = key;
+	held->mutex = mutex;
+	list_add(&held->link, &scope->held_mutexes);
+	return 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_mutex_unlock(u64 handle, u64 key)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_effect_held_mutex *held;
+
+	if (!scope)
+		return -EPERM;
+	list_for_each_entry(held, &scope->held_mutexes, link) {
+		if (held->key != key)
+			continue;
+		list_del(&held->link);
+		mutex_unlock(&held->mutex->lock);
+		ebpfos_effect_mutex_put(key, held->mutex);
+		kfree(held);
+		return 0;
+	}
+	return -EPERM;
 }
 
 /* The IRQ lock never spans BPF instructions or sleepable helper calls. */
@@ -1209,6 +1335,9 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(ebpfos_l1_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_lock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_unlock, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_mutex_new, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_mutex_lock, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_mutex_unlock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_irq_cmpxchg, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_locked_u64_irqsave, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_sequence, KF_SLEEPABLE)
@@ -1320,6 +1449,13 @@ static void ebpfos_effect_scope_test(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, IS_ERR(nested));
 	KUNIT_EXPECT_EQ(test, PTR_ERR(nested), (long)-EDEADLK);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_unlock(0xeffec7), 0);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_unlock(0xeffec7, 1), -EPERM);
+	KUNIT_EXPECT_NE(test, bpf_ebpfos_effect_mutex_new(0xeffec7), 0ULL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_lock(0xeffec7, 1), 0);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_lock(0xeffec7, 1), -EDEADLK);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_lock(0xeffec7, 2), 0);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_unlock(0xeffec7, 2), 0);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_mutex_unlock(0xeffec7, 1), 0);
 	sequence = bpf_ebpfos_effect_sequence(0xeffec7, 0);
 	KUNIT_EXPECT_EQ(test, sequence, 0LL);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_wake(0xeffec7, 0, EPOLLIN), 0);
