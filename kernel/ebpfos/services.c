@@ -20,6 +20,7 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/uio.h>
@@ -31,6 +32,7 @@
 #endif
 
 #define EBPFOS_EFFECT_WAIT_SLOTS 8
+#define EBPFOS_EFFECT_IRQ_SLOTS 8
 #define EBPFOS_EFFECT_COPY_MAX 256
 
 struct ebpfos_effect_wait {
@@ -42,6 +44,7 @@ struct ebpfos_effect_object {
 	refcount_t pins;
 	atomic_t logical_refs;
 	struct mutex lock;
+	raw_spinlock_t irq_locks[EBPFOS_EFFECT_IRQ_SLOTS];
 	struct mutex block_pages_lock;
 	struct xarray block_pages;
 	struct fasync_struct *fasync;
@@ -115,6 +118,8 @@ static struct ebpfos_effect_object *ebpfos_effect_object_get(u64 handle)
 	refcount_set(&object->pins, 1);
 	atomic_set(&object->logical_refs, 1);
 	mutex_init(&object->lock);
+	for (i = 0; i < EBPFOS_EFFECT_IRQ_SLOTS; i++)
+		raw_spin_lock_init(&object->irq_locks[i]);
 	mutex_init(&object->block_pages_lock);
 	xa_init(&object->block_pages);
 	for (i = 0; i < EBPFOS_EFFECT_WAIT_SLOTS; i++) {
@@ -360,6 +365,24 @@ __bpf_kfunc int bpf_ebpfos_effect_unlock(u64 handle)
 	return 0;
 }
 
+/* The IRQ lock never spans BPF instructions or sleepable helper calls. */
+__bpf_kfunc u64 bpf_ebpfos_effect_irq_cmpxchg(u64 handle, u32 kind,
+					       u64 *value, u64 expected, u64 desired)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	unsigned long flags;
+	u64 observed;
+
+	if (!scope || kind >= EBPFOS_EFFECT_IRQ_SLOTS || !value)
+		return U64_MAX;
+	raw_spin_lock_irqsave(&scope->object->irq_locks[kind], flags);
+	observed = READ_ONCE(*value);
+	if (observed == expected)
+		WRITE_ONCE(*value, desired);
+	raw_spin_unlock_irqrestore(&scope->object->irq_locks[kind], flags);
+	return observed;
+}
+
 __bpf_kfunc s64 bpf_ebpfos_effect_sequence(u64 handle, u32 slot)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -563,6 +586,7 @@ static long ebpfos_effect_block_copy(u64 handle, u64 offset, void *buffer,
 	struct ebpfos_effect_object *object;
 	struct page *page;
 	void *mapped;
+	u64 bio_base;
 	u64 index = offset >> PAGE_SHIFT;
 	u32 within = offset & (PAGE_SIZE - 1);
 	int error = 0;
@@ -570,6 +594,10 @@ static long ebpfos_effect_block_copy(u64 handle, u64 offset, void *buffer,
 	if (!scope || !scope->bio || !buffer || !bytes ||
 	    bytes > EBPFOS_EFFECT_COPY_MAX || bytes > PAGE_SIZE - within ||
 	    index > ULONG_MAX)
+		return -EINVAL;
+	bio_base = (u64)scope->bio->bi_iter.bi_sector << SECTOR_SHIFT;
+	if (offset < bio_base || offset - bio_base > scope->bio->bi_iter.bi_size ||
+	    bytes > scope->bio->bi_iter.bi_size - (offset - bio_base))
 		return -EINVAL;
 	object = scope->object;
 	mutex_lock(&object->block_pages_lock);
@@ -777,6 +805,7 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(ebpfos_l1_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_lock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_unlock, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_irq_cmpxchg, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_sequence, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait_locked, KF_SLEEPABLE)
@@ -839,6 +868,7 @@ static void ebpfos_effect_scope_test(struct kunit *test)
 {
 	struct ebpfos_effect_scope *scope, *nested;
 	s64 sequence;
+	u64 irq_counter = 3;
 
 	KUNIT_EXPECT_TRUE(test, ebpfos_effect_kfunc_allowed(
 			ebpfos_l1_services.pairs[0].id));
@@ -847,6 +877,16 @@ static void ebpfos_effect_scope_test(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffec9), 0);
 	scope = ebpfos_effect_scope_enter(0xeffec7, NULL, NULL, NULL);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(scope));
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_irq_cmpxchg(
+		0xeffec9, 0, &irq_counter, 3, 4), U64_MAX);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_irq_cmpxchg(
+		0xeffec7, EBPFOS_EFFECT_IRQ_SLOTS, &irq_counter, 3, 4),
+		U64_MAX);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_irq_cmpxchg(
+		0xeffec7, 0, &irq_counter, 3, 4), 3ULL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_irq_cmpxchg(
+		0xeffec7, 0, &irq_counter, 3, 5), 4ULL);
+	KUNIT_EXPECT_EQ(test, irq_counter, 4ULL);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_lock(0xeffec9), -EPERM);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_lock(0xeffec7), 0);
 	nested = ebpfos_effect_scope_enter(0xeffec7, NULL, NULL, NULL);
@@ -941,6 +981,8 @@ static void ebpfos_effect_bio_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, buffer[255], 'Z');
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_read(0xeffecb, 4096 - 128,
 							 buffer, sizeof(buffer)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_read(0xeffecb, 4608,
+							 buffer, 8), -EINVAL);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_peek(0xeffecb,
 					&segment, sizeof(segment)), 1);
 	KUNIT_EXPECT_EQ(test, segment.byte_offset, 4352ULL);
