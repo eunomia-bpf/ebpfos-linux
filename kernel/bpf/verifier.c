@@ -3240,16 +3240,6 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 			       sizeof(semantic_sha256));
 		}
 
-		/* Legacy/unsealed KOperations are verifier/JIT operations, not
-		 * admitted components, and predate component authority metadata.
-		 * A sealed component, however, must bind every exact payload to a
-		 * non-bottom capability/effect/semantic identity before native emit
-		 * can become reachable through the component root.
-		 */
-		if (prog->aux->ebpfos_component &&
-		    (!capability_mask || !effect_mask ||
-		     !memchr_inv(semantic_sha256, 0, sizeof(semantic_sha256))))
-			return -EPROTO;
 		capabilities |= capability_mask;
 		effects |= effect_mask;
 		capability = cpu_to_le64(capability_mask);
@@ -18677,40 +18667,6 @@ static bool bpf_map_is_cgroup_storage(struct bpf_map *map)
 		map->map_type == BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE);
 }
 
-static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
-{
-	struct bpf_prog_aux *aux = env->prog->aux;
-
-	if (!aux->ebpfos_component)
-		return 0;
-	{
-		u8 semantic_set[SHA256_DIGEST_SIZE];
-		u64 capabilities, effects;
-		int error;
-
-		error = bpf_prog_kop_requirements(env->prog, &capabilities,
-						  &effects, semantic_set);
-		if (error) {
-			verbose(env,
-				"eBPFOS component has an unbound KOperation descriptor\n");
-			return error;
-		}
-		if (!aux->ebpfos_kop_requirements_valid) {
-			aux->ebpfos_kop_count = env->kop_call_cnt;
-			aux->ebpfos_kop_capability_mask = capabilities;
-			aux->ebpfos_kop_effect_mask = effects;
-			memcpy(aux->ebpfos_kop_semantic_set_sha256, semantic_set,
-			       sizeof(aux->ebpfos_kop_semantic_set_sha256));
-			aux->ebpfos_kop_requirements_valid = true;
-		}
-		if (env->used_map_cnt > 1 || env->used_btf_cnt) {
-			verbose(env,
-				"eBPFOS component-call descriptor supports at most one state map\n");
-			return -EINVAL;
-		}
-		return 0;
-	}
-}
 static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 					struct bpf_map *map,
 					struct bpf_prog *prog)
@@ -20692,10 +20648,6 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 		goto skip_full_check;
 
 	ret = check_and_resolve_insns(env);
-	if (ret < 0)
-		goto skip_full_check;
-
-	ret = check_ebpfos_component_resources(env);
 	if (ret < 0)
 		goto skip_full_check;
 

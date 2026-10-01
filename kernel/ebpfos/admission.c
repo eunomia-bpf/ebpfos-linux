@@ -290,9 +290,7 @@ static int ebpfos_validate_component_call_descriptor(
 		EBPFOS_COMPONENT_CALL_ABI_VERSION ||
 	    le32_to_cpu(descriptor->context_size) !=
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
-	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL ||
-	    le32_to_cpu(descriptor->semantic_prog_flags) !=
-		EBPFOS_COMPONENT_CALL_PROG_FLAGS)
+	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL)
 		return -EPROTO;
 	if (resource_count > 1)
 		return -ERANGE;
@@ -927,30 +925,8 @@ static int ebpfos_grant_id_alloc(u64 *grant_id)
 	return error;
 }
 
-static int ebpfos_descriptor_policy_snapshot(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	struct ebpfos_policy_record_v1 *policy,
-	u8 policy_digest[SHA256_DIGEST_SIZE])
-{
-	int error;
-
-	mutex_lock(&ebpfos_publish_gate);
-	if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE) {
-		error = -EACCES;
-	} else {
-		*policy = ebpfos_policy.record;
-		memcpy(policy_digest, ebpfos_policy.digest,
-		       SHA256_DIGEST_SIZE);
-		error = ebpfos_validate_descriptor(descriptor);
-	}
-	mutex_unlock(&ebpfos_publish_gate);
-	return error;
-}
-
 long ebpfos_admission_seal_ioctl(void __user *argp)
 {
-	struct ebpfos_policy_record_v1 policy;
-	u8 policy_digest[SHA256_DIGEST_SIZE];
 	struct ebpfos_ioc_admission_seal request;
 	struct ebpfos_prog_identity *identity = NULL;
 	struct ebpfos_admission *admission = NULL;
@@ -971,8 +947,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		return -EFAULT;
 	if (request.flags || request.reserved0 || request.reserved1)
 		return -EINVAL;
-	error = ebpfos_descriptor_policy_snapshot(&request.descriptor, &policy,
-						  policy_digest);
+	error = ebpfos_validate_descriptor(&request.descriptor);
 	if (error)
 		return error;
 	prog = bpf_prog_get_type_dev(request.prog_fd, BPF_PROG_TYPE_SYSCALL,
@@ -1047,13 +1022,6 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	       sizeof(request.map_digest));
 
 	mutex_lock(&ebpfos_publish_gate);
-	if (!ebpfos_policy_matches_locked(
-			admission->binding->policy_generation,
-			admission->binding->realm_id,
-			admission->binding->policy_digest)) {
-		error = -ESTALE;
-		goto out_unlock_gate;
-	}
 	mutex_lock(&ebpfos_seal_lock);
 	prog = admission->binding->prog;
 	map = admission->binding->map;
@@ -1094,7 +1062,6 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 
 out_unlock_seal:
 	mutex_unlock(&ebpfos_seal_lock);
-out_unlock_gate:
 	mutex_unlock(&ebpfos_publish_gate);
 out_release_file:
 	prog = NULL;
@@ -1129,11 +1096,6 @@ static u32 ebpfos_admission_effective_state_locked(
 	spin_lock(&admission->state_lock);
 	state = admission->state;
 	spin_unlock(&admission->state_lock);
-	if (state == EBPFOS_ADMISSION_FRESH &&
-	    !ebpfos_policy_matches_locked(admission->binding->policy_generation,
-					  admission->binding->realm_id,
-					  admission->binding->policy_digest))
-		return EBPFOS_ADMISSION_STALE;
 	return state;
 }
 
@@ -1249,14 +1211,6 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 	return copy_to_user(argp, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
-static bool ebpfos_admission_current_locked(
-	const struct ebpfos_admission *admission)
-{
-	return ebpfos_policy_matches_locked(admission->binding->policy_generation,
-					    admission->binding->realm_id,
-					    admission->binding->policy_digest);
-}
-
 static int ebpfos_admission_owner_recheck(struct ebpfos_admission *admission)
 {
 	struct ebpfos_binding *binding = admission->binding;
@@ -1305,8 +1259,6 @@ int ebpfos_admission_stage_bundle_locked(
 			     grant->binding->map_id ==
 				grants[prior]->binding->map_id))
 				return -EUCLEAN;
-		if (!ebpfos_admission_current_locked(grant))
-			return -ESTALE;
 		spin_lock(&grant->state_lock);
 		state = grant->state;
 		spin_unlock(&grant->state_lock);
@@ -1381,8 +1333,6 @@ int ebpfos_admission_publish_validate_locked(
 	if (state != expected_state)
 		return state == EBPFOS_ADMISSION_CONSUMED ||
 		       state == EBPFOS_ADMISSION_BURNED ? -EALREADY : -ESTALE;
-	if (!ebpfos_admission_current_locked(admission))
-		return -ESTALE;
 	return ebpfos_admission_owner_recheck(admission);
 }
 
