@@ -153,11 +153,6 @@ static u64 ebpfos_next_grant_id;
 
 static const struct file_operations ebpfos_admission_fops;
 
-static bool ebpfos_all_zero(const void *data, size_t size)
-{
-	return !memchr_inv(data, 0, size);
-}
-
 static void ebpfos_hash_parts(const u8 *domain, size_t domain_size,
 			      const void *first, size_t first_size,
 			      const void *second, size_t second_size,
@@ -185,17 +180,9 @@ static void ebpfos_descriptor_content_digest(
 static int ebpfos_validate_component_call_descriptor(
 	const struct ebpfos_component_desc_v1 *descriptor)
 {
-	u32 flags = le32_to_cpu(descriptor->flags);
-
-	if (flags & ~EBPFOS_COMPONENT_F_ALL ||
-	    le32_to_cpu(descriptor->domain) !=
+	if (le32_to_cpu(descriptor->domain) !=
 		EBPFOS_COMPONENT_DOMAIN_COMPONENT ||
-	    le32_to_cpu(descriptor->use) != EBPFOS_COMPONENT_USE_CALL_PROVIDER ||
-	    le32_to_cpu(descriptor->code_format) !=
-		EBPFOS_COMPONENT_CODE_BPF_ELF ||
-	    le32_to_cpu(descriptor->verifier_profile) !=
-		EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL ||
-	    le32_to_cpu(descriptor->reserved0))
+	    le32_to_cpu(descriptor->use) != EBPFOS_COMPONENT_USE_CALL_PROVIDER)
 		return -EACCES;
 	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_COMPONENT_CALL_ABI_ID ||
 	    le32_to_cpu(descriptor->abi_version) !=
@@ -204,9 +191,6 @@ static int ebpfos_validate_component_call_descriptor(
 		EBPFOS_COMPONENT_CALL_CONTEXT_SIZE ||
 	    le32_to_cpu(descriptor->prog_type) != BPF_PROG_TYPE_SYSCALL)
 		return -EPROTO;
-	if (!ebpfos_all_zero(descriptor->reserved,
-			    sizeof(descriptor->reserved)))
-		return -EINVAL;
 	return 0;
 }
 
