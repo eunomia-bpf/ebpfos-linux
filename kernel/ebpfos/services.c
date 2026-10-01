@@ -42,6 +42,8 @@ struct ebpfos_effect_object {
 	refcount_t pins;
 	atomic_t logical_refs;
 	struct mutex lock;
+	struct mutex block_pages_lock;
+	struct xarray block_pages;
 	struct fasync_struct *fasync;
 	struct ebpfos_effect_wait wait[EBPFOS_EFFECT_WAIT_SLOTS];
 };
@@ -79,8 +81,13 @@ static DEFINE_XARRAY(ebpfos_effect_tasks);
 
 static void ebpfos_effect_object_destroy(struct ebpfos_effect_object *object)
 {
+	struct page *page;
+	unsigned long index;
 	int i;
 
+	xa_for_each(&object->block_pages, index, page)
+		__free_page(page);
+	xa_destroy(&object->block_pages);
 	for (i = 0; i < EBPFOS_EFFECT_WAIT_SLOTS; i++)
 		wake_up_pollfree(&object->wait[i].queue);
 	synchronize_rcu();
@@ -108,6 +115,8 @@ static struct ebpfos_effect_object *ebpfos_effect_object_get(u64 handle)
 	refcount_set(&object->pins, 1);
 	atomic_set(&object->logical_refs, 1);
 	mutex_init(&object->lock);
+	mutex_init(&object->block_pages_lock);
+	xa_init(&object->block_pages);
 	for (i = 0; i < EBPFOS_EFFECT_WAIT_SLOTS; i++) {
 		init_waitqueue_head(&object->wait[i].queue);
 		atomic64_set(&object->wait[i].sequence, 0);
@@ -547,12 +556,77 @@ __bpf_kfunc long bpf_ebpfos_effect_bio_write(u64 handle,
 	return ebpfos_effect_bio_copy(handle, (void *)src, src__sz, true);
 }
 
+static long ebpfos_effect_block_copy(u64 handle, u64 offset, void *buffer,
+				     u32 bytes, bool write)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_effect_object *object;
+	struct page *page;
+	void *mapped;
+	u64 index = offset >> PAGE_SHIFT;
+	u32 within = offset & (PAGE_SIZE - 1);
+	int error = 0;
+
+	if (!scope || !scope->bio || !buffer || !bytes ||
+	    bytes > EBPFOS_EFFECT_COPY_MAX || bytes > PAGE_SIZE - within ||
+	    index > ULONG_MAX)
+		return -EINVAL;
+	object = scope->object;
+	mutex_lock(&object->block_pages_lock);
+	page = xa_load(&object->block_pages, index);
+	if (!page && write) {
+		page = alloc_page(GFP_NOIO | __GFP_ZERO | __GFP_HIGHMEM);
+		if (!page) {
+			error = -ENOMEM;
+			goto out;
+		}
+		error = xa_insert(&object->block_pages, index, page, GFP_NOIO);
+		if (error) {
+			__free_page(page);
+			goto out;
+		}
+	}
+	if (!page) {
+		memset(buffer, 0, bytes);
+		goto out;
+	}
+	mapped = kmap_local_page(page);
+	if (write)
+		memcpy(mapped + within, buffer, bytes);
+	else
+		memcpy(buffer, mapped + within, bytes);
+	kunmap_local(mapped);
+out:
+	mutex_unlock(&object->block_pages_lock);
+	return error ?: bytes;
+}
+
+__bpf_kfunc long bpf_ebpfos_effect_block_read(u64 handle, u64 offset,
+					       void *dst, u32 dst__sz)
+{
+	return ebpfos_effect_block_copy(handle, offset, dst, dst__sz, false);
+}
+
+__bpf_kfunc long bpf_ebpfos_effect_block_write(u64 handle, u64 offset,
+						const void *src, u32 src__sz)
+{
+	return ebpfos_effect_block_copy(handle, offset, (void *)src, src__sz,
+						true);
+}
+
 __bpf_kfunc u64 bpf_ebpfos_effect_current_handle(void)
 {
 	struct ebpfos_effect_task *task;
 
 	task = xa_load(&ebpfos_effect_tasks, (unsigned long)current);
 	return task && task->top ? task->top->handle : 0;
+}
+
+__bpf_kfunc u32 bpf_ebpfos_effect_file_flags(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->file ? READ_ONCE(scope->file->f_flags) : 0;
 }
 
 __bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
@@ -715,7 +789,10 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_iter, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_peek, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_write, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_read, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_write, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_file_flags, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_user, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_user, KF_SLEEPABLE)
@@ -849,10 +926,21 @@ static void ebpfos_effect_bio_test(struct kunit *test)
 					&segment, sizeof(segment)), 1);
 	KUNIT_EXPECT_EQ(test, segment.byte_offset, 4096ULL);
 	KUNIT_EXPECT_EQ(test, segment.bytes, 256U);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_read(0xeffecb, 4096,
+							 buffer, sizeof(buffer)), 256L);
+	KUNIT_EXPECT_EQ(test, buffer[0], 0);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_read(0xeffecb,
-					buffer, sizeof(buffer)), 256L);
+							  buffer, sizeof(buffer)), 256L);
 	KUNIT_EXPECT_EQ(test, buffer[0], 'Z');
 	KUNIT_EXPECT_EQ(test, buffer[255], 'Z');
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_write(0xeffecb, 4096,
+							  buffer, sizeof(buffer)), 256L);
+	memset(buffer, 0, sizeof(buffer));
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_read(0xeffecb, 4096,
+							 buffer, sizeof(buffer)), 256L);
+	KUNIT_EXPECT_EQ(test, buffer[255], 'Z');
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_block_read(0xeffecb, 4096 - 128,
+							 buffer, sizeof(buffer)), -EINVAL);
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_peek(0xeffecb,
 					&segment, sizeof(segment)), 1);
 	KUNIT_EXPECT_EQ(test, segment.byte_offset, 4352ULL);
