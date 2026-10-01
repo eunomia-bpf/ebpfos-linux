@@ -1086,6 +1086,69 @@ __bpf_kfunc int bpf_ebpfos_effect_net_peer_forward(u64 handle)
 	return 0; /* dev_forward_skb consumes the skb on success or drop. */
 }
 
+/* Plain receive uses the same two kernel operations as veth_forward_skb.
+ * The driver's NAPI/XDP owner is reached through the counted native op.
+ */
+__bpf_kfunc int bpf_ebpfos_effect_net_peer_forward_plain(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct net_device *peer;
+	struct sk_buff *skb;
+	int result;
+
+	if (!scope || !scope->netdev || !scope->skb ||
+	    !scope->netdev->netdev_ops->ndo_get_peer_dev)
+		return -EPERM;
+	rcu_read_lock();
+	peer = scope->netdev->netdev_ops->ndo_get_peer_dev(scope->netdev);
+	if (!peer || peer->wanted_features & NETIF_F_GRO ||
+	    dev_xdp_prog_count(peer)) {
+		rcu_read_unlock();
+		return -EOPNOTSUPP;
+	}
+	skb = scope->skb;
+	if (scope->net_timestamp_pending)
+		skb_tx_timestamp(skb);
+	local_bh_disable();
+	result = __dev_forward_skb(peer, skb);
+	if (!result)
+		result = __netif_rx(skb);
+	local_bh_enable();
+	scope->skb = NULL;
+	rcu_read_unlock();
+	return result;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_swstats_tx_add(u64 handle,
+						      u32 packets, u32 bytes)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->netdev)
+		return -EPERM;
+	dev_sw_netstats_tx_add(scope->netdev, packets, bytes);
+	return 0;
+}
+
+/* Atomic operation on a bounded, aligned module-private counter. The field
+ * offset comes from the compiled source layout, not from a native pointer.
+ */
+__bpf_kfunc int bpf_ebpfos_effect_net_private_atomic64_add(u64 handle,
+						   u32 offset, s64 amount)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	atomic64_t *counter;
+
+	if (!scope || !scope->netdev)
+		return -EPERM;
+	if (offset & 7 || offset > scope->netdev->priv_len ||
+	    scope->netdev->priv_len - offset < sizeof(*counter))
+		return -EINVAL;
+	counter = (atomic64_t *)((char *)netdev_priv(scope->netdev) + offset);
+	atomic64_add(amount, counter);
+	return 0;
+}
+
 /* Return the peer receive mode without exposing driver-private queue state. */
 __bpf_kfunc s64 bpf_ebpfos_effect_net_peer_rx_mode(u64 handle)
 {
@@ -1189,6 +1252,9 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_set_mac_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_carrier_set, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_forward, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_forward_plain, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_swstats_tx_add, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_private_atomic64_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_rx_mode, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_ifindex, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_native_xmit, KF_SLEEPABLE)
