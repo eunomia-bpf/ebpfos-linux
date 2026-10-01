@@ -8,6 +8,8 @@
 #define EBPFOS_FOPS_ROUTE_WRITE_METHODS(X) X(write, 3)
 #define EBPFOS_FOPS_ROUTE_POLL_METHODS(X) X(poll, 4)
 #define EBPFOS_FOPS_ROUTE_RELEASE_METHODS(X) X(release, 5)
+#define EBPFOS_FOPS_ROUTE_READ_METHODS(X) X(read, 6)
+#define EBPFOS_FOPS_ROUTE_LLSEEK_METHODS(X) X(llseek, 7)
 /* Keep the original iterator-only route source compatible. */
 #define EBPFOS_FOPS_ROUTE_METHODS(X) EBPFOS_FOPS_ROUTE_ITER_METHODS(X)
 #endif

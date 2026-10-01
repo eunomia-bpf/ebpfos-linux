@@ -31,6 +31,8 @@ enum ebpfos_fops_method {
 	EBPFOS_FOPS_ROUTE_WRITE_METHODS(EBPFOS_FOPS_METHOD_ID)
 	EBPFOS_FOPS_ROUTE_POLL_METHODS(EBPFOS_FOPS_METHOD_ID)
 	EBPFOS_FOPS_ROUTE_RELEASE_METHODS(EBPFOS_FOPS_METHOD_ID)
+	EBPFOS_FOPS_ROUTE_READ_METHODS(EBPFOS_FOPS_METHOD_ID)
+	EBPFOS_FOPS_ROUTE_LLSEEK_METHODS(EBPFOS_FOPS_METHOD_ID)
 #undef EBPFOS_FOPS_METHOD_ID
 };
 
@@ -132,6 +134,16 @@ static int ebpfos_fops_route_invoke(struct ebpfos_fops_route *route,
 	return error;
 }
 
+/* An absent binding has not entered a provider, so native retry is safe. */
+static bool ebpfos_fops_route_fallback(struct ebpfos_fops_route *route,
+				       int error)
+{
+	if (error != -ENOENT)
+		return false;
+	WRITE_ONCE(route->component, false);
+	return true;
+}
+
 static ssize_t ebpfos_fops_linux_iter(struct ebpfos_fops_route *route,
 				     struct kiocb *iocb,
 				     struct iov_iter *iter, u32 method)
@@ -188,6 +200,15 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 			frame.input_size = sizeof(before);
 			error = ebpfos_fops_route_invoke(route, file, iter, NULL,
 						  &frame);
+			if (ebpfos_fops_route_fallback(route, error)) {
+				flags = iocb->ki_flags;
+				if (waitable)
+					iocb->ki_flags |= IOCB_NOWAIT;
+				result = ebpfos_fops_linux_iter(route, iocb, iter,
+							       method);
+				iocb->ki_flags = flags;
+				goto iter_done;
+			}
 			after = iov_iter_count(iter);
 			if (!error && frame.output_size != sizeof(consumed))
 				error = -EPROTO;
@@ -200,6 +221,7 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 			}
 			result = error ? error : consumed;
 		}
+iter_done:
 		ebpfos_component_gate_exit(&route->gate);
 		if (!waitable || result != -EAGAIN)
 			break;
@@ -258,6 +280,11 @@ static ssize_t ebpfos_fops_route_write(struct file *file,
 	memcpy(frame.input + sizeof(count) + sizeof(user_addr), &position,
 	       sizeof(position));
 	error = ebpfos_fops_route_invoke(route, file, NULL, NULL, &frame);
+	if (ebpfos_fops_route_fallback(route, error)) {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->write(file, buf, count, ppos);
+		goto out;
+	}
 	if (!error && frame.status < 0)
 		error = frame.status;
 	if (!error && (frame.status > 0 ||
@@ -277,6 +304,115 @@ static ssize_t ebpfos_fops_route_write(struct file *file,
 	}
 	if (error)
 		result = error;
+out:
+	ebpfos_component_gate_exit(&route->gate);
+	if (atomic_dec_and_test(&route->active))
+		wake_up_all(&route->drained);
+	return result;
+}
+
+static ssize_t ebpfos_fops_route_read(struct file *file, char __user *buf,
+				      size_t count, loff_t *ppos)
+{
+	struct ebpfos_fops_route *route = READ_ONCE(file->f_ebpfos_route);
+	struct ebpfos_component_call_frame frame = {};
+	u64 user_addr = (unsigned long)buf;
+	u64 consumed, position = ppos ? *ppos : 0;
+	ssize_t result;
+	int error;
+
+	if (!route)
+		return -ESTALE;
+	atomic_inc(&route->active);
+	ebpfos_component_gate_enter(&route->gate);
+	if (!READ_ONCE(route->component)) {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->read(file, buf, count, ppos);
+		goto out;
+	}
+	frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	frame.method_id = EBPFOS_FOPS_METHOD_read;
+	frame.object_id = route->handle;
+	frame.flags = file->f_flags & O_NONBLOCK ? 1 : 0;
+	frame.input_size = sizeof(count) + sizeof(user_addr) + sizeof(position);
+	frame.output_capacity = sizeof(consumed) + sizeof(position);
+	memcpy(frame.input, &count, sizeof(count));
+	memcpy(frame.input + sizeof(count), &user_addr, sizeof(user_addr));
+	memcpy(frame.input + sizeof(count) + sizeof(user_addr), &position,
+	       sizeof(position));
+	error = ebpfos_fops_route_invoke(route, file, NULL, NULL, &frame);
+	if (ebpfos_fops_route_fallback(route, error)) {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->read(file, buf, count, ppos);
+		goto out;
+	}
+	if (!error && frame.status < 0)
+		error = frame.status;
+	if (!error && (frame.status > 0 ||
+	    frame.output_size != sizeof(consumed) + sizeof(position)))
+		error = -EPROTO;
+	if (!error) {
+		memcpy(&consumed, frame.output, sizeof(consumed));
+		memcpy(&position, frame.output + sizeof(consumed),
+		       sizeof(position));
+		if (consumed > count || consumed > SSIZE_MAX)
+			error = -EPROTO;
+		else {
+			if (ppos)
+				*ppos = position;
+			result = consumed;
+		}
+	}
+	if (error)
+		result = error;
+out:
+	ebpfos_component_gate_exit(&route->gate);
+	if (atomic_dec_and_test(&route->active))
+		wake_up_all(&route->drained);
+	return result;
+}
+
+static loff_t ebpfos_fops_route_llseek(struct file *file, loff_t offset,
+				       int whence)
+{
+	struct ebpfos_fops_route *route = READ_ONCE(file->f_ebpfos_route);
+	struct ebpfos_component_call_frame frame = {};
+	loff_t result;
+	int error;
+
+	if (!route)
+		return -ESTALE;
+	atomic_inc(&route->active);
+	ebpfos_component_gate_enter(&route->gate);
+	if (!READ_ONCE(route->component)) {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->llseek(file, offset, whence);
+		goto out;
+	}
+	frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	frame.method_id = EBPFOS_FOPS_METHOD_llseek;
+	frame.object_id = route->handle;
+	frame.input_size = sizeof(offset) + sizeof(whence);
+	frame.output_capacity = sizeof(result);
+	memcpy(frame.input, &offset, sizeof(offset));
+	memcpy(frame.input + sizeof(offset), &whence, sizeof(whence));
+	error = ebpfos_fops_route_invoke(route, file, NULL, NULL, &frame);
+	if (ebpfos_fops_route_fallback(route, error)) {
+		atomic64_inc(&route->linux_entries);
+		result = route->original->llseek(file, offset, whence);
+		goto out;
+	}
+	if (!error && frame.status < 0)
+		error = frame.status;
+	if (!error && (frame.status > 0 ||
+	    frame.output_size != sizeof(result)))
+		error = -EPROTO;
+	if (!error) {
+		memcpy(&result, frame.output, sizeof(result));
+		file->f_pos = result;
+	} else {
+		result = error;
+	}
 out:
 	ebpfos_component_gate_exit(&route->gate);
 	if (atomic_dec_and_test(&route->active))
@@ -376,7 +512,9 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 	if (!route->original || (!route->original->read_iter &&
 				 !route->original->write_iter &&
 				 !(extended && (route->original->write ||
-						 route->original->poll)))) {
+						 route->original->poll ||
+						 route->original->read ||
+						 route->original->llseek)))) {
 		error = -EOPNOTSUPP;
 		goto out;
 	}
@@ -410,6 +548,10 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 #undef EBPFOS_INSTALL_ITER
 	if (extended && route->original->write)
 		route->routed.write = ebpfos_fops_route_write;
+	if (extended && route->original->read)
+		route->routed.read = ebpfos_fops_route_read;
+	if (extended && route->original->llseek)
+		route->routed.llseek = ebpfos_fops_route_llseek;
 	if (extended && route->original->poll)
 		route->routed.poll = ebpfos_fops_route_poll;
 	route->routed.release = ebpfos_fops_route_release;
