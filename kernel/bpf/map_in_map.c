@@ -109,8 +109,7 @@ void *bpf_map_fd_get_ptr(struct bpf_map *map,
 	inner_map_meta = map->inner_map_meta;
 	if (!inner_map_meta->ops->map_meta_equal(inner_map_meta, inner_map))
 		return ERR_PTR(-EINVAL);
-	if (bpf_ebpfos_map_candidate(inner_map) &&
-	    !bpf_ebpfos_map_external_get(inner_map))
+	if (!bpf_ebpfos_map_external_get(inner_map))
 		return ERR_PTR(-EBUSY);
 	bpf_map_inc(inner_map);
 
@@ -183,17 +182,10 @@ void bpf_map_fd_put_ptr(struct bpf_map *map, void *ptr, bool need_defer)
 	struct bpf_map *inner_map = ptr;
 
 	if (need_defer) {
-		if (bpf_ebpfos_map_candidate(inner_map)) {
-			bpf_ebpfos_map_external_put_deferred(inner_map);
-			return;
-		}
-		if (atomic64_read(&map->sleepable_refcnt))
-			WRITE_ONCE(inner_map->free_after_mult_rcu_gp, true);
-		else
-			WRITE_ONCE(inner_map->free_after_rcu_gp, true);
+		bpf_ebpfos_map_external_put_deferred(inner_map);
+		return;
 	}
-	if (bpf_ebpfos_map_candidate(inner_map))
-		bpf_ebpfos_map_external_put(inner_map);
+	bpf_ebpfos_map_external_put(inner_map);
 	bpf_map_put(inner_map);
 }
 

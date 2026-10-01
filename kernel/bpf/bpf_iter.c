@@ -614,7 +614,7 @@ static int prepare_seq_file(struct file *file, struct bpf_iter_link *link)
 		goto release_prog;
 	}
 	/* An iterator fd can outlive its link and continue writing map values. */
-	if (link->aux.map && bpf_ebpfos_map_candidate(link->aux.map)) {
+	if (link->aux.map) {
 		if (!bpf_ebpfos_map_external_get(link->aux.map)) {
 			err = -EBUSY;
 			goto release_seq_file;
