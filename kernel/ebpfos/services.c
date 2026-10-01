@@ -744,6 +744,11 @@ __bpf_kfunc u32 bpf_ebpfos_effect_file_flags(u64 handle)
 	return scope && scope->file ? READ_ONCE(scope->file->f_flags) : 0;
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_mb(void)
+{
+	smp_mb();
+}
+
 __bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
 					       u32 size)
 {
@@ -948,6 +953,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_write, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_file_flags, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_mb, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_user, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_user, KF_SLEEPABLE)
