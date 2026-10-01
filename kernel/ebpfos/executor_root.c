@@ -236,11 +236,8 @@ static int ebpfos_executor_root_prepare(
 static int ebpfos_executor_root_source_validate(
 	const struct ebpfos_executor_root_publish_request *request,
 	const struct ebpfos_executor_root_bundle *source,
-	const struct ebpfos_executor_root_bundle *target,
-	struct ebpfos_binding **predecessors)
+	const struct ebpfos_executor_root_bundle *target)
 {
-	u32 role;
-
 	if (target->object_id != request->object_id ||
 	    target->epoch != request->target_epoch ||
 	    target->role_count != request->role_count)
@@ -250,17 +247,6 @@ static int ebpfos_executor_root_source_validate(
 	if (source->object_id != request->object_id ||
 	    source->epoch != request->expected_epoch)
 		return -ESTALE;
-	for (role = 0; role < target->role_count; role++) {
-		u32 previous;
-
-		for (previous = 0; previous < source->role_count; previous++)
-			if (source->roles[previous].snapshot.role_type ==
-			    target->roles[role].snapshot.role_type) {
-				predecessors[role] =
-					source->roles[previous].binding;
-				break;
-			}
-	}
 	return 0;
 }
 
@@ -379,7 +365,6 @@ static int ebpfos_executor_root_publish_common(
 	struct ebpfos_executor_root_bundle *source;
 	struct ebpfos_executor_root_bundle *target = NULL;
 	struct ebpfos_executor_root_slot *slot;
-	struct ebpfos_binding **predecessors = NULL;
 	struct ebpfos_admission **grants = NULL;
 	size_t expected_size;
 	bool staged = false;
@@ -394,9 +379,7 @@ static int ebpfos_executor_root_publish_common(
 	if (error)
 		return error;
 	grants = kcalloc(target->role_count, sizeof(*grants), GFP_KERNEL);
-	predecessors = kcalloc(target->role_count, sizeof(*predecessors),
-			       GFP_KERNEL);
-	if (!grants || !predecessors) {
+	if (!grants) {
 		error = -ENOMEM;
 		goto out;
 	}
@@ -413,12 +396,10 @@ static int ebpfos_executor_root_publish_common(
 	source = rcu_dereference_protected(slot->active,
 					    lockdep_is_held(&slot->lock));
 	spin_unlock(&slot->lock);
-	error = ebpfos_executor_root_source_validate(request, source, target,
-						     predecessors);
+	error = ebpfos_executor_root_source_validate(request, source, target);
 	if (error)
 		goto out_unlock_gate;
-	error = ebpfos_admission_stage_bundle_locked(grants, predecessors,
-						     target->role_count);
+	error = ebpfos_admission_stage_bundle_locked(grants, target->role_count);
 	if (error)
 		goto out_unlock_gate;
 	staged = true;
@@ -437,7 +418,6 @@ static int ebpfos_executor_root_publish_common(
 		ebpfos_admission_put(grants[role]);
 	if (source)
 		call_rcu(&source->rcu, ebpfos_executor_root_retire_rcu);
-	kfree(predecessors);
 	kfree(grants);
 	return 0;
 
@@ -446,7 +426,6 @@ out_unlock_gate:
 		ebpfos_admission_burn_set_locked(grants, target->role_count);
 	ebpfos_admission_gate_unlock();
 out:
-	kfree(predecessors);
 	kfree(grants);
 	ebpfos_executor_root_bundle_release(target);
 	return error;
@@ -756,7 +735,6 @@ late_initcall(ebpfos_executor_root_init);
 #if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
 static void ebpfos_executor_root_compare_test(struct kunit *test)
 {
-	struct ebpfos_binding *predecessors[1] = {};
 	struct ebpfos_executor_root_slot slot = {};
 	struct ebpfos_executor_root_bundle *source;
 	struct ebpfos_executor_root_bundle *target;
@@ -786,32 +764,30 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	source->roles[0].binding = (void *)0x10UL;
 
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), 0);
-	KUNIT_EXPECT_PTR_EQ(test, predecessors[0], source->roles[0].binding);
+		&request, source, target), 0);
 	request.expected_epoch--;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -ESTALE);
+		&request, source, target), -ESTALE);
 	request.expected_epoch++;
 	target->roles[0].snapshot.role_type++;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), 0);
-	KUNIT_EXPECT_PTR_EQ(test, predecessors[0], NULL);
+		&request, source, target), 0);
 	target->roles[0].snapshot.role_type--;
 	target->roles[0].snapshot.contract_digest[0]++;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), 0);
+		&request, source, target), 0);
 	target->roles[0].snapshot.contract_digest[0]--;
 	target->authority = 7;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), 0);
+		&request, source, target), 0);
 	target->authority = source->authority;
 	target->roles[0].snapshot.authority = 7;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), 0);
+		&request, source, target), 0);
 	target->roles[0].snapshot.authority = 3;
 	target->role_count = 2;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -ESTALE);
+		&request, source, target), -ESTALE);
 	target->role_count = 1;
 
 	rcu_assign_pointer(slot.active, source);

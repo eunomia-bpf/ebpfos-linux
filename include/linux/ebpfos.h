@@ -137,22 +137,12 @@ void ebpfos_admission_gate_unlock(void);
 struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd);
 void ebpfos_admission_put(struct ebpfos_admission *admission);
 int ebpfos_admission_stage_bundle_locked(
-	struct ebpfos_admission **grants,
-	struct ebpfos_binding *const *predecessors, unsigned int count);
+	struct ebpfos_admission **grants, unsigned int count);
 int ebpfos_admission_consume_bundle_locked(
 	struct ebpfos_admission **grants, unsigned int count);
-int ebpfos_admission_publish_validate_locked(
-	struct ebpfos_admission *admission,
-	const struct ebpfos_binding *predecessor, bool recovery);
-int ebpfos_admission_consume_set_locked(struct ebpfos_admission **grants,
-					 unsigned int count);
 void ebpfos_admission_burn_set_locked(struct ebpfos_admission **grants,
 				      unsigned int count);
 void ebpfos_admission_burn_locked(struct ebpfos_admission *admission);
-u32 ebpfos_admission_state_locked(struct ebpfos_admission *admission);
-void ebpfos_admission_fill_identity_locked(
-	struct ebpfos_admission *admission,
-	struct ebpfos_admission_identity_v1 *identity);
 struct ebpfos_binding *ebpfos_admission_binding_get(
 	struct ebpfos_admission *admission);
 struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding);

@@ -19,7 +19,6 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include "component_graph.h"
 
 #define EBPFOS_COMPONENT_CALL_PROG_FLAGS 0x410U
 
@@ -855,27 +854,6 @@ static u32 ebpfos_admission_effective_state_locked(
 	return state;
 }
 
-u32 ebpfos_admission_state_locked(struct ebpfos_admission *admission)
-{
-	lockdep_assert_held(&ebpfos_publish_gate);
-	return admission ? ebpfos_admission_effective_state_locked(admission) :
-	       EBPFOS_ADMISSION_NONE;
-}
-
-void ebpfos_admission_fill_identity_locked(
-	struct ebpfos_admission *admission,
-	struct ebpfos_admission_identity_v1 *identity)
-{
-	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!identity)
-		return;
-	ebpfos_binding_fill_identity(admission ? admission->binding : NULL,
-				     identity);
-	if (admission)
-		identity->admission_state =
-			ebpfos_admission_effective_state_locked(admission);
-}
-
 struct ebpfos_binding *
 ebpfos_admission_binding_get(struct ebpfos_admission *admission)
 {
@@ -980,16 +958,14 @@ static int ebpfos_admission_owner_recheck(struct ebpfos_admission *admission)
 }
 
 int ebpfos_admission_stage_bundle_locked(
-	struct ebpfos_admission **grants,
-	struct ebpfos_binding *const *predecessors, unsigned int count)
+	struct ebpfos_admission **grants, unsigned int count)
 {
 	unsigned int index, prior;
 	u64 staged_grants;
 	int error;
 
 	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!grants || !predecessors || !count ||
-	    count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
+	if (!grants || !count || count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
 		return -EINVAL;
 	for (index = 0; index < count; index++) {
 		struct ebpfos_admission *grant = grants[index];
@@ -1061,99 +1037,6 @@ int ebpfos_admission_consume_bundle_locked(
 	}
 	ebpfos_staged_grants -= count;
 	return 0;
-}
-
-int ebpfos_admission_publish_validate_locked(
-	struct ebpfos_admission *admission,
-	const struct ebpfos_binding *predecessor, bool recovery)
-{
-	u32 expected_state = recovery ? EBPFOS_ADMISSION_STAGED_RECOVERY :
-					EBPFOS_ADMISSION_STAGED;
-	u32 state;
-
-	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!admission || !predecessor)
-		return -EINVAL;
-	spin_lock(&admission->state_lock);
-	state = admission->state;
-	spin_unlock(&admission->state_lock);
-	if (state != expected_state)
-		return state == EBPFOS_ADMISSION_CONSUMED ||
-		       state == EBPFOS_ADMISSION_BURNED ? -EALREADY : -ESTALE;
-	return ebpfos_admission_owner_recheck(admission);
-}
-
-static int ebpfos_admission_order_set(struct ebpfos_admission **grants,
-				      unsigned int count,
-				      struct ebpfos_admission **ordered)
-{
-	unsigned int index, position;
-
-	if (!grants || !count || count > EBPFOS_COMPONENT_GRAPH_MAX_ROLES)
-		return -EINVAL;
-	for (index = 0; index < count; index++) {
-		if (!grants[index] || !grants[index]->grant_id)
-			return -EINVAL;
-		for (position = 0; position < index; position++)
-			if (grants[index] == grants[position] ||
-			    grants[index]->grant_id == grants[position]->grant_id)
-				return -EINVAL;
-		position = index;
-		while (position &&
-		       ordered[position - 1]->grant_id > grants[index]->grant_id) {
-			ordered[position] = ordered[position - 1];
-			position--;
-		}
-		ordered[position] = grants[index];
-	}
-	return 0;
-}
-
-static void ebpfos_admission_lock_set(struct ebpfos_admission **ordered,
-				      unsigned int count)
-{
-	unsigned int index;
-
-	spin_lock(&ordered[0]->state_lock);
-	for (index = 1; index < count; index++)
-		spin_lock_nested(&ordered[index]->state_lock, index);
-}
-
-static void ebpfos_admission_unlock_set(struct ebpfos_admission **ordered,
-					unsigned int count)
-{
-	while (count)
-		spin_unlock(&ordered[--count]->state_lock);
-}
-
-int ebpfos_admission_consume_set_locked(struct ebpfos_admission **grants,
-					 unsigned int count)
-{
-	struct ebpfos_admission *ordered[EBPFOS_COMPONENT_GRAPH_MAX_ROLES] = {};
-	unsigned int index;
-	int error;
-
-	lockdep_assert_held(&ebpfos_publish_gate);
-	error = ebpfos_admission_order_set(grants, count, ordered);
-	if (error)
-		return error;
-	ebpfos_admission_lock_set(ordered, count);
-	for (index = 0; index < count; index++)
-		if (ordered[index]->state != EBPFOS_ADMISSION_STAGED) {
-			error = -ESTALE;
-			goto out;
-		}
-	if (ebpfos_staged_grants < count) {
-		error = -EUCLEAN;
-		goto out;
-	}
-	for (index = 0; index < count; index++)
-		ordered[index]->state = EBPFOS_ADMISSION_CONSUMED;
-	ebpfos_staged_grants -= count;
-	error = 0;
-out:
-	ebpfos_admission_unlock_set(ordered, count);
-	return error;
 }
 
 void ebpfos_admission_burn_locked(struct ebpfos_admission *admission)
