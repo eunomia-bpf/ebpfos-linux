@@ -16,17 +16,12 @@ struct ebpfos_ioc_version {
 #define EBPFOS_IOC_VERSION \
 	_IOR(EBPFOS_IOC_MAGIC, 0x00, struct ebpfos_ioc_version)
 
-#define EBPFOS_POLICY_RECORD_V1_SIZE 256U
 #define EBPFOS_RESOURCE_DESC_V1_SIZE 96U
 #define EBPFOS_COMPONENT_DESC_V1_SIZE 1024U
 #define EBPFOS_ADMISSION_MAX_RESOURCES 1U
 
-#define EBPFOS_POLICY_RECORD_V1_MAGIC "EBPFPOL1"
 #define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
 #define EBPFOS_ADMISSION_FORMAT_VERSION 1U
-
-#define EBPFOS_POLICY_F_TEST_ONLY (1U << 1)
-#define EBPFOS_POLICY_F_ALL EBPFOS_POLICY_F_TEST_ONLY
 
 #define EBPFOS_COMPONENT_F_TEST_ONLY (1U << 0)
 #define EBPFOS_COMPONENT_F_ALL EBPFOS_COMPONENT_F_TEST_ONLY
@@ -45,11 +40,6 @@ struct ebpfos_ioc_version {
 #define EBPFOS_EFFECT_OBJECT_WRITE (1ULL << 3)
 #define EBPFOS_EFFECT_STATE_READ (1ULL << 4)
 #define EBPFOS_EFFECT_STATE_WRITE (1ULL << 5)
-
-enum ebpfos_policy_state {
-	EBPFOS_POLICY_INACTIVE = 0,
-	EBPFOS_POLICY_ACTIVE = 1,
-};
 
 enum ebpfos_component_domain {
 	EBPFOS_COMPONENT_DOMAIN_COMPONENT = 3,
@@ -86,33 +76,6 @@ enum ebpfos_admission_state {
 
 enum ebpfos_admitted_binding_kind {
 	EBPFOS_ADMITTED_BINDING_BPF = 2,
-};
-
-struct ebpfos_policy_record_v1 {
-	__u8 magic[8];
-	__le16 format_version;
-	__le16 header_size;
-	__le32 total_size;
-	__le32 flags;
-	__le32 domain_mask;
-	__u8 realm_id[16];
-	__le64 generation;
-	__u8 previous_record_digest[32];
-	__u8 host_policy_sha256[32];
-	__le64 verifier_profile_mask;
-	__le64 capability_ceiling;
-	__le64 effect_ceiling;
-	__le32 max_static_insns;
-	__le32 max_verified_insns;
-	__le32 max_stack_depth;
-	__le32 max_context_size;
-	__le32 max_resources;
-	__le32 reserved0;
-	__le64 max_map_bytes;
-	__le64 max_call_bytes;
-	__u8 kernel_abi_sha256[32];
-	__u8 native_bootstrap_sha256[32];
-	__u8 reserved[16];
 };
 
 struct ebpfos_resource_desc_v1 {
@@ -177,24 +140,6 @@ struct ebpfos_component_desc_v1 {
 	__le64 max_call_bytes;
 	struct ebpfos_resource_desc_v1 resource;
 	__u8 reserved[352];
-};
-
-struct ebpfos_ioc_policy_activate {
-	struct ebpfos_policy_record_v1 record;
-	__u8 reserved[12];
-	__u32 flags;
-};
-
-struct ebpfos_ioc_policy_status {
-	__u32 state;
-	__u32 policy_flags;
-	__u8 realm_id[16];
-	__u64 generation;
-	__u8 policy_record_digest[32];
-	__u8 reserved_root[32];
-	__u64 staged_grants;
-	__u64 reserved0;
-	__u8 reserved[16];
 };
 
 struct ebpfos_ioc_admission_seal {
@@ -269,10 +214,6 @@ struct ebpfos_admission_identity_v1 {
 	__u8 authority_sha256[32];
 };
 
-#define EBPFOS_IOC_POLICY_ACTIVATE \
-	_IOW(EBPFOS_IOC_MAGIC, 0x30, struct ebpfos_ioc_policy_activate)
-#define EBPFOS_IOC_POLICY_STATUS \
-	_IOR(EBPFOS_IOC_MAGIC, 0x31, struct ebpfos_ioc_policy_status)
 #define EBPFOS_IOC_ADMISSION_SEAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x32, struct ebpfos_ioc_admission_seal)
 #define EBPFOS_IOC_ADMISSION_INFO \
