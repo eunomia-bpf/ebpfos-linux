@@ -276,6 +276,14 @@ static int ebpfos_kop_atomic32_instantiate(u64 payload, struct bpf_insn *insns)
 		insns[1] = BPF_ATOMIC_OP(BPF_W, BPF_ADD | BPF_FETCH,
 					 BPF_REG_1, BPF_REG_0, 0);
 		break;
+	case EBPFOS_KOP_ATOMIC32_AND:
+	case EBPFOS_KOP_ATOMIC32_OR:
+		insns[0] = BPF_MOV32_REG(BPF_REG_0, BPF_REG_2);
+		insns[1] = BPF_ATOMIC_OP(BPF_W,
+			spec->op == EBPFOS_KOP_ATOMIC32_AND ? BPF_AND : BPF_OR,
+			BPF_REG_1, BPF_REG_0, 0);
+		insns[2] = BPF_MOV32_IMM(BPF_REG_0, 0);
+		return 3;
 	default:
 		return -EINVAL;
 	}
@@ -315,7 +323,7 @@ static int ebpfos_kop_atomic32_emit_x86(u8 *image, u32 *offset, bool emit,
 }
 
 static struct bpf_kop ebpfos_kop_atomic32 = {
-	.max_insn_cnt = 2,
+	.max_insn_cnt = 3,
 	.max_emit_bytes = 9,
 	.requirements = ebpfos_kop_atomic32_requirements,
 	.instantiate_insn = ebpfos_kop_atomic32_instantiate,
@@ -373,6 +381,14 @@ static int ebpfos_kop_atomic64_instantiate(u64 payload, struct bpf_insn *insns)
 		insns[1] = BPF_ATOMIC_OP(BPF_DW, BPF_ADD | BPF_FETCH,
 					 BPF_REG_1, BPF_REG_0, 0);
 		break;
+	case EBPFOS_KOP_ATOMIC64_AND:
+	case EBPFOS_KOP_ATOMIC64_OR:
+		insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_2);
+		insns[1] = BPF_ATOMIC_OP(BPF_DW,
+			spec->op == EBPFOS_KOP_ATOMIC64_AND ? BPF_AND : BPF_OR,
+			BPF_REG_1, BPF_REG_0, 0);
+		insns[2] = BPF_MOV64_IMM(BPF_REG_0, 0);
+		return 3;
 	default:
 		return -EINVAL;
 	}
@@ -412,7 +428,7 @@ static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
 }
 
 static struct bpf_kop ebpfos_kop_atomic64 = {
-	.max_insn_cnt = 2,
+	.max_insn_cnt = 3,
 	.max_emit_bytes = 12,
 	.requirements = ebpfos_kop_atomic64_requirements,
 	.instantiate_insn = ebpfos_kop_atomic64_instantiate,
