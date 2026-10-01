@@ -13,6 +13,7 @@
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
+#include <linux/xarray.h>
 #if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
 #include <kunit/test.h>
 #endif
@@ -40,9 +41,29 @@ struct ebpfos_executor_root_slot {
 	struct ebpfos_executor_root_bundle __rcu *active;
 };
 
-static struct ebpfos_executor_root_slot ebpfos_executor_root = {
-	.lock = __SPIN_LOCK_UNLOCKED(ebpfos_executor_root.lock),
-};
+/* Slots have stable lifetime; readers find them under RCU and pin bindings. */
+static DEFINE_XARRAY(ebpfos_executor_roots);
+
+static struct ebpfos_executor_root_slot *
+ebpfos_executor_root_slot_get(u64 object_id)
+{
+	struct ebpfos_executor_root_slot *slot;
+	int error;
+
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (slot)
+		return slot;
+	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+	if (!slot)
+		return ERR_PTR(-ENOMEM);
+	spin_lock_init(&slot->lock);
+	error = xa_insert(&ebpfos_executor_roots, object_id, slot, GFP_KERNEL);
+	if (error) {
+		kfree(slot);
+		return ERR_PTR(error);
+	}
+	return slot;
+}
 
 static void ebpfos_executor_root_bundle_release(
 	struct ebpfos_executor_root_bundle *bundle)
@@ -419,6 +440,7 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	const struct ebpfos_executor_root_publish_request *request = request_data;
 	struct ebpfos_executor_root_bundle *source;
 	struct ebpfos_executor_root_bundle *target = NULL;
+	struct ebpfos_executor_root_slot *slot;
 	struct ebpfos_binding **predecessors = NULL;
 	struct ebpfos_admission **grants = NULL;
 	struct ebpfos_executor_root_manifest *manifest = NULL;
@@ -458,10 +480,15 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	error = ebpfos_executor_root_manifest_validate(manifest, target);
 	if (error)
 		goto out_unlock_gate;
-	spin_lock(&ebpfos_executor_root.lock);
-	source = rcu_dereference_protected(ebpfos_executor_root.active,
-					    lockdep_is_held(&ebpfos_executor_root.lock));
-	spin_unlock(&ebpfos_executor_root.lock);
+	slot = ebpfos_executor_root_slot_get(request->object_id);
+	if (IS_ERR(slot)) {
+		error = PTR_ERR(slot);
+		goto out_unlock_gate;
+	}
+	spin_lock(&slot->lock);
+	source = rcu_dereference_protected(slot->active,
+					    lockdep_is_held(&slot->lock));
+	spin_unlock(&slot->lock);
 	error = ebpfos_executor_root_source_validate(request, source, target,
 						     predecessors);
 	if (error)
@@ -478,7 +505,7 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	target->publisher_prog_id = publisher_prog_id;
 	memcpy(target->publisher_digest, publisher_digest,
 	       SHA256_DIGEST_SIZE);
-	error = ebpfos_executor_root_commit(&ebpfos_executor_root, request,
+	error = ebpfos_executor_root_commit(slot, request,
 					    source, target, grants);
 	if (error)
 		goto out_unlock_gate;
@@ -525,6 +552,7 @@ noinline int bpf_ebpfos_executor_root_read_impl(
 {
 	struct ebpfos_executor_root_snapshot *snapshot = snapshot_data;
 	struct ebpfos_executor_root_bundle *bundle;
+	struct ebpfos_executor_root_slot *slot;
 	size_t expected_size;
 	u32 role;
 	int error = 0;
@@ -535,7 +563,8 @@ noinline int bpf_ebpfos_executor_root_read_impl(
 	    snapshot_data__sz < sizeof(*snapshot))
 		return -EINVAL;
 	rcu_read_lock();
-	bundle = rcu_dereference(ebpfos_executor_root.active);
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	bundle = slot ? rcu_dereference(slot->active) : NULL;
 	if (!bundle || bundle->object_id != object_id) {
 		error = -ENOENT;
 		goto out_unlock;
@@ -593,11 +622,13 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get(
 	struct ebpfos_executor_root_role_snapshot *snapshot)
 {
 	struct ebpfos_executor_root_bundle *bundle;
+	struct ebpfos_executor_root_slot *slot;
 	struct ebpfos_binding *binding = NULL;
 	u32 role;
 
 	rcu_read_lock();
-	bundle = rcu_dereference(ebpfos_executor_root.active);
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	bundle = slot ? rcu_dereference(slot->active) : NULL;
 	if (!bundle || bundle->object_id != object_id)
 		goto out;
 	for (role = 0; role < bundle->role_count; role++) {
