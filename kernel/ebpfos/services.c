@@ -419,6 +419,7 @@ int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 	return error;
 }
 
+#ifdef CONFIG_NET
 struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
 						 struct net_device *dev,
 						 struct sk_buff *skb,
@@ -465,6 +466,7 @@ bool ebpfos_effect_net_skb_pending(struct ebpfos_effect_scope *scope)
 {
 	return !IS_ERR_OR_NULL(scope) && scope->skb;
 }
+#endif
 
 static struct ebpfos_effect_scope *ebpfos_effect_current(u64 handle)
 {
@@ -1035,6 +1037,7 @@ __bpf_kfunc int bpf_ebpfos_effect_ref_put(u64 handle)
 }
 
 /* A routed network call owns the skb until the terminal consume effect. */
+#ifdef CONFIG_NET
 __bpf_kfunc s64 bpf_ebpfos_effect_net_skb_len(u64 handle)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -1329,6 +1332,7 @@ __bpf_kfunc int bpf_ebpfos_effect_net_native_xmit(u64 handle)
 	scope->net_native_delegated = true;
 	return 0;
 }
+#endif
 
 __bpf_kfunc_end_defs();
 
@@ -1370,6 +1374,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_signal, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
+#ifdef CONFIG_NET
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_len, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_data_len, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_headlen, KF_SLEEPABLE)
@@ -1391,6 +1396,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_consume_skb, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
+#endif
 BTF_KFUNCS_END(ebpfos_l1_services)
 
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
