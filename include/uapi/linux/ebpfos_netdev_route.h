@@ -14,6 +14,7 @@ struct ebpfos_netdev_route_request {
 	__u64 component_entries;
 	__u64 faults;
 	__u64 method_entries[7]; /* 1..6 correspond to generated method IDs. */
+	__u64 method_mask; /* Zero selects every generated method. */
 };
 
 #define EBPFOS_NETDEV_ROUTE_IOC_ATTACH _IOW('E', 0x80, struct ebpfos_netdev_route_request)

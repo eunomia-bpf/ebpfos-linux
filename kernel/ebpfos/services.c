@@ -931,6 +931,42 @@ __bpf_kfunc int bpf_ebpfos_effect_net_tx_complete(u64 handle)
 	return bpf_ebpfos_effect_net_consume_skb(handle);
 }
 
+/* Transfer an skb to a peer named by the device's registered ops table.
+ * Drivers with a private NAPI/XDP receive path keep that path in Linux.
+ */
+__bpf_kfunc int bpf_ebpfos_effect_net_peer_forward(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct net_device *peer;
+	struct sk_buff *skb;
+	u32 bytes;
+	int result;
+
+	if (!scope || !scope->netdev || !scope->skb ||
+	    !scope->netdev->netdev_ops->ndo_get_peer_dev)
+		return -EPERM;
+	rcu_read_lock();
+	peer = scope->netdev->netdev_ops->ndo_get_peer_dev(scope->netdev);
+	if (!peer || peer->wanted_features & NETIF_F_GRO ||
+	    dev_xdp_prog_count(peer)) {
+		rcu_read_unlock();
+		return -EOPNOTSUPP;
+	}
+	skb = scope->skb;
+	if (!pskb_may_pull(skb, ETH_HLEN)) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+	bytes = skb->len;
+	skb_tx_timestamp(skb);
+	result = dev_forward_skb(peer, skb);
+	scope->skb = NULL;
+	if (result == NET_RX_SUCCESS)
+		dev_sw_netstats_tx_add(scope->netdev, 1, bytes);
+	rcu_read_unlock();
+	return 0; /* dev_forward_skb consumes the skb on success or drop. */
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_l1_services)
@@ -967,6 +1003,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_validate_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_set_mac_addr, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_carrier_set, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_peer_forward, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_consume_skb, KF_SLEEPABLE)

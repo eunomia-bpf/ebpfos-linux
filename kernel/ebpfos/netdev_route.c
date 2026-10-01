@@ -40,6 +40,7 @@ struct ebpfos_netdev_route {
 	bool component;
 	u64 handle;
 	u64 role;
+	u64 method_mask;
 };
 
 struct ebpfos_netdev_work {
@@ -328,12 +329,16 @@ static void ebpfos_netdev_route_resume(struct ebpfos_netdev_route *route)
 }
 
 static int ebpfos_netdev_route_attach(struct net_device *dev,
-					     u64 handle, u64 role)
+					     u64 handle, u64 role, u64 method_mask)
 {
 	struct ebpfos_netdev_route *route;
 	int error;
 
 	if (!handle || !role || ebpfos_netdev_route_get(dev))
+		return -EINVAL;
+	if (!method_mask)
+		method_mask = 0x7e;
+	if (method_mask & ~0x7eULL)
 		return -EINVAL;
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)
@@ -348,7 +353,7 @@ static int ebpfos_netdev_route_attach(struct net_device *dev,
 	}
 	route->routed = *route->original;
 #define EBPFOS_INSTALL_NETDEV(name, method_id) \
-	if (route->original->ndo_##name) \
+	if ((method_mask & (1ULL << method_id)) && route->original->ndo_##name) \
 		route->routed.ndo_##name = ebpfos_netdev_route_##name;
 	EBPFOS_NETDEV_ROUTE_METHODS(EBPFOS_INSTALL_NETDEV)
 #undef EBPFOS_INSTALL_NETDEV
@@ -356,6 +361,7 @@ static int ebpfos_netdev_route_attach(struct net_device *dev,
 	dev_hold(dev);
 	route->handle = handle;
 	route->role = role;
+	route->method_mask = method_mask;
 	spin_lock_init(&route->lock);
 	init_waitqueue_head(&route->drained);
 	atomic_set(&route->active, 0);
@@ -413,7 +419,7 @@ static long ebpfos_netdev_route_ioctl(struct file *control,
 	switch (command) {
 	case EBPFOS_NETDEV_ROUTE_IOC_ATTACH:
 		result = ebpfos_netdev_route_attach(dev, request.handle,
-					    request.role);
+					    request.role, request.method_mask);
 		break;
 	case EBPFOS_NETDEV_ROUTE_IOC_DETACH:
 		result = route ? ebpfos_netdev_route_detach(route) : -ENOENT;
@@ -442,6 +448,7 @@ static long ebpfos_netdev_route_ioctl(struct file *control,
 		request.linux_entries = atomic64_read(&route->linux_entries);
 		request.component_entries = atomic64_read(&route->component_entries);
 		request.faults = atomic64_read(&route->faults);
+		request.method_mask = route->method_mask;
 		for (int method = 1; method <= 6; ++method)
 			request.method_entries[method] =
 				atomic64_read(&route->method_entries[method]);
