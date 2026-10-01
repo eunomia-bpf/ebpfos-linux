@@ -1087,13 +1087,6 @@ struct bpf_kop {
 	 */
 	bool noreturn_native_backedge;
 	/*
-	 * The emitter's bytes mean the same thing wherever they sit: no
-	 * absolute address, no displacement that leaves the emitted sequence.
-	 * Only the emitter can say this about its own output, and saying it is
-	 * what lets a placed image carry the sequence unchanged.
-	 */
-	bool position_independent;
-	/*
 	 * Sealed component admission binds this verifier-visible operation
 	 * identity before its native emitter can become reachable.  These fields
 	 * describe one canonical eBPF semantic operation, not a native fallback.
@@ -1884,7 +1877,6 @@ struct bpf_prog_aux {
 	bool kprobe_write_ctx;
 	bool ebpfos_meta;
 	bool ebpfos_component;
-	bool ebpfos_invariants;
 	u32 ebpfos_load_insn_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
 	bool ebpfos_kop_requirements_valid;
@@ -1997,14 +1989,6 @@ struct bpf_prog {
 		u8 digest[SHA256_DIGEST_SIZE];
 		u8 tag[BPF_TAG_SIZE];
 	};
-	/* eBPFOS: operands the JIT emitted that only this kernel can resolve. */
-	struct bpf_jit_reloc *jit_relocs;
-	u32 jit_reloc_cnt;
-	/* Set when the table could not be completed -- no memory, or more
-	 * operands than were reserved. An empty table and an unrecorded one are
-	 * not the same answer, so this is reported rather than dropped.
-	 */
-	bool jit_reloc_incomplete;
 	struct bpf_prog_stats __percpu *stats;
 	u8 __percpu		*active;	/* u8[BPF_NR_CONTEXTS] for recursion protection */
 	unsigned int		(*bpf_func)(const void *ctx,
@@ -2463,7 +2447,7 @@ struct bpf_array {
  */
 int bpf_array_get_next_key(struct bpf_map *map, void *key, void *next_key);
 
-#define BPF_COMPLEXITY_LIMIT_INSNS      4000000 /* yes. 4M insns */
+#define BPF_COMPLEXITY_LIMIT_INSNS      1000000 /* yes. 1M insns */
 #define MAX_TAIL_CALL_CNT 33
 
 /* Maximum number of loops for bpf_loop and bpf_iter_num.

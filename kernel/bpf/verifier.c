@@ -3676,37 +3676,6 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	return 0;
 }
 
-static int check_btf_subprog_layout_before_kop_lowering(struct bpf_verifier_env *env)
-{
-	struct bpf_prog_aux *aux = env->prog->aux;
-	u32 i;
-
-	if (!aux->func_info)
-		return 0;
-	if (aux->func_info_cnt != env->subprog_cnt) {
-		verbose(env, "number of funcs in func_info doesn't match number of subprogs\n");
-		return -EINVAL;
-	}
-	for (i = 0; i < aux->func_info_cnt; i++) {
-		if (aux->func_info[i].insn_off != env->subprog_info[i].start) {
-			verbose(env, "func_info BTF section doesn't match subprog layout in BPF program\n");
-			return -EINVAL;
-		}
-	}
-	return 0;
-}
-
-static void sync_btf_subprog_layout_after_kop_lowering(struct bpf_verifier_env *env)
-{
-	struct bpf_prog_aux *aux = env->prog->aux;
-	u32 i;
-
-	if (!aux->func_info)
-		return;
-	for (i = 0; i < aux->func_info_cnt; i++)
-		aux->func_info[i].insn_off = env->subprog_info[i].start;
-}
-
 static int check_subprogs(struct bpf_verifier_env *env)
 {
 	int i, subprog_start, subprog_end, off, cur_subprog = 0;
@@ -4447,15 +4416,8 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 			return -EACCES;
 		}
 		if (state != cur && reg->type == PTR_TO_STACK) {
-			/* An admitted program may temporarily link a callee's
-			 * stack object through an ancestor's stack. Verify that
-			 * every such link is gone before the callee returns.
-			 */
-			if (!env->prog->aux->ebpfos_component &&
-			    !env->prog->aux->ebpfos_invariants) {
-				verbose(env, "cannot spill pointers to stack into stack frame of the caller\n");
-				return -EINVAL;
-			}
+			verbose(env, "cannot spill pointers to stack into stack frame of the caller\n");
+			return -EINVAL;
 		}
 		save_register_state(env, state, spi, reg, size);
 	} else {
@@ -8355,22 +8317,14 @@ static void maybe_widen_reg(struct bpf_verifier_env *env,
 	__mark_reg_unknown(env, rcur);
 }
 
-int widen_imprecise_scalars(struct bpf_verifier_env *env,
-			   struct bpf_verifier_state *old,
-			   struct bpf_verifier_state *cur)
+static int widen_imprecise_scalars(struct bpf_verifier_env *env,
+				   struct bpf_verifier_state *old,
+				   struct bpf_verifier_state *cur)
 {
 	struct bpf_func_state *fold, *fcur;
 	int i, fr, num_slots;
 
-	/* Callers that compare the states with states_equal() (callback,
-	 * may_goto and iterator loops) are guaranteed to have equal frame
-	 * depths.  The eBPFOS backedge path calls this unconditionally, where
-	 * the arriving state may be shallower than the explored head (e.g. the
-	 * head was recorded in an inner frame).  cur->frame[fr] is then NULL
-	 * and dereferencing it faults, so only widen over the frames the two
-	 * states have in common.
-	 */
-	for (fr = min(old->curframe, cur->curframe); fr >= 0; fr--) {
+	for (fr = old->curframe; fr >= 0; fr--) {
 		fold = old->frame[fr];
 		fcur = cur->frame[fr];
 
@@ -10525,7 +10479,7 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	struct bpf_func_state *caller, *callee;
 	struct bpf_reg_state *r0;
 	bool in_callback_fn;
-	int err, frame, slot;
+	int err;
 
 	callee = state->frame[state->curframe];
 	r0 = &callee->regs[BPF_REG_0];
@@ -10541,24 +10495,6 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	}
 
 	caller = state->frame[state->curframe - 1];
-	if (env->prog->aux->ebpfos_component ||
-	    env->prog->aux->ebpfos_invariants) {
-		for (frame = 0; frame < state->curframe; frame++) {
-			struct bpf_func_state *ancestor = state->frame[frame];
-
-			for (slot = 0; slot < ancestor->allocated_stack / BPF_REG_SIZE;
-			     slot++) {
-				struct bpf_stack_state *stack = &ancestor->stack[slot];
-
-				if (bpf_is_spilled_reg(stack) &&
-				    stack->spilled_ptr.type == PTR_TO_STACK &&
-				    stack->spilled_ptr.frameno == callee->frameno) {
-					verbose(env, "stack pointer to returning frame remains in caller stack\n");
-					return -EINVAL;
-				}
-			}
-		}
-	}
 	if (callee->in_callback_fn) {
 		if (r0->type != SCALAR_VALUE) {
 			verbose(env, "R0 not a scalar value\n");
@@ -20841,15 +20777,10 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	ret = add_subprog_and_kfunc(env);
 	if (ret < 0)
 		goto skip_full_check;
-	ret = check_btf_subprog_layout_before_kop_lowering(env);
-	if (ret < 0)
-		goto skip_full_check;
 
 	ret = lower_kop_proof_regions(env);
 	if (ret < 0)
 		goto skip_full_check;
-	if (env->kop_call_cnt)
-		sync_btf_subprog_layout_after_kop_lowering(env);
 
 	env->explored_states = kvzalloc_objs(struct list_head,
 					     state_htab_size(env),

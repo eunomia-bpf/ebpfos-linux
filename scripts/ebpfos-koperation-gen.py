@@ -93,9 +93,6 @@ MODEL_SPECIFIC_REGISTERS = {
         "max_writes": 1,
         "msr": 0xC0000082,
         "normalize_bits": 0,
-        "operand_policy": "canonical-address",
-        "operand_required": 0,
-        "operand_variable_mask": 0,
         "payload_id": 1,
         "read_effects": ["syscall.entry.root.observe"],
         "read_post_state": "result-u64",
@@ -113,159 +110,6 @@ MODEL_SPECIFIC_REGISTERS = {
             "rollback-root-required",
         ],
         "write_post_state": "hardware.lstar.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-lvtt": {
-        "family": "model-specific-register",
-        "max_writes": 1,
-        "msr": 0x832,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0xEC,
-        "operand_variable_mask": 0x40000,
-        "payload_id": 2,
-        "read_effects": ["irq.apic.timer-vector.observe"],
-        "read_post_state": "result-u64",
-        "readback_required": True,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": ["irq.apic.timer-vector.replace"],
-        "write_observations": [
-            "all-target-cpus-required",
-            "component-root-input",
-            "rollback-root-required",
-            "x2apic-required",
-        ],
-        "write_post_state": "hardware.x2apic-lvtt.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-tmict": {
-        "family": "model-specific-register",
-        "max_writes": 1,
-        "msr": 0x838,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0,
-        "operand_variable_mask": 0x100000,
-        "payload_id": 3,
-        "read_effects": ["timer.apic.initial-count.observe"],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": ["timer.apic.initial-count.arm"],
-        "write_observations": [
-            "all-target-cpus-required",
-            "component-root-input",
-            "one-shot-count-or-zero",
-            "x2apic-required",
-        ],
-        "write_post_state": "hardware.x2apic-tmict.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-tmcct": {
-        "family": "model-specific-register",
-        "max_writes": 0,
-        "msr": 0x839,
-        "normalize_bits": 0,
-        "operand_policy": "none",
-        "operand_required": 0,
-        "operand_variable_mask": 0,
-        "payload_id": 4,
-        "read_effects": ["timer.apic.current-count.observe"],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": [],
-        "write_observations": [],
-        "write_post_state": "hardware.x2apic-tmcct.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-icr-self": {
-        "family": "model-specific-register",
-        "max_writes": 1,
-        "msr": 0x830,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0x400EC,
-        "operand_variable_mask": 0,
-        "payload_id": 5,
-        "read_effects": ["irq.apic.self-ipi.observe"],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": ["irq.apic.self-ipi.deliver"],
-        "write_observations": [
-            "component-root-input-fixed-self-vector",
-            "x2apic-required",
-        ],
-        "write_post_state": "hardware.x2apic-icr-self.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-icr-allbutself": {
-        "family": "model-specific-register",
-        "max_writes": 1,
-        "msr": 0x830,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0xC00F5,
-        "operand_variable_mask": 0,
-        "payload_id": 7,
-        "read_effects": ["irq.portal.broadcast.observe-unavailable"],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": ["irq.portal.broadcast.deliver"],
-        "write_observations": [
-            "all-excluding-self-destination-shorthand",
-            "component-root-input-fixed-portal-vector",
-            "x2apic-required",
-        ],
-        "write_post_state": "hardware.x2apic-icr-allbutself.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-    "x2apic-eoi": {
-        "family": "model-specific-register",
-        "max_writes": 1,
-        "msr": 0x80B,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0,
-        "operand_variable_mask": 0,
-        "payload_id": 6,
-        "read_effects": ["irq.apic.eoi.observe-unavailable"],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write_effects": ["irq.apic.eoi.acknowledge"],
-        "write_observations": [
-            "component-root-input-zero",
-            "interrupt-context-required",
-            "x2apic-required",
-        ],
-        "write_post_state": "hardware.x2apic-eoi.after",
         "write_source": "operation-operand",
         "write_action": "install",
     },
@@ -301,40 +145,9 @@ DESCRIPTOR_TABLE_REGISTERS = {
     },
 }
 
-IO_PORTS = {
-    "uart8250-tx": {
-        "family": "io-port",
-        "max_writes": 1,
-        "normalize_bits": 0,
-        "operand_policy": "masked-value",
-        "operand_required": 0,
-        "operand_variable_mask": 0xff,
-        "payload_id": 1,
-        "port": 0x3f8,
-        "read_effects": [],
-        "read_post_state": "result-u64",
-        "readback_required": False,
-        "shadow_constants": {
-            "component-root-input": "EBPFOS_KOPERATION_SHADOW_UNAVAILABLE",
-        },
-        "shadow_sources": {"component-root-input"},
-        "write": bytes.fromhex("4889f8baf8030000ee"),
-        "write_effects": ["device.console.byte.emit"],
-        "write_observations": [
-            "component-root-input-byte",
-            "fixed-io-port-0x3f8",
-            "pio-no-dma",
-        ],
-        "write_post_state": "hardware.uart8250-tx.after",
-        "write_source": "operation-operand",
-        "write_action": "install",
-    },
-}
-
 REGISTER_FAMILIES = {
     "control-register": CONTROL_REGISTERS,
     "descriptor-table-register": DESCRIPTOR_TABLE_REGISTERS,
-    "io-port": IO_PORTS,
     "model-specific-register": MODEL_SPECIFIC_REGISTERS,
 }
 
@@ -555,19 +368,6 @@ def native_lower(operation: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
             register_state[register] = value
             events.append({"op": opcode, "register": register,
                            "value": expression_text(value)})
-        elif (opcode == "write-io-port" and
-              set(instruction) == {"op", "register", "source"}):
-            register = instruction["register"]
-            if (register not in IO_PORTS or
-                    instruction["source"] != "value" or
-                    value is None or returned):
-                raise SpecError(
-                    f"{operation['name']}: unsupported or misplaced I/O-port write")
-            output.extend(IO_PORTS[register]["write"])
-            writes.append((register, value))
-            register_state[register] = value
-            events.append({"op": opcode, "register": register,
-                           "value": expression_text(value)})
         elif opcode == "clear-low-bits" and set(instruction) == {"bits", "op"}:
             if value is None or returned:
                 raise SpecError(f"{operation['name']}: native transform has no live value")
@@ -664,8 +464,7 @@ def architecture_requirements(trace: dict[str, Any]) -> int:
     return requirements
 
 
-def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
-                                                        int, int, int, int, int]:
+def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str]:
     register_items = [item for item in operation["native_ir"]
                       if isinstance(item, dict) and item.get("op") in {
                           "read-control-register", "write-control-register",
@@ -673,7 +472,6 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
                           "write-descriptor-table-register",
                           "read-model-specific-register",
                           "write-model-specific-register",
-                          "write-io-port",
                       }]
     registers = {item.get("register") for item in register_items}
     families = {
@@ -684,7 +482,7 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
         item for item in operation["native_ir"]
         if isinstance(item, dict) and item.get("op") in {
             "write-control-register", "write-descriptor-table-register",
-            "write-io-port", "write-model-specific-register"
+            "write-model-specific-register"
         }
     ]
     if len(registers) != 1 or len(families) != 1:
@@ -696,17 +494,10 @@ def machine_binding(operation: dict[str, Any]) -> tuple[int, int, int, int, str,
         raise SpecError(f"{operation['name']}: machine payload register is unsupported")
     action = metadata["write_action"] if writes else "observe"
     form = {"control-register": 1, "model-specific-register": 2,
-            "descriptor-table-register": 3, "io-port": 4}[family]
-    operand_policies = {"none": 0, "canonical-address": 1,
-                        "masked-value": 2}
+            "descriptor-table-register": 3}[family]
     return (form, metadata["payload_id"], CONTROL_ACTIONS[action],
             metadata["normalize_bits"],
-            metadata["shadow_constants"][operation["shadow_source"]],
-            metadata.get("msr", metadata.get("port", 0)),
-            operand_policies[metadata.get("operand_policy", "none")],
-            metadata.get("operand_required", 0),
-            metadata.get("operand_variable_mask", 0),
-            int(metadata["readback_required"]))
+            metadata["shadow_constants"][operation["shadow_source"]])
 
 
 def check_semantics(operation: dict[str, Any]) -> None:
@@ -879,9 +670,7 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
         }
         equivalence_sha = digest(canonical(equivalence))
         (machine_form, machine_selector, machine_action, normalize_bits,
-         shadow_constant, machine_register, operand_policy,
-         operand_required, operand_variable_mask,
-         readback_required) = machine_binding(operation)
+         shadow_constant) = machine_binding(operation)
         sym = symbol(operation["name"])
         proof_name = f"ebpfos_koperation_proof_{operation['id']}"
         header.extend([
@@ -922,11 +711,6 @@ def render(operations: list[dict[str, Any]]) -> tuple[bytes, bytes, bytes, bytes
             f"\t\t.kprog_machine_selector = {machine_selector}U,\n"
             f"\t\t.kprog_machine_action = {machine_action}U,\n"
             f"\t\t.kprog_normalize_bits = {normalize_bits}U,\n"
-            f"\t\t.kprog_machine_register = 0x{machine_register:08x}U,\n"
-            f"\t\t.kprog_operand_policy = {operand_policy}U,\n"
-            f"\t\t.kprog_readback_required = {readback_required}U,\n"
-            f"\t\t.kprog_operand_required = 0x{operand_required:016x}ULL,\n"
-            f"\t\t.kprog_operand_variable_mask = 0x{operand_variable_mask:016x}ULL,\n"
             f"\t\t.proof_insns = {proof_name},\n"
             f"\t\t.proof_insn_count = ARRAY_SIZE({proof_name}),\n"
             f"\t\t.proof_imm64_insn = {immediate_index}U,\n"

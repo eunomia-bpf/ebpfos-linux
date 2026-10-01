@@ -1331,68 +1331,7 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 				}
 				goto skip_inf_loop_check;
 			}
-			/* eBPFOS components and invariant-mode programs execute
-			 * canonical kernel implementation code.  Admit a real
-			 * backedge when the arriving abstract state is contained in
-			 * an earlier state at the same instruction.  The loop body
-			 * has then been checked for all values in the earlier state
-			 * and the backedge re-establishes that invariant.  Keep this
-			 * on the SCC backedge path so read and precision requirements
-			 * are propagated to a fixed point; pruning it as an ordinary
-			 * completed state would be unsound for values first used on a
-			 * later iteration.
-			 *
-			 * A loop-carried scalar (the canonical `r1 += 2` cursor) only
-			 * satisfies range_within() after widening: each iteration
-			 * moves its range outside the range recorded at the head, so
-			 * the loop would otherwise unroll into one state per
-			 * iteration.  Widen the arriving state against the head,
-			 * exactly as the may_goto, iterator and callback loops
-			 * converge, and retry containment.
-			 *
-			 * If the widened arrival is still not contained, record it at
-			 * the miss path instead of pruning it.  The body is then
-			 * re-verified from the widened state, so the executed loop is
-			 * preserved: every iteration still runs and is checked, now
-			 * over the widened invariant, and later arrivals are
-			 * contained by it.  Mutating the head in place and pruning
-			 * would skip that re-verification and admit a body checked
-			 * only for the narrower range.
-			 *
-			 * This is a memory-safety (partial-correctness) proof only.
-			 * It does not prove that the loop terminates.  Both modes are
-			 * restricted to privileged eBPFOS build-time syscall
-			 * programs whose admission contract must establish the
-			 * separate progress/liveness property.  Ordinary BPF
-			 * programs retain the infinite-loop rejection below.
-			 */
-			if (env->prog->aux->ebpfos_component ||
-			    env->prog->aux->ebpfos_invariants) {
-				if (states_equal(env, &sl->state, cur, RANGE_WITHIN)) {
-					loop = true;
-					goto hit;
-				}
-				/* A loop-carried scalar is recorded precise at the head
-				 * once it is used as a branch operand, which makes
-				 * maybe_widen_reg() a no-op and unrolls the loop into one
-				 * state per iteration.  Clear precision on both states so
-				 * the arriving state can be widened against the head.
-				 */
-				mark_all_scalars_imprecise(env, &sl->state);
-				mark_all_scalars_imprecise(env, cur);
-				widen_imprecise_scalars(env, &sl->state, cur);
-				if (states_equal(env, &sl->state, cur, RANGE_WITHIN)) {
-					loop = true;
-					goto hit;
-				}
-				/* The widened arrival is the state the body is
-				 * re-verified from, so every iteration of the executed
-				 * loop is still checked, now over the widened range.
-				 * Later arrivals are contained by it and pruned.
-				 */
-				add_new_state = true;
-				goto miss;
-			}
+			/* attempt to detect infinite loop to avoid unnecessary doomed work */
 			if (states_maybe_looping(&sl->state, cur) &&
 			    states_equal(env, &sl->state, cur, EXACT) &&
 			    !iter_active_depths_differ(&sl->state, cur) &&

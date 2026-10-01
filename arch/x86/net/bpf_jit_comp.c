@@ -12,7 +12,6 @@
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/sort.h>
-#include <asm/bpf_extable.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
 #include <asm/set_memory.h>
@@ -318,16 +317,6 @@ struct jit_context {
 	 */
 	int tail_call_direct_label;
 	int tail_call_indirect_label;
-
-	/* eBPFOS: the operands this JIT resolved from its own kernel, recorded
-	 * where it wrote them so a frozen image can be placed elsewhere without
-	 * matching byte patterns. Reset on every pass; the converged pass wins.
-	 */
-	struct bpf_jit_reloc *relocs;
-	u32 reloc_count;
-	u32 reloc_max;
-	bool reloc_incomplete;
-	char *symbol_scratch;
 };
 
 /* Maximum number of bytes emitted while JITing one eBPF insn */
@@ -587,59 +576,10 @@ static int emit_call(u8 **pprog, void *func, void *ip)
 	return emit_patch(pprog, func, ip, 0xE8);
 }
 
-/* eBPFOS: note one operand and exactly where this JIT put it. @site points at
- * the operand inside the per-instruction scratch buffer, so the image offset is
- * the emitted length so far plus its distance from that buffer's start.
- */
-static void jit_note_reloc(struct jit_context *ctx, int proglen, const u8 *temp,
-			   const u8 *site, u16 kind, u16 width, u64 value,
-			   int insn_index)
-{
-	struct bpf_jit_reloc *record;
-
-	if (!ctx)
-		return;
-	if (!ctx->relocs || ctx->reloc_count >= ctx->reloc_max) {
-		/* Dropping an operand silently would leave a table that looks
-		 * complete. Say it is not.
-		 */
-		ctx->reloc_incomplete = true;
-		return;
-	}
-	record = &ctx->relocs[ctx->reloc_count++];
-	record->offset = proglen + (u32)(site - temp);
-	record->kind = kind;
-	record->width = width;
-	record->value = value;
-	record->insn_index = insn_index;
-	record->function_index = 0;
-	record->symbol[0] = '\0';
-	/* A call target is only bindable elsewhere by name, so resolve it here
-	 * where the address still means something. A name that does not fit is
-	 * left empty rather than truncated into a different symbol.
-	 */
-	if ((kind == BPF_JIT_RELOC_HELPER_CALL ||
-	     kind == BPF_JIT_RELOC_KFUNC_CALL ||
-	     kind == BPF_JIT_RELOC_THUNK_JUMP) && ctx->symbol_scratch &&
-	    !lookup_symbol_name((unsigned long)value, ctx->symbol_scratch) &&
-	    strlen(ctx->symbol_scratch) < sizeof(record->symbol))
-		strscpy(record->symbol, ctx->symbol_scratch,
-			sizeof(record->symbol));
-}
-
-/* Name the operand just recorded, where the emitter knows it statically. */
-static void jit_note_symbol(struct jit_context *ctx, const char *symbol)
-{
-	if (!ctx || !ctx->relocs || !ctx->reloc_count)
-		return;
-	strscpy(ctx->relocs[ctx->reloc_count - 1].symbol, symbol,
-		sizeof(ctx->relocs[ctx->reloc_count - 1].symbol));
-}
-
 static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
-			      const u8 *final_ip, bool *position_independent)
+			      const u8 *final_ip)
 {
 	const struct bpf_kop *kop;
 	u8 scratch[BPF_MAX_INSN_SIZE];
@@ -653,8 +593,6 @@ static int emit_kop_desc_call(u8 **pprog,
 		return ret;
 	if (!kop || !kop->emit_x86)
 		return -EOPNOTSUPP;
-	if (position_independent)
-		*position_independent = kop->position_independent;
 	if (kop->max_emit_bytes > BPF_MAX_INSN_SIZE)
 		return -E2BIG;
 
@@ -787,21 +725,12 @@ static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
 	*pprog = prog;
 }
 
-static void emit_return(u8 **pprog, u8 *ip, struct jit_context *ctx,
-			int proglen, const u8 *temp)
+static void emit_return(u8 **pprog, u8 *ip)
 {
 	u8 *prog = *pprog;
 
 	if (cpu_wants_rethunk()) {
-		u8 *site = prog;
-
 		emit_jump(&prog, x86_return_thunk, ip);
-		/* The epilogue's return goes through kernel text, so the
-		 * displacement moves with the code like any call's.
-		 */
-		jit_note_reloc(ctx, proglen, temp, site + 1,
-			       BPF_JIT_RELOC_THUNK_JUMP, 4,
-			       (u64)(unsigned long)x86_return_thunk, -1);
 	} else {
 		EMIT1(0xC3);		/* ret */
 		if (IS_ENABLED(CONFIG_MITIGATION_SLS))
@@ -1074,32 +1003,6 @@ static void emit_mov_imm64(u8 **pprog, u32 dst_reg,
 	}
 
 	*pprog = prog;
-}
-
-/* The same immediate the stock emitter writes, plus where it wrote it. The
- * branches mirror emit_mov_imm64()/emit_mov_imm32() rather than inspecting the
- * emitted bytes, so the location is exact by construction.
- */
-static void emit_mov_imm64_tracked(u8 **pprog, u32 dst_reg,
-				   const u32 imm32_hi, const u32 imm32_lo,
-				   u8 **operand, u16 *width)
-{
-	u64 imm64 = ((u64)imm32_hi << 32) | (u32)imm32_lo;
-	u8 *start = *pprog;
-
-	emit_mov_imm64(pprog, dst_reg, imm32_hi, imm32_lo);
-	if (!is_uimm32(imm64) && !is_simm32(imm64)) {
-		*operand = start + 2;	/* REX + opcode, then the imm64 */
-		*width = 8;
-		return;
-	}
-	if (!imm32_lo) {
-		*operand = start;	/* xor form carries no immediate */
-		*width = 0;
-		return;
-	}
-	*operand = *pprog - 4;		/* every other form ends with imm32 */
-	*width = 4;
 }
 
 static void emit_mov_reg(u8 **pprog, bool is64, u32 dst_reg, u32 src_reg)
@@ -1567,6 +1470,69 @@ static int emit_atomic_ld_st_index(u8 **pprog, u32 atomic_op, u32 size,
 	return 0;
 }
 
+/*
+ * Metadata encoding for exception handling in JITed code.
+ *
+ * Format of `fixup` and `data` fields in `struct exception_table_entry`:
+ *
+ * Bit layout of `fixup` (32-bit):
+ *
+ * +-----------+--------+-----------+---------+----------+
+ * | 31        | 30-24  |   23-16   |   15-8  |    7-0   |
+ * |           |        |           |         |          |
+ * | ARENA_ACC | Unused | ARENA_REG | DST_REG | INSN_LEN |
+ * +-----------+--------+-----------+---------+----------+
+ *
+ * - INSN_LEN (8 bits): Length of faulting insn (max x86 insn = 15 bytes (fits in 8 bits)).
+ * - DST_REG  (8 bits): Offset of dst_reg from reg2pt_regs[] (max offset = 112 (fits in 8 bits)).
+ *                      This is set to DONT_CLEAR if the insn is a store.
+ * - ARENA_REG (8 bits): Offset of the register that is used to calculate the
+ *                       address for load/store when accessing the arena region.
+ * - ARENA_ACCESS (1 bit): This bit is set when the faulting instruction accessed the arena region.
+ *
+ * Bit layout of `data` (32-bit):
+ *
+ * +--------------+--------+--------------+
+ * |	31-16	  |  15-8  |     7-0      |
+ * |              |	   |              |
+ * | ARENA_OFFSET | Unused |  EX_TYPE_BPF |
+ * +--------------+--------+--------------+
+ *
+ * - ARENA_OFFSET (16 bits): Offset used to calculate the address for load/store when
+ *                           accessing the arena region.
+ */
+
+#define DONT_CLEAR 1
+#define FIXUP_INSN_LEN_MASK	GENMASK(7, 0)
+#define FIXUP_REG_MASK		GENMASK(15, 8)
+#define FIXUP_ARENA_REG_MASK	GENMASK(23, 16)
+#define FIXUP_ARENA_ACCESS	BIT(31)
+#define DATA_ARENA_OFFSET_MASK	GENMASK(31, 16)
+
+bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
+{
+	u32 reg = FIELD_GET(FIXUP_REG_MASK, x->fixup);
+	u32 insn_len = FIELD_GET(FIXUP_INSN_LEN_MASK, x->fixup);
+	bool is_arena = !!(x->fixup & FIXUP_ARENA_ACCESS);
+	bool is_write = (reg == DONT_CLEAR);
+	unsigned long addr;
+	s16 off;
+	u32 arena_reg;
+
+	if (is_arena) {
+		arena_reg = FIELD_GET(FIXUP_ARENA_REG_MASK, x->fixup);
+		off = FIELD_GET(DATA_ARENA_OFFSET_MASK, x->data);
+		addr = *(unsigned long *)((void *)regs + arena_reg) + off;
+		bpf_prog_report_arena_violation(is_write, addr, regs->ip);
+	}
+
+	/* jump over faulting load and clear dest register */
+	if (reg != DONT_CLEAR)
+		*(unsigned long *)((void *)regs + reg) = 0;
+	regs->ip += insn_len;
+
+	return true;
+}
 
 static void detect_insn_reg_usage(const struct bpf_insn *insn, int insn_cnt,
 				  bool *regs_used)
@@ -1694,31 +1660,19 @@ static void emit_shiftx(u8 **pprog, u32 dst_reg, u8 src_reg, bool is64, u8 op)
 	*pprog = prog;
 }
 
-static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr,
-				struct jit_context *ctx, int proglen,
-				const u8 *temp)
+static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr)
 {
 	u8 *prog = *pprog;
-	u8 *operand;
-	u16 width;
 
 	/* movabs r9, priv_frame_ptr */
-	emit_mov_imm64_tracked(&prog, X86_REG_R9,
-			       (__force long) priv_frame_ptr >> 32,
-			       (u32) (__force long) priv_frame_ptr,
-			       &operand, &width);
-	jit_note_reloc(ctx, proglen, temp, operand, BPF_JIT_RELOC_PRIV_STACK,
-		       width, (u64)(__force long) priv_frame_ptr, -1);
+	emit_mov_imm64(&prog, X86_REG_R9, (__force long) priv_frame_ptr >> 32,
+		       (u32) (__force long) priv_frame_ptr);
 
 #ifdef CONFIG_SMP
 	/* add <r9>, gs:[<off>] */
 	EMIT2(0x65, 0x4c);
 	EMIT3(0x03, 0x0c, 0x25);
 	EMIT((u32)(unsigned long)&this_cpu_off, 4);
-	jit_note_reloc(ctx, proglen, temp, prog - 4,
-		       BPF_JIT_RELOC_PERCPU_OFFSET, 4,
-		       (u64)(unsigned long)&this_cpu_off, -1);
-	jit_note_symbol(ctx, "this_cpu_off");
 #endif
 
 	*pprog = prog;
@@ -1796,7 +1750,6 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	u32 stack_depth;
 	int err;
 
-	ctx->reloc_count = 0;
 	stack_depth = bpf_prog->aux->stack_depth;
 	priv_stack_ptr = bpf_prog->aux->priv_stack_ptr;
 	if (priv_stack_ptr) {
@@ -1832,20 +1785,12 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 			push_r12(&prog);
 		push_callee_regs(&prog, callee_regs_used);
 	}
-	if (arena_vm_start) {
-		u8 *operand;
-		u16 width;
-
-		emit_mov_imm64_tracked(&prog, X86_REG_R12,
-				       arena_vm_start >> 32, (u32) arena_vm_start,
-				       &operand, &width);
-		jit_note_reloc(ctx, proglen, temp, operand,
-			       BPF_JIT_RELOC_ARENA_BASE, width, arena_vm_start,
-			       -1);
-	}
+	if (arena_vm_start)
+		emit_mov_imm64(&prog, X86_REG_R12,
+			       arena_vm_start >> 32, (u32) arena_vm_start);
 
 	if (priv_frame_ptr)
-		emit_priv_frame_ptr(&prog, priv_frame_ptr, ctx, proglen, temp);
+		emit_priv_frame_ptr(&prog, priv_frame_ptr);
 
 	ilen = prog - temp;
 	if (rw_image)
@@ -1912,9 +1857,6 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 					EMIT1_off32(0x0D,  user_vm_start >> 32);
 				else
 					EMIT2_off32(0x81, add_1reg(0xC8, dst_reg),  user_vm_start >> 32);
-				jit_note_reloc(ctx, proglen, temp, prog - 4,
-					       BPF_JIT_RELOC_ARENA_USER_BASE, 4,
-					       user_vm_start, i);
 
 				/* rol dst_reg, 32 */
 				maybe_emit_1mod(&prog, dst_reg, true);
@@ -1940,10 +1882,6 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				EMIT2(0x65, add_1mod(0x48, dst_reg));
 				EMIT3(0x03, add_2reg(0x04, 0, dst_reg), 0x25);
 				EMIT((u32)(unsigned long)&this_cpu_off, 4);
-				jit_note_reloc(ctx, proglen, temp, prog - 4,
-					       BPF_JIT_RELOC_PERCPU_OFFSET, 4,
-					       (u64)(unsigned long)&this_cpu_off, i);
-				jit_note_symbol(ctx, "this_cpu_off");
 #endif
 				break;
 			}
@@ -2023,69 +1961,11 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				       dst_reg, imm32);
 			break;
 
-		case BPF_LD | BPF_IMM | BPF_DW: {
-			u64 immediate = ((u64)(u32)insn[1].imm << 32) |
-					(u32)insn[0].imm;
-			const struct bpf_map *named = NULL;
-			bool value_address = false;
-			u32 map_index;
-
-			/* The verifier clears the pseudo source once it has
-			 * resolved a map, so the instruction no longer says it
-			 * carries an address. Ask the program's own resolved
-			 * maps instead of guessing from the bytes.
-			 */
-			for (map_index = 0;
-			     map_index < bpf_prog->aux->used_map_cnt;
-			     map_index++) {
-				struct bpf_map *map =
-					bpf_prog->aux->used_maps[map_index];
-				u64 addr;
-
-				if (!map)
-					continue;
-				if (immediate == (u64)(unsigned long)map) {
-					named = map;
-					break;
-				}
-				if (!map->ops->map_direct_value_addr)
-					continue;
-				if (map->ops->map_direct_value_addr(map, &addr, 0))
-					continue;
-				if (immediate >= addr &&
-				    immediate < addr + map->value_size) {
-					named = map;
-					value_address = true;
-					break;
-				}
-			}
-			if (insn->src_reg || named) {
-				u8 *operand;
-				u16 width;
-
-				emit_mov_imm64_tracked(&prog, dst_reg,
-						       insn[1].imm, insn[0].imm,
-						       &operand, &width);
-				jit_note_reloc(ctx, proglen, temp, operand,
-					       BPF_JIT_RELOC_PSEUDO_IMM64, width,
-					       immediate, i);
-				if (named) {
-					char name[sizeof(((struct bpf_jit_reloc *)0)->symbol)];
-
-					snprintf(name, sizeof(name), "%s:%s%s",
-						 value_address ? "mapval" : "map",
-						 named->name[0] ? named->name : "anon",
-						 "");
-					jit_note_symbol(ctx, name);
-				}
-			} else {
-				emit_mov_imm64(&prog, dst_reg, insn[1].imm,
-					       insn[0].imm);
-			}
+		case BPF_LD | BPF_IMM | BPF_DW:
+			emit_mov_imm64(&prog, dst_reg, insn[1].imm, insn[0].imm);
 			insn++;
 			i++;
 			break;
-		}
 
 			/* dst %= src, dst /= src, dst %= imm32, dst /= imm32 */
 		case BPF_ALU | BPF_MOD | BPF_X:
@@ -2652,28 +2532,13 @@ populate_extable:
 
 		/* call */
 		case BPF_JMP | BPF_CALL: {
-			u8 *call_site;
-
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
-				bool movable = false;
-
-				call_site = prog;
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
-							 image ? ip : NULL,
-							 &movable);
+							 image ? ip : NULL);
 				if (err)
 					return err;
-				/* The KOperation's own emitter owns these bytes,
-				 * so only it can say whether they mean the same
-				 * thing elsewhere. Record which it said.
-				 */
-				jit_note_reloc(ctx, proglen, temp, call_site,
-					       movable ?
-						       BPF_JIT_RELOC_KOP_CALL_PIC :
-						       BPF_JIT_RELOC_KOP_CALL,
-					       (u16)(prog - call_site), imm32, i);
 				break;
 			}
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
@@ -2686,40 +2551,15 @@ populate_extable:
 				push_r9(&prog);
 				ip += 2;
 			}
-			{
-				u8 *accounting = prog;
-				int emitted;
-
-				emitted = x86_call_depth_emit_accounting(&prog,
-									func, ip);
-				ip += emitted;
-				if (emitted)
-					/* Call-depth accounting embeds a target
-					 * this table does not describe.
-					 */
-					jit_note_reloc(ctx, proglen, temp,
-						       accounting,
-						       BPF_JIT_RELOC_UNDESCRIBED,
-						       (u16)emitted, 0, i);
-			}
-			call_site = prog;
+			ip += x86_call_depth_emit_accounting(&prog, func, ip);
 			if (emit_call(&prog, func, ip))
 				return -EINVAL;
-			jit_note_reloc(ctx, proglen, temp, call_site + 1,
-				       src_reg == BPF_PSEUDO_CALL ?
-					       BPF_JIT_RELOC_INTERNAL_CALL :
-				       src_reg == BPF_PSEUDO_KFUNC_CALL ?
-					       BPF_JIT_RELOC_KFUNC_CALL :
-					       BPF_JIT_RELOC_HELPER_CALL,
-				       4, (u64)(unsigned long)func, i);
 			if (priv_frame_ptr)
 				pop_r9(&prog);
 			break;
 		}
 
-		case BPF_JMP | BPF_TAIL_CALL: {
-			u8 *tail_call_site = prog;
-
+		case BPF_JMP | BPF_TAIL_CALL:
 			if (imm32)
 				emit_bpf_tail_call_direct(bpf_prog,
 							  &bpf_prog->aux->poke_tab[imm32 - 1],
@@ -2735,17 +2575,7 @@ populate_extable:
 							    stack_depth,
 							    ip,
 							    ctx);
-			/* A tail call carries the program array, the counter and
-			 * the entry it jumps to, all as addresses of this
-			 * kernel, and none of them is described here. Say so, so
-			 * a placement refuses the image instead of moving bytes
-			 * nothing describes.
-			 */
-			jit_note_reloc(ctx, proglen, temp, tail_call_site,
-				       BPF_JIT_RELOC_UNDESCRIBED,
-				       (u16)(prog - tail_call_site), imm32, i);
 			break;
-		}
 
 			/* cond jump */
 		case BPF_JMP | BPF_JEQ | BPF_X:
@@ -3012,8 +2842,7 @@ emit_jmp:
 			EMIT1(0xC9);         /* leave */
 			bpf_prog->aux->ksym.fp_end = prog - temp;
 
-			emit_return(&prog, image + addrs[i - 1] + (prog - temp),
-				    ctx, proglen, temp);
+			emit_return(&prog, image + addrs[i - 1] + (prog - temp));
 			break;
 
 		default:
@@ -3771,7 +3600,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		/* skip our return address and return to parent */
 		EMIT4(0x48, 0x83, 0xC4, 8); /* add rsp, 8 */
 	}
-	emit_return(&prog, image + (prog - (u8 *)rw_image), NULL, 0, NULL);
+	emit_return(&prog, image + (prog - (u8 *)rw_image));
 	/* Make sure the trampoline generation logic doesn't overflow */
 	if (WARN_ON_ONCE(prog > (u8 *)rw_image_end - BPF_INSN_SAFETY)) {
 		ret = -EFAULT;
@@ -4049,19 +3878,6 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 	}
 	ctx.cleanup_addr = proglen;
 skip_init_addrs:
-	/* eBPFOS: one record per instruction is an upper bound -- an instruction
-	 * emits at most one operand this kernel resolved -- plus the prologue's
-	 * arena base. The pointer is never stored in jit_data, so a later extra
-	 * pass allocates its own and the converged pass always owns what it
-	 * recorded.
-	 */
-	ctx.reloc_max = prog->len + 1;
-	ctx.relocs = kvcalloc(ctx.reloc_max, sizeof(*ctx.relocs), GFP_KERNEL);
-	if (!ctx.relocs) {
-		ctx.reloc_max = 0;
-		ctx.reloc_incomplete = true;
-	}
-	ctx.symbol_scratch = kmalloc(KSYM_NAME_LEN, GFP_KERNEL);
 
 	/*
 	 * JITed image shrinks with every pass and the loop iterates
@@ -4142,9 +3958,6 @@ out_image:
 		} else {
 			jit_data->addrs = addrs;
 			jit_data->ctx = ctx;
-			jit_data->ctx.relocs = NULL;
-			jit_data->ctx.reloc_count = 0;
-			jit_data->ctx.reloc_max = 0;
 			jit_data->proglen = proglen;
 			jit_data->image = image;
 			jit_data->header = header;
@@ -4169,19 +3982,7 @@ out_image:
 		prog->bpf_func = (void *)image + cfi_get_offset();
 		prog->jited = 1;
 		prog->jited_len = proglen - cfi_get_offset();
-		prog->jit_reloc_incomplete = ctx.reloc_incomplete;
-		if (ctx.relocs && ctx.reloc_count) {
-			kvfree(prog->jit_relocs);
-			prog->jit_relocs = ctx.relocs;
-			prog->jit_reloc_cnt = ctx.reloc_count;
-			ctx.relocs = NULL;
-			ctx.reloc_max = 0;
-		}
 	}
-	kvfree(ctx.relocs);
-	ctx.relocs = NULL;
-	kfree(ctx.symbol_scratch);
-	ctx.symbol_scratch = NULL;
 
 	if (!image || !prog->is_func || extra_pass) {
 		if (image)
@@ -4225,10 +4026,6 @@ bool bpf_jit_supports_percpu_insn(void)
 
 void bpf_jit_free(struct bpf_prog *prog)
 {
-	kvfree(prog->jit_relocs);
-	prog->jit_relocs = NULL;
-	prog->jit_reloc_cnt = 0;
-	prog->jit_reloc_incomplete = false;
 	if (prog->jited) {
 		struct x64_jit_data *jit_data = prog->aux->jit_data;
 		struct bpf_binary_header *hdr;

@@ -264,47 +264,6 @@ struct ebpfos_admission_identity_v1 {
 	__u8 authority_sha256[32];
 };
 
-/* Run a verified program's own JIT output from a second address: the copy is
- * relocated for the move and its fault fixups are rebuilt there. @prog_fd names
- * a program this kernel verified and JITed; no native bytes are supplied.
- */
-#define EBPFOS_JIT_PLACE_VERSION 2U
-/* Place without an export to authenticate against. The placement is then only
- * as good as the program fd it was handed, which is why it must be asked for.
- */
-#define EBPFOS_JIT_PLACE_F_NO_ARTIFACT (1U << 0)
-
-struct ebpfos_ioc_jit_place {
-	__u32 version;
-	__u32 flags;
-	__s32 prog_fd;
-	__u32 context_size;
-	__aligned_u64 context;
-	/* The EBPFJIT4 export of this same program. It is authenticated against
-	 * the image and tables this kernel holds; the bytes that get placed are
-	 * the kernel's own, never these. Zero to place without an export.
-	 */
-	__aligned_u64 artifact;
-	__u64 artifact_size;
-	/* The arena the placed code must run against. -1 accepts the program's
-	 * own; anything else must be that same arena.
-	 */
-	__s32 arena_map_fd;
-	__u32 authenticated;
-	__aligned_u64 placed_address;
-	__aligned_u64 source_address;
-	__u32 jited_bytes;
-	__u32 relocations;
-	__u32 exentries;
-	__u32 retval;
-	__u32 functions;
-	__u32 reserved;
-	/* How long the placement itself took: allocation, rebinding, fixups and
-	 * the two symbol swaps, but not the run.
-	 */
-	__u64 place_ns;
-};
-
 #define EBPFOS_IOC_POLICY_ACTIVATE \
 	_IOW(EBPFOS_IOC_MAGIC, 0x30, struct ebpfos_ioc_policy_activate)
 #define EBPFOS_IOC_POLICY_STATUS \
@@ -315,7 +274,5 @@ struct ebpfos_ioc_jit_place {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x33, struct ebpfos_ioc_admission_info)
 #define EBPFOS_IOC_ADMISSION_RUNTIME_INFO \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x38, struct ebpfos_ioc_admission_runtime_info)
-#define EBPFOS_IOC_JIT_PLACE \
-	_IOWR(EBPFOS_IOC_MAGIC, 0x40, struct ebpfos_ioc_jit_place)
 
 #endif /* _UAPI_EBPFOS_H */

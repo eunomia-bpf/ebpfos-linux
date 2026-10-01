@@ -2923,7 +2923,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_TEST_REG_INVARIANTS |
 				 BPF_F_EBPFOS_META |
 				 BPF_F_EBPFOS_COMPONENT |
-				 BPF_F_EBPFOS_INVARIANTS |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
@@ -2941,31 +2940,11 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS_BUILD))
 		return -EOPNOTSUPP;
-	if ((attr->prog_flags & BPF_F_EBPFOS_INVARIANTS) &&
-	    (type != BPF_PROG_TYPE_SYSCALL ||
-	     attr->prog_flags != (BPF_F_EBPFOS_INVARIANTS | BPF_F_SLEEPABLE)))
-		return -EINVAL;
-	if ((attr->prog_flags & BPF_F_EBPFOS_INVARIANTS) &&
-	    !IS_ENABLED(CONFIG_EBPFOS_BUILD))
-		return -EOPNOTSUPP;
 	if ((attr->prog_flags &
 	     (BPF_F_EBPFOS_META | BPF_F_EBPFOS_COMPONENT)) &&
 	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->prog_btf_fd || attr->func_info_rec_size ||
 	     attr->func_info || attr->func_info_cnt ||
-	     attr->line_info_rec_size || attr->line_info ||
-	     attr->line_info_cnt || attr->attach_btf_id ||
-	     attr->attach_prog_fd || attr->core_relo_cnt ||
-	     attr->core_relos || attr->core_relo_rec_size ||
-	     attr->fd_array || attr->fd_array_cnt))
-		return -EINVAL;
-	/* Invariant programs use the normal verifier's BTF function contracts
-	 * to validate global subprograms independently.  Keep every attachment,
-	 * line-info, CO-RE and fd-array input forbidden, but admit the ordinary
-	 * prog_btf_fd/func_info tuple and let bpf_check_btf_info() validate it.
-	 */
-	if ((attr->prog_flags & BPF_F_EBPFOS_INVARIANTS) &&
-	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->line_info_rec_size || attr->line_info ||
 	     attr->line_info_cnt || attr->attach_btf_id ||
 	     attr->attach_prog_fd || attr->core_relo_cnt ||
@@ -3086,8 +3065,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->aux->ebpfos_meta = !!(attr->prog_flags & BPF_F_EBPFOS_META);
 	prog->aux->ebpfos_component =
 		!!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT);
-	prog->aux->ebpfos_invariants =
-		!!(attr->prog_flags & BPF_F_EBPFOS_INVARIANTS);
 	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
@@ -5154,11 +5131,7 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	u32 ulen, len;
 	int err;
 
-	/* The relocation buffer is supplied by userspace like the other export
-	 * buffers, so the accepted input must reach it; everything past it still
-	 * has to be zero.
-	 */
-	len = offsetofend(struct bpf_prog_info, jited_exentries);
+	len = offsetofend(struct bpf_prog_info, attach_btf_id);
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), len, info_len);
 	if (err)
 		return err;
@@ -5350,120 +5323,6 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 			}
 		} else {
 			info.jited_func_lens = 0;
-		}
-	}
-
-	/* eBPFOS: the operands the JIT resolved from this kernel, in the same
-	 * function order as jited_ksyms, so a frozen image can be placed
-	 * elsewhere without inspecting its bytes.
-	 */
-	ulen = info.nr_jited_relocs;
-	info.jited_reloc_rec_size = sizeof(struct bpf_jit_reloc);
-	info.nr_jited_relocs = 0;
-	if (prog->aux->func_cnt) {
-		u32 function;
-
-		for (function = 0; function < prog->aux->func_cnt; function++) {
-			info.nr_jited_relocs +=
-				prog->aux->func[function]->jit_reloc_cnt;
-			/* An incomplete table gets one explicit record so it can
-			 * never be read as a complete empty one.
-			 */
-			if (prog->aux->func[function]->jit_reloc_incomplete)
-				info.nr_jited_relocs++;
-		}
-	} else {
-		info.nr_jited_relocs = prog->jit_reloc_cnt +
-				       (prog->jit_reloc_incomplete ? 1 : 0);
-	}
-	if (ulen) {
-		if (bpf_dump_raw_ok(file->f_cred)) {
-			struct bpf_jit_reloc __user *user_relocs;
-			u32 copied = 0, index, entry;
-
-			ulen = min_t(u32, info.nr_jited_relocs, ulen);
-			user_relocs = u64_to_user_ptr(info.jited_relocs);
-			for (index = 0; index < (prog->aux->func_cnt ? : 1); index++) {
-				struct bpf_prog *sub = prog->aux->func_cnt ?
-						       prog->aux->func[index] : prog;
-
-				for (entry = 0; entry < sub->jit_reloc_cnt; entry++) {
-					struct bpf_jit_reloc record;
-
-					if (copied >= ulen)
-						break;
-					record = sub->jit_relocs[entry];
-					record.function_index = index;
-					if (copy_to_user(&user_relocs[copied],
-							 &record, sizeof(record)))
-						return -EFAULT;
-					copied++;
-				}
-				if (sub->jit_reloc_incomplete && copied < ulen) {
-					struct bpf_jit_reloc record = {
-						.kind = BPF_JIT_RELOC_UNDESCRIBED,
-						.function_index = index,
-					};
-
-					if (copy_to_user(&user_relocs[copied],
-							 &record, sizeof(record)))
-						return -EFAULT;
-					copied++;
-				}
-			}
-		} else {
-			info.jited_relocs = 0;
-		}
-	}
-
-	/* eBPFOS: the fault fixups the JIT installed, addressed from the same
-	 * base as jited_ksyms so a placement can rebuild them.
-	 */
-	ulen = info.nr_jited_exentries;
-	info.jited_exentry_rec_size = sizeof(struct bpf_jit_exentry);
-	info.nr_jited_exentries = 0;
-	if (prog->aux->func_cnt) {
-		u32 function;
-
-		for (function = 0; function < prog->aux->func_cnt; function++)
-			info.nr_jited_exentries +=
-				prog->aux->func[function]->aux->num_exentries;
-	} else {
-		info.nr_jited_exentries = prog->aux->num_exentries;
-	}
-	if (ulen) {
-		if (bpf_dump_raw_ok(file->f_cred)) {
-			struct bpf_jit_exentry __user *user_entries;
-			u32 copied = 0, index, entry;
-
-			ulen = min_t(u32, info.nr_jited_exentries, ulen);
-			user_entries = u64_to_user_ptr(info.jited_exentries);
-			for (index = 0; index < (prog->aux->func_cnt ? : 1); index++) {
-				struct bpf_prog *sub = prog->aux->func_cnt ?
-						       prog->aux->func[index] : prog;
-
-				for (entry = 0; entry < sub->aux->num_exentries; entry++) {
-					const struct exception_table_entry *ex =
-						&sub->aux->extable[entry];
-					struct bpf_jit_exentry record = {};
-					const u8 *faulting;
-
-					if (copied >= ulen)
-						break;
-					faulting = (const u8 *)&ex->insn + ex->insn;
-					record.insn_offset =
-						(u32)(faulting - (const u8 *)sub->bpf_func);
-					record.fixup = ex->fixup;
-					record.data = ex->data;
-					record.function_index = index;
-					if (copy_to_user(&user_entries[copied],
-							 &record, sizeof(record)))
-						return -EFAULT;
-					copied++;
-				}
-			}
-		} else {
-			info.jited_exentries = 0;
 		}
 	}
 

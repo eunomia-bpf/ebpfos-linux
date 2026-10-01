@@ -31,11 +31,6 @@ struct ebpfos_koperation_descriptor {
 	u8 kprog_machine_selector;
 	u8 kprog_machine_action;
 	u8 kprog_normalize_bits;
-	u32 kprog_machine_register;
-	u8 kprog_operand_policy;
-	u8 kprog_readback_required;
-	u64 kprog_operand_required;
-	u64 kprog_operand_variable_mask;
 	const struct bpf_insn *proof_insns;
 	u32 proof_insn_count;
 	u32 proof_imm64_insn;
@@ -71,17 +66,10 @@ ebpfos_koperation_find(u32 operation_id);
 #define EBPFOS_KPROG_FORM_CONTROL_REGISTER 1U
 #define EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER 2U
 #define EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER 3U
-#define EBPFOS_KPROG_FORM_IO_PORT 4U
 #define EBPFOS_KPROG_CONTROL_CR3 3U
 #define EBPFOS_KPROG_CONTROL_CR4 4U
 #define EBPFOS_KPROG_MSR_LSTAR 1U
-#define EBPFOS_KPROG_MSR_X2APIC_LVTT 2U
-#define EBPFOS_KPROG_MSR_X2APIC_TMICT 3U
-#define EBPFOS_KPROG_MSR_X2APIC_TMCCT 4U
-#define EBPFOS_KPROG_MSR_X2APIC_ICR_SELF 5U
-#define EBPFOS_KPROG_MSR_X2APIC_EOI 6U
 #define EBPFOS_KPROG_DESCRIPTOR_IDTR 1U
-#define EBPFOS_KPROG_IO_PORT_UART8250_TX 1U
 #define EBPFOS_KPROG_ACTION_RELOAD 1U
 #define EBPFOS_KPROG_ACTION_OBSERVE 2U
 #define EBPFOS_KPROG_ACTION_INSTALL 3U
@@ -118,8 +106,7 @@ static int ebpfos_kprog_machine_decode(
 	decoded->form = payload & 0xf;
 	if ((decoded->form != EBPFOS_KPROG_FORM_CONTROL_REGISTER &&
 	     decoded->form != EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
-	     decoded->form != EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER &&
-	     decoded->form != EBPFOS_KPROG_FORM_IO_PORT) ||
+	     decoded->form != EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER) ||
 	    payload >> 24)
 		return -EINVAL;
 	decoded->input_reg = (payload >> 4) & 0xf;
@@ -137,17 +124,14 @@ static int ebpfos_kprog_machine_decode(
 		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))
 			return -EINVAL;
 	} else if (decoded->form == EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER &&
+		   (decoded->selector != EBPFOS_KPROG_MSR_LSTAR ||
 		   (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
-		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE)) {
+		    decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
 		return -EINVAL;
 	} else if (decoded->form == EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER &&
 		   (decoded->selector != EBPFOS_KPROG_DESCRIPTOR_IDTR ||
 		    (decoded->action != EBPFOS_KPROG_ACTION_INSTALL &&
 		     decoded->action != EBPFOS_KPROG_ACTION_OBSERVE))) {
-		return -EINVAL;
-	} else if (decoded->form == EBPFOS_KPROG_FORM_IO_PORT &&
-		   (decoded->selector != EBPFOS_KPROG_IO_PORT_UART8250_TX ||
-		    decoded->action != EBPFOS_KPROG_ACTION_INSTALL)) {
 		return -EINVAL;
 	}
 	return 0;
@@ -336,90 +320,30 @@ static int ebpfos_kprog_machine_emit_x86(
 			second_mismatch = cursor++;
 		else
 			third_mismatch = cursor++;
-	} else if (decoded.form == EBPFOS_KPROG_FORM_IO_PORT) {
-		u32 mask = ~(u32)operation->kprog_operand_variable_mask;
-
-		if (operation->kprog_operand_policy !=
-		    EBPFOS_KPROG_OPERAND_MASKED_VALUE ||
-		    operation->kprog_operand_required > S32_MAX ||
-		    operation->kprog_operand_variable_mask > U32_MAX ||
-		    operation->kprog_machine_register > U16_MAX)
-			return -ERANGE;
-		/* Stage the component byte in r11 and reject non-byte authority. */
-		EMIT(0x49 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
-		EMIT(0x89); EMIT(0xc0 | (input_code << 3) | 3);
-		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-		EMIT(0x48); EMIT(0x25);
-		put_unaligned_le32(mask, cursor); cursor += 4;
-		EMIT(0x48); EMIT(0x3d);
-		put_unaligned_le32((u32)operation->kprog_operand_required, cursor);
-		cursor += 4;
-		EMIT(0x75); first_mismatch = cursor++;
-		/* Unique generated PIO execution point: out %al,(%dx). */
-		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-		EMIT(0xba);
-		put_unaligned_le32(operation->kprog_machine_register, cursor);
-		cursor += 4;
-		EMIT(0xee);
-		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
 	} else if (decoded.action == EBPFOS_KPROG_ACTION_INSTALL) {
-		/*
-		 * Stage and constrain the component-owned operand before the unique
-		 * WRMSR execution point selected by generated operation metadata.
-		 */
+		/* Stage the component-owned root in r11 and reject non-canonical
+		 * x86-64 addresses before the unique WRMSR execution point. */
 		EMIT(0x49 | (ebpfos_kprog_x86_reg_extended(decoded.input_reg) << 2));
 		EMIT(0x89); EMIT(0xc0 | (input_code << 3) | 3);
-		if (operation->kprog_operand_policy ==
-		    EBPFOS_KPROG_OPERAND_CANONICAL_ADDRESS) {
-			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-			EMIT(0x48); EMIT(0xc1); EMIT(0xe0); EMIT(0x10);
-			EMIT(0x48); EMIT(0xc1); EMIT(0xf8); EMIT(0x10);
-			EMIT(0x49); EMIT(0x39); EMIT(0xc3);
-			EMIT(0x75); first_mismatch = cursor++;
-		} else if (operation->kprog_operand_policy ==
-			   EBPFOS_KPROG_OPERAND_MASKED_VALUE) {
-			u32 mask = ~(u32)operation->kprog_operand_variable_mask;
-
-			if (operation->kprog_operand_required > S32_MAX ||
-			    operation->kprog_operand_variable_mask > U32_MAX)
-				return -ERANGE;
-			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-			EMIT(0x48); EMIT(0x25);
-			put_unaligned_le32(mask, cursor); cursor += 4;
-			EMIT(0x48); EMIT(0x3d);
-			put_unaligned_le32((u32)operation->kprog_operand_required,
-					   cursor);
-			cursor += 4;
-			EMIT(0x75); first_mismatch = cursor++;
-		} else if (operation->kprog_operand_policy !=
-			   EBPFOS_KPROG_OPERAND_NONE) {
-			return -EINVAL;
-		}
+		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
+		EMIT(0x48); EMIT(0xc1); EMIT(0xe0); EMIT(0x10);
+		EMIT(0x48); EMIT(0xc1); EMIT(0xf8); EMIT(0x10);
+		EMIT(0x49); EMIT(0x39); EMIT(0xc3);
+		EMIT(0x75); first_mismatch = cursor++;
 		EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
 		EMIT(0x4c); EMIT(0x89); EMIT(0xda);
 		EMIT(0x48); EMIT(0xc1); EMIT(0xea); EMIT(0x20);
-		EMIT(0xb9);
-		put_unaligned_le32(operation->kprog_machine_register, cursor);
-		cursor += 4;
+		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
 		EMIT(0x0f); EMIT(0x30);
-		if (operation->kprog_readback_required) {
-			EMIT(0xb9);
-			put_unaligned_le32(operation->kprog_machine_register,
-					   cursor);
-			cursor += 4;
-			EMIT(0x0f); EMIT(0x32);
-			EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
-			EMIT(0x48); EMIT(0x09); EMIT(0xd0);
-			EMIT(0x49); EMIT(0x39); EMIT(0xc3);
-			EMIT(0x75); second_mismatch = cursor++;
-		} else {
-			EMIT(0x4c); EMIT(0x89); EMIT(0xd8);
-		}
+		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
+		EMIT(0x0f); EMIT(0x32);
+		EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
+		EMIT(0x48); EMIT(0x09); EMIT(0xd0);
+		EMIT(0x49); EMIT(0x39); EMIT(0xc3);
+		EMIT(0x75); second_mismatch = cursor++;
 	} else {
-		/* Observe the generated MSR and require the verifier-visible value. */
-		EMIT(0xb9);
-		put_unaligned_le32(operation->kprog_machine_register, cursor);
-		cursor += 4;
+		/* Observe IA32_LSTAR and require the verifier-visible expected root. */
+		EMIT(0xb9); put_unaligned_le32(MSR_LSTAR, cursor); cursor += 4;
 		EMIT(0x0f); EMIT(0x32);
 		EMIT(0x48); EMIT(0xc1); EMIT(0xe2); EMIT(0x20);
 		EMIT(0x48); EMIT(0x09); EMIT(0xd0);
@@ -451,7 +375,6 @@ __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_machine_register(void) { }
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
 __bpf_kfunc void bpf_ebpfos_kprog_bounded_memset(void) { }
-__bpf_kfunc void bpf_ebpfos_kprog_compiler_barrier(void) { }
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_machine_ids)
@@ -465,10 +388,6 @@ BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
 BTF_KFUNCS_START(ebpfos_kprog_bounded_memory_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_bounded_memset)
 BTF_KFUNCS_END(ebpfos_kprog_bounded_memory_ids)
-
-BTF_KFUNCS_START(ebpfos_kprog_compiler_barrier_ids)
-BTF_ID_FLAGS(func, bpf_ebpfos_kprog_compiler_barrier)
-BTF_KFUNCS_END(ebpfos_kprog_compiler_barrier_ids)
 
 /* sha256("ebpfos-koperation-bounded-memset-v1:x86_64:arena-bound:last-byte-proof:rep-stosb") */
 static const u8 ebpfos_kprog_bounded_memset_semantic_sha256[
@@ -625,10 +544,6 @@ static struct bpf_kop ebpfos_kprog_machine = {
 	.effect_mask = EBPFOS_EFFECT_KPROG_MACHINE_STATE,
 	.requirements = ebpfos_kprog_machine_requirements,
 	.instantiate_insn = ebpfos_kprog_machine_instantiate,
-	/* Register and immediate code with rel8 jumps inside the sequence: no
-	 * address of this kernel appears in it.
-	 */
-	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_machine_emit_x86,
 };
 
@@ -671,10 +586,6 @@ static struct bpf_kop ebpfos_kprog_terminal = {
 	},
 	.requirements = ebpfos_kprog_terminal_requirements,
 	.instantiate_insn = ebpfos_kprog_terminal_instantiate,
-	/* Register and immediate code with rel8 jumps inside the sequence: no
-	 * address of this kernel appears in it.
-	 */
-	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_terminal_emit_x86,
 };
 
@@ -720,10 +631,6 @@ static struct bpf_kop ebpfos_kprog_bounded_memset = {
 	},
 	.requirements = ebpfos_kprog_bounded_memset_requirements,
 	.instantiate_insn = ebpfos_kprog_bounded_memset_instantiate,
-	/* Register and immediate code with rel8 jumps inside the sequence: no
-	 * address of this kernel appears in it.
-	 */
-	.position_independent = true,
 	.emit_x86 = ebpfos_kprog_bounded_memset_emit_x86,
 };
 
@@ -747,110 +654,6 @@ static const struct btf_kfunc_id_set ebpfos_kprog_bounded_memory_set = {
 	.set = &ebpfos_kprog_bounded_memory_ids,
 	.filter = ebpfos_kprog_bounded_memory_filter,
 	.kop_descs = ebpfos_kprog_bounded_memory_descs,
-};
-
-/*
- * sha256("ebpfos-koperation-compiler-barrier-v1:x86_64:empty-asm:memory-clobber")
- *
- * Linux's barrier() is an empty asm with a memory clobber: it orders the
- * compiler and emits no machine instruction at all.  Exposing it as a
- * KOperation is what lets an independently verified component keep the
- * barriers its source contains instead of having them discarded, and the
- * native emitter below emits nothing because nothing is what the operation
- * compiles to -- not because its semantics are unimplemented.
- */
-static const u8 ebpfos_kprog_compiler_barrier_semantic_sha256[
-	SHA256_DIGEST_SIZE] = {
-	0x2b, 0xc2, 0xd4, 0x35, 0x69, 0x14, 0x29, 0x2d,
-	0x09, 0x70, 0x48, 0x14, 0xb0, 0x9f, 0x60, 0x8e,
-	0x55, 0xc6, 0xb4, 0x11, 0xba, 0x3a, 0xe2, 0x85,
-	0xdc, 0xc5, 0xe8, 0xf8, 0xb1, 0xbe, 0xd5, 0x08,
-};
-
-/*
- * The operation takes no operands, so exactly one sidecar value names it.
- * Accepting any other payload would admit a second, undescribed instance of
- * an operation that has only one.
- */
-#define EBPFOS_KPROG_COMPILER_BARRIER_PAYLOAD 1ULL
-
-static bool ebpfos_kprog_compiler_barrier_payload(u64 payload)
-{
-	return payload == EBPFOS_KPROG_COMPILER_BARRIER_PAYLOAD;
-}
-
-static int ebpfos_kprog_compiler_barrier_instantiate(
-	u64 payload, struct bpf_insn *insns)
-{
-	u32 effect_tag;
-
-	if (!insns || !ebpfos_kprog_compiler_barrier_payload(payload))
-		return -EINVAL;
-	effect_tag = get_unaligned_le32(
-		ebpfos_kprog_compiler_barrier_semantic_sha256) & S32_MAX;
-	insns[0] = BPF_MOV64_IMM(BPF_REG_0, effect_tag);
-	return 1;
-}
-
-static int ebpfos_kprog_compiler_barrier_emit_x86(
-	u8 *image, u32 *offset, bool emit, u64 payload,
-	const struct bpf_prog *prog, const u8 *final_ip)
-{
-	(void)image;
-	(void)emit;
-	(void)prog;
-	(void)final_ip;
-	if (!offset || !ebpfos_kprog_compiler_barrier_payload(payload))
-		return -EINVAL;
-	/* barrier() constrains the compiler, not the machine: it has no
-	 * instruction.  *offset is left where it was and no byte is written.
-	 */
-	return 0;
-}
-
-static struct bpf_kop ebpfos_kprog_compiler_barrier = {
-	.max_insn_cnt = 1,
-	.max_emit_bytes = 0,
-	.capability_mask = EBPFOS_CAP_KPROG_COMPILER_BARRIER,
-	.effect_mask = EBPFOS_EFFECT_KPROG_COMPILER_ORDERING,
-	.semantic_sha256 = {
-		0x2b, 0xc2, 0xd4, 0x35, 0x69, 0x14, 0x29, 0x2d,
-		0x09, 0x70, 0x48, 0x14, 0xb0, 0x9f, 0x60, 0x8e,
-		0x55, 0xc6, 0xb4, 0x11, 0xba, 0x3a, 0xe2, 0x85,
-		0xdc, 0xc5, 0xe8, 0xf8, 0xb1, 0xbe, 0xd5, 0x08,
-	},
-	.instantiate_insn = ebpfos_kprog_compiler_barrier_instantiate,
-	/* An empty sequence says the same thing at every address. */
-	.position_independent = true,
-	.emit_x86 = ebpfos_kprog_compiler_barrier_emit_x86,
-};
-
-static const struct bpf_kop * const ebpfos_kprog_compiler_barrier_descs[] = {
-	&ebpfos_kprog_compiler_barrier,
-};
-
-static int ebpfos_kprog_compiler_barrier_filter(const struct bpf_prog *prog,
-						u32 kfunc_id)
-{
-	bool own_id = btf_id_set8_contains(&ebpfos_kprog_compiler_barrier_ids,
-					   kfunc_id);
-
-	if (!own_id)
-		return 0;
-	if (!prog || !prog->aux)
-		return 1;
-	/* An admitted component may keep its own barriers.  Any other program
-	 * has no component identity to bind the ordering effect to.
-	 */
-	if (prog->aux->ebpfos_component)
-		return 0;
-	return prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
-}
-
-static const struct btf_kfunc_id_set ebpfos_kprog_compiler_barrier_set = {
-	.set = &ebpfos_kprog_compiler_barrier_ids,
-	.filter = ebpfos_kprog_compiler_barrier_filter,
-	.kop_descs = ebpfos_kprog_compiler_barrier_descs,
 };
 
 static int __init ebpfos_kprog_register(void)
@@ -877,35 +680,7 @@ static int __init ebpfos_kprog_register(void)
 			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_OBSERVE) ||
 	    !ebpfos_koperation_find_machine(
 			EBPFOS_KPROG_FORM_DESCRIPTOR_TABLE_REGISTER,
-			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_INSTALL) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_LVTT,
-			EBPFOS_KPROG_ACTION_OBSERVE) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_LVTT,
-			EBPFOS_KPROG_ACTION_INSTALL) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_TMCCT,
-			EBPFOS_KPROG_ACTION_OBSERVE) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_TMICT,
-			EBPFOS_KPROG_ACTION_INSTALL) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_ICR_SELF,
-			EBPFOS_KPROG_ACTION_INSTALL) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_MODEL_SPECIFIC_REGISTER,
-			EBPFOS_KPROG_MSR_X2APIC_EOI,
-			EBPFOS_KPROG_ACTION_INSTALL) ||
-	    !ebpfos_koperation_find_machine(
-			EBPFOS_KPROG_FORM_IO_PORT,
-			EBPFOS_KPROG_IO_PORT_UART8250_TX,
-			EBPFOS_KPROG_ACTION_INSTALL))
+			EBPFOS_KPROG_DESCRIPTOR_IDTR, EBPFOS_KPROG_ACTION_INSTALL))
 		return -ENOENT;
 	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					  &ebpfos_kprog_machine_set);
@@ -915,12 +690,8 @@ static int __init ebpfos_kprog_register(void)
 					  &ebpfos_kprog_terminal_set);
 	if (error)
 		return error;
-	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					  &ebpfos_kprog_bounded_memory_set);
-	if (error)
-		return error;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_compiler_barrier_set);
+					 &ebpfos_kprog_bounded_memory_set);
 }
 late_initcall(ebpfos_kprog_register);
 

@@ -5,44 +5,18 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 21U
-#define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 20U
+#define EBPFOS_RUNTIME_ROOT_ABI_VERSION 2U
+#define EBPFOS_RUNTIME_ROOT_MAX_SLOTS 16U
 #define EBPFOS_RUNTIME_ROOT_CONTEXT_SIZE 304U
 #define EBPFOS_RUNTIME_ROOT_TAG_SIZE 8U
 #define EBPFOS_RUNTIME_ROOT_DIGEST_SIZE 32U
 #define EBPFOS_RUNTIME_ROOT_IOC_MAGIC 0xe8
-#define EBPFOS_RUNTIME_PROCESS_MAX_TASKS 4U
-#define EBPFOS_RUNTIME_SUCCESSOR_CPUS 4U
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAGIC_BYTES 8U
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_BYTES 4096U
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAX_ROOTS 64U
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_VERSION 1U
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_FLAGS 0x1fULL
-#define EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_RECORD_FLAGS 0x0fULL
-#define EBPFOS_RUNTIME_SUCCESSOR_PREFLIGHT_STACK_BYTES 128U
-#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_CPU 1U
-#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_BOOT_TASK_MM 2U
-#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_APIC_TIMER 3U
-#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_UART_PIO 4U
-#define EBPFOS_RUNTIME_SUCCESSOR_ROOT_KIND_HANDOFF_BRIDGE 5U
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_VERSION 1U
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_STATE_MAGIC 0x454250464f534150ULL
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_READ (1ULL << 0)
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_WRITE (1ULL << 1)
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_EXEC (1ULL << 2)
-#define EBPFOS_RUNTIME_SUCCESSOR_APP_PAGE_STACK (1ULL << 3)
 
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_NONE 0U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_COMMIT_STAGED 1U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_ROOT 2U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_IRQ_ROOT 3U
 #define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_IRQ_ROOT 4U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_REARM_IRQ_ROOT 5U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_PROCESS_ROOT 6U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_PROCESS_ROOT 7U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_INSTALL_DEVICE_ROOT 8U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_EMIT_DEVICE_BYTE 9U
-#define EBPFOS_RUNTIME_SYSCALL_ACTION_ROLLBACK_DEVICE_ROOT 10U
 
 struct ebpfos_runtime_root_slot {
 	__u64 slot_id;
@@ -118,15 +92,6 @@ struct ebpfos_runtime_irq_root {
 	__u64 observer_slot_id;
 	__u64 installer_slot_id;
 	__u64 handler_slot_id;
-	__u64 portal_broadcast_slot_id;
-	__u64 routing_observer_slot_id;
-	__u64 routing_installer_slot_id;
-	__u64 pulse_observer_slot_id;
-	__u64 pulse_installer_slot_id;
-	__u64 routing_old;
-	__u64 routing_target;
-	__u64 pulse_resting;
-	__u64 pulse_armed;
 	__u64 old_idtr;
 	__u64 target_idtr;
 	__u64 handler_entry;
@@ -134,274 +99,17 @@ struct ebpfos_runtime_irq_root {
 	__u8 entry_descriptor_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
 	__u64 dispatches;
 	__u64 dispatch_errors;
-	__u64 pulse_rearms;
-	__u64 portal_broadcasts;
-	__u64 portal_dispatches;
-	__u64 portal_generation;
 	__u64 first_dispatch_epoch;
 	__u64 last_dispatch_epoch;
 	__u32 cpus_observed;
 	__u32 cpus_written;
-	__u32 machine_cpus_observed;
-	__u32 machine_cpus_written;
 	__u32 vector;
 	__u32 gate_dpl;
 	__u32 first_dispatch_prog_id;
 	__u32 last_dispatch_prog_id;
 	__u32 active;
-	__u32 first_vector;
-	__u32 last_vector;
-	__u32 vector_count;
-	__u32 donor_external_gates;
-	__u32 portal_vector;
-	__u32 portal_errors;
 	__u32 reserved;
-};
-
-struct ebpfos_runtime_process_root {
-	__u32 version;
-	__u32 flags;
-	__u64 expected_epoch;
-	__u64 process_slot_id;
-	__u64 mmu_observer_slot_id;
-	__u64 mmu_reloader_slot_id;
-	__u64 task_object_id;
-	__u64 task_start_boottime;
-	__u64 mm_object_id;
-	__u64 address_space_object_id;
-	__u64 mmu_root_physical;
-	__u64 returns;
-	__u64 return_errors;
-	__u64 syscall_returns;
-	__u64 irq_returns;
-	__u64 mmu_observations;
-	__u64 mmu_reloads;
-	__u64 mmu_errors;
-	__u64 mmu_first_epoch;
-	__u64 mmu_last_epoch;
-	__u64 mmu_native_fallbacks;
-	__u64 first_return_epoch;
-	__u64 last_return_epoch;
-	__u64 native_fallbacks;
-	__u64 state_mutations;
-	__u64 task_set_digest;
-	__u64 address_space_set_digest;
-	__u64 mmu_root_set_digest;
-	__u64 task_enrollments;
-	__u64 cpu_mask;
-	__u64 scheduler_decisions;
-	__u64 scheduler_context_switch_growth;
-	__u64 scheduler_cpu_owner_digest;
-	__u64 scheduler_native_fallbacks;
-	__u32 task_pid;
-	__u32 task_tgid;
-	__u32 first_return_prog_id;
-	__u32 last_return_prog_id;
-	__u32 mmu_observer_prog_id;
-	__u32 mmu_reloader_prog_id;
-	__u32 active;
-	__u32 task_count;
-	__u32 mm_count;
-	__u32 max_tasks;
-	__u32 cpus_observed;
-	__u32 scheduler_cpu_claims;
-	__u32 reserved;
-};
-
-struct ebpfos_runtime_device_root {
-	__u32 version;
-	__u32 flags;
-	__u64 expected_epoch;
-	__u64 device_slot_id;
-	__u64 device_object_id;
-	__u64 writes;
-	__u64 write_errors;
-	__u64 first_write_epoch;
-	__u64 last_write_epoch;
-	__u64 native_fallbacks;
-	__u64 dma_operations;
-	__u32 io_port;
-	__u32 first_write_prog_id;
-	__u32 last_write_prog_id;
-	__u32 active;
-	__u32 reserved;
-};
-
-struct ebpfos_runtime_successor_stage {
-	__u32 version;
-	__u32 flags;
-	__u64 user_address;
-	__u64 image_bytes;
-	__u64 physical_base;
-	__u64 virtual_base;
-	__u64 cr3;
-	__u64 idtr;
-	__u64 lstar;
-	__u64 cpu_root;
-	__u64 cpu_stacks[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
-	__u64 cpu_contexts[EBPFOS_RUNTIME_SUCCESSOR_CPUS];
-	__u64 handoff_preflight;
-	__u64 component_probe;
-	__u64 handoff_alias;
-	__u64 handoff_physical;
-	__u64 handoff_bytes;
-	__u64 handoff_magic;
-	__u8 handoff_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 handoff_descriptor_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u64 handoff_publish;
-	__u64 handoff_publish_alias;
-	__u64 handoff_publish_physical;
-	__u64 handoff_publish_bytes;
-	__u8 handoff_publish_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u64 publication_cpu_flags;
-	__u64 publication_cpu_flags_bytes;
-	__u64 publication_state;
-	__u64 publication_capacity;
-	__u64 allocator_metadata;
-	__u64 allocator_metadata_bytes;
-	__u64 app_state;
-	__u64 app_state_bytes;
-	__u64 app_page_arena;
-	__u64 app_page_arena_physical;
-	__u64 app_page_arena_bytes;
-	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u64 mapped_pages;
-	__u32 idt_vectors;
-	__u32 cpus;
-	__u32 staged;
-	__u32 reserved;
-};
-
-struct ebpfos_runtime_successor_allocator_state {
-	__u8 magic[8];
-	__u32 version;
-	__u32 page_bytes;
-	__u64 epoch;
-	__u64 virtual_address;
-	__u64 physical_address;
-	__u64 pages;
-	__u32 bitmap_bytes;
-	__u32 reserved;
-	__u8 bitmap[];
-};
-
-/* Successor-owned migration state populated by the donor before the final
- * graph cut.  Page records describe copied user pages at their unchanged
- * application-visible addresses; no Linux task/mm pointer is exported. */
-struct ebpfos_runtime_successor_app_page {
-	__u64 user_address;
-	__u64 physical_address;
-	__u64 flags;
-	__u64 content_sha256_low;
-};
-
-struct ebpfos_runtime_successor_app_state {
-	__u64 magic;
-	__u32 version;
-	__u32 header_bytes;
-	__u32 page_record_bytes;
-	__u32 page_capacity;
-	__u32 page_count;
-	__u32 donor_pid;
-	__u32 donor_tgid;
-	__u32 retired;
-	__u32 resume_state;
-	__u64 user_rip;
-	__u64 user_rsp;
-	__u64 user_rflags;
-	__u64 user_rax;
-	__u64 user_rbx;
-	__u64 user_rcx;
-	__u64 user_rdx;
-	__u64 user_rsi;
-	__u64 user_rdi;
-	__u64 user_rbp;
-	__u64 user_r8;
-	__u64 user_r9;
-	__u64 user_r10;
-	__u64 user_r11;
-	__u64 user_r12;
-	__u64 user_r13;
-	__u64 user_r14;
-	__u64 user_r15;
-	__u64 user_cs;
-	__u64 user_ss;
-	__u64 copied_bytes;
-	__u64 allocator_pages_consumed;
-	__u64 donor_pages_poisoned;
-	__u64 donor_pages_reclaimed;
-	__u64 donor_fault_address;
-	__u64 user_fs_base;
-	__u64 user_gs_base;
-	struct ebpfos_runtime_successor_app_page pages[];
-};
-
-struct ebpfos_runtime_successor_transaction_header {
-	__u8 magic[EBPFOS_RUNTIME_SUCCESSOR_PUBLICATION_MAGIC_BYTES];
-	__u32 version;
-	__u32 header_bytes;
-	__u32 record_bytes;
-	__u32 record_count;
-	__u64 expected_epoch;
-	__u64 flags;
-	__u8 image_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 root_table_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 entry_points_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 boot_state_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-};
-
-struct ebpfos_runtime_successor_transaction_record {
-	__u32 kind;
-	__u32 cpu;
-	__u64 flags;
-	__u8 root_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 component_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 descriptor_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u8 state_identity[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u64 operands[16];
-};
-
-struct ebpfos_runtime_successor_publish {
-	__u32 version;
-	__u32 flags;
-	__u64 user_address;
-	__u64 transaction_bytes;
-	__u64 expected_epoch;
-	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u32 root_count;
-	__u32 admitted;
-	__u32 published;
-	__u32 reserved;
-};
-
-struct ebpfos_runtime_successor_preflight {
-	__u32 version;
-	__u32 flags;
-	__u64 expected_epoch;
-	__u64 expected_magic;
-	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u32 expected_cpus;
-	__u32 observed_cpus;
-	__u32 cr3_switched_cpus;
-	__u32 root_register_cpus;
-	__u32 reverified_cpus;
-	__u32 koperation_cpus;
-	__u32 state_store_cpus;
-	__u32 idle_entry_cpus;
-	__u32 component_cpus;
-	__u32 preflighted;
-	__u32 published;
-	__u32 reserved;
-};
-
-struct ebpfos_runtime_successor_commit {
-	__u32 version;
-	__u32 flags;
-	__u64 expected_epoch;
-	__u64 expected_magic;
-	__u8 transaction_sha256[EBPFOS_RUNTIME_ROOT_DIGEST_SIZE];
-	__u32 expected_cpus;
-	__u32 reserved;
+	__u32 reserved1;
 };
 
 #define EBPFOS_RUNTIME_ROOT_IOC_PUBLISH \
@@ -428,23 +136,5 @@ struct ebpfos_runtime_successor_commit {
 #define EBPFOS_RUNTIME_ROOT_IOC_IRQ_READ \
 	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x08, \
 	     struct ebpfos_runtime_irq_root)
-#define EBPFOS_RUNTIME_ROOT_IOC_PROCESS_READ \
-	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x09, \
-	     struct ebpfos_runtime_process_root)
-#define EBPFOS_RUNTIME_ROOT_IOC_DEVICE_READ \
-	_IOR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0a, \
-	     struct ebpfos_runtime_device_root)
-#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_STAGE \
-	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0b, \
-	      struct ebpfos_runtime_successor_stage)
-#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PUBLISH \
-	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0c, \
-	      struct ebpfos_runtime_successor_publish)
-#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_PREFLIGHT \
-	_IOWR(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0d, \
-	      struct ebpfos_runtime_successor_preflight)
-#define EBPFOS_RUNTIME_ROOT_IOC_SUCCESSOR_COMMIT \
-	_IOW(EBPFOS_RUNTIME_ROOT_IOC_MAGIC, 0x0e, \
-	     struct ebpfos_runtime_successor_commit)
 
 #endif /* _UAPI_EBPFOS_RUNTIME_H */

@@ -1312,17 +1312,8 @@ enum bpf_perf_event_type {
 
 /* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
 #define BPF_F_EBPFOS_META	(1U << 9)
-/* Restrict a sleepable syscall program to the typed component-call ABI.
- * The verifier may use inductive state containment for memory safety of
- * component backedges; component admission remains responsible for their
- * independent progress/termination contract.
- */
+/* Restrict a sleepable syscall program to the typed component-call ABI. */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)
-/* Verify real backedges by inductive state containment for an authenticated
- * eBPFOS implementation program.  Unlike BPF_F_EBPFOS_COMPONENT, this does
- * not select the mapless component-call ABI.
- */
-#define BPF_F_EBPFOS_INVARIANTS	(1U << 11)
 
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.
@@ -6722,77 +6713,7 @@ struct bpf_prog_info {
 	__u32 attach_btf_obj_id;
 	__u32 attach_btf_id;
 	__u32 :32;
-	/* eBPFOS: where the JIT wrote operands that are only meaningful in the
-	 * kernel that produced them. A frozen image can be placed elsewhere
-	 * without matching byte patterns only if these are known exactly.
-	 */
-	__u32 nr_jited_relocs;
-	__u32 jited_reloc_rec_size;
-	__aligned_u64 jited_relocs;
-	/* The program's fault fixups. An image whose arena accesses can fault
-	 * cannot be entered elsewhere without them.
-	 */
-	__u32 nr_jited_exentries;
-	__u32 jited_exentry_rec_size;
-	__aligned_u64 jited_exentries;
 } __attribute__((aligned(8)));
-
-enum bpf_jit_reloc_kind {
-	BPF_JIT_RELOC_HELPER_CALL	= 1,
-	BPF_JIT_RELOC_KFUNC_CALL	= 2,
-	BPF_JIT_RELOC_INTERNAL_CALL	= 3,
-	BPF_JIT_RELOC_PSEUDO_IMM64	= 4,
-	BPF_JIT_RELOC_ARENA_BASE	= 5,
-	BPF_JIT_RELOC_KOP_CALL		= 6,
-	BPF_JIT_RELOC_ARENA_USER_BASE	= 7,
-	BPF_JIT_RELOC_PERCPU_OFFSET	= 8,
-	BPF_JIT_RELOC_PRIV_STACK	= 9,
-	/* This build emitted something the table does not describe. A consumer
-	 * must refuse the image rather than assume the rest is complete.
-	 */
-	BPF_JIT_RELOC_UNDESCRIBED	= 10,
-	/* A jump the mitigations put in the epilogue or an indirect branch:
-	 * a displacement to kernel text like any other, and just as fatal to
-	 * move without rebinding.
-	 */
-	BPF_JIT_RELOC_THUNK_JUMP	= 11,
-	/* A KOperation sequence whose emitter declares it position
-	 * independent: the bytes carry no address, so a placement moves them
-	 * unchanged instead of refusing them.
-	 */
-	BPF_JIT_RELOC_KOP_CALL_PIC	= 12,
-};
-
-/* One operand the JIT emitted whose value belongs to the emitting kernel.
- * @offset is inside this function's jited image, @value is exactly what the
- * JIT wrote, and @width is 4 for a rel32 displacement or 8 for an immediate.
- */
-struct bpf_jit_reloc {
-	__u32 offset;
-	__u16 kind;
-	__u16 width;
-	__u64 value;
-	__u32 insn_index;
-	__u32 function_index;
-	/* The target's kernel symbol, when it has one. An address is only
-	 * meaningful in the kernel that resolved it; a name is what another
-	 * kernel can bind. Empty when the target has no name to bind by, and
-	 * never truncated: a name that does not fit is left empty.
-	 */
-	char symbol[48];
-};
-
-/* One fault fixup the JIT installed. @insn_offset locates the faulting
- * instruction inside its function's jited image; @fixup and @data are the
- * encodings ex_handler_bpf() consumes and carry no address, so an image placed
- * elsewhere can rebuild the entry from them.
- */
-struct bpf_jit_exentry {
-	__u32 insn_offset;
-	__u32 fixup;
-	__u32 data;
-	__u32 function_index;
-};
 
 struct bpf_map_info {
 	__u32 type;
