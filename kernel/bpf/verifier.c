@@ -31,6 +31,7 @@
 #include <linux/trace_events.h>
 #include <linux/kallsyms.h>
 #include <linux/ebpfos.h>
+#include <linux/ebpfos_services.h>
 #include <crypto/sha2.h>
 
 #include "disasm.h"
@@ -3006,10 +3007,11 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 
 	prog_aux = env->prog->aux;
 	if (!kop_call &&
-	    (prog_aux->ebpfos_component ||
+	    ((prog_aux->ebpfos_component &&
+	      (offset || !ebpfos_effect_kfunc_allowed(func_id))) ||
 	     (prog_aux->ebpfos_meta &&
 	      !ebpfos_executor_root_kfunc_allowed(func_id)))) {
-		verbose(env, "eBPFOS provider programs cannot call kernel functions\n");
+		verbose(env, "eBPFOS program cannot call this kernel function\n");
 		return -EACCES;
 	}
 
@@ -18739,8 +18741,7 @@ static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
 	if (aux->btf || aux->func_info || aux->func_info_aux ||
 	    aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
 	    aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
-	    aux->used_btf_cnt || aux->kfunc_btf_tab ||
-	    (aux->ebpfos_component && bpf_prog_has_kfunc_call(env->prog))) {
+	    aux->used_btf_cnt || aux->kfunc_btf_tab) {
 		verbose(env,
 			"eBPFOS components cannot carry BTF or attach metadata\n");
 		return -EINVAL;

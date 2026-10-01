@@ -9,7 +9,7 @@ struct iov_iter;
 struct poll_table_struct;
 struct ebpfos_effect_scope;
 
-/* The component verifier may admit only kfunc IDs in this L1 service set. */
+/* Provider kfuncs must belong to the ebpfos_l1_services BTF set. */
 #ifdef CONFIG_EBPFOS
 bool ebpfos_effect_kfunc_allowed(u32 btf_id);
 #else

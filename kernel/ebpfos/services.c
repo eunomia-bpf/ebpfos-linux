@@ -418,7 +418,7 @@ __bpf_kfunc int bpf_ebpfos_effect_ref_put(u64 handle)
 
 __bpf_kfunc_end_defs();
 
-BTF_KFUNCS_START(ebpfos_effect_kfunc_ids)
+BTF_KFUNCS_START(ebpfos_l1_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_lock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_unlock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_sequence, KF_SLEEPABLE)
@@ -432,22 +432,24 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_signal, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
-BTF_KFUNCS_END(ebpfos_effect_kfunc_ids)
+BTF_KFUNCS_END(ebpfos_l1_services)
 
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
 {
-	return btf_id_set8_contains(&ebpfos_effect_kfunc_ids, btf_id);
+	return btf_id_set8_contains(&ebpfos_l1_services, btf_id);
 }
 
 static int ebpfos_effect_kfunc_filter(const struct bpf_prog *prog, u32 id)
 {
+	if (!ebpfos_effect_kfunc_allowed(id))
+		return 0;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
 	       prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
 }
 
 static const struct btf_kfunc_id_set ebpfos_effect_kfunc_set = {
 	.owner = THIS_MODULE,
-	.set = &ebpfos_effect_kfunc_ids,
+	.set = &ebpfos_l1_services,
 	.filter = ebpfos_effect_kfunc_filter,
 };
 
@@ -465,7 +467,7 @@ static void ebpfos_effect_scope_test(struct kunit *test)
 	s64 sequence;
 
 	KUNIT_EXPECT_TRUE(test, ebpfos_effect_kfunc_allowed(
-			ebpfos_effect_kfunc_ids.pairs[0].id));
+			ebpfos_l1_services.pairs[0].id));
 	KUNIT_EXPECT_FALSE(test, ebpfos_effect_kfunc_allowed(0));
 	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffec7), 0);
 	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffec9), 0);
