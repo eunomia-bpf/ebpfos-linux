@@ -130,7 +130,7 @@ static void bpf_map_write_active_inc(struct bpf_map *map)
 	atomic64_inc(&map->writecnt);
 }
 
-static void bpf_map_write_active_dec(struct bpf_map *map)
+void bpf_map_write_active_dec(struct bpf_map *map)
 {
 	atomic64_dec(&map->writecnt);
 }
