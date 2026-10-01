@@ -12,11 +12,76 @@
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
+__bpf_kfunc u64 bpf_ebpfos_kop_xadd64(u64 *ptr, u64 delta)
+{
+	return 0; /* Only the verified proof or its bound JIT emission executes. */
+}
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_terminal_effect, KF_NORETURN)
 BTF_KFUNCS_END(ebpfos_kprog_terminal_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_atomic_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_xadd64)
+BTF_KFUNCS_END(ebpfos_kprog_atomic_ids)
+
+static bool ebpfos_kop_xadd64_payload(u64 payload)
+{
+	return ebpfos_kprog_atomic_ids.cnt == 1 &&
+	       payload == ebpfos_kprog_atomic_ids.pairs[0].id;
+}
+
+static int ebpfos_kop_xadd64_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	if (!insns || !ebpfos_kop_xadd64_payload(payload))
+		return -EINVAL;
+	insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_2);
+	insns[1] = BPF_ATOMIC_OP(BPF_DW, BPF_ADD | BPF_FETCH,
+				 BPF_REG_1, BPF_REG_0, 0);
+	return 2;
+}
+
+static int ebpfos_kop_xadd64_emit_x86(u8 *image, u32 *offset, bool emit,
+				      u64 payload, const struct bpf_prog *prog,
+				      const u8 *final_ip)
+{
+	/* BPF r1=RDI, r2=RSI, r0=RAX. lock xaddq (%rdi),%rax. */
+	static const u8 native[] = { 0x48, 0x89, 0xf0,
+				     0xf0, 0x48, 0x0f, 0xc1, 0x07 };
+
+	(void)prog;
+	(void)final_ip;
+	if (!offset || (emit && !image) || !ebpfos_kop_xadd64_payload(payload))
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, native, sizeof(native));
+	*offset += sizeof(native);
+	return sizeof(native);
+}
+
+static struct bpf_kop ebpfos_kop_xadd64 = {
+	.max_insn_cnt = 2,
+	.max_emit_bytes = 8,
+	/* sha256("kop-xadd64-v1:seqcst:old=atomic_fetch_add_u64(ptr,delta)") */
+	.semantic_sha256 = {
+		0x35, 0x60, 0xe3, 0xfd, 0x93, 0x9d, 0x3d, 0x17,
+		0x5a, 0xbd, 0x3e, 0x60, 0x6d, 0x2b, 0x63, 0xca,
+		0xba, 0x42, 0xd7, 0xe8, 0x68, 0x35, 0x7a, 0xcd,
+		0xf4, 0x29, 0xaa, 0x05, 0xea, 0x36, 0xd7, 0x0c,
+	},
+	.instantiate_insn = ebpfos_kop_xadd64_instantiate,
+	.emit_x86 = ebpfos_kop_xadd64_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_atomic_descs[] = {
+	&ebpfos_kop_xadd64,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_atomic_set = {
+	.set = &ebpfos_kprog_atomic_ids,
+	.kop_descs = ebpfos_kprog_atomic_descs,
+};
 
 /* sha256("ebpfos-koperation-terminal-effect-v2:x86_64:f390:verified-native-backedge:verifier-noreturn") */
 static const u8 ebpfos_kprog_terminal_semantic_sha256[SHA256_DIGEST_SIZE] = {
@@ -117,7 +182,13 @@ static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
 
 static int __init ebpfos_kprog_register(void)
 {
+	int err;
+
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_terminal_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_terminal_set);
+					 &ebpfos_kprog_atomic_set);
 }
 late_initcall(ebpfos_kprog_register);
