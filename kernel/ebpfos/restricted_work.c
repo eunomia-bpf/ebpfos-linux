@@ -97,9 +97,9 @@ void ebpfos_restricted_work_unregister(void *owner)
 EXPORT_SYMBOL_GPL(ebpfos_restricted_work_unregister);
 
 void ebpfos_restricted_work(void *queue, ebpfos_work_native_t native,
-			   struct work_struct *work)
+			   struct work_struct *work, u64 scalar)
 {
-	struct { u64 args[1]; } context = {};
+	struct { u64 args[1]; } context = { .args = { scalar } };
 	struct work_route *route;
 	u32 result;
 
@@ -108,7 +108,7 @@ void ebpfos_restricted_work(void *queue, ebpfos_work_native_t native,
 	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog))
 		goto native;
 	result = bpf_prog_run(route->prog, &context);
-	if (result != 1) {
+	if (result > 1) {
 		atomic64_inc(&route->faults);
 		WRITE_ONCE(route->active, false);
 		goto native;
@@ -116,7 +116,8 @@ void ebpfos_restricted_work(void *queue, ebpfos_work_native_t native,
 	atomic64_inc(&route->component_entries);
 	if (in_hardirq())
 		atomic64_inc(&route->hardirq_entries);
-	schedule_work(work);
+	if (result)
+		schedule_work(work);
 	goto out;
 native:
 	if (route)
