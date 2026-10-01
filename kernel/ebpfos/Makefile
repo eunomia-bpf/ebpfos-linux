@@ -3,4 +3,5 @@ obj-y += admission.o component_graph.o executor_root.o core.o
 obj-y += fops_route_dispatch.o
 obj-y += services.o
 obj-y += fops_route.o
+obj-y += bops_route.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o
