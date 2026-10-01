@@ -56,19 +56,21 @@ static struct irq_event_route *route_for_locked(void *data)
 }
 
 irqreturn_t ebpfos_restricted_irq_event(
-	int irq, void *data, irq_handler_t native, spinlock_t *lock,
+	int irq, void *data, void *route_key, irq_handler_t native, spinlock_t *lock,
 	unsigned long *counter, wait_queue_head_t *waitqueue,
 	struct fasync_struct **async, void __iomem *status, u32 mask,
 	unsigned int flags, unsigned int shared_mask,
 	unsigned int mode_mask, unsigned int mode_value)
 {
-	struct { u64 args[2]; } context = { .args = { READ_ONCE(*counter), 0 } };
+	struct { u64 args[2]; } context = {
+		.args = { counter ? READ_ONCE(*counter) : 0, 0 }
+	};
 	struct irq_event_route *route;
 	u32 result;
 	irqreturn_t answer;
 
 	rcu_read_lock();
-	route = route_for(data);
+	route = route_for(route_key);
 	if (!route || !READ_ONCE(route->active) ||
 	    (flags & mode_mask) != mode_value)
 		goto native;
@@ -80,13 +82,17 @@ irqreturn_t ebpfos_restricted_irq_event(
 		    (flags & shared_mask) && !context.args[1])
 			goto fault;
 		if (result == IRQ_HANDLED) {
-			spin_lock(lock);
-			(*counter)++;
-			if (flags & shared_mask)
-				writel(mask, status);
-			spin_unlock(lock);
-			wake_up_interruptible(waitqueue);
-			kill_fasync(async, SIGIO, POLL_IN);
+			if (counter) {
+				spin_lock(lock);
+				(*counter)++;
+				if (flags & shared_mask)
+					writel(mask, status);
+				spin_unlock(lock);
+			}
+			if (waitqueue)
+				wake_up_interruptible(waitqueue);
+			if (async)
+				kill_fasync(async, SIGIO, POLL_IN);
 		}
 		atomic64_inc(&route->component_entries);
 		if (in_hardirq())

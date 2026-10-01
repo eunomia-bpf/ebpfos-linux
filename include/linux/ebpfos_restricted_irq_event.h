@@ -6,7 +6,7 @@
 #include <linux/wait.h>
 
 irqreturn_t ebpfos_restricted_irq_event(
-	int irq, void *data, irq_handler_t native, spinlock_t *lock,
+	int irq, void *data, void *route_key, irq_handler_t native, spinlock_t *lock,
 	unsigned long *counter, wait_queue_head_t *waitqueue,
 	struct fasync_struct **async, void __iomem *status, u32 mask,
 	unsigned int flags, unsigned int shared_mask,
