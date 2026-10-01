@@ -102,6 +102,8 @@ static int ebpfos_kop_tzcnt64_instantiate(u64 payload,
 	}
 	insns[zero_branch] = BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0,
 					   n - zero_branch - 1);
+	/* Both paths must land inside the verifier's proof region. */
+	insns[n++] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_0);
 	return n;
 }
 
@@ -147,7 +149,7 @@ static int ebpfos_kop_tzcnt64_emit_x86(u8 *image, u32 *offset,
 }
 
 static struct bpf_kop ebpfos_kop_tzcnt64 = {
-	.max_insn_cnt = 33,
+	.max_insn_cnt = 34,
 	.max_emit_bytes = 5,
 	.requirements = ebpfos_kop_tzcnt64_requirements,
 	.instantiate_insn = ebpfos_kop_tzcnt64_instantiate,
