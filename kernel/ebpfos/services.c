@@ -434,6 +434,11 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_effect_kfunc_ids)
 
+bool ebpfos_effect_kfunc_allowed(u32 btf_id)
+{
+	return btf_id_set8_contains(&ebpfos_effect_kfunc_ids, btf_id);
+}
+
 static int ebpfos_effect_kfunc_filter(const struct bpf_prog *prog, u32 id)
 {
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
@@ -459,6 +464,9 @@ static void ebpfos_effect_scope_test(struct kunit *test)
 	struct ebpfos_effect_scope *scope, *nested;
 	s64 sequence;
 
+	KUNIT_EXPECT_TRUE(test, ebpfos_effect_kfunc_allowed(
+			ebpfos_effect_kfunc_ids.pairs[0].id));
+	KUNIT_EXPECT_FALSE(test, ebpfos_effect_kfunc_allowed(0));
 	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffec7), 0);
 	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffec9), 0);
 	scope = ebpfos_effect_scope_enter(0xeffec7, NULL, NULL, NULL);

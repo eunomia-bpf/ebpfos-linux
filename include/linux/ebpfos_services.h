@@ -9,6 +9,16 @@ struct iov_iter;
 struct poll_table_struct;
 struct ebpfos_effect_scope;
 
+/* The component verifier may admit only kfunc IDs in this L1 service set. */
+#ifdef CONFIG_EBPFOS
+bool ebpfos_effect_kfunc_allowed(u32 btf_id);
+#else
+static inline bool ebpfos_effect_kfunc_allowed(u32 btf_id)
+{
+	return false;
+}
+#endif
+
 /* Native route owns one handle reference from attach through detach. */
 int ebpfos_effect_handle_get(u64 handle);
 void ebpfos_effect_handle_put(u64 handle);
