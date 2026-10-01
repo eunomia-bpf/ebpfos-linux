@@ -9,11 +9,15 @@
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
+#ifdef CONFIG_X86
+#include <asm/cpufeature.h>
+#endif
 #include "koperation_xadd64.generated.h"
 #include "koperation_atomic64.generated.h"
 #include "koperation_atomic32.generated.h"
 #include "koperation_bit64.generated.h"
 #include "koperation_compiler_barrier.generated.h"
+#include "koperation_tzcnt64.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -34,6 +38,10 @@ __bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
 __bpf_kfunc void bpf_ebpfos_kop_compiler_barrier(void) { }
+__bpf_kfunc u64 bpf_ebpfos_kop_tzcnt64(u64 value)
+{
+	return 0; /* Only the verified proof or its bound JIT emission executes. */
+}
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
@@ -59,6 +67,101 @@ BTF_KFUNCS_END(ebpfos_kprog_bit64_ids)
 BTF_KFUNCS_START(ebpfos_kprog_compiler_barrier_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_compiler_barrier)
 BTF_KFUNCS_END(ebpfos_kprog_compiler_barrier_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_tzcnt64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_tzcnt64)
+BTF_KFUNCS_END(ebpfos_kprog_tzcnt64_ids)
+
+static int ebpfos_kop_tzcnt64_instantiate(u64 payload,
+					 struct bpf_insn *insns)
+{
+	static const struct { u16 mask; u8 shift; } stages[] = {
+		{ 0xffff, 16 }, { 0xff, 8 }, { 0xf, 4 },
+		{ 0x3, 2 }, { 0x1, 1 },
+	};
+	int zero_branch, n = 0;
+	u32 i;
+
+	if (!insns || ebpfos_kprog_tzcnt64_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_tzcnt64_ids.pairs[0].id)
+		return -EINVAL;
+	insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 64);
+	zero_branch = n++;
+	insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 0);
+	insns[n++] = BPF_MOV64_REG(BPF_REG_2, BPF_REG_1);
+	insns[n++] = BPF_MOV32_REG(BPF_REG_3, BPF_REG_2);
+	insns[n++] = BPF_JMP_IMM(BPF_JNE, BPF_REG_3, 0, 2);
+	insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 32);
+	insns[n++] = BPF_ALU64_IMM(BPF_RSH, BPF_REG_2, 32);
+	for (i = 0; i < ARRAY_SIZE(stages); i++) {
+		insns[n++] = BPF_MOV64_REG(BPF_REG_3, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_3, stages[i].mask);
+		insns[n++] = BPF_JMP_IMM(BPF_JNE, BPF_REG_3, 0, 2);
+		insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, stages[i].shift);
+		insns[n++] = BPF_ALU64_IMM(BPF_RSH, BPF_REG_2, stages[i].shift);
+	}
+	insns[zero_branch] = BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0,
+					   n - zero_branch - 1);
+	return n;
+}
+
+static int ebpfos_kop_tzcnt64_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	static const u8 digest[SHA256_DIGEST_SIZE] =
+		EBPFOS_KOP_TZCNT64_SEMANTIC_SHA256;
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    ebpfos_kprog_tzcnt64_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_tzcnt64_ids.pairs[0].id)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, digest, sizeof(digest));
+	return 0;
+}
+
+static int ebpfos_kop_tzcnt64_emit_x86(u8 *image, u32 *offset,
+			bool emit, u64 payload, const struct bpf_prog *prog,
+			const u8 *final_ip)
+{
+	static const u8 native[] = EBPFOS_KOP_TZCNT64_NATIVE_BYTES;
+
+	(void)prog;
+	(void)final_ip;
+#ifdef CONFIG_X86
+	if (!boot_cpu_has(X86_FEATURE_BMI1))
+		return -EOPNOTSUPP;
+#else
+	return -EOPNOTSUPP;
+#endif
+	if (!offset || (emit && !image) ||
+	    ebpfos_kprog_tzcnt64_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_tzcnt64_ids.pairs[0].id)
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, native, sizeof(native));
+	*offset += sizeof(native);
+	return sizeof(native);
+}
+
+static struct bpf_kop ebpfos_kop_tzcnt64 = {
+	.max_insn_cnt = 33,
+	.max_emit_bytes = 5,
+	.requirements = ebpfos_kop_tzcnt64_requirements,
+	.instantiate_insn = ebpfos_kop_tzcnt64_instantiate,
+	.emit_x86 = ebpfos_kop_tzcnt64_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_tzcnt64_descs[] = {
+	&ebpfos_kop_tzcnt64,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_tzcnt64_set = {
+	.set = &ebpfos_kprog_tzcnt64_ids,
+	.kop_descs = ebpfos_kprog_tzcnt64_descs,
+};
 
 static int ebpfos_kop_compiler_barrier_instantiate(u64 payload,
 						  struct bpf_insn *insns)
@@ -614,7 +717,11 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_bit64_set);
 	if (err)
 		return err;
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_compiler_barrier_set);
+	if (err)
+		return err;
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_kprog_tzcnt64_set);
 }
 late_initcall(ebpfos_kprog_register);
