@@ -47,7 +47,6 @@
 #define KERN_VM_SZ (SZ_4G + GUARD_SZ)
 
 static void arena_free_pages(struct bpf_arena *arena, long uaddr, long page_cnt, bool sleepable);
-static long compute_pgoff(struct bpf_arena *arena, long uaddr);
 
 struct bpf_arena {
 	struct bpf_map map;
@@ -84,47 +83,6 @@ u64 bpf_arena_get_kern_vm_start(struct bpf_arena *arena)
 u64 bpf_arena_get_user_vm_start(struct bpf_arena *arena)
 {
 	return arena ? arena->user_vm_start : 0;
-}
-
-/* A bounded arena scalar transaction for an L1 lock-handle effect. Keep the
- * arena's mapping stable while the effect's IRQ lock protects the value. */
-int bpf_arena_irq_cmpxchg_u64(struct bpf_map *map, u32 offset,
-			      raw_spinlock_t *lock, u64 expected, u64 desired,
-			      u64 *observed)
-{
-	struct bpf_arena *arena;
-	unsigned long arena_flags, irq_flags;
-	u64 address;
-	u64 *value;
-	u32 page;
-	int ret;
-
-	if (!map || map->map_type != BPF_MAP_TYPE_ARENA || !lock || !observed ||
-	    (offset & (sizeof(u64) - 1)))
-		return -EINVAL;
-	arena = container_of(map, struct bpf_arena, map);
-	page = compute_pgoff(arena, offset);
-	if (page >= (arena->user_vm_end - arena->user_vm_start) >> PAGE_SHIFT)
-		return -ERANGE;
-	ret = raw_res_spin_lock_irqsave(&arena->spinlock, arena_flags);
-	if (ret)
-		return ret;
-	address = bpf_arena_get_kern_vm_start(arena) + offset;
-	if (is_range_tree_set(&arena->rt, page, 1) == 0 ||
-	    !vmalloc_to_page((void *)(unsigned long)address)) {
-		ret = -ENOENT;
-		goto out;
-	}
-	value = (u64 *)(unsigned long)address;
-	raw_spin_lock_irqsave(lock, irq_flags);
-	*observed = READ_ONCE(*value);
-	if (*observed == expected)
-		WRITE_ONCE(*value, desired);
-	raw_spin_unlock_irqrestore(lock, irq_flags);
-	ret = 0;
-out:
-	raw_res_spin_unlock_irqrestore(&arena->spinlock, arena_flags);
-	return ret;
 }
 
 static long arena_map_peek_elem(struct bpf_map *map, void *value)
