@@ -422,11 +422,24 @@ static const struct btf_kfunc_id_set ebpfos_kprog_tzcnt64_set = {
 	.kop_descs = ebpfos_kprog_tzcnt64_descs,
 };
 
+static int ebpfos_kop_barrier_op(u64 payload)
+{
+	u64 id;
+
+	if (ebpfos_kprog_compiler_barrier_ids.cnt != 1)
+		return -EINVAL;
+	id = ebpfos_kprog_compiler_barrier_ids.pairs[0].id;
+	if (payload == id)
+		return 1;
+	if (payload == (id << 8 | 2))
+		return 2;
+	return -EINVAL;
+}
+
 static int ebpfos_kop_compiler_barrier_instantiate(u64 payload,
 						  struct bpf_insn *insns)
 {
-	if (!insns || ebpfos_kprog_compiler_barrier_ids.cnt != 1 ||
-	    payload != ebpfos_kprog_compiler_barrier_ids.pairs[0].id)
+	if (!insns || ebpfos_kop_barrier_op(payload) < 0)
 		return -EINVAL;
 	/* The IR side effect and memory clobber carry the compile-order rule. */
 	insns[0] = BPF_MOV64_IMM(BPF_REG_0, 0);
@@ -439,14 +452,17 @@ static int ebpfos_kop_compiler_barrier_requirements(u64 payload,
 {
 	static const u8 digest[SHA256_DIGEST_SIZE] =
 		EBPFOS_KOP_COMPILER_BARRIER_SEMANTIC_SHA256;
+	static const u8 pause_digest[SHA256_DIGEST_SIZE] =
+		EBPFOS_KOP_PAUSE_SEMANTIC_SHA256;
+	int op = ebpfos_kop_barrier_op(payload);
 
 	if (!capability_mask || !effect_mask || !semantic_sha256 ||
-	    ebpfos_kprog_compiler_barrier_ids.cnt != 1 ||
-	    payload != ebpfos_kprog_compiler_barrier_ids.pairs[0].id)
+	    op < 0)
 		return -EINVAL;
 	*capability_mask = 0;
 	*effect_mask = 0;
-	memcpy(semantic_sha256, digest, sizeof(digest));
+	memcpy(semantic_sha256, op == 1 ? digest : pause_digest,
+	       sizeof(digest));
 	return 0;
 }
 
@@ -455,22 +471,24 @@ static int ebpfos_kop_compiler_barrier_emit_x86(u8 *image, u32 *offset,
 				const u8 *final_ip)
 {
 	static const u8 native[] = EBPFOS_KOP_COMPILER_BARRIER_NATIVE_BYTES;
+	static const u8 pause_native[] = EBPFOS_KOP_PAUSE_NATIVE_BYTES;
+	int op = ebpfos_kop_barrier_op(payload);
+	const u8 *bytes = op == 1 ? native : pause_native;
+	u32 len = op == 1 ? sizeof(native) : sizeof(pause_native);
 
 	(void)prog;
 	(void)final_ip;
-	if (!offset || (emit && !image) ||
-	    ebpfos_kprog_compiler_barrier_ids.cnt != 1 ||
-	    payload != ebpfos_kprog_compiler_barrier_ids.pairs[0].id)
+	if (!offset || (emit && !image) || op < 0)
 		return -EINVAL;
 	if (emit)
-		memcpy(image + *offset, native, sizeof(native));
-	*offset += sizeof(native);
-	return sizeof(native);
+		memcpy(image + *offset, bytes, len);
+	*offset += len;
+	return len;
 }
 
 static struct bpf_kop ebpfos_kop_compiler_barrier = {
 	.max_insn_cnt = 1,
-	.max_emit_bytes = 2,
+	.max_emit_bytes = 4,
 	.requirements = ebpfos_kop_compiler_barrier_requirements,
 	.instantiate_insn = ebpfos_kop_compiler_barrier_instantiate,
 	.emit_x86 = ebpfos_kop_compiler_barrier_emit_x86,
