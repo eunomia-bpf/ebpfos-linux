@@ -5,4 +5,5 @@ obj-y += services.o
 obj-y += fops_route.o
 obj-y += netdev_route.o
 obj-y += bops_route.o
+obj-y += mqops_route.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o
