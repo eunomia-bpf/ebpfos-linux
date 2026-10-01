@@ -15,6 +15,13 @@ struct bpf_prog;
 struct bpf_prog_aux;
 struct ebpfos_admission;
 struct ebpfos_prog_identity;
+struct ebpfos_executor_root_slot;
+
+struct ebpfos_executor_root_lease {
+	struct ebpfos_binding *binding;
+	struct ebpfos_executor_root_slot *slot;
+	u64 epoch;
+};
 
 struct ebpfos_binding {
 	refcount_t refs;
@@ -264,8 +271,12 @@ struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
 void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
 				  struct ebpfos_admission_identity_v1 *identity);
-struct ebpfos_binding *ebpfos_executor_root_binding_get(
-	u64 object_id, u64 role_type, u64 *epoch);
+int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot);
+void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease);
+int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch);
+void ebpfos_executor_root_resume(u64 object_id);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
 #else

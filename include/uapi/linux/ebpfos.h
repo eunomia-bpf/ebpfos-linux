@@ -245,6 +245,11 @@ struct ebpfos_ioc_admission_runtime_info {
 	__u32 reserved2;
 };
 
+struct ebpfos_ioc_root_quiesce {
+	__u64 object_id;
+	__u64 expected_epoch;
+};
+
 struct ebpfos_admission_identity_v1 {
 	__u64 grant_id;
 	__u64 policy_generation;
@@ -272,5 +277,8 @@ struct ebpfos_admission_identity_v1 {
 	_IOWR(EBPFOS_IOC_MAGIC, 0x33, struct ebpfos_ioc_admission_info)
 #define EBPFOS_IOC_ADMISSION_RUNTIME_INFO \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x38, struct ebpfos_ioc_admission_runtime_info)
+#define EBPFOS_IOC_ROOT_QUIESCE \
+	_IOW(EBPFOS_IOC_MAGIC, 0x39, struct ebpfos_ioc_root_quiesce)
+#define EBPFOS_IOC_ROOT_RESUME _IO(EBPFOS_IOC_MAGIC, 0x3a)
 
 #endif /* _UAPI_EBPFOS_H */

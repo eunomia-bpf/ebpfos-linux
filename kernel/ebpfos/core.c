@@ -3,7 +3,36 @@
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
 #include <linux/uaccess.h>
+
+struct ebpfos_control_session {
+	struct mutex lock;
+	u64 quiesced_object;
+};
+
+static int ebpfos_open(struct inode *inode, struct file *file)
+{
+	struct ebpfos_control_session *session;
+
+	session = kzalloc(sizeof(*session), GFP_KERNEL);
+	if (!session)
+		return -ENOMEM;
+	mutex_init(&session->lock);
+	file->private_data = session;
+	return 0;
+}
+
+static int ebpfos_release(struct inode *inode, struct file *file)
+{
+	struct ebpfos_control_session *session = file->private_data;
+
+	if (session->quiesced_object)
+		ebpfos_executor_root_resume(session->quiesced_object);
+	kfree(session);
+	return 0;
+}
 
 /* Retiring the legacy hook fields does not change the version query wire. */
 static_assert(sizeof(struct ebpfos_ioc_version) == 8);
@@ -21,8 +50,9 @@ static long ebpfos_ioctl_version(void __user *argp)
 static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
-
-	(void)file;
+	struct ebpfos_control_session *session = file->private_data;
+	struct ebpfos_ioc_root_quiesce request;
+	long error;
 
 	switch (cmd) {
 	case EBPFOS_IOC_VERSION:
@@ -37,6 +67,31 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return ebpfos_admission_info_ioctl(argp);
 	case EBPFOS_IOC_ADMISSION_RUNTIME_INFO:
 		return ebpfos_admission_runtime_info_ioctl(argp);
+	case EBPFOS_IOC_ROOT_QUIESCE:
+		if (copy_from_user(&request, argp, sizeof(request)))
+			return -EFAULT;
+		mutex_lock(&session->lock);
+		if (session->quiesced_object) {
+			error = -EBUSY;
+		} else {
+			error = ebpfos_executor_root_quiesce(
+				request.object_id, request.expected_epoch);
+			if (!error)
+				session->quiesced_object = request.object_id;
+		}
+		mutex_unlock(&session->lock);
+		return error;
+	case EBPFOS_IOC_ROOT_RESUME:
+		mutex_lock(&session->lock);
+		if (!session->quiesced_object) {
+			error = -EINVAL;
+		} else {
+			ebpfos_executor_root_resume(session->quiesced_object);
+			session->quiesced_object = 0;
+			error = 0;
+		}
+		mutex_unlock(&session->lock);
+		return error;
 	default:
 		return -ENOTTY;
 	}
@@ -44,6 +99,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static const struct file_operations ebpfos_fops = {
 	.owner = THIS_MODULE,
+	.open = ebpfos_open,
+	.release = ebpfos_release,
 	.unlocked_ioctl = ebpfos_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = ebpfos_ioctl,

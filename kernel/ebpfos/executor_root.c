@@ -14,6 +14,7 @@
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
+#include "component_graph.h"
 #if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
 #include <kunit/test.h>
 #endif
@@ -38,6 +39,7 @@ struct ebpfos_executor_root_bundle {
 
 struct ebpfos_executor_root_slot {
 	spinlock_t lock;
+	struct ebpfos_component_gate gate;
 	struct ebpfos_executor_root_bundle __rcu *active;
 };
 
@@ -57,6 +59,7 @@ ebpfos_executor_root_slot_get(u64 object_id)
 	if (!slot)
 		return ERR_PTR(-ENOMEM);
 	spin_lock_init(&slot->lock);
+	ebpfos_component_gate_init(&slot->gate);
 	error = xa_insert(&ebpfos_executor_roots, object_id, slot, GFP_KERNEL);
 	if (error) {
 		kfree(slot);
@@ -618,18 +621,16 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 }
 
 static struct ebpfos_binding *ebpfos_executor_root_role_get(
-	u64 object_id, u64 role_type, u64 *epoch,
+	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
 	struct ebpfos_executor_root_role_snapshot *snapshot)
 {
 	struct ebpfos_executor_root_bundle *bundle;
-	struct ebpfos_executor_root_slot *slot;
 	struct ebpfos_binding *binding = NULL;
 	u32 role;
 
 	rcu_read_lock();
-	slot = xa_load(&ebpfos_executor_roots, object_id);
-	bundle = slot ? rcu_dereference(slot->active) : NULL;
-	if (!bundle || bundle->object_id != object_id)
+	bundle = rcu_dereference(slot->active);
+	if (!bundle)
 		goto out;
 	for (role = 0; role < bundle->role_count; role++) {
 		if (bundle->roles[role].snapshot.role_type < role_type)
@@ -646,6 +647,78 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get(
 out:
 	rcu_read_unlock();
 	return binding;
+}
+
+int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	struct ebpfos_executor_root_slot *slot;
+
+	if (!object_id || !role_type || !lease || !snapshot)
+		return -EINVAL;
+	memset(lease, 0, sizeof(*lease));
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (!slot)
+		return -ENOENT;
+	ebpfos_component_gate_enter(&slot->gate);
+	lease->binding = ebpfos_executor_root_role_get(
+		slot, role_type, &lease->epoch, snapshot);
+	if (!lease->binding) {
+		ebpfos_component_gate_exit(&slot->gate);
+		return -ENOENT;
+	}
+	lease->slot = slot;
+	return 0;
+}
+
+void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
+{
+	if (!lease || !lease->slot)
+		return;
+	ebpfos_binding_put(lease->binding);
+	ebpfos_component_gate_exit(&lease->slot->gate);
+	memset(lease, 0, sizeof(*lease));
+}
+
+int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch)
+{
+	struct ebpfos_executor_root_slot *slot;
+	struct ebpfos_executor_root_bundle *active;
+	int error;
+
+	if (!object_id)
+		return -EINVAL;
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (!slot)
+		return -ENOENT;
+	spin_lock(&slot->lock);
+	active = rcu_dereference_protected(slot->active,
+					   lockdep_is_held(&slot->lock));
+	error = !active || active->epoch != expected_epoch ? -ESTALE : 0;
+	spin_unlock(&slot->lock);
+	if (error)
+		return error;
+	error = ebpfos_component_gate_engage(&slot->gate);
+	if (error)
+		return error;
+	spin_lock(&slot->lock);
+	active = rcu_dereference_protected(slot->active,
+					   lockdep_is_held(&slot->lock));
+	error = !active || active->epoch != expected_epoch ? -ESTALE : 0;
+	spin_unlock(&slot->lock);
+	if (error)
+		ebpfos_component_gate_abort(&slot->gate);
+	return error;
+}
+
+void ebpfos_executor_root_resume(u64 object_id)
+{
+	struct ebpfos_executor_root_slot *slot;
+
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (slot)
+		ebpfos_component_gate_abort(&slot->gate);
 }
 
 static int ebpfos_executor_method_validate(
@@ -718,6 +791,7 @@ noinline int bpf_ebpfos_executor_root_call_impl(
 {
 	struct ebpfos_executor_call *call = call_data;
 	struct ebpfos_executor_root_role_snapshot role = {};
+	struct ebpfos_executor_root_lease lease = {};
 	struct ebpfos_executor_import import = {};
 	const struct ebpfos_component_desc_v1 *descriptor;
 	struct ebpfos_binding *binding;
@@ -734,10 +808,12 @@ noinline int bpf_ebpfos_executor_root_call_impl(
 	call->provider_prog_id = 0;
 	call->provider_status = 0;
 retry_lookup:
-	binding = ebpfos_executor_root_role_get(call->object_id,
-						call->role_type, &epoch, &role);
-	if (!binding)
-		return -ENOENT;
+	error = ebpfos_executor_root_lease_begin(call->object_id,
+						call->role_type, &lease, &role);
+	if (error)
+		return error;
+	binding = lease.binding;
+	epoch = lease.epoch;
 	descriptor = ebpfos_binding_descriptor(binding);
 	provider = ebpfos_binding_prog(binding);
 	if (!descriptor || !ebpfos_executor_provider_supported(provider)) {
@@ -774,7 +850,7 @@ retry_lookup:
 					     &status);
 	if (error) {
 		if (error == -ESHUTDOWN) {
-			ebpfos_binding_put(binding);
+			ebpfos_executor_root_lease_end(&lease);
 			if (call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH)
 				return -ESTALE;
 			if (!retried) {
@@ -791,7 +867,7 @@ retry_lookup:
 	call->provider_status = status;
 	error = 0;
 out_put:
-	ebpfos_binding_put(binding);
+	ebpfos_executor_root_lease_end(&lease);
 	return error;
 }
 
@@ -802,20 +878,6 @@ __bpf_kfunc int bpf_ebpfos_executor_root_call(
 }
 
 __bpf_kfunc_end_defs();
-
-struct ebpfos_binding *ebpfos_executor_root_binding_get(
-	u64 object_id, u64 role_type, u64 *epoch)
-{
-	struct ebpfos_executor_root_role_snapshot snapshot;
-	u64 observed_epoch;
-
-	if (!object_id || !role_type)
-		return NULL;
-	if (!epoch)
-		epoch = &observed_epoch;
-	return ebpfos_executor_root_role_get(object_id, role_type, epoch,
-					     &snapshot);
-}
 
 BTF_KFUNCS_START(ebpfos_executor_root_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_publish,

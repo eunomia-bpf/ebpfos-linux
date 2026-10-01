@@ -12,6 +12,20 @@
 #define EBPFOS_COMPONENT_GRAPH_MAX_ROLES 4U
 #define EBPFOS_COMPONENT_SNAPSHOT_COUNTERS 8U
 
+/* Policy-free acquisition gate shared by component routes. */
+struct ebpfos_component_gate {
+	spinlock_t lock;
+	wait_queue_head_t waitq;
+	unsigned int acquired;
+	bool draining;
+};
+
+void ebpfos_component_gate_init(struct ebpfos_component_gate *gate);
+void ebpfos_component_gate_enter(struct ebpfos_component_gate *gate);
+void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate);
+int ebpfos_component_gate_engage(struct ebpfos_component_gate *gate);
+void ebpfos_component_gate_abort(struct ebpfos_component_gate *gate);
+
 enum ebpfos_component_publish_state {
 	EBPFOS_COMPONENT_PUBLISH_EMPTY,
 	EBPFOS_COMPONENT_PUBLISH_PREPARED,
