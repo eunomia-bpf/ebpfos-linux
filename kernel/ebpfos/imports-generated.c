@@ -27,7 +27,8 @@ BTF_KFUNCS_END(ebpfos_import_ids)
 
 static int ebpfos_import_filter(const struct bpf_prog *prog, u32 id)
 {
-	(void)id;
+	if (!btf_id_set8_contains(&ebpfos_import_ids, id))
+		return 0;
 	return !prog || !prog->aux ||
 	       !prog->aux->ebpfos_component ||
 	       prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
