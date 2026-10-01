@@ -8,4 +8,5 @@ obj-y += netdev_route.o
 obj-y += bops_route.o
 obj-y += mqops_route.o
 obj-y += restricted_block.o
+obj-y += restricted_irq_event.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o
