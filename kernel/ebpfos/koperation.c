@@ -21,6 +21,7 @@
 #include "koperation_tzcnt64.generated.h"
 #include "koperation_load32.generated.h"
 #include "koperation_current_task.generated.h"
+#include "koperation_cmp_mask.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -52,6 +53,10 @@ __bpf_kfunc u32 bpf_ebpfos_kop_load32(u32 *ptr)
 __bpf_kfunc struct task_struct *bpf_ebpfos_kop_current_task(void)
 {
 	return NULL; /* Only the verified proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_cmp_mask(u64 left, u64 right)
+{
+	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
 __bpf_kfunc_end_defs();
 
@@ -90,6 +95,99 @@ BTF_KFUNCS_END(ebpfos_kprog_load32_ids)
 BTF_KFUNCS_START(ebpfos_kprog_current_task_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_current_task)
 BTF_KFUNCS_END(ebpfos_kprog_current_task_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_cmp_mask_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_cmp_mask)
+BTF_KFUNCS_END(ebpfos_kprog_cmp_mask_ids)
+
+static int ebpfos_kop_cmp_mask_op(u64 payload)
+{
+	if (ebpfos_kprog_cmp_mask_ids.cnt != 1 ||
+	    payload >> 8 != ebpfos_kprog_cmp_mask_ids.pairs[0].id)
+		return -EINVAL;
+	switch (payload & 0xff) {
+	case 1: return 32;
+	case 2: return 64;
+	default: return -EINVAL;
+	}
+}
+
+static int ebpfos_kop_cmp_mask_instantiate(u64 payload,
+					   struct bpf_insn *insns)
+{
+	int width = ebpfos_kop_cmp_mask_op(payload);
+
+	if (!insns || width < 0)
+		return -EINVAL;
+	insns[0] = BPF_MOV64_IMM(BPF_REG_0, 0);
+	insns[1] = width == 32 ?
+		BPF_JMP32_REG(BPF_JGE, BPF_REG_2, BPF_REG_1, 1) :
+		BPF_JMP_REG(BPF_JGE, BPF_REG_2, BPF_REG_1, 1);
+	insns[2] = BPF_MOV64_IMM(BPF_REG_0, -1);
+	insns[3] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_0);
+	return 4;
+}
+
+static int ebpfos_kop_cmp_mask_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	static const u8 digest32[SHA256_DIGEST_SIZE] =
+		EBPFOS_KOP_CMP_MASK32_SEMANTIC_SHA256;
+	static const u8 digest64[SHA256_DIGEST_SIZE] =
+		EBPFOS_KOP_CMP_MASK64_SEMANTIC_SHA256;
+	int width = ebpfos_kop_cmp_mask_op(payload);
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 || width < 0)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, width == 32 ? digest32 : digest64,
+	       SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_cmp_mask_emit_x86(u8 *image, u32 *offset,
+			bool emit, u64 payload, const struct bpf_prog *prog,
+			const u8 *final_ip)
+{
+	static const u8 native32[] = EBPFOS_KOP_CMP_MASK32_NATIVE_BYTES;
+	static const u8 native64[] = EBPFOS_KOP_CMP_MASK64_NATIVE_BYTES;
+	const u8 *native;
+	size_t len;
+	int width = ebpfos_kop_cmp_mask_op(payload);
+
+	(void)prog;
+	(void)final_ip;
+#ifndef CONFIG_X86
+	return -EOPNOTSUPP;
+#endif
+	if (!offset || (emit && !image) || width < 0)
+		return -EINVAL;
+	native = width == 32 ? native32 : native64;
+	len = width == 32 ? sizeof(native32) : sizeof(native64);
+	if (emit)
+		memcpy(image + *offset, native, len);
+	*offset += len;
+	return len;
+}
+
+static struct bpf_kop ebpfos_kop_cmp_mask = {
+	.max_insn_cnt = 4,
+	.max_emit_bytes = 6,
+	.requirements = ebpfos_kop_cmp_mask_requirements,
+	.instantiate_insn = ebpfos_kop_cmp_mask_instantiate,
+	.emit_x86 = ebpfos_kop_cmp_mask_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_cmp_mask_descs[] = {
+	&ebpfos_kop_cmp_mask,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_cmp_mask_set = {
+	.set = &ebpfos_kprog_cmp_mask_ids,
+	.kop_descs = ebpfos_kprog_cmp_mask_descs,
+};
 
 static int ebpfos_kop_current_task_instantiate(u64 payload,
 					       struct bpf_insn *insns)
@@ -890,7 +988,11 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_load32_set);
 	if (err)
 		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_current_task_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_current_task_set);
+					 &ebpfos_kprog_cmp_mask_set);
 }
 late_initcall(ebpfos_kprog_register);
