@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/ebpfos.h>
+#include <uapi/linux/ebpfos_root.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -92,6 +93,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		mutex_unlock(&session->lock);
 		return error;
+	case EBPFOS_IOC_ROOT_PUBLISH:
+		return ebpfos_executor_root_publish_ioctl(argp);
 	default:
 		return -ENOTTY;
 	}

@@ -277,6 +277,7 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease);
 int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch);
 void ebpfos_executor_root_resume(u64 object_id);
+long ebpfos_executor_root_publish_ioctl(void __user *argp);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
 bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
 #else

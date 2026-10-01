@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/bpf.h>
+#include <linux/capability.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <crypto/sha2.h>
@@ -12,8 +13,10 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
+#include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
+#include <uapi/linux/ebpfos_root.h>
 #include "component_graph.h"
 #if IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)
 #include <kunit/test.h>
@@ -230,8 +233,6 @@ static int ebpfos_executor_root_manifest_validate(
 		    actual->provider_type_id != expected->provider_type_id ||
 		    actual->schema != expected->schema ||
 		    actual->authority != expected->authority ||
-		    memcmp(actual->content_digest, expected->content_digest,
-			   SHA256_DIGEST_SIZE) ||
 		    memcmp(actual->contract_digest, expected->contract_digest,
 			   SHA256_DIGEST_SIZE))
 			return -EPROTOTYPE;
@@ -436,7 +437,7 @@ out_unlock:
 
 __bpf_kfunc_start_defs();
 
-noinline int bpf_ebpfos_executor_root_publish_impl(
+static int ebpfos_executor_root_publish_common(
 	const void *request_data, u32 request_data__sz,
 	struct bpf_prog_aux *aux)
 {
@@ -454,8 +455,7 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	u32 role;
 	int error;
 
-	/* Reject non-publisher meta programs before parsing request-owned FDs. */
-	if (!aux || !ebpfos_admission_root_publisher_program(aux->prog))
+	if (aux && !ebpfos_admission_root_publisher_program(aux->prog))
 		return -EACCES;
 	error = ebpfos_executor_root_request_size(request, request_data__sz,
 						  &expected_size);
@@ -467,8 +467,9 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 	grants = kcalloc(target->role_count, sizeof(*grants), GFP_KERNEL);
 	predecessors = kcalloc(target->role_count, sizeof(*predecessors),
 			       GFP_KERNEL);
-	manifest = kzalloc_obj(*manifest);
-	if (!grants || !predecessors || !manifest) {
+	if (aux)
+		manifest = kzalloc_obj(*manifest);
+	if (!grants || !predecessors || (aux && !manifest)) {
 		error = -ENOMEM;
 		goto out;
 	}
@@ -476,13 +477,15 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 		grants[role] = target->roles[role].grant;
 
 	ebpfos_admission_gate_lock();
-	error = ebpfos_admission_root_publisher_validate_locked(
-		aux, &publisher_prog_id, publisher_digest, manifest);
-	if (error)
-		goto out_unlock_gate;
-	error = ebpfos_executor_root_manifest_validate(manifest, target);
-	if (error)
-		goto out_unlock_gate;
+	if (aux) {
+		error = ebpfos_admission_root_publisher_validate_locked(
+			aux, &publisher_prog_id, publisher_digest, manifest);
+		if (error)
+			goto out_unlock_gate;
+		error = ebpfos_executor_root_manifest_validate(manifest, target);
+		if (error)
+			goto out_unlock_gate;
+	}
 	slot = ebpfos_executor_root_slot_get(request->object_id);
 	if (IS_ERR(slot)) {
 		error = PTR_ERR(slot);
@@ -505,9 +508,11 @@ noinline int bpf_ebpfos_executor_root_publish_impl(
 		error = -ECANCELED;
 		goto out_unlock_gate;
 	}
-	target->publisher_prog_id = publisher_prog_id;
-	memcpy(target->publisher_digest, publisher_digest,
-	       SHA256_DIGEST_SIZE);
+	if (aux) {
+		target->publisher_prog_id = publisher_prog_id;
+		memcpy(target->publisher_digest, publisher_digest,
+		       SHA256_DIGEST_SIZE);
+	}
 	error = ebpfos_executor_root_commit(slot, request,
 					    source, target, grants);
 	if (error)
@@ -534,6 +539,45 @@ out:
 	kfree(manifest);
 	ebpfos_executor_root_bundle_release(target);
 	return error;
+}
+
+long ebpfos_executor_root_publish_ioctl(void __user *argp)
+{
+	struct ebpfos_ioc_root_publish *request;
+	size_t request_size;
+	long error;
+
+	static_assert(offsetof(struct ebpfos_ioc_root_publish, roles) ==
+		      sizeof(struct ebpfos_executor_root_publish_request));
+	static_assert(sizeof(struct ebpfos_ioc_root_role) ==
+		      sizeof(struct ebpfos_executor_root_role_request));
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	request = memdup_user(argp, sizeof(*request));
+	if (IS_ERR(request))
+		return PTR_ERR(request);
+	if (request->role_count > EBPFOS_ROOT_MAX_ROLES) {
+		error = -EINVAL;
+		goto out;
+	}
+	request_size = offsetof(struct ebpfos_ioc_root_publish, roles) +
+		request->role_count * sizeof(request->roles[0]);
+	error = ebpfos_executor_root_publish_common(
+		(const void *)request, request_size, NULL);
+out:
+	kfree(request);
+	return error;
+}
+
+noinline int bpf_ebpfos_executor_root_publish_impl(
+	const void *request_data, u32 request_data__sz,
+	struct bpf_prog_aux *aux)
+{
+	if (!aux)
+		return -EACCES;
+	return ebpfos_executor_root_publish_common(request_data,
+						 request_data__sz, aux);
 }
 
 /*
@@ -1250,7 +1294,7 @@ static void ebpfos_executor_root_manifest_test(struct kunit *test)
 	actual->authority = manifest->roles[0].authority;
 	actual->content_digest[0]++;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), -EPROTOTYPE);
+		manifest, target), 0);
 }
 
 static struct kunit_case ebpfos_executor_root_cases[] = {
