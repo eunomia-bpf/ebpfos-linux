@@ -18,8 +18,3 @@ config EBPFOS_KOPERATION
 	help
 	  Build the generic verifier-checked terminal-effect call. The verifier
 	  validates the terminal backedge before the x86 JIT emits its effect.
-
-config EBPFOS_KUNIT_TEST
-	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS
-	depends on EBPFOS && KUNIT
-	default KUNIT_ALL_TESTS
