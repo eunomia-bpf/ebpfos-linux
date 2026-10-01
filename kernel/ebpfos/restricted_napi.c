@@ -98,18 +98,21 @@ EXPORT_SYMBOL_GPL(ebpfos_restricted_napi_unregister);
 
 void ebpfos_restricted_napi(struct virtqueue *queue,
 			    void (*native)(struct virtqueue *),
-			    struct napi_struct *napi, u16 *calls)
+			    struct napi_struct *napi, u16 *calls,
+			    unsigned int flags)
 {
-	struct { u64 args[1]; } context = {
+	struct { u64 args[3]; } context = {
 		.args = { !napi_is_scheduled(napi) &&
-			  !napi_disable_pending(napi) }
+			  !napi_disable_pending(napi),
+			  READ_ONCE(napi->weight), 0 }
 	};
 	struct napi_route *route;
 	u32 result;
 
 	rcu_read_lock();
 	route = route_for_queue(queue);
-	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog))
+	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog) ||
+	    ((flags & EBPFOS_NAPI_REQUIRE_WEIGHT) && !READ_ONCE(napi->weight)))
 		goto native;
 	result = bpf_prog_run(route->prog, &context);
 	if (result != 1) {
@@ -117,7 +120,10 @@ void ebpfos_restricted_napi(struct virtqueue *queue,
 		WRITE_ONCE(route->active, false);
 		goto native;
 	}
-	(*calls)++;
+	if (calls)
+		(*calls)++;
+	if (flags & EBPFOS_NAPI_DISABLE_ALWAYS)
+		virtqueue_disable_cb(queue);
 	if (napi_schedule_prep(napi)) {
 		virtqueue_disable_cb(queue);
 		__napi_schedule(napi);
