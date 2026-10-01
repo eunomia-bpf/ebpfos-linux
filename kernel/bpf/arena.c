@@ -369,6 +369,7 @@ static void arena_vm_close(struct vm_area_struct *vma)
 	list_del(&vml->head);
 	vma->vm_private_data = NULL;
 	kfree(vml);
+	bpf_ebpfos_map_mmap_put(map);
 }
 
 static vm_fault_t arena_vm_fault(struct vm_fault *vmf)

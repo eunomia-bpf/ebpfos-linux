@@ -171,12 +171,6 @@ static_assert(EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ==
 	      sizeof(struct ebpfos_executor_root_role_snapshot));
 
 static const u8 ebpfos_policy_domain[] = "eBPFOS-policy-v1";
-static const u8 ebpfos_empty_sha256[SHA256_DIGEST_SIZE] = {
-	0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
-	0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-	0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
-	0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
-};
 static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
 
 static const u8 ebpfos_executor_root_component_id[16] = {
@@ -511,10 +505,6 @@ static int ebpfos_validate_executor_root_descriptor(
 	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->load_image_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->initial_map_sha256,
 			    SHA256_DIGEST_SIZE))
 		return -EINVAL;
 	if (le64_to_cpu(descriptor->abi_id) !=
@@ -586,7 +576,6 @@ static int ebpfos_validate_component_call_descriptor(
 	u64 effects = le64_to_cpu(descriptor->effect_mask);
 	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
 	u32 resource_count = le32_to_cpu(descriptor->resource_count);
-	u64 canonical_bytes;
 
 	if (!(le32_to_cpu(policy->domain_mask) &
 	      EBPFOS_COMPONENT_DOMAIN_COMPONENT_MASK) ||
@@ -633,8 +622,6 @@ static int ebpfos_validate_component_call_descriptor(
 	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->load_image_sha256,
 			    SHA256_DIGEST_SIZE))
 		return -EINVAL;
 	if (le64_to_cpu(descriptor->abi_id) != EBPFOS_COMPONENT_CALL_ABI_ID ||
@@ -671,27 +658,15 @@ static int ebpfos_validate_component_call_descriptor(
 			    sizeof(descriptor->reserved)))
 		return -EINVAL;
 	if (!resource_count)
-		return ebpfos_all_zero(resource, sizeof(*resource)) &&
-		       !memcmp(descriptor->initial_map_sha256,
-			       ebpfos_empty_sha256, SHA256_DIGEST_SIZE) ? 0 : -EINVAL;
+		return ebpfos_all_zero(resource, sizeof(*resource)) ? 0 : -EINVAL;
 
-	canonical_bytes = round_up(le32_to_cpu(resource->value_size), 8U);
-	if (le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP ||
-	    le32_to_cpu(resource->flags) != EBPFOS_RESOURCE_F_ALL ||
-	    le32_to_cpu(resource->map_type) != BPF_MAP_TYPE_ARRAY ||
-	    le32_to_cpu(resource->key_size) != sizeof(u32) ||
-	    !le32_to_cpu(resource->value_size) ||
-	    le32_to_cpu(resource->max_entries) != 1 ||
-	    le32_to_cpu(resource->map_flags) ||
+	if ((le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_ARRAY_MAP &&
+	     le32_to_cpu(resource->kind) != EBPFOS_RESOURCE_MAP) ||
+	    le32_to_cpu(resource->flags) & ~EBPFOS_RESOURCE_F_ALL ||
+	    !le32_to_cpu(resource->map_type) ||
+	    !le32_to_cpu(resource->max_entries) ||
 	    le32_to_cpu(resource->reserved0) ||
-	    le64_to_cpu(resource->map_extra) ||
-	    le64_to_cpu(resource->logical_bytes) !=
-		    sizeof(u32) + le32_to_cpu(resource->value_size) ||
-	    le64_to_cpu(resource->canonical_bytes) != canonical_bytes ||
-	    canonical_bytes > le64_to_cpu(policy->max_map_bytes) ||
-	    !ebpfos_all_zero(resource->reserved, sizeof(resource->reserved)) ||
-	    !ebpfos_nonzero(descriptor->initial_map_sha256,
-			    SHA256_DIGEST_SIZE))
+	    !ebpfos_all_zero(resource->reserved, sizeof(resource->reserved)))
 		return -EINVAL;
 	return 0;
 }
@@ -1088,6 +1063,8 @@ static bool ebpfos_map_owner_matches(struct bpf_prog *prog,
 	matches = map->ebpfos_component_owner == prog->aux &&
 		  map->ebpfos_prog_users == 1 &&
 		  !map->ebpfos_external_writers &&
+		  !map->ebpfos_user_mmaps &&
+		  !atomic64_read(&map->writecnt) &&
 		  !map->ebpfos_external_gp_refs &&
 		  !map->ebpfos_external_next_refs &&
 		  !map->ebpfos_external_gp_queued;
@@ -1102,22 +1079,18 @@ static bool ebpfos_map_tuple_matches(
 	const struct ebpfos_resource_desc_v1 *resource = &descriptor->resource;
 
 	return map->map_type == le32_to_cpu(resource->map_type) &&
+	       /* Nested maps and program arrays need package-wide leases. */
+	       !map->inner_map_meta && map->map_type != BPF_MAP_TYPE_PROG_ARRAY &&
 	       map->key_size == le32_to_cpu(resource->key_size) &&
 	       map->value_size == le32_to_cpu(resource->value_size) &&
 	       map->max_entries == le32_to_cpu(resource->max_entries) &&
 	       map->map_flags == le32_to_cpu(resource->map_flags) &&
-	       map->map_extra == le64_to_cpu(resource->map_extra) &&
-	       !map->inner_map_meta && !map->btf && !map->btf_key_type_id &&
-	       !map->btf_value_type_id && !map->btf_vmlinux_value_type_id &&
-	       !map->record && !map->excl && !map->excl_prog_sha &&
-	       READ_ONCE(map->frozen);
+	       map->map_extra == le64_to_cpu(resource->map_extra);
 }
 
-static int ebpfos_measure_map(struct bpf_prog *prog, struct bpf_map *map,
+static int ebpfos_check_map_lease(struct bpf_prog *prog, struct bpf_map *map,
 			      const struct ebpfos_component_desc_v1 *descriptor,
-			      struct ebpfos_prog_identity *expected_identity,
-			      bool calculate_hash,
-			      u8 digest[SHA256_DIGEST_SIZE])
+			      struct ebpfos_prog_identity *expected_identity)
 {
 	bool externally_reachable;
 	int error = 0;
@@ -1143,30 +1116,15 @@ static int ebpfos_measure_map(struct bpf_prog *prog, struct bpf_map *map,
 		error = -EBUSY;
 		goto out_unlock_maps;
 	}
-	if (calculate_hash) {
-		if (!map->ops->map_get_hash) {
-			error = -EOPNOTSUPP;
-			goto out_unlock_maps;
-		}
-		error = map->ops->map_get_hash(map, SHA256_DIGEST_SIZE,
-					      digest);
-		if (error)
-			goto out_unlock_maps;
-		if (!ebpfos_map_tuple_matches(descriptor, map) ||
-		    !ebpfos_map_owner_matches(prog, map))
-			error = -EAGAIN;
-	}
 out_unlock_maps:
 	mutex_unlock(&prog->aux->used_maps_mutex);
 	return error;
 }
 
-static int ebpfos_measure_program(
+static int ebpfos_check_program(
 	struct bpf_prog *prog, struct bpf_map *map,
 	const struct ebpfos_component_desc_v1 *descriptor,
-	struct ebpfos_prog_identity *expected_identity,
-	bool calculate_hash,
-	u8 map_digest[SHA256_DIGEST_SIZE])
+	struct ebpfos_prog_identity *expected_identity)
 {
 	bool root = le32_to_cpu(descriptor->domain) ==
 		    EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT;
@@ -1185,14 +1143,11 @@ static int ebpfos_measure_program(
 		le32_to_cpu(descriptor->max_verified_insns) ||
 	    prog->aux->stack_depth > le32_to_cpu(descriptor->max_stack_depth) ||
 	    prog->aux->max_ctx_offset >
-		le32_to_cpu(descriptor->max_ctx_offset) ||
-	    memcmp(prog->digest, descriptor->load_image_sha256,
-		   SHA256_DIGEST_SIZE))
+		le32_to_cpu(descriptor->max_ctx_offset))
 		return -EKEYREJECTED;
 	if (!component)
-		return ebpfos_measure_map(prog, map, descriptor,
-					  expected_identity, calculate_hash,
-					  map_digest);
+		return ebpfos_check_map_lease(prog, map, descriptor,
+					      expected_identity);
 	{
 		u8 semantic_set[SHA256_DIGEST_SIZE];
 		u64 capabilities, effects;
@@ -1208,9 +1163,8 @@ static int ebpfos_measure_program(
 			return error ?: -EKEYREJECTED;
 	}
 	if (le32_to_cpu(descriptor->resource_count))
-		return ebpfos_measure_map(prog, map, descriptor,
-					  expected_identity, calculate_hash,
-					  map_digest);
+		return ebpfos_check_map_lease(prog, map, descriptor,
+					      expected_identity);
 	if (map)
 		return -EXDEV;
 	mutex_lock(&prog->aux->used_maps_mutex);
@@ -1228,8 +1182,6 @@ static int ebpfos_measure_program(
 		error = -EBUSY;
 		goto out_unlock_maps;
 	}
-	if (map_digest)
-		memcpy(map_digest, ebpfos_empty_sha256, SHA256_DIGEST_SIZE);
 out_unlock_maps:
 	mutex_unlock(&prog->aux->used_maps_mutex);
 	return error;
@@ -1402,7 +1354,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct bpf_map *map = NULL;
 	struct file *admission_file = NULL;
 	u8 content_digest[SHA256_DIGEST_SIZE];
-	u8 map_digest[SHA256_DIGEST_SIZE];
+	u8 map_digest[SHA256_DIGEST_SIZE] = {};
 	u64 grant_id;
 	bool mapless;
 	int fd = -1;
@@ -1436,15 +1388,9 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 			goto out_put_prog;
 		}
 	}
-	error = ebpfos_measure_program(prog, map, &request.descriptor, NULL,
-				       true, map_digest);
+	error = ebpfos_check_program(prog, map, &request.descriptor, NULL);
 	if (error)
 		goto out_put_map;
-	if (memcmp(map_digest, request.descriptor.initial_map_sha256,
-		   sizeof(map_digest))) {
-		error = -EKEYREJECTED;
-		goto out_put_map;
-	}
 	error = ebpfos_executor_import_manifest_copy(map, &request.descriptor,
 						     &imports);
 	if (error)
@@ -1516,8 +1462,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		error = -EALREADY;
 		goto out_unlock_seal;
 	}
-	error = ebpfos_measure_program(prog, map, &identity->descriptor, NULL,
-				       false, NULL);
+	error = ebpfos_check_program(prog, map, &identity->descriptor, NULL);
 	if (error)
 		goto out_unlock_seal;
 	WRITE_ONCE(prog->aux->ebpfos_identity, identity);
@@ -1732,26 +1677,16 @@ static bool ebpfos_predecessor_matches(
 		       predecessor->content_digest, SHA256_DIGEST_SIZE);
 }
 
-static int ebpfos_admission_owner_recheck(
-	struct ebpfos_admission *admission, bool calculate_hash)
+static int ebpfos_admission_owner_recheck(struct ebpfos_admission *admission)
 {
 	struct ebpfos_binding *binding = admission->binding;
-	u8 map_digest[SHA256_DIGEST_SIZE];
-	int error;
 
 	if (READ_ONCE(binding->prog_identity->seal_state) !=
 	    EBPFOS_PROG_SEALED)
 		return -EKEYREJECTED;
-	if (calculate_hash && binding->map)
-		atomic64_inc(&binding->map_rehashes);
-	error = ebpfos_measure_program(binding->prog, binding->map,
+	return ebpfos_check_program(binding->prog, binding->map,
 				       &binding->prog_identity->descriptor,
-				       binding->prog_identity, calculate_hash,
-				       map_digest);
-	if (!error && calculate_hash &&
-	    memcmp(map_digest, binding->map_digest, sizeof(map_digest)))
-		error = -EKEYREJECTED;
-	return error;
+				       binding->prog_identity);
 }
 
 static bool ebpfos_executor_root_publisher_descriptor(
@@ -1880,7 +1815,6 @@ int ebpfos_admission_root_publisher_validate_locked(
 	const struct ebpfos_component_desc_v1 *descriptor;
 	struct bpf_map *map;
 	const void *value;
-	u8 map_digest[SHA256_DIGEST_SIZE];
 	u32 key = 0;
 	int error;
 
@@ -1900,12 +1834,9 @@ int ebpfos_admission_root_publisher_validate_locked(
 					   descriptor->policy_record_digest))
 		return -EACCES;
 	map = aux->used_maps[0];
-	error = ebpfos_measure_map(aux->prog, map, descriptor,
-				   identity, true, map_digest);
+	error = ebpfos_check_map_lease(aux->prog, map, descriptor, identity);
 	if (error)
 		return error;
-	if (memcmp(map_digest, identity->map_digest, sizeof(map_digest)))
-		return -EKEYREJECTED;
 	rcu_read_lock();
 	value = map->ops->map_lookup_elem(map, &key);
 	if (value)
@@ -2092,13 +2023,12 @@ int ebpfos_admission_stage_bundle_locked(
 		if (state != EBPFOS_ADMISSION_FRESH)
 			return state == EBPFOS_ADMISSION_STAGED ? -EBUSY : -EALREADY;
 		/*
-		 * Seal measured the frozen map once.  A FRESH grant cannot have
+		 * A FRESH grant cannot have
 		 * entered an executor root, provider TEST_RUN is denied, and the
 		 * verifier's sole-owner rule excludes another program or external
-		 * writer.  Recheck that identity, tuple, sole owner, and reachability
-		 * without rereading tens of MiB on the commit path.
+		 * writer or user mapping. Recheck the lease before publication.
 		 */
-		error = ebpfos_admission_owner_recheck(grant, false);
+		error = ebpfos_admission_owner_recheck(grant);
 		if (error)
 			return error;
 	}
@@ -2170,7 +2100,7 @@ int ebpfos_admission_publish_validate_locked(
 		return -ESTALE;
 	if (!ebpfos_predecessor_matches(admission, predecessor))
 		return -EXDEV;
-	return ebpfos_admission_owner_recheck(admission, false);
+	return ebpfos_admission_owner_recheck(admission);
 }
 
 static int ebpfos_admission_order_set(struct ebpfos_admission **grants,

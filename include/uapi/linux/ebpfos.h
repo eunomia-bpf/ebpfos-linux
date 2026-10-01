@@ -71,6 +71,7 @@ enum ebpfos_verifier_profile {
 
 enum ebpfos_resource_kind {
 	EBPFOS_RESOURCE_ARRAY_MAP = 1,
+	EBPFOS_RESOURCE_MAP = 2,
 };
 
 enum ebpfos_admission_state {
