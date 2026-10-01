@@ -2934,11 +2934,10 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		return -EOPNOTSUPP;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    (type != BPF_PROG_TYPE_SYSCALL ||
-	     (attr->prog_flags != BPF_F_EBPFOS_COMPONENT &&
-	      attr->prog_flags != (BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE))))
+	     attr->prog_flags != (BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE)))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
-	    !IS_ENABLED(CONFIG_EBPFOS_BUILD))
+	    !IS_ENABLED(CONFIG_EBPFOS))
 		return -EOPNOTSUPP;
 	if ((attr->prog_flags &
 	     (BPF_F_EBPFOS_META | BPF_F_EBPFOS_COMPONENT)) &&
