@@ -27,6 +27,7 @@ struct ebpfos_restricted_block_route {
 	struct module *owner;
 	struct bpf_prog *softirq_prog;
 	struct bpf_prog *timer_prog;
+	struct bpf_prog *queue_timer_prog;
 	u32 status_offset;
 	bool active;
 	atomic64_t native_entries;
@@ -35,6 +36,8 @@ struct ebpfos_restricted_block_route {
 	atomic64_t softirq_context_entries;
 	atomic64_t hardirq_context_entries;
 	atomic64_t faults;
+	atomic64_t queue_timer_entries;
+	atomic64_t queue_timer_hardirq_entries;
 };
 
 static DEFINE_MUTEX(ebpfos_restricted_block_lock);
@@ -44,6 +47,14 @@ static struct ebpfos_restricted_block_route *route_for(struct request_queue *q);
 static u32 run_restricted(struct bpf_prog *prog, blk_status_t status)
 {
 	struct { u64 args[1]; } context = { .args = { status } };
+
+	return bpf_prog_run(prog, &context);
+}
+
+static u32 run_queue_timer(struct bpf_prog *prog, unsigned int rate,
+			   unsigned long current_bytes)
+{
+	struct { u64 args[2]; } context = { .args = { rate, current_bytes } };
 
 	return bpf_prog_run(prog, &context);
 }
@@ -106,6 +117,45 @@ native:
 }
 EXPORT_SYMBOL_GPL(ebpfos_restricted_block_timer);
 
+enum hrtimer_restart ebpfos_restricted_block_queue_timer(
+	struct request_queue *q, struct hrtimer *timer,
+	enum hrtimer_restart (*native)(struct hrtimer *),
+	atomic_long_t *counter, unsigned int rate, ktime_t interval)
+{
+	struct ebpfos_restricted_block_route *route = route_for(q);
+	u32 result;
+
+	if (!route || !READ_ONCE(route->active))
+		goto native;
+	if (!route->queue_timer_prog)
+		goto fault;
+	result = run_queue_timer(route->queue_timer_prog, rate,
+				 atomic_long_read(counter));
+	if (result == 0) {
+		atomic64_inc(&route->queue_timer_entries);
+		if (in_hardirq())
+			atomic64_inc(&route->queue_timer_hardirq_entries);
+		return HRTIMER_NORESTART;
+	}
+	if (result != U32_MAX && (result & 3) == 1) {
+		atomic_long_set(counter, result >> 2);
+		blk_mq_start_stopped_hw_queues(q, true);
+		hrtimer_forward(timer, hrtimer_cb_get_time(timer), interval);
+		atomic64_inc(&route->queue_timer_entries);
+		if (in_hardirq())
+			atomic64_inc(&route->queue_timer_hardirq_entries);
+		return HRTIMER_RESTART;
+	}
+fault:
+	atomic64_inc(&route->faults);
+	WRITE_ONCE(route->active, false);
+native:
+	if (route)
+		atomic64_inc(&route->native_entries);
+	return native(timer);
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_block_queue_timer);
+
 static struct ebpfos_restricted_block_route *route_for(struct request_queue *q)
 {
 	const struct blk_mq_ops *ops = READ_ONCE(q->mq_ops);
@@ -146,6 +196,16 @@ static int attach(struct gendisk *disk,
 			goto free;
 		}
 	}
+	if (request->queue_timer_enabled) {
+		route->queue_timer_prog = bpf_prog_get_type(
+			request->queue_timer_prog_fd,
+			BPF_PROG_TYPE_RAW_TRACEPOINT);
+		if (IS_ERR(route->queue_timer_prog)) {
+			error = PTR_ERR(route->queue_timer_prog);
+			route->queue_timer_prog = NULL;
+			goto free;
+		}
+	}
 	mutex_lock(&ebpfos_restricted_block_lock);
 	memflags = blk_mq_freeze_queue(q);
 	if (route_for(q)) {
@@ -177,6 +237,8 @@ unlock:
 free:
 	if (route->timer_prog)
 		bpf_prog_put(route->timer_prog);
+	if (route->queue_timer_prog)
+		bpf_prog_put(route->queue_timer_prog);
 	if (route->softirq_prog)
 		bpf_prog_put(route->softirq_prog);
 	kfree(route);
@@ -230,6 +292,9 @@ static long control_ioctl(struct file *control, unsigned int command,
 		request.hardirq_context_entries =
 			atomic64_read(&route->hardirq_context_entries);
 		request.faults = atomic64_read(&route->faults);
+		request.queue_timer_entries = atomic64_read(&route->queue_timer_entries);
+		request.queue_timer_hardirq_entries =
+			atomic64_read(&route->queue_timer_hardirq_entries);
 		request.active = READ_ONCE(route->active);
 		result = copy_to_user((void __user *)argument, &request,
 				      sizeof(request)) ? -EFAULT : 0;
@@ -241,6 +306,8 @@ static long control_ioctl(struct file *control, unsigned int command,
 		module_put(route->owner);
 		if (route->timer_prog)
 			bpf_prog_put(route->timer_prog);
+		if (route->queue_timer_prog)
+			bpf_prog_put(route->queue_timer_prog);
 		if (route->softirq_prog)
 			bpf_prog_put(route->softirq_prog);
 		kfree(route);

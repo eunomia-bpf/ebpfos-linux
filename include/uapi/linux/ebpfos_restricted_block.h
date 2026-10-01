@@ -16,6 +16,10 @@ struct ebpfos_restricted_block_request {
 	__u64 softirq_context_entries;
 	__u64 hardirq_context_entries;
 	__u64 faults;
+	__s32 queue_timer_prog_fd;
+	__u32 queue_timer_enabled;
+	__u64 queue_timer_entries;
+	__u64 queue_timer_hardirq_entries;
 };
 
 #define EBPFOS_RESTRICTED_BLOCK_ATTACH _IOW('E', 0xa0, struct ebpfos_restricted_block_request)
