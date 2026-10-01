@@ -3008,11 +3008,6 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	/* Component kfuncs use the stock program-type set and its filters.
 	 * The eBPFOS L1 services are registered in that set for components only.
 	 */
-	if (!kop_call && prog_aux->ebpfos_meta &&
-	    !ebpfos_executor_root_kfunc_allowed(func_id)) {
-		verbose(env, "eBPFOS program cannot call this kernel function\n");
-		return -EACCES;
-	}
 
 	tab = prog_aux->kfunc_tab;
 	btf_tab = prog_aux->kfunc_btf_tab;
@@ -3614,11 +3609,6 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 		if (!bpf_pseudo_func(insn) && !bpf_pseudo_call(insn) &&
 		    !bpf_pseudo_kfunc_call(insn) && !bpf_pseudo_kop_call(insn))
 			continue;
-		if (env->prog->aux->ebpfos_meta &&
-		    !bpf_pseudo_kfunc_call(insn) && !bpf_pseudo_kop_call(insn)) {
-			verbose(env, "eBPFOS provider programs cannot call BPF functions\n");
-			return -EACCES;
-		}
 
 		if (!env->bpf_capable) {
 			verbose(env, "loading/calling other bpf or kernel functions are allowed for CAP_BPF and CAP_SYS_ADMIN\n");
@@ -3647,12 +3637,6 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	 * marked using BTF decl tag to serve as the exception callback.
 	 */
 	if (ex_cb_insn) {
-		if (env->prog->aux->ebpfos_meta ||
-		    env->prog->aux->ebpfos_component) {
-			verbose(env,
-				"eBPFOS provider programs cannot define exception callbacks\n");
-			return -EACCES;
-		}
 		ret = add_subprog(env, ex_cb_insn);
 		if (ret < 0)
 			return ret;
@@ -4927,11 +4911,6 @@ static int check_map_access_type(struct bpf_verifier_env *env, u32 regno,
 	struct bpf_map *map = reg->map_ptr;
 	u32 cap = bpf_map_flags_to_cap(map);
 
-	if (type == BPF_WRITE && env->prog->aux->ebpfos_meta) {
-		verbose(env,
-			"eBPFOS meta-component manifest map values are verifier read-only\n");
-		return -EACCES;
-	}
 
 	if (type == BPF_WRITE && !(cap & BPF_MAP_CAN_WRITE)) {
 		verbose(env, "write into map forbidden, value_size=%d off=%lld size=%d\n",
@@ -10908,12 +10887,6 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 	/* find function prototype */
 	func_id = insn->imm;
-	if (env->prog->aux->ebpfos_meta &&
-	    func_id != BPF_FUNC_map_lookup_elem) {
-		verbose(env,
-			"eBPFOS meta-component manifests are immutable after admission\n");
-		return -EACCES;
-	}
 	err = bpf_get_helper_proto(env, insn->imm, &fn);
 	if (err == -ERANGE) {
 		verbose(env, "invalid func %s#%d\n", func_id_name(func_id), func_id);
@@ -18704,49 +18677,13 @@ static bool bpf_map_is_cgroup_storage(struct bpf_map *map)
 		map->map_type == BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE);
 }
 
-static int check_ebpfos_meta_map(struct bpf_verifier_env *env,
-				  struct bpf_map *map)
-{
-	bool root_manifest =
-		map->value_size == BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE;
-	bool import_manifest =
-		map->value_size == BPF_EBPFOS_EXECUTOR_IMPORT_MANIFEST_VALUE_SIZE;
-
-	if (map->map_type != BPF_MAP_TYPE_ARRAY || bpf_map_is_offloaded(map) ||
-	    map->key_size != sizeof(u32) ||
-	    (!root_manifest && !import_manifest) ||
-	    map->max_entries != 1 || map->map_flags || map->map_extra ||
-	    map->inner_map_meta || map->btf || map->btf_key_type_id ||
-	    map->btf_value_type_id || map->btf_vmlinux_value_type_id ||
-	    map->record || map->excl || map->excl_prog_sha) {
-		verbose(env,
-			"eBPFOS meta-component requires an exact ordinary root or import-manifest ARRAY map\n");
-		return -EINVAL;
-	}
-	if (!READ_ONCE(map->frozen)) {
-		verbose(env,
-			"eBPFOS meta-component map must be frozen before program load\n");
-		return -EPERM;
-	}
-	return 0;
-}
-
 static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
 {
 	struct bpf_prog_aux *aux = env->prog->aux;
 
-	if (!aux->ebpfos_meta && !aux->ebpfos_component)
+	if (!aux->ebpfos_component)
 		return 0;
-	if (aux->attach_btf || aux->attach_btf_id || aux->dst_prog ||
-	    (aux->ebpfos_meta &&
-	     (aux->btf || aux->func_info || aux->func_info_aux ||
-	      aux->func_info_cnt || aux->linfo || aux->nr_linfo ||
-	      aux->used_btf_cnt || aux->kfunc_btf_tab))) {
-		verbose(env,
-			"eBPFOS program cannot carry this BTF or attach metadata\n");
-		return -EINVAL;
-	}
-	if (aux->ebpfos_component) {
+	{
 		u8 semantic_set[SHA256_DIGEST_SIZE];
 		u64 capabilities, effects;
 		int error;
@@ -18773,12 +18710,6 @@ static int check_ebpfos_component_resources(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
-	if (env->used_map_cnt != 1 || env->used_btf_cnt) {
-		verbose(env,
-			"eBPFOS meta-components require one manifest map\n");
-		return -EINVAL;
-	}
-	return check_ebpfos_meta_map(env, env->used_maps[0]);
 }
 static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 					struct bpf_map *map,
@@ -18887,9 +18818,7 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 
 static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 {
-	bool meta = env->prog->aux->ebpfos_meta;
-	bool call_component = env->prog->aux->ebpfos_component;
-	bool component = meta || call_component;
+	bool component = env->prog->aux->ebpfos_component;
 	int i, err;
 
 	/* check whether we recorded this map already */
@@ -18902,26 +18831,11 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 			MAX_USED_MAPS);
 		return -E2BIG;
 	}
-	if (component) {
-		if (call_component) {
-			if (env->used_map_cnt) {
-				verbose(env,
-					"eBPFOS component-call descriptor supports at most one state map\n");
-				return -EINVAL;
-			}
-			goto component_map_valid;
-		}
-		if (env->used_map_cnt) {
-			verbose(env,
-				"eBPFOS meta-components cannot reference more than one map\n");
-			return -EINVAL;
-		}
-		err = check_ebpfos_meta_map(env, map);
-		if (err)
-			return err;
+	if (component && env->used_map_cnt) {
+		verbose(env,
+			"eBPFOS component-call descriptor supports at most one state map\n");
+		return -EINVAL;
 	}
-
-component_map_valid:
 
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)
@@ -19902,11 +19816,6 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 	long addr = 0;
 	struct module *mod = NULL;
 
-	if (tgt_prog && (tgt_prog->aux->ebpfos_meta ||
-			 tgt_prog->aux->ebpfos_component)) {
-		bpf_log(log, "eBPFOS provider programs cannot be attach targets\n");
-		return -EPERM;
-	}
 
 	if (!btf_id) {
 		bpf_log(log, "Tracing programs must provide btf_id\n");

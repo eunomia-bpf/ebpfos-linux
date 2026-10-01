@@ -33,9 +33,7 @@ struct ebpfos_executor_root_bundle {
 	u64 object_id;
 	u64 epoch;
 	u64 authority;
-	u32 publisher_prog_id;
 	u32 role_count;
-	u8 publisher_digest[SHA256_DIGEST_SIZE];
 	struct ebpfos_executor_root_role roles[];
 };
 
@@ -133,35 +131,6 @@ static int ebpfos_executor_root_request_size(
 	return 0;
 }
 
-static int ebpfos_executor_root_snapshot_size(u32 role_count,
-					       u32 snapshot_size,
-					       size_t *expected_size)
-{
-	size_t capacity_size;
-	size_t roles_size;
-
-	if (!role_count || role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
-	    !expected_size || snapshot_size <
-		sizeof(struct ebpfos_executor_root_snapshot))
-		return -EINVAL;
-	if (check_mul_overflow((size_t)role_count,
-			       sizeof(struct ebpfos_executor_root_role_snapshot),
-			       &roles_size) ||
-	    check_add_overflow(sizeof(struct ebpfos_executor_root_snapshot),
-			       roles_size, expected_size) ||
-	    snapshot_size < *expected_size)
-		return -ENOSPC;
-	capacity_size = snapshot_size -
-		sizeof(struct ebpfos_executor_root_snapshot);
-	if (capacity_size %
-			sizeof(struct ebpfos_executor_root_role_snapshot) ||
-	    capacity_size /
-			sizeof(struct ebpfos_executor_root_role_snapshot) >
-		EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
-		return -ENOSPC;
-	return 0;
-}
-
 static int ebpfos_executor_root_role_fill(
 	struct ebpfos_executor_root_role *role,
 	const struct ebpfos_executor_root_role_request *request)
@@ -209,33 +178,6 @@ static int ebpfos_executor_root_role_fill(
 	       SHA256_DIGEST_SIZE);
 	role->binding = binding;
 	role->grant = grant;
-	return 0;
-}
-
-static int ebpfos_executor_root_manifest_validate(
-	const struct ebpfos_executor_root_manifest *manifest,
-	const struct ebpfos_executor_root_bundle *target)
-{
-	u32 role;
-
-	if (target->object_id != manifest->object_id ||
-	    target->role_count != manifest->role_count ||
-	    target->authority != manifest->authority_ceiling)
-		return -EACCES;
-	for (role = 0; role < target->role_count; role++) {
-		const struct ebpfos_executor_root_role_snapshot *actual =
-			&target->roles[role].snapshot;
-		const struct ebpfos_executor_root_manifest_role *expected =
-			&manifest->roles[role];
-
-		if (actual->role_type != expected->role_type ||
-		    actual->provider_type_id != expected->provider_type_id ||
-		    actual->schema != expected->schema ||
-		    actual->authority != expected->authority ||
-		    memcmp(actual->contract_digest, expected->contract_digest,
-			   SHA256_DIGEST_SIZE))
-			return -EPROTOTYPE;
-	}
 	return 0;
 }
 
@@ -308,17 +250,18 @@ static int ebpfos_executor_root_source_validate(
 	if (!source)
 		return request->expected_epoch ? -ESTALE : 0;
 	if (source->object_id != request->object_id ||
-	    source->epoch != request->expected_epoch ||
-	    source->role_count != target->role_count)
+	    source->epoch != request->expected_epoch)
 		return -ESTALE;
 	for (role = 0; role < target->role_count; role++) {
-		if (source->roles[role].snapshot.role_type !=
-			    target->roles[role].snapshot.role_type ||
-		    memcmp(source->roles[role].snapshot.contract_digest,
-			   target->roles[role].snapshot.contract_digest,
-			   SHA256_DIGEST_SIZE))
-			return -EPROTOTYPE;
-		predecessors[role] = source->roles[role].binding;
+		u32 previous;
+
+		for (previous = 0; previous < source->role_count; previous++)
+			if (source->roles[previous].snapshot.role_type ==
+			    target->roles[role].snapshot.role_type) {
+				predecessors[role] =
+					source->roles[previous].binding;
+				break;
+			}
 	}
 	return 0;
 }
@@ -432,8 +375,7 @@ out_unlock:
 __bpf_kfunc_start_defs();
 
 static int ebpfos_executor_root_publish_common(
-	const void *request_data, u32 request_data__sz,
-	struct bpf_prog_aux *aux)
+	const void *request_data, u32 request_data__sz)
 {
 	const struct ebpfos_executor_root_publish_request *request = request_data;
 	struct ebpfos_executor_root_bundle *source;
@@ -441,16 +383,11 @@ static int ebpfos_executor_root_publish_common(
 	struct ebpfos_executor_root_slot *slot;
 	struct ebpfos_binding **predecessors = NULL;
 	struct ebpfos_admission **grants = NULL;
-	struct ebpfos_executor_root_manifest *manifest = NULL;
-	u8 publisher_digest[SHA256_DIGEST_SIZE];
 	size_t expected_size;
-	u32 publisher_prog_id;
 	bool staged = false;
 	u32 role;
 	int error;
 
-	if (aux && !ebpfos_admission_root_publisher_program(aux->prog))
-		return -EACCES;
 	error = ebpfos_executor_root_request_size(request, request_data__sz,
 						  &expected_size);
 	if (error)
@@ -461,9 +398,7 @@ static int ebpfos_executor_root_publish_common(
 	grants = kcalloc(target->role_count, sizeof(*grants), GFP_KERNEL);
 	predecessors = kcalloc(target->role_count, sizeof(*predecessors),
 			       GFP_KERNEL);
-	if (aux)
-		manifest = kzalloc_obj(*manifest);
-	if (!grants || !predecessors || (aux && !manifest)) {
+	if (!grants || !predecessors) {
 		error = -ENOMEM;
 		goto out;
 	}
@@ -471,15 +406,6 @@ static int ebpfos_executor_root_publish_common(
 		grants[role] = target->roles[role].grant;
 
 	ebpfos_admission_gate_lock();
-	if (aux) {
-		error = ebpfos_admission_root_publisher_validate_locked(
-			aux, &publisher_prog_id, publisher_digest, manifest);
-		if (error)
-			goto out_unlock_gate;
-		error = ebpfos_executor_root_manifest_validate(manifest, target);
-		if (error)
-			goto out_unlock_gate;
-	}
 	slot = ebpfos_executor_root_slot_get(request->object_id);
 	if (IS_ERR(slot)) {
 		error = PTR_ERR(slot);
@@ -502,11 +428,6 @@ static int ebpfos_executor_root_publish_common(
 		error = -ECANCELED;
 		goto out_unlock_gate;
 	}
-	if (aux) {
-		target->publisher_prog_id = publisher_prog_id;
-		memcpy(target->publisher_digest, publisher_digest,
-		       SHA256_DIGEST_SIZE);
-	}
 	error = ebpfos_executor_root_commit(slot, request,
 					    source, target, grants);
 	if (error)
@@ -520,7 +441,6 @@ static int ebpfos_executor_root_publish_common(
 		call_rcu(&source->rcu, ebpfos_executor_root_retire_rcu);
 	kfree(predecessors);
 	kfree(grants);
-	kfree(manifest);
 	return 0;
 
 out_unlock_gate:
@@ -530,7 +450,6 @@ out_unlock_gate:
 out:
 	kfree(predecessors);
 	kfree(grants);
-	kfree(manifest);
 	ebpfos_executor_root_bundle_release(target);
 	return error;
 }
@@ -558,85 +477,10 @@ long ebpfos_executor_root_publish_ioctl(void __user *argp)
 	request_size = offsetof(struct ebpfos_ioc_root_publish, roles) +
 		request->role_count * sizeof(request->roles[0]);
 	error = ebpfos_executor_root_publish_common(
-		(const void *)request, request_size, NULL);
+		(const void *)request, request_size);
 out:
 	kfree(request);
 	return error;
-}
-
-noinline int bpf_ebpfos_executor_root_publish_impl(
-	const void *request_data, u32 request_data__sz,
-	struct bpf_prog_aux *aux)
-{
-	if (!aux)
-		return -EACCES;
-	return ebpfos_executor_root_publish_common(request_data,
-						 request_data__sz, aux);
-}
-
-/*
- * Keep the legacy _impl BTF counterpart explicit until the minimum supported
- * pahole can synthesize it for KF_IMPLICIT_ARGS.  The public symbol remains
- * the only registered/callable kfunc and receives aux from the verifier.
- */
-__bpf_kfunc int bpf_ebpfos_executor_root_publish(
-	const void *request_data, u32 request_data__sz,
-	struct bpf_prog_aux *aux)
-{
-	return bpf_ebpfos_executor_root_publish_impl(request_data,
-						     request_data__sz, aux);
-}
-
-noinline int bpf_ebpfos_executor_root_read_impl(
-	u64 object_id, void *snapshot_data, u32 snapshot_data__sz,
-	struct bpf_prog_aux *aux)
-{
-	struct ebpfos_executor_root_snapshot *snapshot = snapshot_data;
-	struct ebpfos_executor_root_bundle *bundle;
-	struct ebpfos_executor_root_slot *slot;
-	size_t expected_size;
-	u32 role;
-	int error = 0;
-
-	if (!aux || !ebpfos_admission_root_publisher_program(aux->prog))
-		return -EACCES;
-	if (!object_id || !snapshot ||
-	    snapshot_data__sz < sizeof(*snapshot))
-		return -EINVAL;
-	rcu_read_lock();
-	slot = xa_load(&ebpfos_executor_roots, object_id);
-	bundle = slot ? rcu_dereference(slot->active) : NULL;
-	if (!bundle || bundle->object_id != object_id) {
-		error = -ENOENT;
-		goto out_unlock;
-	}
-	error = ebpfos_executor_root_snapshot_size(bundle->role_count,
-						 snapshot_data__sz,
-						 &expected_size);
-	if (error)
-		goto out_unlock;
-	memset(snapshot, 0, snapshot_data__sz);
-	snapshot->version = EBPFOS_EXECUTOR_ROOT_ABI_VERSION;
-	snapshot->object_id = bundle->object_id;
-	snapshot->epoch = bundle->epoch;
-	snapshot->authority = bundle->authority;
-	snapshot->publisher_prog_id = bundle->publisher_prog_id;
-	snapshot->role_count = bundle->role_count;
-	memcpy(snapshot->publisher_digest, bundle->publisher_digest,
-	       SHA256_DIGEST_SIZE);
-	for (role = 0; role < bundle->role_count; role++)
-		snapshot->roles[role] = bundle->roles[role].snapshot;
-out_unlock:
-	rcu_read_unlock();
-	return error;
-}
-
-__bpf_kfunc int bpf_ebpfos_executor_root_read(
-	u64 object_id, void *snapshot_data, u32 snapshot_data__sz,
-	struct bpf_prog_aux *aux)
-{
-	return bpf_ebpfos_executor_root_read_impl(object_id, snapshot_data,
-						 snapshot_data__sz, aux);
 }
 
 static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
@@ -645,7 +489,7 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 	size_t expected_size;
 
 	if (!call || call_data__sz < sizeof(*call) ||
-	    call->version != EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION ||
+	    call->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
 	    call->flags & ~EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH ||
 	    !call->method_id || !call->object_id || !call->role_type ||
 	    !call->context_size ||
@@ -895,18 +739,9 @@ __bpf_kfunc int bpf_ebpfos_executor_root_call(
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_executor_root_kfunc_ids)
-BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_publish,
-		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_read,
-		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_executor_root_call,
 		     KF_IMPLICIT_ARGS | KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_executor_root_kfunc_ids)
-
-bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
-{
-	return btf_id_set8_contains(&ebpfos_executor_root_kfunc_ids, btf_id);
-}
 
 static const struct btf_kfunc_id_set ebpfos_executor_root_kfunc_set = {
 	.owner = THIS_MODULE,
@@ -961,11 +796,12 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	request.expected_epoch++;
 	target->roles[0].snapshot.role_type++;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -EPROTOTYPE);
+		&request, source, target, predecessors), 0);
+	KUNIT_EXPECT_PTR_EQ(test, predecessors[0], NULL);
 	target->roles[0].snapshot.role_type--;
 	target->roles[0].snapshot.contract_digest[0]++;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -EPROTOTYPE);
+		&request, source, target, predecessors), 0);
 	target->roles[0].snapshot.contract_digest[0]--;
 	target->authority = 7;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
@@ -1060,10 +896,6 @@ static void ebpfos_executor_root_request_test(struct kunit *test)
 	struct ebpfos_executor_root_publish_request *request;
 	size_t request_size = sizeof(*request) + 2 * sizeof(request->roles[0]);
 	size_t live_size = sizeof(*request) + sizeof(request->roles[0]);
-	size_t snapshot_size = sizeof(struct ebpfos_executor_root_snapshot) +
-		2 * sizeof(struct ebpfos_executor_root_role_snapshot);
-	size_t live_snapshot_size = sizeof(struct ebpfos_executor_root_snapshot) +
-		sizeof(struct ebpfos_executor_root_role_snapshot);
 	size_t expected_size = 0;
 
 	request = kunit_kzalloc(test, request_size, GFP_KERNEL);
@@ -1082,13 +914,6 @@ static void ebpfos_executor_root_request_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), -E2BIG);
 	request->roles[1].role_type = 0;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
-		1, snapshot_size, &expected_size), 0);
-	KUNIT_EXPECT_EQ(test, expected_size, live_snapshot_size);
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
-		2, live_snapshot_size, &expected_size), -ENOSPC);
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_snapshot_size(
-		1, snapshot_size - 1, &expected_size), -ENOSPC);
 	request->role_count = EBPFOS_EXECUTOR_ROOT_MAX_ROLES + 1;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), -EINVAL);
@@ -1105,7 +930,7 @@ static void ebpfos_executor_root_call_size_test(struct kunit *test)
 
 	call = kunit_kzalloc(test, size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, call);
-	call->version = EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION;
+	call->version = EBPFOS_EXECUTOR_ROOT_ABI_VERSION;
 	call->object_id = 7;
 	call->role_type = 9;
 	call->method_id = 1;
@@ -1206,57 +1031,6 @@ static void ebpfos_executor_provider_run_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_binding_invocation_entries(&binding), 1ULL);
 }
 
-static void ebpfos_executor_root_manifest_test(struct kunit *test)
-{
-	struct ebpfos_executor_root_manifest *manifest;
-	struct ebpfos_executor_root_bundle *target;
-	struct ebpfos_executor_root_role_snapshot *actual;
-
-	manifest = kunit_kzalloc(test, sizeof(*manifest), GFP_KERNEL);
-	target = kunit_kzalloc(test, struct_size(target, roles, 1), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, manifest);
-	KUNIT_ASSERT_NOT_NULL(test, target);
-	manifest->version = EBPFOS_EXECUTOR_ROOT_ABI_VERSION;
-	manifest->role_count = 1;
-	manifest->object_id = 7;
-	manifest->authority_ceiling = 3;
-	manifest->roles[0].role_type = 9;
-	manifest->roles[0].provider_type_id = 11;
-	manifest->roles[0].schema = 13;
-	manifest->roles[0].authority = 3;
-	target->object_id = manifest->object_id;
-	target->role_count = manifest->role_count;
-	target->authority = manifest->authority_ceiling;
-	actual = &target->roles[0].snapshot;
-	actual->role_type = manifest->roles[0].role_type;
-	actual->provider_type_id = manifest->roles[0].provider_type_id;
-	actual->schema = manifest->roles[0].schema;
-	actual->authority = manifest->roles[0].authority;
-	actual->content_digest[0] = manifest->roles[0].content_digest[0] = 0xaa;
-	actual->contract_digest[0] = manifest->roles[0].contract_digest[0] = 0xbb;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), 0);
-	actual->role_type++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), -EPROTOTYPE);
-	actual->role_type--;
-	actual->provider_type_id++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), -EPROTOTYPE);
-	actual->provider_type_id--;
-	actual->schema++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), -EPROTOTYPE);
-	actual->schema--;
-	actual->authority = 1;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), -EPROTOTYPE);
-	actual->authority = manifest->roles[0].authority;
-	actual->content_digest[0]++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_manifest_validate(
-		manifest, target), 0);
-}
-
 static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_compare_test),
 	KUNIT_CASE(ebpfos_executor_root_retained_binding_test),
@@ -1264,7 +1038,6 @@ static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_call_size_test),
 	KUNIT_CASE(ebpfos_executor_frame_test),
 	KUNIT_CASE(ebpfos_executor_provider_run_test),
-	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
 };
 

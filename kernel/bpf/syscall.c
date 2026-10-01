@@ -2936,17 +2936,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_XDP_HAS_FRAGS |
 				 BPF_F_XDP_DEV_BOUND_ONLY |
 				 BPF_F_TEST_REG_INVARIANTS |
-				 BPF_F_EBPFOS_META |
 				 BPF_F_EBPFOS_COMPONENT |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
-	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
-	    (type != BPF_PROG_TYPE_SYSCALL ||
-	     attr->prog_flags != (BPF_F_EBPFOS_META | BPF_F_SLEEPABLE)))
-		return -EINVAL;
-	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
-	    !IS_ENABLED(CONFIG_EBPFOS))
-		return -EOPNOTSUPP;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    (type != BPF_PROG_TYPE_SYSCALL ||
 	     attr->prog_flags != (BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE)))
@@ -2954,16 +2946,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))
 		return -EOPNOTSUPP;
-	if ((attr->prog_flags & BPF_F_EBPFOS_META) &&
-	    (attr->expected_attach_type || attr->prog_ifindex ||
-	     attr->prog_btf_fd || attr->func_info_rec_size ||
-	     attr->func_info || attr->func_info_cnt ||
-	     attr->line_info_rec_size || attr->line_info ||
-	     attr->line_info_cnt || attr->attach_btf_id ||
-	     attr->attach_prog_fd || attr->core_relo_cnt ||
-	     attr->core_relos || attr->core_relo_rec_size ||
-	     attr->fd_array || attr->fd_array_cnt))
-		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    (attr->expected_attach_type || attr->prog_ifindex ||
 	     attr->attach_btf_id || attr->attach_prog_fd ||
@@ -3082,7 +3064,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 
 	prog->expected_attach_type = attr->expected_attach_type;
 	prog->sleepable = !!(attr->prog_flags & BPF_F_SLEEPABLE);
-	prog->aux->ebpfos_meta = !!(attr->prog_flags & BPF_F_EBPFOS_META);
 	prog->aux->ebpfos_component =
 		!!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT);
 	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
@@ -4833,9 +4814,7 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	prog = bpf_prog_get(attr->test.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->kop_terminal_effect ||
-	    (prog->aux->ebpfos_meta &&
-	     !ebpfos_admission_meta_program(prog))) {
+	if (prog->aux->kop_terminal_effect) {
 		ret = -EPERM;
 		goto out_put;
 	}
@@ -6210,11 +6189,6 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 	prog = bpf_prog_get(attr->prog_bind_map.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->ebpfos_meta ||
-	    prog->aux->ebpfos_component) {
-		ret = -EPERM;
-		goto out_prog_put;
-	}
 
 	map = bpf_map_get(attr->prog_bind_map.map_fd);
 	if (IS_ERR(map)) {
@@ -6572,9 +6546,7 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 		prog = bpf_prog_get_type(attr->test.prog_fd, BPF_PROG_TYPE_SYSCALL);
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
-		if (prog->aux->kop_terminal_effect ||
-		    (prog->aux->ebpfos_meta &&
-		     !ebpfos_admission_meta_program(prog))) {
+		if (prog->aux->kop_terminal_effect) {
 			bpf_prog_put(prog);
 			return -EPERM;
 		}
@@ -6666,11 +6638,6 @@ static const struct bpf_func_proto bpf_kallsyms_lookup_name_proto = {
 static const struct bpf_func_proto *
 syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (prog->aux->ebpfos_meta ||
-	    prog->aux->ebpfos_component)
-		return func_id == BPF_FUNC_map_lookup_elem ?
-		       &bpf_map_lookup_elem_proto : NULL;
-
 	switch (func_id) {
 	case BPF_FUNC_sys_bpf:
 		return !bpf_token_capable(prog->aux->token, CAP_PERFMON)

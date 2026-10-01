@@ -355,8 +355,6 @@ struct bpf_map {
 #define BPF_EBPFOS_PROVIDER_V2_MAX_ENTRIES	32770U
 #define BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE	2080U
 #define BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES	16386U
-#define BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE	6200U
-#define BPF_EBPFOS_EXECUTOR_IMPORT_MANIFEST_VALUE_SIZE	10304U
 
 static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 {
@@ -367,12 +365,6 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 	bool split_v2 =
 		map->value_size == BPF_EBPFOS_PROVIDER_SPLIT_V2_VALUE_SIZE &&
 		map->max_entries == BPF_EBPFOS_PROVIDER_SPLIT_V2_MAX_ENTRIES;
-	bool executor_root =
-		map->value_size == BPF_EBPFOS_EXECUTOR_ROOT_MANIFEST_VALUE_SIZE &&
-		map->max_entries == 1;
-	bool executor_imports =
-		map->value_size == BPF_EBPFOS_EXECUTOR_IMPORT_MANIFEST_VALUE_SIZE &&
-		map->max_entries == 1;
 
 	return IS_ENABLED(CONFIG_EBPFOS) &&
 	       map->map_type == BPF_MAP_TYPE_ARRAY &&
@@ -381,7 +373,7 @@ static inline bool bpf_ebpfos_map_candidate(const struct bpf_map *map)
 	       !map->btf_key_type_id && !map->btf_value_type_id &&
 	       !map->btf_vmlinux_value_type_id && !map->record &&
 	       !map->excl && !map->excl_prog_sha &&
-	       (v1 || v2 || split_v2 || executor_root || executor_imports);
+	       (v1 || v2 || split_v2);
 }
 
 static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
@@ -1899,7 +1891,6 @@ struct bpf_prog_aux {
 	bool changes_pkt_data;
 	bool might_sleep;
 	bool kprobe_write_ctx;
-	bool ebpfos_meta;
 	bool ebpfos_component;
 	u32 ebpfos_load_insn_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */

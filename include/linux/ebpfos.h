@@ -52,23 +52,10 @@ struct ebpfos_binding {
 };
 
 /* Policy-free generic executor-root substrate. */
-#define EBPFOS_EXECUTOR_ROOT_ABI_ID 0x4558524f4f540001ULL
 #define EBPFOS_EXECUTOR_ROOT_ABI_VERSION 1U
-#define EBPFOS_EXECUTOR_ROOT_PUBLISH_CAPABILITY BIT_ULL(63)
-#define EBPFOS_EXECUTOR_ROOT_PUBLISH_EFFECT BIT_ULL(63)
 #define EBPFOS_EXECUTOR_ROOT_MAX_ROLES 64U
-#define EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE 7800U
-#define EBPFOS_EXECUTOR_ROOT_MANIFEST_SCHEMA 0x4558524d414e0001ULL
-#define EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT 2U
-#define EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT_MASK \
-	BIT(EBPFOS_COMPONENT_DOMAIN_EXECUTOR_ROOT)
-#define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_PUBLISHER 10U
-#define EBPFOS_COMPONENT_USE_EXECUTOR_ROOT_CALLER 11U
+#define EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE EBPFOS_COMPONENT_CALL_CONTEXT_SIZE
 #define EBPFOS_COMPONENT_USE_CALL_PROVIDER 12U
-#define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT 2U
-#define EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT_MASK \
-	BIT_ULL(EBPFOS_VERIFIER_PROFILE_EXECUTOR_ROOT)
-#define EBPFOS_EXECUTOR_ROOT_PUBLISHER_TYPE 0x4558525055420001ULL
 #define EBPFOS_EXECUTOR_ROOT_F_TEST_FAIL_AFTER_STAGE BIT(0)
 
 #define EBPFOS_COMPONENT_CALL_ABI_ID 0x454243414c4c0001ULL
@@ -95,42 +82,7 @@ struct ebpfos_component_call_frame {
 #define EBPFOS_COMPONENT_CALL_CONTEXT_SIZE \
 	((u32)sizeof(struct ebpfos_component_call_frame))
 
-#define EBPFOS_EXECUTOR_IMPORT_ABI_ID 0x4558494d504f0001ULL
-#define EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION 1U
-#define EBPFOS_EXECUTOR_IMPORT_MANIFEST_SCHEMA 0x4558494d414e0001ULL
-#define EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES 64U
 #define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH BIT(0)
-
-struct ebpfos_executor_import {
-	u64 object_id;
-	u64 role_type;
-	u64 provider_type_id;
-	u64 runtime_schema;
-	u64 authority_ceiling;
-	u64 effect_ceiling;
-	u64 call_abi_id;
-	u32 context_size;
-	u32 flags;
-	u32 method_id;
-	u32 discriminator_offset;
-	u32 discriminator_size;
-	u32 reserved;
-	u64 discriminator_value;
-	u64 discriminator_mask;
-	u8 contract_digest[32];
-	u8 prototype_digest[32];
-};
-
-struct ebpfos_executor_import_manifest {
-	u32 version;
-	u32 import_count;
-	u32 flags;
-	u32 reserved;
-	u64 authority_ceiling;
-	u64 effect_ceiling;
-	u8 provenance_digest[32];
-	struct ebpfos_executor_import imports[EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES];
-};
 
 struct ebpfos_executor_call {
 	u32 version;
@@ -144,25 +96,6 @@ struct ebpfos_executor_call {
 	u32 context_size;
 	u32 method_id;
 	u8 context[];
-};
-
-struct ebpfos_executor_root_manifest_role {
-	u64 role_type;
-	u64 provider_type_id;
-	u64 schema;
-	u64 authority;
-	u8 content_digest[32];
-	u8 contract_digest[32];
-};
-
-struct ebpfos_executor_root_manifest {
-	u32 version;
-	u32 role_count;
-	u64 object_id;
-	u64 authority_ceiling;
-	struct ebpfos_executor_root_manifest_role
-		roles[EBPFOS_EXECUTOR_ROOT_MAX_ROLES];
-	u8 platform_digest[32];
 };
 
 struct ebpfos_executor_root_role_request {
@@ -191,18 +124,6 @@ struct ebpfos_executor_root_role_snapshot {
 	u32 map_id;
 	u8 content_digest[32];
 	u8 contract_digest[32];
-};
-
-struct ebpfos_executor_root_snapshot {
-	u32 version;
-	u32 flags;
-	u64 object_id;
-	u64 epoch;
-	u64 authority;
-	u32 publisher_prog_id;
-	u32 role_count;
-	u8 publisher_digest[32];
-	struct ebpfos_executor_root_role_snapshot roles[];
 };
 
 #ifdef CONFIG_EBPFOS
@@ -239,17 +160,6 @@ void ebpfos_admission_fill_identity_locked(
 	struct ebpfos_admission_identity_v1 *identity);
 struct ebpfos_binding *ebpfos_admission_binding_get(
 	struct ebpfos_admission *admission);
-int ebpfos_admission_root_publisher_validate_locked(
-	struct bpf_prog_aux *aux, u32 *prog_id, u8 content_digest[32],
-	struct ebpfos_executor_root_manifest *manifest);
-bool ebpfos_admission_root_publisher_program(const struct bpf_prog *prog);
-bool ebpfos_admission_meta_program(const struct bpf_prog *prog);
-int ebpfos_admission_import_validate(
-	struct bpf_prog_aux *aux, u64 object_id, u64 role_type, u32 method_id,
-	const struct ebpfos_component_desc_v1 *provider,
-	const struct ebpfos_executor_root_role_snapshot *role,
-	struct ebpfos_executor_import *matched);
-
 struct ebpfos_binding *ebpfos_binding_get(struct ebpfos_binding *binding);
 void ebpfos_binding_put(struct ebpfos_binding *binding);
 int ebpfos_binding_invocation_enter(struct ebpfos_binding *binding);
@@ -279,21 +189,6 @@ int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch);
 void ebpfos_executor_root_resume(u64 object_id);
 long ebpfos_executor_root_publish_ioctl(void __user *argp);
 void ebpfos_prog_identity_put(struct ebpfos_prog_identity *identity);
-bool ebpfos_executor_root_kfunc_allowed(u32 btf_id);
-#else
-static inline bool ebpfos_admission_root_publisher_program(
-	const struct bpf_prog *prog)
-{
-	return false;
-}
-static inline bool ebpfos_admission_meta_program(const struct bpf_prog *prog)
-{
-	return false;
-}
-static inline bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
-{
-	return false;
-}
 #endif
 
 #endif /* _LINUX_EBPFOS_H */
