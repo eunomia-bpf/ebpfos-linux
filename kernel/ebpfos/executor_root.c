@@ -136,7 +136,6 @@ static int ebpfos_executor_root_role_fill(
 	const struct ebpfos_executor_root_role_request *request)
 {
 	const struct ebpfos_component_desc_v1 *descriptor;
-	struct ebpfos_admission_identity_v1 identity = {};
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
 	bool component;
@@ -162,15 +161,14 @@ static int ebpfos_executor_root_role_fill(
 		ebpfos_admission_put(grant);
 		return -EOPNOTSUPP;
 	}
-	ebpfos_binding_fill_identity(binding, &identity);
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.authority = le64_to_cpu(descriptor->capability_mask);
 	role->snapshot.provider_type_id =
 		le64_to_cpu(descriptor->provider_type_id);
 	role->snapshot.schema = le64_to_cpu(descriptor->runtime_schema_u64);
-	role->snapshot.prog_id = identity.prog_id;
-	role->snapshot.map_id = identity.map_id;
-	memcpy(role->snapshot.content_digest, identity.content_digest,
+	role->snapshot.prog_id = binding->prog_id;
+	role->snapshot.map_id = binding->map_id;
+	memcpy(role->snapshot.content_digest, binding->content_digest,
 	       SHA256_DIGEST_SIZE);
 	memcpy(role->snapshot.contract_digest, descriptor->contract_sha256,
 	       SHA256_DIGEST_SIZE);

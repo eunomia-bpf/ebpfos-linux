@@ -197,23 +197,6 @@ struct ebpfos_ioc_root_quiesce {
 	__u64 expected_epoch;
 };
 
-struct ebpfos_admission_identity_v1 {
-	__u64 grant_id;
-	__u64 policy_generation;
-	__u32 binding_kind;
-	__u32 admission_state;
-	__u32 prog_id;
-	__u32 map_id;
-	__u8 policy_record_digest[32];
-	__u8 content_digest[32];
-	__u8 program_digest[32];
-	__u8 map_digest[32];
-	__u8 contract_sha256[32];
-	__u8 abstract_schema_sha256[32];
-	__u8 concrete_schema_sha256[32];
-	__u8 authority_sha256[32];
-};
-
 #define EBPFOS_IOC_ADMISSION_SEAL \
 	_IOWR(EBPFOS_IOC_MAGIC, 0x32, struct ebpfos_ioc_admission_seal)
 #define EBPFOS_IOC_ADMISSION_INFO \

@@ -36,21 +36,13 @@ struct ebpfos_binding {
 	u32 map_count;
 	struct ebpfos_prog_identity *prog_identity;
 	u64 grant_id;
-	u64 policy_generation;
-	u64 runtime_schema;
 	u32 kind;
 	u32 use;
 	u32 prog_id;
 	u32 map_id;
-	u8 realm_id[16];
-	u8 policy_digest[32];
 	u8 content_digest[32];
 	u8 program_digest[32];
 	u8 map_digest[32];
-	u8 contract_sha256[32];
-	u8 abstract_schema_sha256[32];
-	u8 concrete_schema_sha256[32];
-	u8 authority_sha256[32];
 };
 
 /* Policy-free generic executor-root substrate. */
@@ -153,19 +145,12 @@ u32 ebpfos_binding_active_invocations(const struct ebpfos_binding *binding);
 u64 ebpfos_binding_invocation_entries(const struct ebpfos_binding *binding);
 bool ebpfos_binding_is_retired(const struct ebpfos_binding *binding);
 void ebpfos_binding_retire(struct ebpfos_binding *binding, u64 epoch);
-bool ebpfos_binding_content_matches(const struct ebpfos_binding *binding,
-				    const u8 digest[32]);
-u64 ebpfos_binding_policy_generation(const struct ebpfos_binding *binding);
-u64 ebpfos_binding_runtime_schema(const struct ebpfos_binding *binding);
 u32 ebpfos_binding_use(const struct ebpfos_binding *binding);
 u32 ebpfos_binding_kind(const struct ebpfos_binding *binding);
-const u8 *ebpfos_binding_content_digest(const struct ebpfos_binding *binding);
 const struct ebpfos_component_desc_v1 *
 ebpfos_binding_descriptor(const struct ebpfos_binding *binding);
 struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
-void ebpfos_binding_fill_identity(const struct ebpfos_binding *binding,
-				  struct ebpfos_admission_identity_v1 *identity);
 int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot);

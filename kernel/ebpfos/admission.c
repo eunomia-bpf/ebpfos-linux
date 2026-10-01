@@ -110,10 +110,6 @@ EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, content_digest, 40);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, retired_epoch, 72);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
 		     entries_at_publication, 80);
-static_assert(sizeof(struct ebpfos_admission_identity_v1) == 288);
-EBPFOS_ASSERT_OFFSET(ebpfos_admission_identity_v1,
-		     policy_record_digest, 32);
-EBPFOS_ASSERT_OFFSET(ebpfos_admission_identity_v1, authority_sha256, 256);
 static_assert(BPF_PROG_TYPE_SYSCALL == 31);
 static_assert((BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE) ==
 	      EBPFOS_COMPONENT_CALL_PROG_FLAGS);
@@ -415,51 +411,17 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	binding->map = map_count ? maps[0] : NULL;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
 	binding->grant_id = grant_id;
-	binding->policy_generation =
-		le64_to_cpu(descriptor->policy_generation);
-	binding->runtime_schema = le64_to_cpu(descriptor->runtime_schema_u64);
 	binding->kind = EBPFOS_ADMITTED_BINDING_BPF;
 	binding->use = le32_to_cpu(descriptor->use);
 	binding->prog_id = prog->aux->id;
 	binding->map_id = binding->map ? binding->map->id : 0;
-	memcpy(binding->realm_id, descriptor->realm_id,
-	       sizeof(binding->realm_id));
-	memcpy(binding->policy_digest, descriptor->policy_record_digest,
-	       sizeof(binding->policy_digest));
 	memcpy(binding->content_digest, identity->content_digest,
 	       sizeof(binding->content_digest));
 	memcpy(binding->program_digest, identity->program_digest,
 	       sizeof(binding->program_digest));
 	memcpy(binding->map_digest, identity->map_digest,
 	       sizeof(binding->map_digest));
-	memcpy(binding->contract_sha256, descriptor->contract_sha256,
-	       sizeof(binding->contract_sha256));
-	memcpy(binding->abstract_schema_sha256,
-	       descriptor->abstract_schema_sha256,
-	       sizeof(binding->abstract_schema_sha256));
-	memcpy(binding->concrete_schema_sha256,
-	       descriptor->concrete_schema_sha256,
-	       sizeof(binding->concrete_schema_sha256));
-	memcpy(binding->authority_sha256, descriptor->authority_sha256,
-	       sizeof(binding->authority_sha256));
 	return binding;
-}
-
-bool ebpfos_binding_content_matches(const struct ebpfos_binding *binding,
-				    const u8 digest[SHA256_DIGEST_SIZE])
-{
-	return binding && digest &&
-	       !memcmp(binding->content_digest, digest, SHA256_DIGEST_SIZE);
-}
-
-u64 ebpfos_binding_policy_generation(const struct ebpfos_binding *binding)
-{
-	return binding ? binding->policy_generation : 0;
-}
-
-u64 ebpfos_binding_runtime_schema(const struct ebpfos_binding *binding)
-{
-	return binding ? binding->runtime_schema : 0;
 }
 
 u32 ebpfos_binding_use(const struct ebpfos_binding *binding)
@@ -470,11 +432,6 @@ u32 ebpfos_binding_use(const struct ebpfos_binding *binding)
 u32 ebpfos_binding_kind(const struct ebpfos_binding *binding)
 {
 	return binding ? binding->kind : 0;
-}
-
-const u8 *ebpfos_binding_content_digest(const struct ebpfos_binding *binding)
-{
-	return binding ? binding->content_digest : NULL;
 }
 
 const struct ebpfos_component_desc_v1 *
@@ -492,43 +449,6 @@ struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding)
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding)
 {
 	return binding ? binding->map : NULL;
-}
-
-void ebpfos_binding_fill_identity(
-	const struct ebpfos_binding *binding,
-	struct ebpfos_admission_identity_v1 *identity)
-{
-	if (!identity)
-		return;
-	memset(identity, 0, sizeof(*identity));
-	if (!binding)
-		return;
-	identity->grant_id = binding->grant_id;
-	identity->policy_generation = binding->policy_generation;
-	identity->binding_kind = binding->kind;
-	identity->admission_state =
-		binding->kind == EBPFOS_ADMITTED_BINDING_BPF ?
-		EBPFOS_ADMISSION_CONSUMED : EBPFOS_ADMISSION_NONE;
-	identity->prog_id = binding->prog_id;
-	identity->map_id = binding->map_id;
-	memcpy(identity->policy_record_digest, binding->policy_digest,
-	       sizeof(identity->policy_record_digest));
-	memcpy(identity->content_digest, binding->content_digest,
-	       sizeof(identity->content_digest));
-	memcpy(identity->program_digest, binding->program_digest,
-	       sizeof(identity->program_digest));
-	memcpy(identity->map_digest, binding->map_digest,
-	       sizeof(identity->map_digest));
-	memcpy(identity->contract_sha256, binding->contract_sha256,
-	       sizeof(identity->contract_sha256));
-	memcpy(identity->abstract_schema_sha256,
-	       binding->abstract_schema_sha256,
-	       sizeof(identity->abstract_schema_sha256));
-	memcpy(identity->concrete_schema_sha256,
-	       binding->concrete_schema_sha256,
-	       sizeof(identity->concrete_schema_sha256));
-	memcpy(identity->authority_sha256, binding->authority_sha256,
-	       sizeof(identity->authority_sha256));
 }
 
 static bool ebpfos_map_owner_matches(struct bpf_prog *prog,
