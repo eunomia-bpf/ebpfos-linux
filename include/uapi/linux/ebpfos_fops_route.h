@@ -28,5 +28,6 @@ struct ebpfos_fops_route_request {
 
 #define EBPFOS_FOPS_ROUTE_F_COMPONENT 1U
 #define EBPFOS_FOPS_ROUTE_F_EXTENDED 2U
+#define EBPFOS_FOPS_ROUTE_F_WAIT_BRIDGE 4U
 
 #endif

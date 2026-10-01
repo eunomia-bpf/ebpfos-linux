@@ -40,6 +40,12 @@ struct ebpfos_effect_wait {
 	atomic64_t sequence;
 };
 
+struct ebpfos_effect_wait_ref {
+	u64 handle;
+	u32 slot;
+	struct ebpfos_effect_object *object;
+};
+
 struct ebpfos_effect_object {
 	refcount_t pins;
 	atomic_t logical_refs;
@@ -160,6 +166,56 @@ static void ebpfos_effect_object_put(u64 handle,
 	mutex_unlock(&ebpfos_effect_objects_lock);
 	if (last)
 		ebpfos_effect_object_destroy(object);
+}
+
+struct ebpfos_effect_wait_ref *ebpfos_effect_wait_ref_get(u64 handle, u32 slot)
+{
+	struct ebpfos_effect_wait_ref *ref;
+	struct ebpfos_effect_object *object;
+
+	if (slot >= EBPFOS_EFFECT_WAIT_SLOTS)
+		return ERR_PTR(-EINVAL);
+	object = ebpfos_effect_object_lookup(handle);
+	if (!object)
+		return ERR_PTR(-ENOENT);
+	ref = kzalloc_obj(*ref);
+	if (!ref) {
+		ebpfos_effect_object_put(handle, object);
+		return ERR_PTR(-ENOMEM);
+	}
+	ref->handle = handle;
+	ref->slot = slot;
+	ref->object = object;
+	return ref;
+}
+
+void ebpfos_effect_wait_ref_put(struct ebpfos_effect_wait_ref *ref)
+{
+	if (!ref)
+		return;
+	ebpfos_effect_object_put(ref->handle, ref->object);
+	kfree(ref);
+}
+
+u64 ebpfos_effect_wait_ref_sequence(struct ebpfos_effect_wait_ref *ref)
+{
+	return atomic64_read(&ref->object->wait[ref->slot].sequence);
+}
+
+int ebpfos_effect_wait_ref_wait(struct ebpfos_effect_wait_ref *ref, u64 seen)
+{
+	struct ebpfos_effect_wait *wait = &ref->object->wait[ref->slot];
+
+	return wait_event_interruptible(wait->queue,
+		atomic64_read(&wait->sequence) != seen);
+}
+
+void ebpfos_effect_wait_ref_wake(struct ebpfos_effect_wait_ref *ref, u32 mask)
+{
+	struct ebpfos_effect_wait *wait = &ref->object->wait[ref->slot];
+
+	atomic64_inc(&wait->sequence);
+	wake_up_interruptible_poll(&wait->queue, mask);
 }
 
 int ebpfos_effect_handle_get(u64 handle)

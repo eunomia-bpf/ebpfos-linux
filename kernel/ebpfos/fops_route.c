@@ -10,6 +10,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/list.h>
 #include <linux/limits.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -44,9 +45,68 @@ struct ebpfos_fops_route {
 	bool extended;
 	u64 handle;
 	u64 role;
+	struct ebpfos_effect_wait_ref *wait;
+	poll_table bridge_poll;
+	struct list_head bridges;
+	int bridge_error;
+};
+
+struct ebpfos_fops_bridge {
+	struct list_head link;
+	wait_queue_head_t *head;
+	wait_queue_entry_t entry;
+	struct ebpfos_fops_route *route;
 };
 
 static DEFINE_MUTEX(ebpfos_fops_route_lock);
+
+static int ebpfos_fops_bridge_wake(wait_queue_entry_t *entry,
+				   unsigned int mode, int sync, void *key)
+{
+	struct ebpfos_fops_bridge *bridge = entry->private;
+
+	ebpfos_effect_wait_ref_wake(bridge->route->wait,
+				   EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP);
+	return 1;
+}
+
+static void ebpfos_fops_bridge_poll(struct file *file,
+				    wait_queue_head_t *head, poll_table *table)
+{
+	struct ebpfos_fops_route *route =
+		container_of(table, struct ebpfos_fops_route, bridge_poll);
+	struct ebpfos_fops_bridge *bridge;
+
+	list_for_each_entry(bridge, &route->bridges, link)
+		if (bridge->head == head)
+			return;
+	if (route->bridge_error)
+		return;
+	bridge = kzalloc_obj(*bridge);
+	if (!bridge) {
+		route->bridge_error = -ENOMEM;
+		return;
+	}
+	bridge->route = route;
+	bridge->head = head;
+	init_waitqueue_func_entry(&bridge->entry, ebpfos_fops_bridge_wake);
+	bridge->entry.private = bridge;
+	add_wait_queue(head, &bridge->entry);
+	list_add(&bridge->link, &route->bridges);
+}
+
+static void ebpfos_fops_bridge_cleanup(struct ebpfos_fops_route *route)
+{
+	struct ebpfos_fops_bridge *bridge, *next;
+
+	list_for_each_entry_safe(bridge, next, &route->bridges, link) {
+		remove_wait_queue(bridge->head, &bridge->entry);
+		list_del(&bridge->link);
+		kfree(bridge);
+	}
+	ebpfos_effect_wait_ref_put(route->wait);
+	route->wait = NULL;
+}
 
 static int ebpfos_fops_route_invoke(struct ebpfos_fops_route *route,
 				    struct file *file, struct iov_iter *iter,
@@ -93,44 +153,67 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 	struct ebpfos_fops_route *route = READ_ONCE(file->f_ebpfos_route);
 	struct ebpfos_component_call_frame frame = {};
 	size_t before, after;
-	u64 consumed = 0;
+	u64 consumed, seen;
+	ssize_t result;
+	unsigned int flags;
+	bool waitable;
 	int error;
 
 	if (!route)
 		return -ESTALE;
+	waitable = route->wait && !(file->f_flags & O_NONBLOCK) &&
+		   !(iocb->ki_flags & IOCB_NOWAIT);
 	atomic_inc(&route->active);
-	ebpfos_component_gate_enter(&route->gate);
-	if (!READ_ONCE(route->component)) {
-		ssize_t result = ebpfos_fops_linux_iter(route, iocb,
-						iter, method);
-
+	for (;;) {
+		before = iov_iter_count(iter);
+		seen = waitable ? ebpfos_effect_wait_ref_sequence(route->wait) : 0;
+		ebpfos_component_gate_enter(&route->gate);
+		if (!READ_ONCE(route->component)) {
+			flags = iocb->ki_flags;
+			if (waitable)
+				iocb->ki_flags |= IOCB_NOWAIT;
+			result = ebpfos_fops_linux_iter(route, iocb, iter, method);
+			iocb->ki_flags = flags;
+		} else {
+			memset(&frame, 0, sizeof(frame));
+			consumed = 0;
+			frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+			frame.method_id = method;
+			frame.object_id = route->handle;
+			frame.flags = waitable || file->f_flags & O_NONBLOCK ? 1 : 0;
+			frame.output_capacity = sizeof(consumed);
+			memcpy(frame.input, &before, sizeof(before));
+			frame.input_size = sizeof(before);
+			error = ebpfos_fops_route_invoke(route, file, iter, NULL,
+						  &frame);
+			after = iov_iter_count(iter);
+			if (!error && frame.output_size != sizeof(consumed))
+				error = -EPROTO;
+			if (!error) {
+				memcpy(&consumed, frame.output, sizeof(consumed));
+				if (frame.status || consumed > before ||
+				    before - after != consumed)
+					error = frame.status < 0 && before == after ?
+						frame.status : -EPROTO;
+			}
+			result = error ? error : consumed;
+		}
 		ebpfos_component_gate_exit(&route->gate);
-		if (atomic_dec_and_test(&route->active))
-			wake_up_all(&route->drained);
-		return result;
+		if (!waitable || result != -EAGAIN)
+			break;
+		if (iov_iter_count(iter) != before) {
+			result = -EPROTO;
+			break;
+		}
+		error = ebpfos_effect_wait_ref_wait(route->wait, seen);
+		if (error) {
+			result = error;
+			break;
+		}
 	}
-	before = iov_iter_count(iter);
-	frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
-	frame.method_id = method;
-	frame.object_id = route->handle;
-	frame.flags = file->f_flags & O_NONBLOCK ? 1 : 0;
-	frame.output_capacity = sizeof(consumed);
-	memcpy(frame.input, &before, sizeof(before));
-	frame.input_size = sizeof(before);
-	error = ebpfos_fops_route_invoke(route, file, iter, NULL, &frame);
-	after = iov_iter_count(iter);
-	if (!error && frame.output_size != sizeof(consumed))
-		error = -EPROTO;
-	if (!error) {
-		memcpy(&consumed, frame.output, sizeof(consumed));
-		if (frame.status || consumed > before || before - after != consumed)
-			error = frame.status < 0 && before == after ?
-			frame.status : -EPROTO;
-	}
-	ebpfos_component_gate_exit(&route->gate);
 	if (atomic_dec_and_test(&route->active))
 		wake_up_all(&route->drained);
-	return error ? error : consumed;
+	return result;
 }
 
 #define EBPFOS_DEFINE_ITER(name, method_id) \
@@ -238,6 +321,7 @@ static int ebpfos_fops_route_release(struct inode *inode, struct file *file)
 
 	WARN_ON_ONCE(atomic_read(&route->active));
 	ebpfos_component_gate_enter(&route->gate);
+	ebpfos_fops_bridge_cleanup(route);
 	if (route->extended && original->release &&
 	    READ_ONCE(route->component)) {
 		frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
@@ -264,7 +348,8 @@ static int ebpfos_fops_route_release(struct inode *inode, struct file *file)
 }
 
 static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
-					  u64 role, bool extended)
+					  u64 role, bool extended,
+					  bool wait_bridge)
 {
 	struct ebpfos_fops_route *route;
 	int error = 0;
@@ -274,6 +359,7 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)
 		return -ENOMEM;
+	INIT_LIST_HEAD(&route->bridges);
 	error = ebpfos_effect_handle_get(handle);
 	if (error) {
 		kfree(route);
@@ -291,6 +377,28 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 						 route->original->poll)))) {
 		error = -EOPNOTSUPP;
 		goto out;
+	}
+	if (wait_bridge) {
+		if (!(file->f_mode & FMODE_NOWAIT) ||
+		    !route->original->poll ||
+		    (!route->original->read_iter &&
+		     !route->original->write_iter)) {
+			error = -EOPNOTSUPP;
+			goto out;
+		}
+		route->wait = ebpfos_effect_wait_ref_get(handle, 0);
+		if (IS_ERR(route->wait)) {
+			error = PTR_ERR(route->wait);
+			route->wait = NULL;
+			goto out;
+		}
+		init_poll_funcptr(&route->bridge_poll,
+				  ebpfos_fops_bridge_poll);
+		route->original->poll(file, &route->bridge_poll);
+		if (route->bridge_error || list_empty(&route->bridges)) {
+			error = route->bridge_error ?: -EOPNOTSUPP;
+			goto out;
+		}
 	}
 	route->routed = *route->original;
 #define EBPFOS_INSTALL_ITER(name, method_id) \
@@ -315,8 +423,10 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 	WRITE_ONCE(file->f_op, &route->routed);
 out:
 	mutex_unlock(&ebpfos_fops_route_lock);
-	if (error)
+	if (error) {
+		ebpfos_fops_bridge_cleanup(route);
 		kfree(route);
+	}
 	if (error)
 		ebpfos_effect_handle_put(handle);
 	return error;
@@ -324,7 +434,7 @@ out:
 
 int ebpfos_fops_route_attach(struct file *file, u64 handle, u64 role)
 {
-	return ebpfos_fops_route_attach_flags(file, handle, role, false);
+	return ebpfos_fops_route_attach_flags(file, handle, role, false, false);
 }
 
 int ebpfos_fops_route_detach(struct file *file)
@@ -342,6 +452,7 @@ int ebpfos_fops_route_detach(struct file *file)
 	/* Caller excludes new VFS acquisition. Existing routed calls finish
 	 * before restoration. */
 	wait_event(route->drained, !atomic_read(&route->active));
+	ebpfos_fops_bridge_cleanup(route);
 	WRITE_ONCE(file->f_op, route->original);
 	WRITE_ONCE(file->f_ebpfos_route, NULL);
 	mutex_unlock(&ebpfos_fops_route_lock);
@@ -360,29 +471,46 @@ static struct ebpfos_fops_route *ebpfos_fops_route_get(struct file *file)
 
 int ebpfos_fops_route_quiesce(struct file *file)
 {
-	struct ebpfos_fops_route *route = ebpfos_fops_route_get(file);
+	struct ebpfos_fops_route *route;
+	int error;
 
-	return route ? ebpfos_component_gate_engage(&route->gate) : -ENOENT;
+	mutex_lock(&ebpfos_fops_route_lock);
+	route = ebpfos_fops_route_get(file);
+	error = route ? ebpfos_component_gate_engage(&route->gate) : -ENOENT;
+	mutex_unlock(&ebpfos_fops_route_lock);
+	return error;
 }
 
 int ebpfos_fops_route_switch(struct file *file, bool component)
 {
-	struct ebpfos_fops_route *route = ebpfos_fops_route_get(file);
+	struct ebpfos_fops_route *route;
+	int error = 0;
 
+	mutex_lock(&ebpfos_fops_route_lock);
+	route = ebpfos_fops_route_get(file);
 	if (!route)
-		return -ENOENT;
-	if (!READ_ONCE(route->gate.draining))
-		return -EBUSY;
-	WRITE_ONCE(route->component, component);
-	return 0;
+		error = -ENOENT;
+	else if (!READ_ONCE(route->gate.draining))
+		error = -EBUSY;
+	else
+		WRITE_ONCE(route->component, component);
+	mutex_unlock(&ebpfos_fops_route_lock);
+	return error;
 }
 
 void ebpfos_fops_route_resume(struct file *file)
 {
-	struct ebpfos_fops_route *route = ebpfos_fops_route_get(file);
+	struct ebpfos_fops_route *route;
 
-	if (route)
+	mutex_lock(&ebpfos_fops_route_lock);
+	route = ebpfos_fops_route_get(file);
+	if (route) {
 		ebpfos_component_gate_abort(&route->gate);
+		if (route->wait)
+				ebpfos_effect_wait_ref_wake(route->wait,
+					 EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP);
+	}
+	mutex_unlock(&ebpfos_fops_route_lock);
 }
 
 u64 ebpfos_fops_route_linux_entries(struct file *file)
@@ -404,7 +532,8 @@ static long ebpfos_fops_route_ioctl(struct file *control,
 	if (copy_from_user(&request, (void __user *)argument, sizeof(request)))
 		return -EFAULT;
 	if ((command == EBPFOS_FOPS_ROUTE_IOC_ATTACH &&
-	     request.flags & ~EBPFOS_FOPS_ROUTE_F_EXTENDED) ||
+	     request.flags & ~(EBPFOS_FOPS_ROUTE_F_EXTENDED |
+			       EBPFOS_FOPS_ROUTE_F_WAIT_BRIDGE)) ||
 	    (command != EBPFOS_FOPS_ROUTE_IOC_ATTACH &&
 	     request.flags & ~EBPFOS_FOPS_ROUTE_F_COMPONENT))
 		return -EINVAL;
@@ -416,7 +545,9 @@ static long ebpfos_fops_route_ioctl(struct file *control,
 		result = ebpfos_fops_route_attach_flags(target, request.handle,
 						request.role,
 						request.flags &
-						EBPFOS_FOPS_ROUTE_F_EXTENDED);
+						EBPFOS_FOPS_ROUTE_F_EXTENDED,
+						request.flags &
+						EBPFOS_FOPS_ROUTE_F_WAIT_BRIDGE);
 		break;
 	case EBPFOS_FOPS_ROUTE_IOC_QUIESCE:
 		result = ebpfos_fops_route_quiesce(target);
