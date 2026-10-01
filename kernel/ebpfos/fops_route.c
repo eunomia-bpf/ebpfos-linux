@@ -4,6 +4,8 @@
 #include <linux/capability.h>
 #include <linux/ebpfos.h>
 #include <linux/ebpfos_fops_route.h>
+#include <linux/ebpfos_services.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -56,7 +58,8 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 	struct file *file = iocb->ki_filp;
 	struct ebpfos_fops_route *route = READ_ONCE(file->f_ebpfos_route);
 	struct ebpfos_component_call_frame frame = {};
-	size_t before, copied = 0, count;
+	struct ebpfos_effect_scope *scope;
+	size_t before, after;
 	u64 consumed = 0;
 	u64 epoch = 0;
 	u32 provider_id = 0, provider_status = 0;
@@ -79,54 +82,28 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 	frame.version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
 	frame.method_id = method;
 	frame.object_id = route->handle;
-	frame.output_capacity = EBPFOS_COMPONENT_CALL_OUTPUT_SIZE;
+	frame.flags = file->f_flags & O_NONBLOCK ? 1 : 0;
+	frame.output_capacity = sizeof(consumed);
 	memcpy(frame.input, &before, sizeof(before));
 	frame.input_size = sizeof(before);
-	if (method == 2 && before) {
-		count = min_t(size_t, before,
-			      EBPFOS_COMPONENT_CALL_INPUT_SIZE - sizeof(before));
-		copied = copy_from_iter(frame.input + sizeof(before), count,
-					iter);
-		if (!copied) {
-			error = -EFAULT;
-			goto out;
-		}
-		frame.input_size += copied;
+	scope = ebpfos_effect_scope_enter(route->handle, file, iter, NULL);
+	if (IS_ERR(scope)) {
+		error = PTR_ERR(scope);
+		goto out;
 	}
 	error = ebpfos_fops_route_call(route->handle, route->role, &frame,
 				      &epoch, &provider_id, &provider_status);
-	if (error || provider_status || frame.output_size >
-	    EBPFOS_COMPONENT_CALL_OUTPUT_SIZE ||
-	    (method == 1 && frame.output_size > before)) {
-		error = error ?: -EPROTO;
-		goto revert;
-	}
-	if (frame.status) {
-		error = frame.status < 0 ? frame.status : -EPROTO;
-		goto revert;
-	}
-	if (method == 1) {
-		count = copy_to_iter(frame.output, frame.output_size, iter);
-		if (count != frame.output_size) {
-			error = -EFAULT;
-			goto out;
-		}
-		consumed = count;
-	} else if (method == 2 && frame.output_size == sizeof(consumed)) {
-		memcpy(&consumed, frame.output, sizeof(consumed));
-		if (consumed > copied) {
-			error = -EPROTO;
-			goto revert;
-		}
-		iov_iter_revert(iter, copied - consumed);
-	} else {
+	if (ebpfos_effect_scope_exit(scope) && !error)
 		error = -EPROTO;
-		goto revert;
+	after = iov_iter_count(iter);
+	if (!error && (provider_status || frame.output_size != sizeof(consumed)))
+		error = -EPROTO;
+	if (!error) {
+		memcpy(&consumed, frame.output, sizeof(consumed));
+		if (frame.status || consumed > before || before - after != consumed)
+			error = frame.status < 0 && before == after ?
+			frame.status : -EPROTO;
 	}
-	goto out;
-revert:
-	if (copied)
-		iov_iter_revert(iter, copied);
 out:
 	ebpfos_component_gate_exit(&route->gate);
 	if (atomic_dec_and_test(&route->active))
@@ -154,6 +131,7 @@ static int ebpfos_fops_route_release(struct inode *inode, struct file *file)
 	WRITE_ONCE(file->f_ebpfos_route, NULL);
 	if (original->release)
 		result = original->release(inode, file);
+	ebpfos_effect_handle_put(route->handle);
 	kfree(route);
 	return result;
 }
@@ -168,6 +146,11 @@ int ebpfos_fops_route_attach(struct file *file, u64 handle, u64 role)
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)
 		return -ENOMEM;
+	error = ebpfos_effect_handle_get(handle);
+	if (error) {
+		kfree(route);
+		return error;
+	}
 	mutex_lock(&ebpfos_fops_route_lock);
 	if (file->f_op &&
 	    (file->f_op->read_iter == ebpfos_fops_route_read_iter ||
@@ -201,6 +184,8 @@ out:
 	mutex_unlock(&ebpfos_fops_route_lock);
 	if (error)
 		kfree(route);
+	if (error)
+		ebpfos_effect_handle_put(handle);
 	return error;
 }
 
@@ -224,6 +209,7 @@ int ebpfos_fops_route_detach(struct file *file)
 	WRITE_ONCE(file->f_op, route->original);
 	WRITE_ONCE(file->f_ebpfos_route, NULL);
 	mutex_unlock(&ebpfos_fops_route_lock);
+	ebpfos_effect_handle_put(route->handle);
 	kfree(route);
 	return 0;
 }
