@@ -12,7 +12,6 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/unaligned.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
@@ -312,8 +311,6 @@ static int ebpfos_executor_root_source_validate(
 	    source->epoch != request->expected_epoch ||
 	    source->role_count != target->role_count)
 		return -ESTALE;
-	if (target->authority & ~source->authority)
-		return -EACCES;
 	for (role = 0; role < target->role_count; role++) {
 		if (source->roles[role].snapshot.role_type !=
 			    target->roles[role].snapshot.role_type ||
@@ -321,9 +318,6 @@ static int ebpfos_executor_root_source_validate(
 			   target->roles[role].snapshot.contract_digest,
 			   SHA256_DIGEST_SIZE))
 			return -EPROTOTYPE;
-		if (target->roles[role].snapshot.authority &
-		    ~source->roles[role].snapshot.authority)
-			return -EACCES;
 		predecessors[role] = source->roles[role].binding;
 	}
 	return 0;
@@ -765,37 +759,20 @@ void ebpfos_executor_root_resume(u64 object_id)
 		ebpfos_component_gate_abort(&slot->gate);
 }
 
-static int ebpfos_executor_method_validate(
-	const struct ebpfos_executor_call *call,
-	const struct ebpfos_executor_import *import)
+static int ebpfos_executor_frame_validate(
+	const struct ebpfos_executor_call *call)
 {
-	const u8 *value;
-	u64 discriminator;
+	const struct ebpfos_component_call_frame *frame =
+		(const void *)call->context;
 
-	if (!call || !import || call->method_id != import->method_id ||
-	    import->discriminator_offset > call->context_size ||
-	    import->discriminator_size > call->context_size -
-		import->discriminator_offset)
+	if (call->context_size != sizeof(*frame) ||
+	    frame->version != EBPFOS_COMPONENT_CALL_ABI_VERSION ||
+	    frame->method_id != call->method_id ||
+	    frame->object_id != call->object_id ||
+	    frame->input_size > sizeof(frame->input) ||
+	    frame->output_capacity > sizeof(frame->output))
 		return -EPROTO;
-	value = call->context + import->discriminator_offset;
-	switch (import->discriminator_size) {
-	case 1:
-		discriminator = *value;
-		break;
-	case 2:
-		discriminator = get_unaligned_le16(value);
-		break;
-	case 4:
-		discriminator = get_unaligned_le32(value);
-		break;
-	case 8:
-		discriminator = get_unaligned_le64(value);
-		break;
-	default:
-		return -EPROTO;
-	}
-	return (discriminator & import->discriminator_mask) ==
-		import->discriminator_value ? 0 : -EACCES;
+	return 0;
 }
 
 static bool ebpfos_executor_provider_supported(const struct bpf_prog *provider)
@@ -836,7 +813,6 @@ noinline int bpf_ebpfos_executor_root_call_impl(
 	struct ebpfos_executor_call *call = call_data;
 	struct ebpfos_executor_root_role_snapshot role = {};
 	struct ebpfos_executor_root_lease lease = {};
-	struct ebpfos_executor_import import = {};
 	const struct ebpfos_component_desc_v1 *descriptor;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *provider;
@@ -868,21 +844,16 @@ retry_lookup:
 		error = -ELOOP;
 		goto out_put;
 	}
-	error = ebpfos_admission_import_validate(aux, call->object_id,
-					 call->role_type, call->method_id, descriptor,
-					 &role, &import);
-	if (error)
-		goto out_put;
 	if ((call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH) &&
 	    call->expected_epoch != epoch) {
 		error = -ESTALE;
 		goto out_put;
 	}
-	if (call->context_size != import.context_size) {
+	if (call->context_size != le32_to_cpu(descriptor->context_size)) {
 		error = -EMSGSIZE;
 		goto out_put;
 	}
-	error = ebpfos_executor_method_validate(call, &import);
+	error = ebpfos_executor_frame_validate(call);
 	if (error)
 		goto out_put;
 	/*
@@ -998,11 +969,11 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	target->roles[0].snapshot.contract_digest[0]--;
 	target->authority = 7;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -EACCES);
+		&request, source, target, predecessors), 0);
 	target->authority = source->authority;
 	target->roles[0].snapshot.authority = 7;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target, predecessors), -EACCES);
+		&request, source, target, predecessors), 0);
 	target->roles[0].snapshot.authority = 3;
 	target->role_count = 2;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
@@ -1150,36 +1121,25 @@ static void ebpfos_executor_root_call_size_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
 }
 
-static void ebpfos_executor_method_test(struct kunit *test)
+static void ebpfos_executor_frame_test(struct kunit *test)
 {
-	struct ebpfos_executor_import import = {
-		.method_id = 5,
-		.context_size = 16,
-		.discriminator_offset = 3,
-		.discriminator_size = 4,
-		.discriminator_value = 0x11223344,
-		.discriminator_mask = U32_MAX,
-	};
 	struct ebpfos_executor_call *call;
-	size_t size = sizeof(*call) + import.context_size;
+	struct ebpfos_component_call_frame *frame;
+	size_t size = sizeof(*call) + sizeof(*frame);
 
 	call = kunit_kzalloc(test, size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, call);
-	call->method_id = import.method_id;
-	call->context_size = import.context_size;
-	put_unaligned_le32(import.discriminator_value, call->context + 3);
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import), 0);
-	call->context[3]++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
-			-EACCES);
-	call->context[3]--;
-	import.discriminator_size = 3;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
-			-EPROTO);
-	import.discriminator_size = 4;
-	import.discriminator_offset = 14;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_method_validate(call, &import),
-			-EPROTO);
+	frame = (void *)call->context;
+	call->method_id = frame->method_id = 5;
+	call->object_id = frame->object_id = 7;
+	call->context_size = sizeof(*frame);
+	frame->version = EBPFOS_COMPONENT_CALL_ABI_VERSION;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_frame_validate(call), 0);
+	frame->method_id++;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_frame_validate(call), -EPROTO);
+	frame->method_id--;
+	frame->input_size = sizeof(frame->input) + 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_frame_validate(call), -EPROTO);
 }
 
 static unsigned int ebpfos_executor_test_provider(
@@ -1302,7 +1262,7 @@ static struct kunit_case ebpfos_executor_root_cases[] = {
 	KUNIT_CASE(ebpfos_executor_root_retained_binding_test),
 	KUNIT_CASE(ebpfos_executor_root_request_test),
 	KUNIT_CASE(ebpfos_executor_root_call_size_test),
-	KUNIT_CASE(ebpfos_executor_method_test),
+	KUNIT_CASE(ebpfos_executor_frame_test),
 	KUNIT_CASE(ebpfos_executor_provider_run_test),
 	KUNIT_CASE(ebpfos_executor_root_manifest_test),
 	{}
