@@ -16,6 +16,8 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
 #include <linux/uio.h>
 #include <linux/wait.h>
 #include <linux/xarray.h>
@@ -51,8 +53,12 @@ struct ebpfos_effect_scope {
 	struct file *file;
 	struct iov_iter *iter;
 	struct poll_table_struct *poll;
+	size_t copied_from_iter;
 	bool locked;
 };
+
+/* tty_ioctl is retained in the generic route's copied file_operations. */
+extern long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
 static DEFINE_XARRAY(ebpfos_effect_objects);
 static DEFINE_MUTEX(ebpfos_effect_objects_lock);
@@ -339,14 +345,58 @@ __bpf_kfunc int bpf_ebpfos_effect_poll(u64 handle, u32 slot)
 }
 
 __bpf_kfunc long bpf_ebpfos_effect_copy_from_iter(u64 handle,
-						   void *dst, u32 dst__sz)
+					   void *dst, u32 dst__sz)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	long copied;
 
 	if (!scope || !scope->iter || !dst || !dst__sz ||
 	    dst__sz > EBPFOS_EFFECT_COPY_MAX)
 		return -EINVAL;
-	return copy_from_iter(dst, dst__sz, scope->iter);
+	copied = copy_from_iter(dst, dst__sz, scope->iter);
+	scope->copied_from_iter += copied;
+	return copied;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_iter_revert(u64 handle, u32 count)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->iter || count > scope->copied_from_iter)
+		return -EINVAL;
+	iov_iter_revert(scope->iter, count);
+	scope->copied_from_iter -= count;
+	return 0;
+}
+
+__bpf_kfunc long bpf_ebpfos_effect_tty_emit(u64 handle, const void *src,
+					     u32 src__sz, u32 flags)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct tty_file_private *private;
+	struct tty_struct *tty;
+	long written;
+
+	if (!scope || !scope->file || !src || !src__sz ||
+	    src__sz > EBPFOS_EFFECT_COPY_MAX || flags & ~1U ||
+	    scope->file->f_op->unlocked_ioctl != tty_ioctl)
+		return -EINVAL;
+	private = scope->file->private_data;
+	if (!private || !private->tty)
+		return -EIO;
+	tty = private->tty;
+	if (!tty->ops || !tty->ops->write || tty_io_error(tty))
+		return -EIO;
+	if (!mutex_trylock(&tty->atomic_write_lock)) {
+		if (flags & 1U)
+			return -EAGAIN;
+		if (mutex_lock_interruptible(&tty->atomic_write_lock))
+			return -ERESTARTSYS;
+	}
+	written = tty->ops->write(tty, src, src__sz);
+	mutex_unlock(&tty->atomic_write_lock);
+	wake_up_interruptible_poll(&tty->write_wait, EPOLLOUT);
+	return written;
 }
 
 __bpf_kfunc long bpf_ebpfos_effect_copy_to_iter(u64 handle,
@@ -358,6 +408,42 @@ __bpf_kfunc long bpf_ebpfos_effect_copy_to_iter(u64 handle,
 	    src__sz > EBPFOS_EFFECT_COPY_MAX)
 		return -EINVAL;
 	return copy_to_iter(src, src__sz, scope->iter);
+}
+
+__bpf_kfunc u64 bpf_ebpfos_effect_current_handle(void)
+{
+	struct ebpfos_effect_task *task;
+
+	task = xa_load(&ebpfos_effect_tasks, (unsigned long)current);
+	return task && task->top ? task->top->handle : 0;
+}
+
+__bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
+					       u32 size)
+{
+	return ebpfos_effect_current(handle) &&
+		access_ok((const void __user *)(unsigned long)user_addr, size);
+}
+
+__bpf_kfunc unsigned long bpf_ebpfos_effect_copy_from_user(u64 handle,
+					void *dst, u32 dst__sz, u64 user_addr)
+{
+	if (!ebpfos_effect_current(handle) || !dst || !dst__sz ||
+	    dst__sz > EBPFOS_EFFECT_COPY_MAX)
+		return dst__sz;
+	return copy_from_user(dst, (const void __user *)(unsigned long)user_addr,
+			      dst__sz);
+}
+
+__bpf_kfunc unsigned long bpf_ebpfos_effect_copy_to_user(u64 handle,
+					   u64 user_addr, const void *src,
+					   u32 src__sz)
+{
+	if (!ebpfos_effect_current(handle) || !src || !src__sz ||
+	    src__sz > EBPFOS_EFFECT_COPY_MAX)
+		return src__sz;
+	return copy_to_user((void __user *)(unsigned long)user_addr, src,
+			    src__sz);
 }
 
 __bpf_kfunc int bpf_ebpfos_effect_signal_pending(u64 handle)
@@ -426,7 +512,13 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_wait, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_wake, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_poll, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_iter, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_iter_revert, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_tty_emit, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_iter, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_user, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_user, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_signal_pending, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_signal, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
@@ -512,6 +604,12 @@ static void ebpfos_effect_copy_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_copy_from_iter(0xeffec8,
 							  buffer, 4), 4L);
 	KUNIT_EXPECT_MEMEQ(test, buffer, source, 4);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_iter_revert(0xeffec8, 5),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_iter_revert(0xeffec8, 2), 0);
+	KUNIT_EXPECT_EQ(test, iov_iter_count(&iter), 2UL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_tty_emit(0xeffec8,
+							buffer, 4, 0), -EINVAL);
 	KUNIT_EXPECT_EQ(test, ebpfos_effect_scope_exit(scope), 0);
 	vector.iov_base = destination;
 	iov_iter_kvec(&iter, ITER_DEST, &vector, 1, 4);
