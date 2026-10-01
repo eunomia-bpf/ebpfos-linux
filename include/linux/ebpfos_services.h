@@ -9,6 +9,7 @@ struct bio;
 struct iov_iter;
 struct poll_table_struct;
 struct net_device;
+struct rtnl_link_stats64;
 struct sk_buff;
 struct ebpfos_effect_scope;
 struct ebpfos_effect_wait_ref;
@@ -36,8 +37,11 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
 						   struct bio *bio);
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope);
 struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
-						 struct net_device *dev,
-						 struct sk_buff *skb);
+					 struct net_device *dev,
+					 struct sk_buff *skb);
+struct ebpfos_effect_scope *ebpfos_effect_net_config_scope_enter(u64 handle,
+		struct net_device *dev, void *addr,
+		struct rtnl_link_stats64 *stats);
 bool ebpfos_effect_net_skb_pending(struct ebpfos_effect_scope *scope);
 
 /* Native fops can attach poll/fasync to an effect object. */

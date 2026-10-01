@@ -14,6 +14,7 @@
 #include <linux/mutex.h>
 #include <linux/net_tstamp.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/poll.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
@@ -74,6 +75,8 @@ struct ebpfos_effect_scope {
 	u64 bio_bytes;
 	struct net_device *netdev;
 	struct sk_buff *skb;
+	void *net_addr;
+	struct rtnl_link_stats64 *net_stats;
 	u32 net_stats_bytes;
 	bool net_stats_pending;
 	bool net_timestamp_pending;
@@ -350,6 +353,23 @@ struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
 		return scope;
 	scope->netdev = dev;
 	scope->skb = skb;
+	return scope;
+}
+
+struct ebpfos_effect_scope *ebpfos_effect_net_config_scope_enter(u64 handle,
+		struct net_device *dev, void *addr,
+		struct rtnl_link_stats64 *stats)
+{
+	struct ebpfos_effect_scope *scope;
+
+	if (!dev)
+		return ERR_PTR(-EINVAL);
+	scope = ebpfos_effect_scope_enter(handle, NULL, NULL, NULL);
+	if (IS_ERR(scope))
+		return scope;
+	scope->netdev = dev;
+	scope->net_addr = addr;
+	scope->net_stats = stats;
 	return scope;
 }
 
@@ -805,6 +825,45 @@ __bpf_kfunc s64 bpf_ebpfos_effect_net_skb_len(u64 handle)
 	return scope && scope->skb ? scope->skb->len : -EPERM;
 }
 
+__bpf_kfunc int bpf_ebpfos_effect_net_validate_addr(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->netdev ? eth_validate_addr(scope->netdev) : -EPERM;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_set_mac_addr(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->netdev && scope->net_addr ?
+		eth_mac_addr(scope->netdev, scope->net_addr) : -EPERM;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_lstats_read(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->netdev || !scope->net_stats)
+		return -EPERM;
+	dev_lstats_read(scope->netdev, &scope->net_stats->tx_packets,
+			&scope->net_stats->tx_bytes);
+	return 0;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_carrier_set(u64 handle, u32 up)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	if (!scope || !scope->netdev || up > 1)
+		return -EINVAL;
+	if (up)
+		netif_carrier_on(scope->netdev);
+	else
+		netif_carrier_off(scope->netdev);
+	return 0;
+}
+
 __bpf_kfunc int bpf_ebpfos_effect_net_lstats_add(u64 handle, u32 bytes)
 {
 	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
@@ -887,6 +946,10 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_len, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_validate_addr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_set_mac_addr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_read, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_carrier_set, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_lstats_add, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_timestamp, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_consume_skb, KF_SLEEPABLE)
