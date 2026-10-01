@@ -67,7 +67,7 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 	frame.object_id = route->handle;
 	frame.input_size = sizeof(input);
 	memcpy(frame.input, &input, sizeof(input));
-	scope = ebpfos_effect_scope_enter(route->handle, NULL, NULL, NULL);
+	scope = ebpfos_effect_scope_enter_bio(route->handle, bio);
 	if (IS_ERR(scope)) {
 		error = PTR_ERR(scope);
 		goto fail;
@@ -76,7 +76,8 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 				      &epoch, &provider_id, &provider_status);
 	if (ebpfos_effect_scope_exit(scope) && !error)
 		error = -EPROTO;
-	if (!error && (provider_status || frame.status || frame.output_size))
+	if (!error && (provider_status || frame.status || frame.output_size ||
+		       (!bio_no_advance_iter(bio) && bio->bi_iter.bi_size)))
 		error = -EPROTO;
 	if (error)
 		goto fail;
