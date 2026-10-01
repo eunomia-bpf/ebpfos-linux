@@ -12,6 +12,7 @@
 #include "koperation_xadd64.generated.h"
 #include "koperation_atomic64.generated.h"
 #include "koperation_atomic32.generated.h"
+#include "koperation_bit64.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -24,6 +25,10 @@ __bpf_kfunc u64 bpf_ebpfos_kop_atomic64(u64 *ptr, u64 value, u64 expected)
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
 __bpf_kfunc u32 bpf_ebpfos_kop_atomic32(u32 *ptr, u32 value, u32 expected)
+{
+	return 0; /* KOperation calls require JIT emission after proof checking. */
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
@@ -44,6 +49,111 @@ BTF_KFUNCS_END(ebpfos_kprog_atomic64_ids)
 BTF_KFUNCS_START(ebpfos_kprog_atomic32_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_atomic32)
 BTF_KFUNCS_END(ebpfos_kprog_atomic32_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_bit64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_bit64)
+BTF_KFUNCS_END(ebpfos_kprog_bit64_ids)
+
+static const struct ebpfos_kop_bit64_spec *ebpfos_kop_bit64_spec(u64 payload)
+{
+	u8 op = payload & 0xff;
+	u32 i;
+
+	if (ebpfos_kprog_bit64_ids.cnt != 1 ||
+	    payload >> 8 != ebpfos_kprog_bit64_ids.pairs[0].id)
+		return NULL;
+	for (i = 0; i < ARRAY_SIZE(ebpfos_kop_bit64_specs); i++)
+		if (ebpfos_kop_bit64_specs[i].op == op)
+			return &ebpfos_kop_bit64_specs[i];
+	return NULL;
+}
+
+static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
+	int n = 0;
+
+	if (!insns || !spec)
+		return -EINVAL;
+	/* x86 memory bit indexing uses a signed word offset and bit modulo 64. */
+	insns[n++] = BPF_MOV64_REG(BPF_REG_3, BPF_REG_1);
+	insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+	insns[n++] = BPF_ALU64_IMM(BPF_ARSH, BPF_REG_4, 6);
+	insns[n++] = BPF_ALU64_IMM(BPF_LSH, BPF_REG_4, 3);
+	insns[n++] = BPF_ALU64_REG(BPF_ADD, BPF_REG_3, BPF_REG_4);
+	if (spec->op == EBPFOS_KOP_BIT64_TEST) {
+		insns[n++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0);
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
+		insns[n++] = BPF_ALU64_REG(BPF_RSH, BPF_REG_0, BPF_REG_4);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_0, 1);
+	} else {
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
+		insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 1);
+		insns[n++] = BPF_ALU64_REG(BPF_LSH, BPF_REG_0, BPF_REG_4);
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_0);
+		if (spec->op == EBPFOS_KOP_BIT64_RESET)
+			insns[n++] = BPF_ALU64_IMM(BPF_XOR, BPF_REG_0, -1);
+		insns[n++] = BPF_ATOMIC_OP(BPF_DW,
+			spec->op == EBPFOS_KOP_BIT64_SET ? BPF_OR | BPF_FETCH :
+			BPF_AND | BPF_FETCH, BPF_REG_3, BPF_REG_0, 0);
+		insns[n++] = BPF_ALU64_REG(BPF_AND, BPF_REG_0, BPF_REG_4);
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
+		insns[n++] = BPF_ALU64_REG(BPF_RSH, BPF_REG_0, BPF_REG_4);
+	}
+	insns[n++] = BPF_MOV64_IMM(BPF_REG_3, 0);
+	insns[n++] = BPF_MOV64_IMM(BPF_REG_4, 0);
+	return n;
+}
+
+static int ebpfos_kop_bit64_requirements(
+	u64 payload, u64 *capability_mask, u64 *effect_mask,
+	u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
+
+	if (!spec || !capability_mask || !effect_mask || !semantic_sha256)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
+				     u64 payload, const struct bpf_prog *prog,
+				     const u8 *final_ip)
+{
+	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
+
+	(void)prog;
+	(void)final_ip;
+	if (!spec || !offset || (emit && !image))
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, spec->native, spec->native_len);
+	*offset += spec->native_len;
+	return spec->native_len;
+}
+
+static struct bpf_kop ebpfos_kop_bit64 = {
+	.max_insn_cnt = 18,
+	.max_emit_bytes = 15,
+	.requirements = ebpfos_kop_bit64_requirements,
+	.instantiate_insn = ebpfos_kop_bit64_instantiate,
+	.emit_x86 = ebpfos_kop_bit64_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_bit64_descs[] = {
+	&ebpfos_kop_bit64,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_bit64_set = {
+	.set = &ebpfos_kprog_bit64_ids,
+	.kop_descs = ebpfos_kprog_bit64_descs,
+};
 
 static const struct ebpfos_kop_atomic32_spec *
 ebpfos_kop_atomic32_spec(u64 payload)
@@ -401,7 +511,11 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_atomic64_set);
 	if (err)
 		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_atomic32_set);
+	if (err)
+		return err;
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_kprog_atomic32_set);
+					 &ebpfos_kprog_bit64_set);
 }
 late_initcall(ebpfos_kprog_register);
