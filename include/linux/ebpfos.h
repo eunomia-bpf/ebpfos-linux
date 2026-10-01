@@ -10,74 +10,6 @@
 #include <linux/types.h>
 #include <uapi/linux/ebpfos.h>
 
-/* Kernel-private generated KOperation transaction ABI. */
-#define EBPFOS_KOPERATION_ABI_VERSION 1U
-#define EBPFOS_KOPERATION_PAGE_TABLE_READ_CR3_ROOT 1U
-#define EBPFOS_KOPERATION_PAGE_TABLE_RELOAD_CR3_ROOT 2U
-#define EBPFOS_KOPERATION_STATUS_STAGED 1U
-#define EBPFOS_KOPERATION_STATUS_COMPLETE 2U
-#define EBPFOS_KOPERATION_STATUS_BURNED 3U
-#define EBPFOS_KOPERATION_ARCH_CR4_PCIDE BIT_ULL(0)
-#define EBPFOS_KOPERATION_ARCH_CR4_PGE BIT_ULL(1)
-#define EBPFOS_KOPERATION_ARCH_CR3_NOFLUSH BIT_ULL(2)
-
-struct ebpfos_koperation_prepare {
-	__u32 version;
-	__u32 operation_id;
-	__u32 flags;
-	__u32 reserved0;
-	__u64 transaction_id;
-	__u64 staged_shadow;
-	__u8 semantic_sha256[32];
-	__u8 proof_template_sha256[32];
-	__u8 native_sha256[32];
-	__u8 equivalence_sha256[32];
-	__u64 attempts;
-	__u64 commits;
-	__u64 rejects;
-};
-
-struct ebpfos_koperation_execute {
-	__u32 version;
-	__u32 operation_id;
-	__s32 proof_prog_fd;
-	__u32 flags;
-	__u64 transaction_id;
-	__u64 expected_shadow;
-	__u8 expected_semantic_sha256[32];
-	__u8 expected_proof_template_sha256[32];
-	__u8 expected_native_sha256[32];
-	__u8 expected_equivalence_sha256[32];
-};
-
-struct ebpfos_koperation_result {
-	__u32 version;
-	__u32 operation_id;
-	__u32 status;
-	__s32 error;
-	__u64 transaction_id;
-	__u64 staged_shadow;
-	__u64 native_result;
-	__u64 native_operand_before;
-	__u64 architecture_flags;
-	__u32 cpu_before;
-	__u32 cpu_after;
-	__u8 semantic_sha256[32];
-	__u8 proof_program_sha256[32];
-	__u8 native_sha256[32];
-	__u8 equivalence_sha256[32];
-	__u64 attempts;
-	__u64 commits;
-	__u64 rejects;
-};
-
-#define EBPFOS_IOC_KOPERATION_PREPARE_EXPERIMENTAL \
-	_IOWR(EBPFOS_IOC_MAGIC, 0x40, struct ebpfos_koperation_prepare)
-#define EBPFOS_IOC_KOPERATION_EXECUTE_EXPERIMENTAL \
-	_IOW(EBPFOS_IOC_MAGIC, 0x41, struct ebpfos_koperation_execute)
-#define EBPFOS_IOC_KOPERATION_RESULT_EXPERIMENTAL \
-	_IOR(EBPFOS_IOC_MAGIC, 0x42, struct ebpfos_koperation_result)
-
 struct bpf_map;
 struct bpf_prog;
 struct bpf_prog_aux;
@@ -136,12 +68,8 @@ struct ebpfos_binding {
 #define EBPFOS_COMPONENT_CALL_ABI_VERSION 1U
 #define EBPFOS_COMPONENT_CALL_INPUT_SIZE 128U
 #define EBPFOS_COMPONENT_CALL_OUTPUT_SIZE 128U
-#define EBPFOS_CAP_KPROG_MACHINE_ROOT BIT_ULL(3)
 #define EBPFOS_CAP_KPROG_TERMINAL_ROOT BIT_ULL(4)
-#define EBPFOS_CAP_KPROG_BOUNDED_MEMORY BIT_ULL(5)
-#define EBPFOS_EFFECT_KPROG_MACHINE_STATE BIT_ULL(6)
 #define EBPFOS_EFFECT_KPROG_TERMINAL_WAIT BIT_ULL(7)
-#define EBPFOS_EFFECT_KPROG_MEMORY_WRITE BIT_ULL(8)
 
 struct ebpfos_component_call_frame {
 	u32 version;
@@ -354,37 +282,6 @@ static inline bool ebpfos_executor_root_kfunc_allowed(u32 btf_id)
 {
 	return false;
 }
-#endif
-
-#ifdef CONFIG_EBPFOS_KOPERATION
-int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
-			       bool own_koperation_id);
-long ebpfos_koperation_prepare_ioctl(void __user *argp, void **txn_slot);
-long ebpfos_koperation_execute_ioctl(void __user *argp, void **txn_slot);
-long ebpfos_koperation_result_ioctl(void __user *argp, void **txn_slot);
-void ebpfos_koperation_release(void **txn_slot);
-#else
-static inline int ebpfos_kprog_domain_filter(const struct bpf_prog *prog,
-					      bool own_koperation_id)
-{
-	return -EACCES;
-}
-static inline long ebpfos_koperation_prepare_ioctl(void __user *argp,
-						    void **txn_slot)
-{
-	return -EOPNOTSUPP;
-}
-static inline long ebpfos_koperation_execute_ioctl(void __user *argp,
-						    void **txn_slot)
-{
-	return -EOPNOTSUPP;
-}
-static inline long ebpfos_koperation_result_ioctl(void __user *argp,
-						   void **txn_slot)
-{
-	return -EOPNOTSUPP;
-}
-static inline void ebpfos_koperation_release(void **txn_slot) { }
 #endif
 
 #endif /* _LINUX_EBPFOS_H */

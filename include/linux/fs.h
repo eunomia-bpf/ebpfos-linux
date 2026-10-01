@@ -1297,9 +1297,6 @@ struct file {
 	};
 	file_ref_t			f_ref;
 	/* --- cacheline 3 boundary (192 bytes) --- */
-#ifdef CONFIG_EBPFOS
-	atomic64_t			f_ebpfos_cookie;
-#endif
 } __randomize_layout
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 

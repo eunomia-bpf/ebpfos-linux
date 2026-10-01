@@ -20,7 +20,6 @@ struct ebpfos_ioc_version {
 #define EBPFOS_RESOURCE_DESC_V1_SIZE 96U
 #define EBPFOS_COMPONENT_DESC_V1_SIZE 1024U
 #define EBPFOS_ADMISSION_MAX_RESOURCES 1U
-#define EBPFOS_ADMISSION_MAX_SIGNATURE 16384U
 
 #define EBPFOS_POLICY_RECORD_V1_MAGIC "EBPFPOL1"
 #define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
@@ -181,8 +180,7 @@ struct ebpfos_component_desc_v1 {
 
 struct ebpfos_ioc_policy_activate {
 	struct ebpfos_policy_record_v1 record;
-	__aligned_u64 signature;
-	__u32 signature_size;
+	__u8 reserved[12];
 	__u32 flags;
 };
 
@@ -192,7 +190,7 @@ struct ebpfos_ioc_policy_status {
 	__u8 realm_id[16];
 	__u64 generation;
 	__u8 policy_record_digest[32];
-	__u8 root_fingerprint[32];
+	__u8 reserved_root[32];
 	__u64 staged_grants;
 	__u64 reserved0;
 	__u8 reserved[16];
@@ -202,8 +200,8 @@ struct ebpfos_ioc_admission_seal {
 	__s32 prog_fd;
 	__s32 map_fd;
 	__u32 flags;
-	__u32 signature_size;
-	__aligned_u64 signature;
+	__u32 reserved0;
+	__aligned_u64 reserved1;
 	struct ebpfos_component_desc_v1 descriptor;
 	__s32 admission_fd;
 	__u32 admission_state;

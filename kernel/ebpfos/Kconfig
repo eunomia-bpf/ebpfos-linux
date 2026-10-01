@@ -2,40 +2,22 @@
 config EBPFOS
 	bool "eBPFOS transactional component graph"
 	depends on BPF_SYSCALL && BPF_JIT
-	depends on KEYS && ASYMMETRIC_KEY_TYPE
-	depends on X509_CERTIFICATE_PARSER = y
-	depends on SYSTEM_DATA_VERIFICATION
 	select CRYPTO_LIB_SHA256
 	default n
 	help
-	  Build the eBPFOS component nucleus and its kernel-enforced admission
-	  boundary.  Admission uses a private keyring populated from exactly one
-	  compile-time X.509 certificate; it never consults a caller-selected or
-	  system-wide keyring.
-
-config EBPFOS_TRUSTED_KEYS
-	string "eBPFOS admission X.509 certificate"
-	depends on EBPFOS
-	help
-	  Path to one PEM X.509 certificate.  The build converts it to
-	  DER, and boot fails the admission trust setup unless the resulting
-	  list contains exactly one certificate.  Do not place a private key in
-	  this option or in the kernel image.
+	  Build the eBPFOS component nucleus and transactional package admission.
 
 config EBPFOS_BUILD
 	bool
 	default y if EBPFOS || EBPFOS_KOPERATION
 
 config EBPFOS_KOPERATION
-	bool "eBPFOS generated x86-64 KOperation executor"
+	bool "eBPFOS terminal-effect KOperation"
 	depends on X86_64 && BPF_SYSCALL && BPF_JIT
 	default y if EBPFOS
 	help
-	  Build the generic verifier-to-native KOperation executor and its
-	  generated operation table.  Individual operations are declarative data;
-	  they do not add verifier hooks or native fallback implementations.  The
-	  executor can be linked with the policy-free runtime root without the
-	  donor admission/control plane.
+	  Build the generic verifier-checked terminal-effect call. The verifier
+	  validates the terminal backedge before the x86 JIT emits its effect.
 
 config EBPFOS_KUNIT_TEST
 	bool "eBPFOS component nucleus tests" if !KUNIT_ALL_TESTS

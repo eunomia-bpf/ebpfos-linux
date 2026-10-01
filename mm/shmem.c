@@ -1300,6 +1300,7 @@ static int shmem_getattr(struct mnt_idmap *idmap,
 			STATX_ATTR_IMMUTABLE |
 			STATX_ATTR_NODUMP);
 	generic_fillattr(idmap, request_mask, inode, stat);
+
 	if (shmem_huge_global_enabled(inode, 0, 0, false, NULL, 0))
 		stat->blksize = HPAGE_PMD_SIZE;
 
@@ -3337,8 +3338,7 @@ shmem_write_end(const struct kiocb *iocb, struct address_space *mapping,
 	return copied;
 }
 
-static ssize_t __shmem_file_read_iter(struct kiocb *iocb,
-				      struct iov_iter *to)
+static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
@@ -3458,13 +3458,7 @@ static ssize_t __shmem_file_read_iter(struct kiocb *iocb,
 	return retval ? retval : error;
 }
 
-static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
-{
-	return __shmem_file_read_iter(iocb, to);
-}
-
-static ssize_t __shmem_file_write_iter(struct kiocb *iocb,
-				       struct iov_iter *from)
+static ssize_t shmem_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
@@ -3484,12 +3478,6 @@ static ssize_t __shmem_file_write_iter(struct kiocb *iocb,
 unlock:
 	inode_unlock(inode);
 	return ret;
-}
-
-static ssize_t shmem_file_write_iter(struct kiocb *iocb,
-				     struct iov_iter *from)
-{
-	return __shmem_file_write_iter(iocb, from);
 }
 
 static bool zero_pipe_buf_get(struct pipe_inode_info *pipe,
@@ -3649,17 +3637,11 @@ static ssize_t shmem_file_splice_read(struct file *in, loff_t *ppos,
 	return total_spliced ? total_spliced : error;
 }
 
-static ssize_t shmem_file_splice_write(struct pipe_inode_info *pipe,
-				       struct file *out, loff_t *ppos,
-				       size_t len, unsigned int flags)
-{
-	return iter_file_splice_write(pipe, out, ppos, len, flags);
-}
-
 static loff_t shmem_file_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = mapping->host;
+
 	if (whence != SEEK_DATA && whence != SEEK_HOLE)
 		return generic_file_llseek_size(file, offset, whence,
 					MAX_LFS_FILESIZE, i_size_read(inode));
@@ -3689,6 +3671,7 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 		return -EOPNOTSUPP;
 
 	inode_lock(inode);
+
 	if (info->flags & SHMEM_F_MAPPING_FROZEN) {
 		error = -EPERM;
 		goto out;
@@ -5225,7 +5208,7 @@ static const struct file_operations shmem_file_operations = {
 	.write_iter	= shmem_file_write_iter,
 	.fsync		= noop_fsync,
 	.splice_read	= shmem_file_splice_read,
-	.splice_write	= shmem_file_splice_write,
+	.splice_write	= iter_file_splice_write,
 	.fallocate	= shmem_fallocate,
 	.setlease	= generic_setlease,
 #endif

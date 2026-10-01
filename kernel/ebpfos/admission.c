@@ -4,12 +4,10 @@
 #include <linux/bpf.h>
 #include <linux/build_bug.h>
 #include <linux/capability.h>
-#include <linux/cred.h>
 #include <linux/ebpfos.h>
 #include <linux/file.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
-#include <linux/key.h>
 #include <linux/kref.h>
 #include <linux/lockdep.h>
 #include <linux/module.h>
@@ -21,8 +19,6 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/verification.h>
-#include "admission_certificates.h"
 #include "component_graph.h"
 
 #define EBPFOS_EXECUTOR_ROOT_PROG_FLAGS 0x210U
@@ -128,15 +124,14 @@ EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, resource, 576);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved, 672);
 
 static_assert(sizeof(struct ebpfos_ioc_policy_activate) == 272);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_activate, signature, 256);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_activate, signature_size, 264);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_activate, reserved, 256);
 static_assert(sizeof(struct ebpfos_ioc_policy_status) == 128);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, generation, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, policy_record_digest, 32);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, root_fingerprint, 64);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, reserved_root, 64);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_policy_status, staged_grants, 96);
 static_assert(sizeof(struct ebpfos_ioc_admission_seal) == 1168);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, signature, 16);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, reserved1, 16);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, descriptor, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, admission_fd, 1048);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, grant_id, 1056);
@@ -182,15 +177,7 @@ static const u8 ebpfos_empty_sha256[SHA256_DIGEST_SIZE] = {
 	0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
 	0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 };
-static const u8 ebpfos_admission_domain[] = "eBPFOS-admission-v1";
 static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
-
-static const u8 ebpfos_kernel_abi_sha256[SHA256_DIGEST_SIZE] = {
-	0x30, 0xfc, 0x01, 0x36, 0xde, 0x41, 0x9c, 0x62,
-	0xcf, 0x4a, 0x21, 0x25, 0x7c, 0x21, 0x88, 0xd3,
-	0x82, 0xaf, 0x4b, 0x02, 0xa1, 0x50, 0x68, 0x65,
-	0x88, 0x9a, 0x80, 0x89, 0x80, 0x3d, 0xf8, 0x3b,
-};
 
 static const u8 ebpfos_executor_root_component_id[16] = {
 	0x01, 0x00, 0x00, 0x00, 0x54, 0x4f, 0x4f, 0x52,
@@ -230,9 +217,6 @@ struct ebpfos_policy {
 static DEFINE_MUTEX(ebpfos_publish_gate);
 static DEFINE_MUTEX(ebpfos_seal_lock);
 static struct ebpfos_policy ebpfos_policy;
-static struct key *ebpfos_trusted_keyring;
-static u8 ebpfos_root_fingerprint[SHA256_DIGEST_SIZE];
-static bool ebpfos_trust_ready;
 static u64 ebpfos_staged_grants;
 static DEFINE_SPINLOCK(ebpfos_grant_id_lock);
 static u64 ebpfos_next_grant_id;
@@ -281,9 +265,7 @@ static int ebpfos_executor_import_manifest_validate(
 	    manifest->version != EBPFOS_EXECUTOR_IMPORT_MANIFEST_VERSION ||
 	    !manifest->import_count ||
 	    manifest->import_count > EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES ||
-	    manifest->flags || manifest->reserved ||
-	    !ebpfos_nonzero(manifest->provenance_digest,
-			    sizeof(manifest->provenance_digest)))
+	    manifest->flags || manifest->reserved)
 		return -EPROTO;
 	for (index = 0; index < EBPFOS_EXECUTOR_IMPORT_MAX_ENTRIES; index++) {
 		const struct ebpfos_executor_import *entry =
@@ -403,32 +385,6 @@ static void ebpfos_descriptor_content_digest(
 			  sizeof(*descriptor), NULL, 0, digest);
 }
 
-static int ebpfos_verify_signature(const u8 *domain, size_t domain_size,
-				   const void *record, size_t record_size,
-				   const void *signature,
-				   size_t signature_size)
-{
-	size_t payload_size;
-	u8 *payload;
-	int error;
-
-	if (!READ_ONCE(ebpfos_trust_ready) || !ebpfos_trusted_keyring)
-		return -ENOKEY;
-	if (check_add_overflow(domain_size, record_size, &payload_size))
-		return -EOVERFLOW;
-	payload = kmalloc(payload_size, GFP_KERNEL);
-	if (!payload)
-		return -ENOMEM;
-	memcpy(payload, domain, domain_size);
-	memcpy(payload + domain_size, record, record_size);
-	error = verify_pkcs7_signature(payload, payload_size, signature,
-				       signature_size, ebpfos_trusted_keyring,
-				       VERIFYING_UNSPECIFIED_SIGNATURE, NULL,
-				       NULL);
-	kfree_sensitive(payload);
-	return error;
-}
-
 static int ebpfos_validate_policy_record(
 	const struct ebpfos_policy_record_v1 *record)
 {
@@ -453,10 +409,6 @@ static int ebpfos_validate_policy_record(
 	    le16_to_cpu(record->header_size) != sizeof(*record) ||
 	    le32_to_cpu(record->total_size) != sizeof(*record))
 		return -EPROTO;
-	if (flags & EBPFOS_POLICY_F_TEST_ONLY) {
-		allowed_capabilities |= EBPFOS_CAP_KPROG_MACHINE_ROOT;
-		allowed_effects |= EBPFOS_EFFECT_KPROG_MACHINE_STATE;
-	}
 	if (flags & ~EBPFOS_POLICY_F_ALL || !domains ||
 	    (domains & ~allowed_domains) || !profiles ||
 	    (profiles & ~allowed_profiles) ||
@@ -481,9 +433,6 @@ static int ebpfos_validate_policy_record(
 	if (le32_to_cpu(record->reserved0) ||
 	    !ebpfos_all_zero(record->reserved, sizeof(record->reserved)))
 		return -EINVAL;
-	if (memcmp(record->kernel_abi_sha256, ebpfos_kernel_abi_sha256,
-		   SHA256_DIGEST_SIZE))
-		return -EPROTO;
 	if (!ebpfos_all_zero(record->native_bootstrap_sha256,
 			     sizeof(record->native_bootstrap_sha256)))
 		return -EINVAL;
@@ -562,8 +511,6 @@ static int ebpfos_validate_executor_root_descriptor(
 	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->attested_elf_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->load_image_sha256,
 			    SHA256_DIGEST_SIZE) ||
@@ -686,8 +633,6 @@ static int ebpfos_validate_component_call_descriptor(
 	    !ebpfos_nonzero(descriptor->abstract_schema_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->concrete_schema_sha256,
-			    SHA256_DIGEST_SIZE) ||
-	    !ebpfos_nonzero(descriptor->attested_elf_sha256,
 			    SHA256_DIGEST_SIZE) ||
 	    !ebpfos_nonzero(descriptor->load_image_sha256,
 			    SHA256_DIGEST_SIZE))
@@ -816,8 +761,6 @@ int ebpfos_policy_identity_validate_locked(
 	u32 flags;
 
 	lockdep_assert_held(&ebpfos_publish_gate);
-	if (!ebpfos_trust_ready)
-		return -ENOKEY;
 	if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE)
 		return -EACCES;
 	if (!ebpfos_policy_matches_locked(generation, realm_id, policy_digest) ||
@@ -1296,7 +1239,6 @@ long ebpfos_policy_activate_ioctl(void __user *argp)
 {
 	struct ebpfos_ioc_policy_activate request;
 	u8 digest[SHA256_DIGEST_SIZE];
-	void *signature;
 	u64 generation;
 	int error;
 
@@ -1304,32 +1246,16 @@ long ebpfos_policy_activate_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || !request.signature || !request.signature_size ||
-	    request.signature_size > EBPFOS_ADMISSION_MAX_SIGNATURE)
+	if (request.flags || !ebpfos_all_zero(request.reserved,
+					     sizeof(request.reserved)))
 		return -EINVAL;
 	error = ebpfos_validate_policy_record(&request.record);
-	if (error)
-		return error;
-	signature = memdup_user(u64_to_user_ptr(request.signature),
-				request.signature_size);
-	if (IS_ERR(signature))
-		return PTR_ERR(signature);
-	error = ebpfos_verify_signature(ebpfos_policy_domain,
-					sizeof(ebpfos_policy_domain),
-					&request.record,
-					sizeof(request.record), signature,
-					request.signature_size);
-	kfree_sensitive(signature);
 	if (error)
 		return error;
 	ebpfos_policy_digest(&request.record, digest);
 	generation = le64_to_cpu(request.record.generation);
 
 	mutex_lock(&ebpfos_publish_gate);
-	if (!ebpfos_trust_ready) {
-		error = -ENOKEY;
-		goto out_unlock;
-	}
 	if (ebpfos_staged_grants) {
 		error = -EBUSY;
 		goto out_unlock;
@@ -1383,8 +1309,6 @@ long ebpfos_policy_status_ioctl(void __user *argp)
 		memcpy(status.policy_record_digest, ebpfos_policy.digest,
 		       sizeof(status.policy_record_digest));
 	}
-	memcpy(status.root_fingerprint, ebpfos_root_fingerprint,
-	       sizeof(status.root_fingerprint));
 	status.staged_grants = ebpfos_staged_grants;
 	status.reserved0 = 0;
 	mutex_unlock(&ebpfos_publish_gate);
@@ -1452,9 +1376,7 @@ static int ebpfos_descriptor_policy_snapshot(
 	int error;
 
 	mutex_lock(&ebpfos_publish_gate);
-	if (!ebpfos_trust_ready) {
-		error = -ENOKEY;
-	} else if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE) {
+	if (ebpfos_policy.state != EBPFOS_POLICY_ACTIVE) {
 		error = -EACCES;
 	} else {
 		*policy = ebpfos_policy.record;
@@ -1481,7 +1403,6 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct file *admission_file = NULL;
 	u8 content_digest[SHA256_DIGEST_SIZE];
 	u8 map_digest[SHA256_DIGEST_SIZE];
-	void *signature = NULL;
 	u64 grant_id;
 	bool mapless;
 	int fd = -1;
@@ -1491,26 +1412,12 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || !request.signature || !request.signature_size ||
-	    request.signature_size > EBPFOS_ADMISSION_MAX_SIGNATURE)
+	if (request.flags || request.reserved0 || request.reserved1)
 		return -EINVAL;
 	error = ebpfos_descriptor_policy_snapshot(&request.descriptor, &policy,
 						  policy_digest);
 	if (error)
 		return error;
-	signature = memdup_user(u64_to_user_ptr(request.signature),
-				request.signature_size);
-	if (IS_ERR(signature))
-		return PTR_ERR(signature);
-	error = ebpfos_verify_signature(ebpfos_admission_domain,
-					sizeof(ebpfos_admission_domain),
-					&request.descriptor,
-					sizeof(request.descriptor), signature,
-					request.signature_size);
-	kfree_sensitive(signature);
-	if (error)
-		return error;
-
 	prog = bpf_prog_get_type_dev(request.prog_fd, BPF_PROG_TYPE_SYSCALL,
 				     false);
 	if (IS_ERR(prog))
@@ -2374,89 +2281,3 @@ void ebpfos_admission_burn_set_locked(struct ebpfos_admission **grants,
 	for (index = 0; index < count; index++)
 		ebpfos_admission_burn_locked(grants[index]);
 }
-
-static int ebpfos_der_object_size(const u8 *der, size_t der_size,
-				  size_t *object_size)
-{
-	size_t content_size;
-	size_t header_size = 2;
-	size_t length_octets;
-	size_t i;
-
-	if (der_size < header_size || der[0] != 0x30)
-		return -EKEYREJECTED;
-	if (!(der[1] & 0x80)) {
-		content_size = der[1];
-	} else {
-		length_octets = der[1] & 0x7f;
-		if (!length_octets || length_octets > sizeof(content_size) ||
-		    der_size < header_size + length_octets || !der[2])
-			return -EKEYREJECTED;
-		header_size += length_octets;
-		content_size = 0;
-		for (i = 0; i < length_octets; i++) {
-			if (content_size > (SIZE_MAX >> 8))
-				return -EOVERFLOW;
-			content_size = (content_size << 8) | der[2 + i];
-		}
-		if (content_size < 0x80)
-			return -EKEYREJECTED;
-	}
-	if (content_size > der_size - header_size)
-		return -EKEYREJECTED;
-	if (check_add_overflow(header_size, content_size, object_size))
-		return -EOVERFLOW;
-	return 0;
-}
-
-
-static int __init ebpfos_admission_init(void)
-{
-	const u8 *certificate = ebpfos_certificate_list;
-	size_t certificate_size =
-		ebpfos_certificate_list_end - ebpfos_certificate_list;
-	key_perm_t permissions = (KEY_POS_ALL & ~KEY_POS_SETATTR) |
-				 KEY_USR_VIEW | KEY_USR_READ | KEY_USR_SEARCH;
-	key_ref_t key_ref;
-	size_t object_size;
-	int error;
-
-	error = ebpfos_der_object_size(certificate, certificate_size,
-				       &object_size);
-	if (error)
-		return error;
-	if (object_size != certificate_size)
-		return -EKEYREJECTED;
-
-	ebpfos_trusted_keyring =
-		keyring_alloc(".ebpfos_trusted_keys", GLOBAL_ROOT_UID,
-			      GLOBAL_ROOT_GID, current_cred(), permissions,
-			      KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
-	if (IS_ERR(ebpfos_trusted_keyring)) {
-		error = PTR_ERR(ebpfos_trusted_keyring);
-
-		ebpfos_trusted_keyring = NULL;
-		return error;
-	}
-	key_ref = key_create_or_update(make_key_ref(ebpfos_trusted_keyring, true),
-				       "asymmetric", NULL, certificate,
-				       certificate_size,
-				       (KEY_POS_ALL & ~KEY_POS_SETATTR) |
-				       KEY_USR_VIEW | KEY_USR_READ,
-				       KEY_ALLOC_NOT_IN_QUOTA |
-				       KEY_ALLOC_BUILT_IN |
-				       KEY_ALLOC_BYPASS_RESTRICTION);
-	if (IS_ERR(key_ref)) {
-		error = PTR_ERR(key_ref);
-
-		key_put(ebpfos_trusted_keyring);
-		ebpfos_trusted_keyring = NULL;
-		return error;
-	}
-	key_ref_put(key_ref);
-	sha256(certificate, certificate_size, ebpfos_root_fingerprint);
-	WRITE_ONCE(ebpfos_trust_ready, true);
-	pr_info("ebpfos: admission trust root ready (one certificate)\n");
-	return 0;
-}
-late_initcall(ebpfos_admission_init);
