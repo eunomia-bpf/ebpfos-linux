@@ -21,6 +21,7 @@ struct ebpfos_executor_root_lease {
 	struct ebpfos_binding *binding;
 	struct ebpfos_executor_root_slot *slot;
 	u64 epoch;
+	bool rcu_held;
 };
 
 struct ebpfos_binding {
@@ -152,6 +153,10 @@ ebpfos_binding_descriptor(const struct ebpfos_binding *binding);
 struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
 int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot);
+/* Non-sleepable callers must end this lease in the same context. */
+int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot);
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease);

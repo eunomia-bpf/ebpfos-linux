@@ -477,7 +477,7 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 	return 0;
 }
 
-static struct ebpfos_binding *ebpfos_executor_root_role_get(
+static struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
 	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
 	struct ebpfos_executor_root_role_snapshot *snapshot)
 {
@@ -485,10 +485,9 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get(
 	struct ebpfos_binding *binding = NULL;
 	u32 role;
 
-	rcu_read_lock();
 	bundle = rcu_dereference(slot->active);
 	if (!bundle)
-		goto out;
+		return NULL;
 	for (role = 0; role < bundle->role_count; role++) {
 		if (bundle->roles[role].snapshot.role_type < role_type)
 			continue;
@@ -501,7 +500,18 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get(
 		}
 		break;
 	}
-out:
+	return binding;
+}
+
+static struct ebpfos_binding *ebpfos_executor_root_role_get(
+	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	struct ebpfos_binding *binding;
+
+	rcu_read_lock();
+	binding = ebpfos_executor_root_role_get_rcu(slot, role_type, epoch,
+						      snapshot);
 	rcu_read_unlock();
 	return binding;
 }
@@ -529,12 +539,41 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 	return 0;
 }
 
+int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	struct ebpfos_executor_root_slot *slot;
+
+	if (!object_id || !role_type || !lease || !snapshot)
+		return -EINVAL;
+	memset(lease, 0, sizeof(*lease));
+	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (!slot)
+		return -ENOENT;
+	if (!ebpfos_component_gate_try_enter(&slot->gate))
+		return -EAGAIN;
+	rcu_read_lock();
+	lease->binding = ebpfos_executor_root_role_get_rcu(
+		slot, role_type, &lease->epoch, snapshot);
+	if (!lease->binding) {
+		rcu_read_unlock();
+		ebpfos_component_gate_exit(&slot->gate);
+		return -ENOENT;
+	}
+	lease->slot = slot;
+	lease->rcu_held = true;
+	return 0;
+}
+
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 {
 	if (!lease || !lease->slot)
 		return;
 	ebpfos_binding_put(lease->binding);
 	ebpfos_component_gate_exit(&lease->slot->gate);
+	if (lease->rcu_held)
+		rcu_read_unlock();
 	memset(lease, 0, sizeof(*lease));
 }
 
