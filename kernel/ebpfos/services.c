@@ -3,13 +3,17 @@
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
+#include <linux/bio.h>
 #include <linux/ebpfos_services.h>
 #include <linux/err.h>
 #include <linux/filter.h>
 #include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/limits.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/net_tstamp.h>
+#include <linux/netdevice.h>
 #include <linux/poll.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
@@ -21,6 +25,7 @@
 #include <linux/uio.h>
 #include <linux/wait.h>
 #include <linux/xarray.h>
+#include <uapi/linux/ebpfos_block_effect.h>
 #if IS_ENABLED(CONFIG_KUNIT)
 #include <kunit/test.h>
 #endif
@@ -53,6 +58,11 @@ struct ebpfos_effect_scope {
 	struct file *file;
 	struct iov_iter *iter;
 	struct poll_table_struct *poll;
+	struct bio *bio;
+	struct bvec_iter bio_iter;
+	u64 bio_bytes;
+	struct net_device *netdev;
+	struct sk_buff *skb;
 	size_t copied_from_iter;
 	bool locked;
 };
@@ -210,6 +220,21 @@ out_free_scope:
 	return ERR_PTR(error);
 }
 
+struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
+						   struct bio *bio)
+{
+	struct ebpfos_effect_scope *scope;
+
+	if (!bio)
+		return ERR_PTR(-EINVAL);
+	scope = ebpfos_effect_scope_enter(handle, NULL, NULL, NULL);
+	if (!IS_ERR(scope)) {
+		scope->bio = bio;
+		scope->bio_iter = bio->bi_iter;
+	}
+	return scope;
+}
+
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 {
 	struct ebpfos_effect_task *task;
@@ -224,6 +249,11 @@ int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 		mutex_unlock(&scope->object->lock);
 		error = -EPROTO;
 	}
+	if (scope->bio) {
+		scope->bio_iter.bi_sector = scope->bio->bi_iter.bi_sector +
+			(scope->bio_bytes >> SECTOR_SHIFT);
+		scope->bio->bi_iter = scope->bio_iter;
+	}
 	task->top = scope->previous;
 	if (!task->top) {
 		xa_erase(&ebpfos_effect_tasks, (unsigned long)current);
@@ -232,6 +262,27 @@ int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope)
 	ebpfos_effect_object_put(scope->handle, scope->object);
 	kfree(scope);
 	return error;
+}
+
+struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
+						 struct net_device *dev,
+						 struct sk_buff *skb)
+{
+	struct ebpfos_effect_scope *scope;
+
+	if (!dev || !skb)
+		return ERR_PTR(-EINVAL);
+	scope = ebpfos_effect_scope_enter(handle, NULL, NULL, NULL);
+	if (IS_ERR(scope))
+		return scope;
+	scope->netdev = dev;
+	scope->skb = skb;
+	return scope;
+}
+
+bool ebpfos_effect_net_skb_pending(struct ebpfos_effect_scope *scope)
+{
+	return !IS_ERR_OR_NULL(scope) && scope->skb;
 }
 
 static struct ebpfos_effect_scope *ebpfos_effect_current(u64 handle)
@@ -410,6 +461,68 @@ __bpf_kfunc long bpf_ebpfos_effect_copy_to_iter(u64 handle,
 	return copy_to_iter(src, src__sz, scope->iter);
 }
 
+__bpf_kfunc int bpf_ebpfos_effect_bio_peek(u64 handle, void *out,
+					     u32 out__sz)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct ebpfos_block_segment segment;
+	struct bio_vec bv;
+
+	if (!scope || !scope->bio || !out || out__sz != sizeof(segment))
+		return -EINVAL;
+	if (!scope->bio_iter.bi_size)
+		return 0;
+	if (bio_no_advance_iter(scope->bio))
+		return -EOPNOTSUPP;
+	bv = bio_iter_iovec(scope->bio, scope->bio_iter);
+	segment.byte_offset = ((u64)scope->bio->bi_iter.bi_sector <<
+			       SECTOR_SHIFT) + scope->bio_bytes;
+	segment.bytes = min_t(u32, bv.bv_len, EBPFOS_EFFECT_COPY_MAX);
+	segment.bytes = min_t(u32, segment.bytes,
+				 PAGE_SIZE - (segment.byte_offset & (PAGE_SIZE - 1)));
+	segment.opf = scope->bio->bi_opf;
+	memcpy(out, &segment, sizeof(segment));
+	return 1;
+}
+
+static long ebpfos_effect_bio_copy(u64 handle, void *buffer, u32 bytes,
+				   bool to_bio)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct bio_vec bv;
+	void *mapped;
+
+	if (!scope || !scope->bio || !buffer || !bytes ||
+	    bytes > EBPFOS_EFFECT_COPY_MAX || bytes > scope->bio_iter.bi_size)
+		return -EINVAL;
+	if (bio_no_advance_iter(scope->bio))
+		return -EOPNOTSUPP;
+	bv = bio_iter_iovec(scope->bio, scope->bio_iter);
+	if (bytes > bv.bv_len)
+		return -EINVAL;
+	mapped = bvec_kmap_local(&bv);
+	if (to_bio)
+		memcpy(mapped, buffer, bytes);
+	else
+		memcpy(buffer, mapped, bytes);
+	kunmap_local(mapped);
+	bvec_iter_advance_single(scope->bio->bi_io_vec, &scope->bio_iter, bytes);
+	scope->bio_bytes += bytes;
+	return bytes;
+}
+
+__bpf_kfunc long bpf_ebpfos_effect_bio_read(u64 handle,
+					     void *dst, u32 dst__sz)
+{
+	return ebpfos_effect_bio_copy(handle, dst, dst__sz, false);
+}
+
+__bpf_kfunc long bpf_ebpfos_effect_bio_write(u64 handle,
+					      const void *src, u32 src__sz)
+{
+	return ebpfos_effect_bio_copy(handle, (void *)src, src__sz, true);
+}
+
 __bpf_kfunc u64 bpf_ebpfos_effect_current_handle(void)
 {
 	struct ebpfos_effect_task *task;
@@ -502,6 +615,29 @@ __bpf_kfunc int bpf_ebpfos_effect_ref_put(u64 handle)
 	return refs - 1;
 }
 
+/* A routed network call owns the skb until the terminal consume effect. */
+__bpf_kfunc s64 bpf_ebpfos_effect_net_skb_len(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+
+	return scope && scope->skb ? scope->skb->len : -EPERM;
+}
+
+__bpf_kfunc int bpf_ebpfos_effect_net_tx_complete(u64 handle)
+{
+	struct ebpfos_effect_scope *scope = ebpfos_effect_current(handle);
+	struct sk_buff *skb;
+
+	if (!scope || !scope->netdev || !scope->skb)
+		return -EPERM;
+	skb = scope->skb;
+	scope->skb = NULL;
+	dev_lstats_add(scope->netdev, skb->len);
+	skb_tx_timestamp(skb);
+	dev_kfree_skb(skb);
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_l1_services)
@@ -515,6 +651,9 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_iter, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_iter_revert, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_tty_emit, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_to_iter, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_peek, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_read, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_bio_write, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_user, KF_SLEEPABLE)
@@ -524,6 +663,8 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_signal, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fasync, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_get, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_ref_put, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_skb_len, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_l1_services)
 
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
@@ -622,9 +763,51 @@ static void ebpfos_effect_copy_test(struct kunit *test)
 	ebpfos_effect_handle_put(0xeffec8);
 }
 
+static void ebpfos_effect_bio_test(struct kunit *test)
+{
+	struct ebpfos_block_segment segment;
+	struct ebpfos_effect_scope *scope;
+	struct bio_vec vector;
+	struct bio bio;
+	struct page *page;
+	char buffer[EBPFOS_EFFECT_COPY_MAX];
+
+	page = alloc_page(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	memset(page_address(page), 0x5a, PAGE_SIZE);
+	bio_init(&bio, NULL, &vector, 1, REQ_OP_WRITE);
+	__bio_add_page(&bio, page, 512, 0);
+	bio.bi_iter.bi_sector = 8;
+	KUNIT_ASSERT_EQ(test, ebpfos_effect_handle_get(0xeffecb), 0);
+	scope = ebpfos_effect_scope_enter_bio(0xeffecb, &bio);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(scope));
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_peek(0xeffecb,
+					&segment, sizeof(segment)), 1);
+	KUNIT_EXPECT_EQ(test, segment.byte_offset, 4096ULL);
+	KUNIT_EXPECT_EQ(test, segment.bytes, 256U);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_read(0xeffecb,
+					buffer, sizeof(buffer)), 256L);
+	KUNIT_EXPECT_EQ(test, buffer[0], 'Z');
+	KUNIT_EXPECT_EQ(test, buffer[255], 'Z');
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_peek(0xeffecb,
+					&segment, sizeof(segment)), 1);
+	KUNIT_EXPECT_EQ(test, segment.byte_offset, 4352ULL);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_read(0xeffecb,
+					buffer, sizeof(buffer)), 256L);
+	KUNIT_EXPECT_EQ(test, bpf_ebpfos_effect_bio_peek(0xeffecb,
+					&segment, sizeof(segment)), 0);
+	KUNIT_EXPECT_EQ(test, ebpfos_effect_scope_exit(scope), 0);
+	KUNIT_EXPECT_EQ(test, bio.bi_iter.bi_sector, 9ULL);
+	KUNIT_EXPECT_EQ(test, bio.bi_iter.bi_size, 0U);
+	bio_uninit(&bio);
+	__free_page(page);
+	ebpfos_effect_handle_put(0xeffecb);
+}
+
 static struct kunit_case ebpfos_effect_cases[] = {
 	KUNIT_CASE(ebpfos_effect_scope_test),
 	KUNIT_CASE(ebpfos_effect_copy_test),
+	KUNIT_CASE(ebpfos_effect_bio_test),
 	{}
 };
 

@@ -5,8 +5,11 @@
 #include <linux/types.h>
 
 struct file;
+struct bio;
 struct iov_iter;
 struct poll_table_struct;
+struct net_device;
+struct sk_buff;
 struct ebpfos_effect_scope;
 
 /* Provider kfuncs must belong to the ebpfos_l1_services BTF set. */
@@ -28,7 +31,13 @@ struct ebpfos_effect_scope *ebpfos_effect_scope_enter(u64 handle,
 					     struct file *file,
 					     struct iov_iter *iter,
 					     struct poll_table_struct *table);
+struct ebpfos_effect_scope *ebpfos_effect_scope_enter_bio(u64 handle,
+						   struct bio *bio);
 int ebpfos_effect_scope_exit(struct ebpfos_effect_scope *scope);
+struct ebpfos_effect_scope *ebpfos_effect_net_scope_enter(u64 handle,
+						 struct net_device *dev,
+						 struct sk_buff *skb);
+bool ebpfos_effect_net_skb_pending(struct ebpfos_effect_scope *scope);
 
 /* Native fops can attach poll/fasync to an effect object. */
 void ebpfos_effect_poll(u64 handle, u32 slot, struct file *file,
