@@ -513,10 +513,8 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || request.map_fd < -1 ||
-	    request.map_count > MAX_USED_MAPS ||
-	    (request.map_count ? (request.map_fd != -1 || !request.map_fds) :
-				(request.map_fds != 0)))
+	if (request.map_count > MAX_USED_MAPS ||
+	    (request.map_count && !request.map_fds))
 		return -EINVAL;
 	error = ebpfos_validate_descriptor(&request.descriptor);
 	if (error)
