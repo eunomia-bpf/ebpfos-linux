@@ -315,15 +315,9 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	binding->map_count = map_count;
 	binding->map = map_count ? maps[0] : NULL;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
-	binding->kind = EBPFOS_ADMITTED_BINDING_BPF;
 	binding->prog_id = prog->aux->id;
 	binding->map_id = binding->map ? binding->map->id : 0;
 	return binding;
-}
-
-u32 ebpfos_binding_kind(const struct ebpfos_binding *binding)
-{
-	return binding ? binding->kind : 0;
 }
 
 const struct ebpfos_component_desc_v1 *

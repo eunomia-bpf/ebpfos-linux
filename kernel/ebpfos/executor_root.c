@@ -97,10 +97,8 @@ static int ebpfos_executor_root_role_fill(
 	struct ebpfos_executor_root_role *role,
 	const struct ebpfos_executor_root_role_request *request)
 {
-	const struct ebpfos_component_desc_v1 *descriptor;
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
-	bool component;
 
 	if (!role || !request || request->admission_fd < 0)
 		return -EINVAL;
@@ -111,16 +109,6 @@ static int ebpfos_executor_root_role_fill(
 	if (!binding) {
 		ebpfos_admission_put(grant);
 		return -EUCLEAN;
-	}
-	descriptor = ebpfos_binding_descriptor(binding);
-	component = descriptor &&
-		ebpfos_binding_prog(binding) &&
-		ebpfos_binding_prog(binding)->aux->ebpfos_component;
-	if (ebpfos_binding_kind(binding) != EBPFOS_ADMITTED_BINDING_BPF ||
-	    !component) {
-		ebpfos_binding_put(binding);
-		ebpfos_admission_put(grant);
-		return -EOPNOTSUPP;
 	}
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;

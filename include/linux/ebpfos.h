@@ -35,7 +35,6 @@ struct ebpfos_binding {
 	struct bpf_map **maps;
 	u32 map_count;
 	struct ebpfos_prog_identity *prog_identity;
-	u32 kind;
 	u32 prog_id;
 	u32 map_id;
 };
@@ -143,7 +142,6 @@ u32 ebpfos_binding_active_invocations(const struct ebpfos_binding *binding);
 u64 ebpfos_binding_invocation_entries(const struct ebpfos_binding *binding);
 bool ebpfos_binding_is_retired(const struct ebpfos_binding *binding);
 void ebpfos_binding_retire(struct ebpfos_binding *binding, u64 epoch);
-u32 ebpfos_binding_kind(const struct ebpfos_binding *binding);
 const struct ebpfos_component_desc_v1 *
 ebpfos_binding_descriptor(const struct ebpfos_binding *binding);
 struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);

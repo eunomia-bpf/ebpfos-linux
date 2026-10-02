@@ -35,10 +35,6 @@ enum ebpfos_admission_state {
 	EBPFOS_ADMISSION_STALE = 6,
 };
 
-enum ebpfos_admitted_binding_kind {
-	EBPFOS_ADMITTED_BINDING_BPF = 2,
-};
-
 struct ebpfos_component_desc_v1 {
 	/* Retained wire slots; admission uses the typed ABI fields below. */
 	__u8 magic[8];
