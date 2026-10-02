@@ -35,7 +35,6 @@ struct ebpfos_binding {
 	struct bpf_map **maps;
 	u32 map_count;
 	struct ebpfos_prog_identity *prog_identity;
-	u64 grant_id;
 	u32 kind;
 	u32 use;
 	u32 prog_id;

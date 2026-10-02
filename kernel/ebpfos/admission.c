@@ -85,15 +85,12 @@ struct ebpfos_admission {
 	/* Serializes one-shot transitions shared by duplicated grant FDs. */
 	spinlock_t state_lock;
 	struct ebpfos_binding *binding;
-	u64 grant_id;
 	u32 state;
 };
 
 static DEFINE_MUTEX(ebpfos_publish_gate);
 static DEFINE_MUTEX(ebpfos_seal_lock);
 static u64 ebpfos_staged_grants;
-static DEFINE_SPINLOCK(ebpfos_grant_id_lock);
-static u64 ebpfos_next_grant_id;
 
 static const struct file_operations ebpfos_admission_fops;
 
@@ -326,8 +323,7 @@ struct ebpfos_admission *ebpfos_admission_get_from_fd(int fd)
 
 static struct ebpfos_binding *
 ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
-			 u32 map_count,
-			 struct ebpfos_prog_identity *identity, u64 grant_id)
+			 u32 map_count, struct ebpfos_prog_identity *identity)
 {
 	const struct ebpfos_component_desc_v1 *descriptor =
 		&identity->descriptor;
@@ -343,7 +339,6 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	binding->map_count = map_count;
 	binding->map = map_count ? maps[0] : NULL;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
-	binding->grant_id = grant_id;
 	binding->kind = EBPFOS_ADMITTED_BINDING_BPF;
 	binding->use = le32_to_cpu(descriptor->use);
 	binding->prog_id = prog->aux->id;
@@ -466,7 +461,7 @@ ebpfos_prog_identity_alloc(const struct ebpfos_component_desc_v1 *descriptor)
 }
 
 static struct ebpfos_admission *
-ebpfos_admission_alloc(struct ebpfos_binding *binding, u64 grant_id)
+ebpfos_admission_alloc(struct ebpfos_binding *binding)
 {
 	struct ebpfos_admission *admission;
 
@@ -476,22 +471,8 @@ ebpfos_admission_alloc(struct ebpfos_binding *binding, u64 grant_id)
 	kref_init(&admission->ref);
 	spin_lock_init(&admission->state_lock);
 	admission->binding = binding;
-	admission->grant_id = grant_id;
 	admission->state = EBPFOS_ADMISSION_FRESH;
 	return admission;
-}
-
-static int ebpfos_grant_id_alloc(u64 *grant_id)
-{
-	int error = 0;
-
-	spin_lock(&ebpfos_grant_id_lock);
-	if (ebpfos_next_grant_id == U64_MAX)
-		error = -EOVERFLOW;
-	else
-		*grant_id = ++ebpfos_next_grant_id;
-	spin_unlock(&ebpfos_grant_id_lock);
-	return error;
 }
 
 long ebpfos_admission_seal_ioctl(void __user *argp)
@@ -504,7 +485,6 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct bpf_map **maps = NULL;
 	struct file *admission_file = NULL;
 	int *map_fds = NULL;
-	u64 grant_id;
 	u32 map_count, i;
 	int fd = -1;
 	int error;
@@ -554,16 +534,12 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	error = ebpfos_check_program(prog, maps, map_count, NULL);
 	if (error)
 		goto out_put_map;
-	error = ebpfos_grant_id_alloc(&grant_id);
-	if (error)
-		goto out_put_map;
 	identity = ebpfos_prog_identity_alloc(&request.descriptor);
 	if (!identity) {
 		error = -ENOMEM;
 		goto out_put_map;
 	}
-	binding = ebpfos_binding_alloc_bpf(prog, maps, map_count, identity,
-					   grant_id);
+	binding = ebpfos_binding_alloc_bpf(prog, maps, map_count, identity);
 	if (!binding) {
 		error = -ENOMEM;
 		goto out_put_identity;
@@ -571,7 +547,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	/* Binding owns the program and all map references. */
 	prog = NULL;
 	maps = NULL;
-	admission = ebpfos_admission_alloc(binding, grant_id);
+	admission = ebpfos_admission_alloc(binding);
 	if (!admission) {
 		error = -ENOMEM;
 		goto out_put_binding;
@@ -592,7 +568,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	}
 	request.admission_fd = fd;
 	request.admission_state = EBPFOS_ADMISSION_FRESH;
-	request.grant_id = grant_id;
+	request.grant_id = 0;
 	request.prog_id = admission->binding->prog_id;
 	request.map_id = admission->binding->map_id;
 	memset(request.reserved_digests, 0, sizeof(request.reserved_digests));
@@ -701,7 +677,7 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 		return PTR_ERR(admission);
 	binding = admission->binding;
 	mutex_lock(&ebpfos_publish_gate);
-	request.grant_id = admission->grant_id;
+	request.grant_id = 0;
 	request.admission_state =
 		ebpfos_admission_effective_state_locked(admission);
 	request.prog_id = binding->prog_id;
@@ -787,16 +763,12 @@ int ebpfos_admission_stage_bundle_locked(
 		struct ebpfos_admission *grant = grants[index];
 		u32 state;
 
-		if (!grant || !grant->grant_id || !grant->binding ||
-		    !grant->binding->prog_id)
+		if (!grant || !grant->binding)
 			return -EINVAL;
 		if (!!grant->binding->map_count != !!grant->binding->map)
 			return -EUCLEAN;
 		for (prior = 0; prior < index; prior++)
-			if (grant == grants[prior] ||
-			    grant->grant_id == grants[prior]->grant_id ||
-			    grant->binding == grants[prior]->binding ||
-			    grant->binding->prog_id == grants[prior]->binding->prog_id)
+			if (grant == grants[prior])
 				return -EUCLEAN;
 		spin_lock(&grant->state_lock);
 		state = grant->state;

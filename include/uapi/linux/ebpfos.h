@@ -68,6 +68,7 @@ struct ebpfos_ioc_admission_seal {
 	struct ebpfos_component_desc_v1 descriptor;
 	__s32 admission_fd;
 	__u32 admission_state;
+	/* Retained wire slot; always zero. */
 	__u64 grant_id;
 	__u32 prog_id;
 	__u32 map_id;
@@ -77,6 +78,7 @@ struct ebpfos_ioc_admission_seal {
 struct ebpfos_ioc_admission_info {
 	__s32 admission_fd;
 	__u32 flags;
+	/* Retained wire slot; always zero. */
 	__u64 grant_id;
 	__u32 admission_state;
 	__u32 prog_id;
