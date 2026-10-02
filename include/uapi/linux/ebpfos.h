@@ -92,6 +92,7 @@ struct ebpfos_ioc_admission_info {
 
 struct ebpfos_ioc_admission_runtime_info {
 	__s32 admission_fd;
+	/* Output layout version; the ioctl command fixes the request size. */
 	__u32 version;
 	__u32 flags;
 	__u32 prog_id;

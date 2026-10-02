@@ -701,12 +701,11 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.version != EBPFOS_ADMISSION_RUNTIME_INFO_VERSION)
-		return -EINVAL;
 	admission = ebpfos_admission_get_from_fd(request.admission_fd);
 	if (IS_ERR(admission))
 		return PTR_ERR(admission);
 	binding = admission->binding;
+	request.version = EBPFOS_ADMISSION_RUNTIME_INFO_VERSION;
 	request.flags = 0;
 	request.prog_id = binding->prog_id;
 	request.map_id = binding->map_id;
