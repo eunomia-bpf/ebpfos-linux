@@ -106,8 +106,7 @@ static int ebpfos_executor_root_request_size(
 	    !request->object_id ||
 	    !request->role_count ||
 	    request->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
-	    request->expected_epoch == U64_MAX ||
-	    request->target_epoch != request->expected_epoch + 1)
+	    request->target_epoch <= request->expected_epoch)
 		return -EINVAL;
 	if (check_mul_overflow((size_t)request->role_count,
 			       sizeof(request->roles[0]), &roles_size) ||
