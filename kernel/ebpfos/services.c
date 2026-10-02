@@ -4,6 +4,7 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/bio.h>
+#include <linux/bug.h>
 #include <linux/ebpfos_services.h>
 #include <linux/err.h>
 #include <linux/filter.h>
@@ -957,6 +958,11 @@ __bpf_kfunc void bpf_ebpfos_effect_mb(void)
 	smp_mb();
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_fatal_bug(void)
+{
+	BUG();
+}
+
 #ifdef CONFIG_X86
 __bpf_kfunc u64 bpf_ebpfos_effect_tsc(u32 ordered)
 {
@@ -1430,22 +1436,18 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
 #endif
 BTF_KFUNCS_END(ebpfos_l1_services)
 
+BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 #ifdef CONFIG_X86
-BTF_KFUNCS_START(ebpfos_l1_io_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
-BTF_KFUNCS_END(ebpfos_l1_io_services)
 #endif
+BTF_KFUNCS_END(ebpfos_l1_nonsleep_services)
 
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
 {
-	if (btf_id_set8_contains(&ebpfos_l1_services, btf_id))
-		return true;
-#ifdef CONFIG_X86
-	return btf_id_set8_contains(&ebpfos_l1_io_services, btf_id);
-#else
-	return false;
-#endif
+	return btf_id_set8_contains(&ebpfos_l1_services, btf_id) ||
+		btf_id_set8_contains(&ebpfos_l1_nonsleep_services, btf_id);
 }
 
 static int ebpfos_effect_kfunc_filter(const struct bpf_prog *prog, u32 id)
@@ -1462,21 +1464,19 @@ static const struct btf_kfunc_id_set ebpfos_effect_kfunc_set = {
 	.filter = ebpfos_effect_kfunc_filter,
 };
 
-#ifdef CONFIG_X86
-static int ebpfos_io_kfunc_filter(const struct bpf_prog *prog, u32 id)
+static int ebpfos_nonsleep_kfunc_filter(const struct bpf_prog *prog, u32 id)
 {
-	if (!btf_id_set8_contains(&ebpfos_l1_io_services, id))
+	if (!btf_id_set8_contains(&ebpfos_l1_nonsleep_services, id))
 		return 0;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
 	       prog->type != BPF_PROG_TYPE_SYSCALL;
 }
 
-static const struct btf_kfunc_id_set ebpfos_io_kfunc_set = {
+static const struct btf_kfunc_id_set ebpfos_nonsleep_kfunc_set = {
 	.owner = THIS_MODULE,
-	.set = &ebpfos_l1_io_services,
-	.filter = ebpfos_io_kfunc_filter,
+	.set = &ebpfos_l1_nonsleep_services,
+	.filter = ebpfos_nonsleep_kfunc_filter,
 };
-#endif
 
 static int __init ebpfos_effect_init(void)
 {
@@ -1486,12 +1486,8 @@ static int __init ebpfos_effect_init(void)
 					 &ebpfos_effect_kfunc_set);
 	if (err)
 		return err;
-#ifdef CONFIG_X86
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_io_kfunc_set);
-#else
-	return 0;
-#endif
+					 &ebpfos_nonsleep_kfunc_set);
 }
 late_initcall(ebpfos_effect_init);
 
