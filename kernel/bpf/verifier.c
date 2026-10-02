@@ -3277,6 +3277,20 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 	int i, err;
 
 	if (cap) {
+		struct bpf_prog_aux *aux = env->prog->aux;
+
+		/* The proof expansion changes instruction positions. Check the
+		 * submitted FUNC records against the original subprog layout first.
+		 */
+		if (aux->func_info) {
+			if (aux->func_info_cnt != env->subprog_cnt)
+				return -EINVAL;
+			for (i = 0; i < env->subprog_cnt; i++) {
+				if (aux->func_info[i].insn_off !=
+				    env->subprog_info[i].start)
+					return -EINVAL;
+			}
+		}
 		/* The proof expansion temporarily removes the payload/call pairs.
 		 * Seal their exact requirements before that verifier-only rewrite.
 		 */
@@ -3513,6 +3527,16 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		}
 	}
 	if (cap) {
+		struct bpf_prog_aux *aux = env->prog->aux;
+
+		/* check_btf_func() runs on the expanded proof image. Keep its
+		 * records aligned with the subprogram starts in that image; the
+		 * normal final adjust_btf_func() restores final code positions.
+		 */
+		if (aux->func_info)
+			for (i = 0; i < env->subprog_cnt; i++)
+				aux->func_info[i].insn_off =
+					env->subprog_info[i].start;
 		env->prog->aux->ebpfos_kop_count = cap;
 		env->prog->aux->ebpfos_kop_capability_mask = capabilities;
 		env->prog->aux->ebpfos_kop_effect_mask = effects;
