@@ -20642,6 +20642,16 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	if (ret < 0)
 		goto skip_full_check;
 
+	/* Validate source line offsets on the submitted instruction layout.
+	 * Generic verifier patch/remove helpers then carry them through the
+	 * temporary KOperation proof expansion.
+	 */
+	if (env->kop_call_cnt) {
+		ret = bpf_check_btf_line(env, attr, uattr);
+		if (ret < 0)
+			goto skip_full_check;
+	}
+
 	ret = lower_kop_proof_regions(env);
 	if (ret < 0)
 		goto skip_full_check;

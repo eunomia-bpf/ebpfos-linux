@@ -210,9 +210,9 @@ err_free:
 #define MIN_BPF_LINEINFO_SIZE	offsetofend(struct bpf_line_info, line_col)
 #define MAX_LINEINFO_REC_SIZE	MAX_FUNCINFO_REC_SIZE
 
-static int check_btf_line(struct bpf_verifier_env *env,
-			  const union bpf_attr *attr,
-			  bpfptr_t uattr)
+int bpf_check_btf_line(struct bpf_verifier_env *env,
+		       const union bpf_attr *attr,
+		       bpfptr_t uattr)
 {
 	u32 i, s, nr_linfo, ncopy, expected_size, rec_size, prev_offset = 0;
 	struct bpf_subprog_info *sub;
@@ -451,7 +451,7 @@ int bpf_check_btf_info(struct bpf_verifier_env *env,
 	if (err)
 		return err;
 
-	err = check_btf_line(env, attr, uattr);
+	err = env->prog->aux->linfo ? 0 : bpf_check_btf_line(env, attr, uattr);
 	if (err)
 		return err;
 
