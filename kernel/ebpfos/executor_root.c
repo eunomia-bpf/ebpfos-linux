@@ -108,7 +108,7 @@ static int ebpfos_executor_root_request_size(
 	    request->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
 	    request->flags & ~EBPFOS_EXECUTOR_ROOT_F_TEST_FAIL_AFTER_STAGE ||
 	    (request->flags && !IS_ENABLED(CONFIG_EBPFOS_KUNIT_TEST)) ||
-	    request->reserved || !request->object_id ||
+	    !request->object_id ||
 	    !request->role_count ||
 	    request->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
 	    request->expected_epoch == U64_MAX ||
@@ -122,9 +122,7 @@ static int ebpfos_executor_root_request_size(
 	capacity_size = request_size - sizeof(*request);
 	if (capacity_size % sizeof(request->roles[0]) ||
 	    capacity_size / sizeof(request->roles[0]) >
-		EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
-	    memchr_inv((const u8 *)request + *expected_size, 0,
-		       request_size - *expected_size))
+		EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
 		return -E2BIG;
 	return 0;
 }
@@ -139,7 +137,7 @@ static int ebpfos_executor_root_role_fill(
 	bool component;
 
 	if (!role || !request || request->admission_fd < 0 ||
-	    request->reserved || !request->role_type)
+	    !request->role_type)
 		return -EINVAL;
 	grant = ebpfos_admission_get_from_fd(request->admission_fd);
 	if (IS_ERR(grant))
@@ -893,9 +891,13 @@ static void ebpfos_executor_root_request_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
 		request, request_size, &expected_size), 0);
 	KUNIT_EXPECT_EQ(test, expected_size, live_size);
+	request->reserved = 1;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
+		request, request_size, &expected_size), 0);
+	request->reserved = 0;
 	request->roles[1].role_type = 2;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
-		request, request_size, &expected_size), -E2BIG);
+		request, request_size, &expected_size), 0);
 	request->roles[1].role_type = 0;
 	request->role_count = EBPFOS_EXECUTOR_ROOT_MAX_ROLES + 1;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_request_size(
