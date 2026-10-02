@@ -307,8 +307,7 @@ static int ebpfos_executor_root_publish_common(
 	u32 role;
 	int error;
 
-	if (request->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
-	    !request->object_id || !request->role_count ||
+	if (!request->object_id || !request->role_count ||
 	    request->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
 	    request->target_epoch <= request->expected_epoch)
 		return -EINVAL;

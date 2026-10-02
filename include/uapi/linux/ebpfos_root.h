@@ -13,6 +13,7 @@ struct ebpfos_ioc_root_role {
 };
 
 struct ebpfos_ioc_root_publish {
+	/* Retained wire slot; the ioctl command fixes the request size. */
 	__u32 version;
 	__u32 flags;
 	__u64 object_id;
