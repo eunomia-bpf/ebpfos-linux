@@ -12,8 +12,10 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/pm_wakeup.h>
 #include <linux/rculist.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <uapi/linux/ebpfos_restricted_work.h>
 
@@ -128,6 +130,58 @@ out:
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(ebpfos_restricted_work);
+
+void ebpfos_restricted_pm_work(void *queue, ebpfos_work_native_t native,
+		spinlock_t *stop_lock, bool *stop, spinlock_t *wakeup_lock,
+		u32 *wakeup_mask, bool *processing, struct device *device,
+		struct work_struct *work, struct workqueue_struct *workqueue,
+		u32 mask_bit)
+{
+	struct { u64 args[3]; } context;
+	struct work_route *route;
+	unsigned long flags;
+	u32 result;
+
+	rcu_read_lock();
+	route = route_for_queue(queue);
+	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog))
+		goto native;
+	spin_lock(stop_lock);
+	context.args[0] = *stop;
+	spin_lock_irqsave(wakeup_lock, flags);
+	context.args[1] = *processing;
+	context.args[2] = *wakeup_mask;
+	spin_unlock_irqrestore(wakeup_lock, flags);
+	result = bpf_prog_run(route->prog, &context);
+	if (result > 1 || result != !*stop) {
+		atomic64_inc(&route->faults);
+		WRITE_ONCE(route->active, false);
+		spin_unlock(stop_lock);
+		goto native;
+	}
+	atomic64_inc(&route->component_entries);
+	if (in_hardirq())
+		atomic64_inc(&route->hardirq_entries);
+	if (result) {
+		spin_lock_irqsave(wakeup_lock, flags);
+		*wakeup_mask |= mask_bit;
+		if (!*processing) {
+			*processing = true;
+			pm_stay_awake(device);
+		}
+		spin_unlock_irqrestore(wakeup_lock, flags);
+		queue_work_on(WORK_CPU_UNBOUND, workqueue, work);
+	}
+	spin_unlock(stop_lock);
+	goto out;
+native:
+	if (route)
+		atomic64_inc(&route->native_entries);
+	native(queue);
+out:
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_pm_work);
 
 static long work_ioctl(struct file *file, unsigned int command,
 		       unsigned long argument)
