@@ -750,8 +750,6 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.flags || request.reserved0)
-		return -EINVAL;
 	admission = ebpfos_admission_get_from_fd(request.admission_fd);
 	if (IS_ERR(admission))
 		return PTR_ERR(admission);
@@ -762,6 +760,7 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 		ebpfos_admission_effective_state_locked(admission);
 	request.prog_id = binding->prog_id;
 	request.map_id = binding->map_id;
+	request.flags = 0;
 	request.reserved0 = 0;
 	memset(request.content_digest, 0, sizeof(request.content_digest));
 	memset(request.program_digest, 0, sizeof(request.program_digest));
@@ -782,19 +781,13 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
-	if (request.version != EBPFOS_ADMISSION_RUNTIME_INFO_VERSION ||
-	    request.flags || request.prog_id || request.map_id ||
-	    request.active_invocations || request.map_rehashes ||
-	    request.invocation_entries ||
-	    memchr_inv(request.content_digest, 0, sizeof(request.content_digest)) ||
-	    request.retired_epoch || request.entries_at_publication ||
-	    request.active_at_publication ||
-	    request.reserved2)
+	if (request.version != EBPFOS_ADMISSION_RUNTIME_INFO_VERSION)
 		return -EINVAL;
 	admission = ebpfos_admission_get_from_fd(request.admission_fd);
 	if (IS_ERR(admission))
 		return PTR_ERR(admission);
 	binding = admission->binding;
+	request.flags = 0;
 	request.prog_id = binding->prog_id;
 	request.map_id = binding->map_id;
 	request.map_rehashes = atomic64_read(&binding->map_rehashes);
@@ -808,6 +801,9 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 	}
 	memset(request.content_digest, 0, sizeof(request.content_digest));
 	request.retired_epoch = smp_load_acquire(&binding->retired_epoch);
+	request.entries_at_publication = 0;
+	request.active_at_publication = 0;
+	request.reserved2 = 0;
 	if (request.retired_epoch) {
 		u64 snapshot = READ_ONCE(binding->retirement_snapshot);
 
