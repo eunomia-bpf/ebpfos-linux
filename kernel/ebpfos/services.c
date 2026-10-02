@@ -31,6 +31,7 @@
 #include <uapi/linux/ebpfos_block_effect.h>
 #include <uapi/linux/ebpfos_locked_section.h>
 #ifdef CONFIG_X86
+#include <asm/cpufeature.h>
 #include <asm/tsc.h>
 #endif
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -960,6 +961,11 @@ __bpf_kfunc u64 bpf_ebpfos_effect_tsc(u32 ordered)
 {
 	return ordered ? rdtsc_ordered() : rdtsc();
 }
+
+__bpf_kfunc u32 bpf_ebpfos_effect_cpu_feature(u32 feature)
+{
+	return feature < MAX_CPU_FEATURES && boot_cpu_has(feature);
+}
 #endif
 
 __bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
@@ -1378,6 +1384,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_file_flags, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_mb, KF_SLEEPABLE)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_tsc, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_cpu_feature, KF_SLEEPABLE)
 #endif
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_copy_from_user, KF_SLEEPABLE)
