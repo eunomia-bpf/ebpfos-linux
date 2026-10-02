@@ -24,21 +24,6 @@
 #define EBPFOS_ASSERT_OFFSET(_type, _field, _offset) \
 	static_assert(offsetof(struct _type, _field) == (_offset))
 
-static_assert(sizeof(struct ebpfos_resource_desc_v1) ==
-	      EBPFOS_RESOURCE_DESC_V1_SIZE);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, kind, 0);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, flags, 4);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, map_type, 8);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, key_size, 12);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, value_size, 16);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, max_entries, 20);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, map_flags, 24);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, reserved0, 28);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, map_extra, 32);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, logical_bytes, 40);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, canonical_bytes, 48);
-EBPFOS_ASSERT_OFFSET(ebpfos_resource_desc_v1, reserved, 56);
-
 static_assert(sizeof(struct ebpfos_component_desc_v1) ==
 	      EBPFOS_COMPONENT_DESC_V1_SIZE);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, magic, 0);
@@ -51,47 +36,13 @@ EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, use, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, code_format, 28);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, verifier_profile, 32);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved0, 36);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, realm_id, 40);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, policy_generation, 56);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, policy_record_digest, 64);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, host_policy_sha256, 96);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, component_id, 128);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, component_version, 144);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, provider_type_id, 152);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, transition_id, 160);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1,
-		     predecessor_policy_generation, 168);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1,
-		     predecessor_policy_digest, 176);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1,
-		     predecessor_content_digest, 208);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, contract_sha256, 240);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, interface_sha256, 272);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, authority_sha256, 304);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1,
-		     abstract_schema_sha256, 336);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1,
-		     concrete_schema_sha256, 368);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, attested_elf_sha256, 400);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, load_image_sha256, 432);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, initial_map_sha256, 464);
+EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved_identity, 40);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, abi_id, 496);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, abi_version, 504);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, context_size, 508);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, runtime_schema_u64, 512);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, capability_mask, 520);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, effect_mask, 528);
+EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved_attributes, 512);
 EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, prog_type, 536);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, semantic_prog_flags, 540);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, exact_insn_count, 544);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_verified_insns, 548);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_stack_depth, 552);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_ctx_offset, 556);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_tail_calls, 560);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, resource_count, 564);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, max_call_bytes, 568);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, resource, 576);
-EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved, 672);
+EBPFOS_ASSERT_OFFSET(ebpfos_component_desc_v1, reserved_payload, 540);
 
 static_assert(sizeof(struct ebpfos_ioc_admission_seal) == 1168);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, map_fds, 16);

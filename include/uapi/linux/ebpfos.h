@@ -16,30 +16,13 @@ struct ebpfos_ioc_version {
 #define EBPFOS_IOC_VERSION \
 	_IOR(EBPFOS_IOC_MAGIC, 0x00, struct ebpfos_ioc_version)
 
-#define EBPFOS_RESOURCE_DESC_V1_SIZE 96U
 #define EBPFOS_COMPONENT_DESC_V1_SIZE 1024U
-#define EBPFOS_ADMISSION_MAX_RESOURCES 1U
 
 #define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
 #define EBPFOS_ADMISSION_FORMAT_VERSION 1U
 
 #define EBPFOS_COMPONENT_F_TEST_ONLY (1U << 0)
 #define EBPFOS_COMPONENT_F_ALL EBPFOS_COMPONENT_F_TEST_ONLY
-
-#define EBPFOS_RESOURCE_F_FROZEN_BEFORE_LOAD (1U << 0)
-#define EBPFOS_RESOURCE_F_EXCLUSIVE_PROGRAM_OWNER (1U << 1)
-#define EBPFOS_RESOURCE_F_INITIAL_HASH_REQUIRED (1U << 2)
-#define EBPFOS_RESOURCE_F_ALL \
-	(EBPFOS_RESOURCE_F_FROZEN_BEFORE_LOAD | \
-	 EBPFOS_RESOURCE_F_EXCLUSIVE_PROGRAM_OWNER | \
-	 EBPFOS_RESOURCE_F_INITIAL_HASH_REQUIRED)
-
-#define EBPFOS_EFFECT_MAP_LOOKUP (1ULL << 0)
-#define EBPFOS_EFFECT_MAP_UPDATE (1ULL << 1)
-#define EBPFOS_EFFECT_OBJECT_READ (1ULL << 2)
-#define EBPFOS_EFFECT_OBJECT_WRITE (1ULL << 3)
-#define EBPFOS_EFFECT_STATE_READ (1ULL << 4)
-#define EBPFOS_EFFECT_STATE_WRITE (1ULL << 5)
 
 enum ebpfos_component_domain {
 	EBPFOS_COMPONENT_DOMAIN_COMPONENT = 3,
@@ -59,11 +42,6 @@ enum ebpfos_verifier_profile {
 #define EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL_MASK \
 	(1ULL << EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL)
 
-enum ebpfos_resource_kind {
-	EBPFOS_RESOURCE_ARRAY_MAP = 1,
-	EBPFOS_RESOURCE_MAP = 2,
-};
-
 enum ebpfos_admission_state {
 	EBPFOS_ADMISSION_NONE = 0,
 	EBPFOS_ADMISSION_FRESH = 1,
@@ -78,21 +56,6 @@ enum ebpfos_admitted_binding_kind {
 	EBPFOS_ADMITTED_BINDING_BPF = 2,
 };
 
-struct ebpfos_resource_desc_v1 {
-	__le32 kind;
-	__le32 flags;
-	__le32 map_type;
-	__le32 key_size;
-	__le32 value_size;
-	__le32 max_entries;
-	__le32 map_flags;
-	__le32 reserved0;
-	__le64 map_extra;
-	__le64 logical_bytes;
-	__le64 canonical_bytes;
-	__u8 reserved[40];
-};
-
 struct ebpfos_component_desc_v1 {
 	__u8 magic[8];
 	__le16 format_version;
@@ -104,42 +67,14 @@ struct ebpfos_component_desc_v1 {
 	__le32 code_format;
 	__le32 verifier_profile;
 	__le32 reserved0;
-	__u8 realm_id[16];
-	__le64 policy_generation;
-	__u8 policy_record_digest[32];
-	__u8 host_policy_sha256[32];
-	__u8 component_id[16];
-	__le64 component_version;
-	__le64 provider_type_id;
-	__le64 transition_id;
-	__le64 predecessor_policy_generation;
-	__u8 predecessor_policy_digest[32];
-	__u8 predecessor_content_digest[32];
-	__u8 contract_sha256[32];
-	__u8 interface_sha256[32];
-	__u8 authority_sha256[32];
-	__u8 abstract_schema_sha256[32];
-	__u8 concrete_schema_sha256[32];
-	__u8 attested_elf_sha256[32];
-	__u8 load_image_sha256[32];
-	__u8 initial_map_sha256[32];
+	/* Retained wire space from the original descriptor format. */
+	__u8 reserved_identity[456];
 	__le64 abi_id;
 	__le32 abi_version;
 	__le32 context_size;
-	__le64 runtime_schema_u64;
-	__le64 capability_mask;
-	__le64 effect_mask;
+	__u8 reserved_attributes[24];
 	__le32 prog_type;
-	__le32 semantic_prog_flags;
-	__le32 exact_insn_count;
-	__le32 max_verified_insns;
-	__le32 max_stack_depth;
-	__le32 max_ctx_offset;
-	__le32 max_tail_calls;
-	__le32 resource_count;
-	__le64 max_call_bytes;
-	struct ebpfos_resource_desc_v1 resource;
-	__u8 reserved[352];
+	__u8 reserved_payload[484];
 };
 
 struct ebpfos_ioc_admission_seal {
