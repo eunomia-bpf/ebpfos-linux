@@ -571,13 +571,23 @@ int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch)
 
 	if (!object_id)
 		return -EINVAL;
-	slot = xa_load(&ebpfos_executor_roots, object_id);
+	if (!expected_epoch) {
+		/* A first publish can be gated before the root has a bundle. */
+		ebpfos_admission_gate_lock();
+		slot = ebpfos_executor_root_slot_get(object_id);
+		ebpfos_admission_gate_unlock();
+		if (IS_ERR(slot))
+			return PTR_ERR(slot);
+	} else {
+		slot = xa_load(&ebpfos_executor_roots, object_id);
+	}
 	if (!slot)
 		return -ENOENT;
 	spin_lock(&slot->lock);
 	active = rcu_dereference_protected(slot->active,
 					   lockdep_is_held(&slot->lock));
-	error = !active || active->epoch != expected_epoch ? -ESTALE : 0;
+	error = (!active && !expected_epoch) ||
+		(active && active->epoch == expected_epoch) ? 0 : -ESTALE;
 	spin_unlock(&slot->lock);
 	if (error)
 		return error;
@@ -587,7 +597,8 @@ int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch)
 	spin_lock(&slot->lock);
 	active = rcu_dereference_protected(slot->active,
 					   lockdep_is_held(&slot->lock));
-	error = !active || active->epoch != expected_epoch ? -ESTALE : 0;
+	error = (!active && !expected_epoch) ||
+		(active && active->epoch == expected_epoch) ? 0 : -ESTALE;
 	spin_unlock(&slot->lock);
 	if (error)
 		ebpfos_component_gate_abort(&slot->gate);
