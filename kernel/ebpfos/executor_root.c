@@ -93,34 +93,6 @@ static void ebpfos_executor_root_retire_rcu(struct rcu_head *rcu)
 	schedule_work(&bundle->retire_work);
 }
 
-static int ebpfos_executor_root_request_size(
-	const struct ebpfos_executor_root_publish_request *request,
-	u32 request_size, size_t *expected_size)
-{
-	size_t capacity_size;
-	size_t roles_size;
-
-	if (!request || !expected_size ||
-	    request_size < sizeof(*request) ||
-	    request->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
-	    !request->object_id ||
-	    !request->role_count ||
-	    request->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
-	    request->target_epoch <= request->expected_epoch)
-		return -EINVAL;
-	if (check_mul_overflow((size_t)request->role_count,
-			       sizeof(request->roles[0]), &roles_size) ||
-	    check_add_overflow(sizeof(*request), roles_size, expected_size) ||
-	    request_size < *expected_size)
-		return -E2BIG;
-	capacity_size = request_size - sizeof(*request);
-	if (capacity_size % sizeof(request->roles[0]) ||
-	    capacity_size / sizeof(request->roles[0]) >
-		EBPFOS_EXECUTOR_ROOT_MAX_ROLES)
-		return -E2BIG;
-	return 0;
-}
-
 static int ebpfos_executor_root_role_fill(
 	struct ebpfos_executor_root_role *role,
 	const struct ebpfos_executor_root_role_request *request)
@@ -337,22 +309,21 @@ out_unlock:
 __bpf_kfunc_start_defs();
 
 static int ebpfos_executor_root_publish_common(
-	const void *request_data, u32 request_data__sz)
+	const struct ebpfos_executor_root_publish_request *request)
 {
-	const struct ebpfos_executor_root_publish_request *request = request_data;
 	struct ebpfos_executor_root_bundle *source;
 	struct ebpfos_executor_root_bundle *target = NULL;
 	struct ebpfos_executor_root_slot *slot;
 	struct ebpfos_admission **grants = NULL;
-	size_t expected_size;
 	bool staged = false;
 	u32 role;
 	int error;
 
-	error = ebpfos_executor_root_request_size(request, request_data__sz,
-						  &expected_size);
-	if (error)
-		return error;
+	if (request->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
+	    !request->object_id || !request->role_count ||
+	    request->role_count > EBPFOS_EXECUTOR_ROOT_MAX_ROLES ||
+	    request->target_epoch <= request->expected_epoch)
+		return -EINVAL;
 	error = ebpfos_executor_root_prepare(request, &target);
 	if (error)
 		return error;
@@ -408,7 +379,6 @@ out:
 long ebpfos_executor_root_publish_ioctl(void __user *argp)
 {
 	struct ebpfos_ioc_root_publish *request;
-	size_t request_size;
 	long error;
 
 	static_assert(offsetof(struct ebpfos_ioc_root_publish, roles) ==
@@ -421,15 +391,7 @@ long ebpfos_executor_root_publish_ioctl(void __user *argp)
 	request = memdup_user(argp, sizeof(*request));
 	if (IS_ERR(request))
 		return PTR_ERR(request);
-	if (request->role_count > EBPFOS_ROOT_MAX_ROLES) {
-		error = -EINVAL;
-		goto out;
-	}
-	request_size = offsetof(struct ebpfos_ioc_root_publish, roles) +
-		request->role_count * sizeof(request->roles[0]);
-	error = ebpfos_executor_root_publish_common(
-		(const void *)request, request_size);
-out:
+	error = ebpfos_executor_root_publish_common((const void *)request);
 	kfree(request);
 	return error;
 }
