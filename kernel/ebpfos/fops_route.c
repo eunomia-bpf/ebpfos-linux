@@ -444,8 +444,12 @@ static __poll_t ebpfos_fops_route_poll(struct file *file, poll_table *table)
 	frame.object_id = route->handle;
 	frame.output_capacity = sizeof(mask);
 	error = ebpfos_fops_route_invoke(route, file, NULL, table, &frame);
-	if (!error && !frame.status && frame.output_size == sizeof(mask))
+	if (ebpfos_fops_route_fallback(route, error)) {
+		atomic64_inc(&route->linux_entries);
+		mask = route->original->poll(file, table);
+	} else if (!error && !frame.status && frame.output_size == sizeof(mask)) {
 		memcpy(&mask, frame.output, sizeof(mask));
+	}
 out:
 	ebpfos_component_gate_exit(&route->gate);
 	if (atomic_dec_and_test(&route->active))
@@ -470,16 +474,22 @@ static int ebpfos_fops_route_release(struct inode *inode, struct file *file)
 		frame.object_id = route->handle;
 		result = ebpfos_fops_route_invoke(route, file, NULL, NULL,
 					  &frame);
+		if (ebpfos_fops_route_fallback(route, result))
+			goto native;
 		if (!result && frame.output_size)
 			result = -EPROTO;
 		if (!result)
 			result = frame.status;
-	} else if (original->release) {
+		goto done;
+	}
+native:
+	if (original->release) {
 		WRITE_ONCE(file->f_op, original);
 		WRITE_ONCE(file->f_ebpfos_route, NULL);
 		atomic64_inc(&route->linux_entries);
 		result = original->release(inode, file);
 	}
+done:
 	WRITE_ONCE(file->f_op, original);
 	WRITE_ONCE(file->f_ebpfos_route, NULL);
 	ebpfos_component_gate_exit(&route->gate);
