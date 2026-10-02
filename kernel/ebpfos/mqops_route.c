@@ -74,8 +74,13 @@ static blk_status_t ebpfos_mqops_route_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (error || provider_status || frame.status || frame.output_size) {
 		atomic64_inc(&route->faults);
 		WRITE_ONCE(route->component, false);
-		atomic64_inc(&route->linux_entries);
-		status = route->original->queue_rq(hctx, bd);
+		/* Only a missing binding is known to precede provider entry. */
+		if (error == -ENOENT) {
+			atomic64_inc(&route->linux_entries);
+			status = route->original->queue_rq(hctx, bd);
+		} else {
+			status = BLK_STS_IOERR;
+		}
 		goto out;
 	}
 	blk_mq_start_request(bd->rq);

@@ -72,8 +72,9 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 	memcpy(frame.input, &input, sizeof(input));
 	scope = ebpfos_effect_scope_enter_bio(route->handle, bio);
 	if (IS_ERR(scope)) {
-		error = PTR_ERR(scope);
-		goto fail;
+		atomic64_inc(&route->faults);
+		WRITE_ONCE(route->component, false);
+		goto native;
 	}
 	error = ebpfos_fops_route_call(route->handle, route->role, &frame,
 				      &epoch, &provider_id, &provider_status);
@@ -90,6 +91,12 @@ static void ebpfos_bops_route_submit_bio(struct bio *bio)
 fail:
 	atomic64_inc(&route->faults);
 	WRITE_ONCE(route->component, false);
+	/* A provider may already have touched the bio or device. Never replay it. */
+	if (error != -ENOENT) {
+		bio_io_error(bio);
+		goto out;
+	}
+native:
 	bio->bi_iter = original_iter;
 	atomic64_inc(&route->linux_entries);
 	route->original->submit_bio(bio);
