@@ -32,6 +32,7 @@
 #include <uapi/linux/ebpfos_locked_section.h>
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
+#include <asm/io.h>
 #include <asm/tsc.h>
 #endif
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -966,6 +967,16 @@ __bpf_kfunc u32 bpf_ebpfos_effect_cpu_feature(u32 feature)
 {
 	return feature < MAX_CPU_FEATURES && boot_cpu_has(feature);
 }
+
+__bpf_kfunc u8 bpf_ebpfos_effect_io_port_read8(u16 port)
+{
+	return inb(port);
+}
+
+__bpf_kfunc void bpf_ebpfos_effect_io_port_write8(u8 value, u16 port)
+{
+	outb(value, port);
+}
 #endif
 
 __bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
@@ -1419,9 +1430,22 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
 #endif
 BTF_KFUNCS_END(ebpfos_l1_services)
 
+#ifdef CONFIG_X86
+BTF_KFUNCS_START(ebpfos_l1_io_services)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
+BTF_KFUNCS_END(ebpfos_l1_io_services)
+#endif
+
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
 {
-	return btf_id_set8_contains(&ebpfos_l1_services, btf_id);
+	if (btf_id_set8_contains(&ebpfos_l1_services, btf_id))
+		return true;
+#ifdef CONFIG_X86
+	return btf_id_set8_contains(&ebpfos_l1_io_services, btf_id);
+#else
+	return false;
+#endif
 }
 
 static int ebpfos_effect_kfunc_filter(const struct bpf_prog *prog, u32 id)
@@ -1438,10 +1462,36 @@ static const struct btf_kfunc_id_set ebpfos_effect_kfunc_set = {
 	.filter = ebpfos_effect_kfunc_filter,
 };
 
+#ifdef CONFIG_X86
+static int ebpfos_io_kfunc_filter(const struct bpf_prog *prog, u32 id)
+{
+	if (!btf_id_set8_contains(&ebpfos_l1_io_services, id))
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_SYSCALL;
+}
+
+static const struct btf_kfunc_id_set ebpfos_io_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &ebpfos_l1_io_services,
+	.filter = ebpfos_io_kfunc_filter,
+};
+#endif
+
 static int __init ebpfos_effect_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+	int err;
+
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_effect_kfunc_set);
+	if (err)
+		return err;
+#ifdef CONFIG_X86
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_io_kfunc_set);
+#else
+	return 0;
+#endif
 }
 late_initcall(ebpfos_effect_init);
 
