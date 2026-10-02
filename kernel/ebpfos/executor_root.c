@@ -136,8 +136,7 @@ static int ebpfos_executor_root_role_fill(
 	struct ebpfos_admission *grant;
 	bool component;
 
-	if (!role || !request || request->admission_fd < 0 ||
-	    !request->role_type)
+	if (!role || !request || request->admission_fd < 0)
 		return -EINVAL;
 	grant = ebpfos_admission_get_from_fd(request->admission_fd);
 	if (IS_ERR(grant))
@@ -453,7 +452,7 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 	if (!call || call_data__sz < sizeof(*call) ||
 	    call->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
 	    call->flags & ~EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH ||
-	    !call->method_id || !call->object_id || !call->role_type ||
+	    !call->object_id ||
 	    !call->context_size ||
 	    call->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
 	    (!(call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH) &&
@@ -509,7 +508,7 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 {
 	struct ebpfos_executor_root_slot *slot;
 
-	if (!object_id || !role_type || !lease || !snapshot)
+	if (!object_id || !lease || !snapshot)
 		return -EINVAL;
 	memset(lease, 0, sizeof(*lease));
 	slot = xa_load(&ebpfos_executor_roots, object_id);
@@ -532,7 +531,7 @@ int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 {
 	struct ebpfos_executor_root_slot *slot;
 
-	if (!object_id || !role_type || !lease || !snapshot)
+	if (!object_id || !lease || !snapshot)
 		return -EINVAL;
 	memset(lease, 0, sizeof(*lease));
 	slot = xa_load(&ebpfos_executor_roots, object_id);
@@ -929,6 +928,10 @@ static void ebpfos_executor_root_call_size_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
 	call->flags = 0;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), -EINVAL);
+	call->expected_epoch = 0;
+	call->role_type = 0;
+	call->method_id = 0;
+	KUNIT_EXPECT_EQ(test, ebpfos_executor_call_size(call, size), 0);
 }
 
 static void ebpfos_executor_frame_test(struct kunit *test)

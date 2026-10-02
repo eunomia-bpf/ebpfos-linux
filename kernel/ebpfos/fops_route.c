@@ -492,7 +492,7 @@ static int ebpfos_fops_route_attach_flags(struct file *file, u64 handle,
 	struct ebpfos_fops_route *route;
 	int error = 0;
 
-	if (!file || !handle || !role)
+	if (!file || !handle)
 		return -EINVAL;
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)

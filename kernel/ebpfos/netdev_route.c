@@ -356,7 +356,7 @@ static int ebpfos_netdev_route_attach(struct net_device *dev,
 	struct ebpfos_netdev_route *route;
 	int error;
 
-	if (!handle || !role || ebpfos_netdev_route_get(dev))
+	if (!handle || ebpfos_netdev_route_get(dev))
 		return -EINVAL;
 	if (!method_mask)
 		method_mask = 0xfe;

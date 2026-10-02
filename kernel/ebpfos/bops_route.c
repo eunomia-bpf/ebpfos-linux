@@ -112,7 +112,7 @@ static int ebpfos_bops_route_attach(struct gendisk *disk, u64 handle, u64 role)
 	unsigned int memflags;
 	int error;
 
-	if (!handle || !role)
+	if (!handle)
 		return -EINVAL;
 	route = kzalloc(sizeof(*route), GFP_KERNEL);
 	if (!route)

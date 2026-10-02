@@ -17,7 +17,7 @@ int ebpfos_fops_route_call(u64 handle, u64 role, void *frame,
 	u64 start;
 	int error, attempts = 0;
 
-	if (!handle || !role || !frame || !epoch || !provider_id || !status)
+	if (!handle || !frame || !epoch || !provider_id || !status)
 		return -EINVAL;
 retry:
 	error = ebpfos_executor_root_lease_begin(handle, role, &lease,
