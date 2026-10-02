@@ -40,6 +40,7 @@ enum ebpfos_admitted_binding_kind {
 };
 
 struct ebpfos_component_desc_v1 {
+	/* Retained wire slots; admission uses the typed ABI fields below. */
 	__u8 magic[8];
 	__le16 format_version;
 	__le16 header_size;

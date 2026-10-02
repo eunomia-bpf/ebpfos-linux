@@ -120,24 +120,6 @@ static int ebpfos_validate_component_descriptor(
 	return -EPROTO;
 }
 
-static int ebpfos_validate_descriptor(
-	const struct ebpfos_component_desc_v1 *descriptor)
-{
-	if (memcmp(descriptor->magic, EBPFOS_COMPONENT_DESC_V1_MAGIC,
-		   sizeof(descriptor->magic)) ||
-	    le16_to_cpu(descriptor->format_version) !=
-		EBPFOS_ADMISSION_FORMAT_VERSION ||
-	    le16_to_cpu(descriptor->header_size) != sizeof(*descriptor) ||
-	    le32_to_cpu(descriptor->total_size) != sizeof(*descriptor))
-		return -EPROTO;
-
-	switch (le32_to_cpu(descriptor->domain)) {
-	case EBPFOS_COMPONENT_DOMAIN_COMPONENT:
-		return ebpfos_validate_component_descriptor(descriptor);
-	default:
-		return -EACCES;
-	}
-}
 void ebpfos_admission_gate_lock(void)
 {
 	mutex_lock(&ebpfos_publish_gate);
@@ -496,7 +478,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	if (request.map_count > MAX_USED_MAPS ||
 	    (request.map_count && !request.map_fds))
 		return -EINVAL;
-	error = ebpfos_validate_descriptor(&request.descriptor);
+	error = ebpfos_validate_component_descriptor(&request.descriptor);
 	if (error)
 		return error;
 	prog = bpf_prog_get_type_dev(request.prog_fd,
