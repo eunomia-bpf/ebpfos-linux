@@ -455,8 +455,6 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 	    !call->object_id ||
 	    !call->context_size ||
 	    call->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
-	    (!(call->flags & EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH) &&
-	     call->expected_epoch) ||
 	    check_add_overflow(sizeof(*call), (size_t)call->context_size,
 			       &expected_size) || expected_size != call_data__sz)
 		return -EINVAL;
