@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/ebpfos.h>
 #include <uapi/linux/ebpfos_root.h>
+#include <linux/capability.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -65,6 +66,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case EBPFOS_IOC_ADMISSION_RUNTIME_INFO:
 		return ebpfos_admission_runtime_info_ioctl(argp);
 	case EBPFOS_IOC_ROOT_QUIESCE:
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
 		if (copy_from_user(&request, argp, sizeof(request)))
 			return -EFAULT;
 		mutex_lock(&session->lock);
@@ -79,6 +82,8 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		mutex_unlock(&session->lock);
 		return error;
 	case EBPFOS_IOC_ROOT_RESUME:
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
 		mutex_lock(&session->lock);
 		if (!session->quiesced_object) {
 			error = -EINVAL;

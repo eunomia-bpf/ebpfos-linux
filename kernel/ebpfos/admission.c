@@ -632,8 +632,6 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 	struct ebpfos_admission *admission;
 	struct ebpfos_binding *binding;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 	admission = ebpfos_admission_get_from_fd(request.admission_fd);
@@ -661,8 +659,6 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 	struct ebpfos_admission *admission;
 	struct ebpfos_binding *binding;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	if (copy_from_user(&request, argp, sizeof(request)))
 		return -EFAULT;
 	admission = ebpfos_admission_get_from_fd(request.admission_fd);
