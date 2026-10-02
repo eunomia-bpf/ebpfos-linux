@@ -46,6 +46,7 @@ struct ebpfos_component_desc_v1 {
 	__le16 header_size;
 	__le32 total_size;
 	__le32 reserved_flags;
+	/* Legacy metadata; the typed ABI determines admission. */
 	__le32 domain;
 	__le32 use;
 	__u8 reserved_header[12];

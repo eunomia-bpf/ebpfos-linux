@@ -101,10 +101,6 @@ static int ebpfos_validate_component_descriptor(
 	u32 context_size = le32_to_cpu(descriptor->context_size);
 	u32 prog_type = le32_to_cpu(descriptor->prog_type);
 
-	if (le32_to_cpu(descriptor->domain) !=
-		EBPFOS_COMPONENT_DOMAIN_COMPONENT ||
-	    le32_to_cpu(descriptor->use) != EBPFOS_COMPONENT_USE_CALL_PROVIDER)
-		return -EACCES;
 	if (prog_type == BPF_PROG_TYPE_SYSCALL &&
 	    abi_id == EBPFOS_COMPONENT_CALL_ABI_ID &&
 	    le32_to_cpu(descriptor->abi_version) ==
@@ -307,8 +303,6 @@ static struct ebpfos_binding *
 ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 			 u32 map_count, struct ebpfos_prog_identity *identity)
 {
-	const struct ebpfos_component_desc_v1 *descriptor =
-		&identity->descriptor;
 	struct ebpfos_binding *binding;
 
 	binding = kzalloc_obj(*binding, GFP_KERNEL);
@@ -322,15 +316,9 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	binding->map = map_count ? maps[0] : NULL;
 	binding->prog_identity = ebpfos_prog_identity_get(identity);
 	binding->kind = EBPFOS_ADMITTED_BINDING_BPF;
-	binding->use = le32_to_cpu(descriptor->use);
 	binding->prog_id = prog->aux->id;
 	binding->map_id = binding->map ? binding->map->id : 0;
 	return binding;
-}
-
-u32 ebpfos_binding_use(const struct ebpfos_binding *binding)
-{
-	return binding ? binding->use : 0;
 }
 
 u32 ebpfos_binding_kind(const struct ebpfos_binding *binding)

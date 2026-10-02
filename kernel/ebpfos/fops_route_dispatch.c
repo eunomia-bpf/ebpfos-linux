@@ -27,8 +27,7 @@ retry:
 	binding = lease.binding;
 	provider = ebpfos_binding_prog(binding);
 	if (!provider || !provider->aux || !provider->aux->ebpfos_component ||
-	    provider->type != BPF_PROG_TYPE_SYSCALL || !provider->sleepable ||
-	    ebpfos_binding_use(binding) != EBPFOS_COMPONENT_USE_CALL_PROVIDER) {
+	    provider->type != BPF_PROG_TYPE_SYSCALL || !provider->sleepable) {
 		error = -EOPNOTSUPP;
 		goto out;
 	}
