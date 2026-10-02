@@ -10,6 +10,8 @@ typedef struct spinlock spinlock_t;
 
 void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
 		spinlock_t *lock, void *owner, unsigned int completion_offset);
+void ebpfos_restricted_vq_drain_register_block(struct virtqueue *vq,
+		spinlock_t *lock, void *owner);
 void ebpfos_restricted_vq_drain_unregister(void *owner);
 void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 		void (*native)(struct virtqueue *vq));

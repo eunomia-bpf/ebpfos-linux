@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Non-sleepable virtqueue drain and per-buffer completion effect. */
 #include <linux/bpf.h>
+#ifdef CONFIG_BLOCK
+#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
+#endif
 #include <linux/capability.h>
 #include <linux/completion.h>
 #include <linux/ebpfos_restricted_vq_drain.h>
@@ -27,6 +31,7 @@ struct drain_route {
 	void *owner;
 	u64 id;
 	u32 completion_offset;
+	bool block_request;
 	struct bpf_prog *prog;
 	bool active;
 	atomic64_t native_entries;
@@ -59,8 +64,8 @@ static struct drain_route *route_for_id(u64 id)
 	return NULL;
 }
 
-void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
-		spinlock_t *lock, void *owner, unsigned int completion_offset)
+static void register_route(struct virtqueue *vq, spinlock_t *lock,
+		void *owner, unsigned int completion_offset, bool block_request)
 {
 	struct drain_route *route, *existing;
 
@@ -73,6 +78,7 @@ void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
 	route->lock = lock;
 	route->owner = owner;
 	route->completion_offset = completion_offset;
+	route->block_request = block_request;
 	route->id = atomic64_inc_return(&drain_next_id);
 	mutex_lock(&drain_routes_lock);
 	list_for_each_entry(existing, &drain_routes, node)
@@ -84,7 +90,22 @@ void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
 	list_add_rcu(&route->node, &drain_routes);
 	mutex_unlock(&drain_routes_lock);
 }
+
+void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
+		spinlock_t *lock, void *owner, unsigned int completion_offset)
+{
+	register_route(vq, lock, owner, completion_offset, false);
+}
 EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register);
+
+#ifdef CONFIG_BLOCK
+void ebpfos_restricted_vq_drain_register_block(struct virtqueue *vq,
+		spinlock_t *lock, void *owner)
+{
+	register_route(vq, lock, owner, 0, true);
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register_block);
+#endif
 
 void ebpfos_restricted_vq_drain_unregister(void *owner)
 {
@@ -112,6 +133,9 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 	unsigned int len;
 	void *buffer;
 	bool fault = false;
+#ifdef CONFIG_BLOCK
+	struct request_queue *stopped_queue = NULL;
+#endif
 
 	rcu_read_lock();
 	route = route_for_queue(vq);
@@ -125,11 +149,23 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 	do {
 		virtqueue_disable_cb(vq);
 		while ((buffer = virtqueue_get_buf(vq, &len))) {
-			struct completion *done = *(struct completion **)
-				((char *)buffer + route->completion_offset);
+			struct completion *done = NULL;
 			struct { u64 args[3]; } context = {
-				.args = { 1, !!done, 0 },
+				.args = { 1, 0, 0 },
 			};
+#ifdef CONFIG_BLOCK
+			struct request *request = NULL;
+
+			if (route->block_request) {
+				request = blk_mq_rq_from_pdu(buffer);
+				stopped_queue = request->q;
+			} else
+#endif
+			{
+				done = *(struct completion **)
+					((char *)buffer + route->completion_offset);
+				context.args[1] = !!done;
+			}
 
 			if (bpf_prog_run(route->prog, &context) != 1) {
 				atomic64_inc(&route->faults);
@@ -141,6 +177,12 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 					atomic64_inc(&route->hardirq_entries);
 			}
 			/* The consumed buffer cannot be replayed by native(vq). */
+#ifdef CONFIG_BLOCK
+			if (request) {
+				if (!blk_should_fake_timeout(stopped_queue))
+					blk_mq_complete_request(request);
+			} else
+#endif
 			if (done)
 				complete(done);
 			if (fault)
@@ -149,6 +191,10 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 		if (fault)
 			break;
 	} while (!virtqueue_enable_cb(vq));
+#ifdef CONFIG_BLOCK
+	if (stopped_queue)
+		blk_mq_start_stopped_hw_queues(stopped_queue, true);
+#endif
 	spin_unlock_irqrestore(route->lock, flags);
 	if (fault) {
 		atomic64_inc(&route->native_entries);
