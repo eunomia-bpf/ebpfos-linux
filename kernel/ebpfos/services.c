@@ -963,6 +963,18 @@ __bpf_kfunc void bpf_ebpfos_effect_fatal_bug(void)
 	BUG();
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_atomic_or8(void *ptr, u32 ptr__sz, u8 value)
+{
+	if (ptr && ptr__sz == 1)
+		__atomic_fetch_or((u8 *)ptr, value, __ATOMIC_SEQ_CST);
+}
+
+__bpf_kfunc void bpf_ebpfos_effect_atomic_and8(void *ptr, u32 ptr__sz, u8 value)
+{
+	if (ptr && ptr__sz == 1)
+		__atomic_fetch_and((u8 *)ptr, value, __ATOMIC_SEQ_CST);
+}
+
 #ifdef CONFIG_X86
 __bpf_kfunc u64 bpf_ebpfos_effect_tsc(u32 ordered)
 {
@@ -1438,6 +1450,8 @@ BTF_KFUNCS_END(ebpfos_l1_services)
 
 BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
