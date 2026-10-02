@@ -34,6 +34,7 @@
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
 #include <asm/io.h>
+#include <asm/pkru.h>
 #include <asm/tsc.h>
 #endif
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -976,6 +977,11 @@ __bpf_kfunc void bpf_ebpfos_effect_atomic_and8(void *ptr, u32 ptr__sz, u8 value)
 }
 
 #ifdef CONFIG_X86
+__bpf_kfunc u32 bpf_ebpfos_effect_pkru_read(void)
+{
+	return read_pkru();
+}
+
 __bpf_kfunc u64 bpf_ebpfos_effect_tsc(u32 ordered)
 {
 	return ordered ? rdtsc_ordered() : rdtsc();
@@ -1453,6 +1459,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 #ifdef CONFIG_X86
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
 #endif
