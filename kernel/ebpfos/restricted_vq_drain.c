@@ -22,7 +22,14 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/virtio.h>
+#include <linux/workqueue.h>
 #include <uapi/linux/ebpfos_restricted_vq_drain.h>
+
+enum drain_delivery {
+	DRAIN_COMPLETE,
+	DRAIN_BLOCK_REQUEST,
+	DRAIN_WORK,
+};
 
 struct drain_route {
 	struct list_head node;
@@ -31,7 +38,10 @@ struct drain_route {
 	void *owner;
 	u64 id;
 	u32 completion_offset;
-	bool block_request;
+	enum drain_delivery delivery;
+	bool *stop;
+	u32 work_offset;
+	struct workqueue_struct *workqueue;
 	struct bpf_prog *prog;
 	bool active;
 	atomic64_t native_entries;
@@ -65,7 +75,9 @@ static struct drain_route *route_for_id(u64 id)
 }
 
 static void register_route(struct virtqueue *vq, spinlock_t *lock,
-		void *owner, unsigned int completion_offset, bool block_request)
+		void *owner, enum drain_delivery delivery,
+		unsigned int completion_offset, bool *stop,
+		unsigned int work_offset, struct workqueue_struct *workqueue)
 {
 	struct drain_route *route, *existing;
 
@@ -78,7 +90,10 @@ static void register_route(struct virtqueue *vq, spinlock_t *lock,
 	route->lock = lock;
 	route->owner = owner;
 	route->completion_offset = completion_offset;
-	route->block_request = block_request;
+	route->delivery = delivery;
+	route->stop = stop;
+	route->work_offset = work_offset;
+	route->workqueue = workqueue;
 	route->id = atomic64_inc_return(&drain_next_id);
 	mutex_lock(&drain_routes_lock);
 	list_for_each_entry(existing, &drain_routes, node)
@@ -94,7 +109,8 @@ static void register_route(struct virtqueue *vq, spinlock_t *lock,
 void ebpfos_restricted_vq_drain_register(struct virtqueue *vq,
 		spinlock_t *lock, void *owner, unsigned int completion_offset)
 {
-	register_route(vq, lock, owner, completion_offset, false);
+	register_route(vq, lock, owner, DRAIN_COMPLETE,
+		       completion_offset, NULL, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register);
 
@@ -102,10 +118,21 @@ EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register);
 void ebpfos_restricted_vq_drain_register_block(struct virtqueue *vq,
 		spinlock_t *lock, void *owner)
 {
-	register_route(vq, lock, owner, 0, true);
+	register_route(vq, lock, owner, DRAIN_BLOCK_REQUEST, 0, NULL, 0, NULL);
 }
 EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register_block);
 #endif
+
+void ebpfos_restricted_vq_drain_register_work(struct virtqueue *vq,
+		spinlock_t *lock, void *owner, bool *stop,
+		unsigned int work_offset, struct workqueue_struct *workqueue)
+{
+	if (!stop || !workqueue)
+		return;
+	register_route(vq, lock, owner, DRAIN_WORK,
+		       0, stop, work_offset, workqueue);
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_vq_drain_register_work);
 
 void ebpfos_restricted_vq_drain_unregister(void *owner)
 {
@@ -156,12 +183,14 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 #ifdef CONFIG_BLOCK
 			struct request *request = NULL;
 
-			if (route->block_request) {
+			if (route->delivery == DRAIN_BLOCK_REQUEST) {
 				request = blk_mq_rq_from_pdu(buffer);
 				stopped_queue = request->q;
 			} else
 #endif
-			{
+			if (route->delivery == DRAIN_WORK) {
+				context.args[1] = READ_ONCE(*route->stop);
+			} else {
 				done = *(struct completion **)
 					((char *)buffer + route->completion_offset);
 				context.args[1] = !!done;
@@ -183,7 +212,13 @@ void ebpfos_restricted_vq_drain(struct virtqueue *vq,
 					blk_mq_complete_request(request);
 			} else
 #endif
-			if (done)
+			if (route->delivery == DRAIN_WORK) {
+				if (!context.args[1])
+					queue_work_on(WORK_CPU_UNBOUND,
+						route->workqueue,
+						(struct work_struct *)((char *)buffer +
+							route->work_offset));
+			} else if (done)
 				complete(done);
 			if (fault)
 				break;
