@@ -30,4 +30,7 @@ struct ebpfos_fops_route_request {
 #define EBPFOS_FOPS_ROUTE_F_EXTENDED 2U
 #define EBPFOS_FOPS_ROUTE_F_WAIT_BRIDGE 4U
 
+/* Maximum I/O count represented by the current generated file call frame. */
+#define EBPFOS_FOPS_ROUTE_COMPONENT_IO_MAX 65536U
+
 #endif

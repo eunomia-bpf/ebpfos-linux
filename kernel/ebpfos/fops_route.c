@@ -182,7 +182,9 @@ static ssize_t ebpfos_fops_route_iter(struct kiocb *iocb,
 		before = iov_iter_count(iter);
 		seen = waitable ? ebpfos_effect_wait_ref_sequence(route->wait) : 0;
 		ebpfos_component_gate_enter(&route->gate);
-		if (!READ_ONCE(route->component)) {
+		if (!READ_ONCE(route->component) ||
+		    (method == EBPFOS_FOPS_METHOD_read_iter &&
+		     before > EBPFOS_FOPS_ROUTE_COMPONENT_IO_MAX)) {
 			flags = iocb->ki_flags;
 			if (waitable)
 				iocb->ki_flags |= IOCB_NOWAIT;
@@ -264,7 +266,8 @@ static ssize_t ebpfos_fops_route_write(struct file *file,
 		return -ESTALE;
 	atomic_inc(&route->active);
 	ebpfos_component_gate_enter(&route->gate);
-	if (!READ_ONCE(route->component)) {
+	if (!READ_ONCE(route->component) ||
+	    count > EBPFOS_FOPS_ROUTE_COMPONENT_IO_MAX) {
 		atomic64_inc(&route->linux_entries);
 		result = route->original->write(file, buf, count, ppos);
 		goto out;
@@ -325,7 +328,8 @@ static ssize_t ebpfos_fops_route_read(struct file *file, char __user *buf,
 		return -ESTALE;
 	atomic_inc(&route->active);
 	ebpfos_component_gate_enter(&route->gate);
-	if (!READ_ONCE(route->component)) {
+	if (!READ_ONCE(route->component) ||
+	    count > EBPFOS_FOPS_ROUTE_COMPONENT_IO_MAX) {
 		atomic64_inc(&route->linux_entries);
 		result = route->original->read(file, buf, count, ppos);
 		goto out;
