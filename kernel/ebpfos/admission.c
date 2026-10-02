@@ -49,14 +49,16 @@ EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, map_fds, 16);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, descriptor, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, admission_fd, 1048);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, grant_id, 1056);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, content_digest, 1072);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_seal, reserved_digests, 1072);
 static_assert(sizeof(struct ebpfos_ioc_admission_info) == 1152);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_info, descriptor, 128);
 static_assert(sizeof(struct ebpfos_ioc_admission_runtime_info) == 96);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, map_rehashes, 24);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
+		     reserved_rehashes, 24);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
 			     invocation_entries, 32);
-EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, content_digest, 40);
+EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
+		     reserved_digest, 40);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info, retired_epoch, 72);
 EBPFOS_ASSERT_OFFSET(ebpfos_ioc_admission_runtime_info,
 		     entries_at_publication, 80);
@@ -338,7 +340,6 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 		return NULL;
 	refcount_set(&binding->refs, 1);
 	atomic64_set(&binding->invocation_state, 0);
-	atomic64_set(&binding->map_rehashes, 0);
 	binding->prog = prog;
 	binding->maps = maps;
 	binding->map_count = map_count;
@@ -598,9 +599,7 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	request.grant_id = grant_id;
 	request.prog_id = admission->binding->prog_id;
 	request.map_id = admission->binding->map_id;
-	memset(request.content_digest, 0, sizeof(request.content_digest));
-	memset(request.program_digest, 0, sizeof(request.program_digest));
-	memset(request.map_digest, 0, sizeof(request.map_digest));
+	memset(request.reserved_digests, 0, sizeof(request.reserved_digests));
 
 	mutex_lock(&ebpfos_publish_gate);
 	mutex_lock(&ebpfos_seal_lock);
@@ -713,9 +712,7 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 	request.map_id = binding->map_id;
 	request.flags = 0;
 	request.reserved0 = 0;
-	memset(request.content_digest, 0, sizeof(request.content_digest));
-	memset(request.program_digest, 0, sizeof(request.program_digest));
-	memset(request.map_digest, 0, sizeof(request.map_digest));
+	memset(request.reserved_digests, 0, sizeof(request.reserved_digests));
 	request.descriptor = binding->prog_identity->descriptor;
 	mutex_unlock(&ebpfos_publish_gate);
 	ebpfos_admission_put(admission);
@@ -741,7 +738,7 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 	request.flags = 0;
 	request.prog_id = binding->prog_id;
 	request.map_id = binding->map_id;
-	request.map_rehashes = atomic64_read(&binding->map_rehashes);
+	request.reserved_rehashes = 0;
 	/* Both values are decoded from one atomic snapshot. */
 	{
 		u64 state = atomic64_read(&binding->invocation_state);
@@ -750,7 +747,7 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 			state, &request.active_invocations,
 			&request.invocation_entries);
 	}
-	memset(request.content_digest, 0, sizeof(request.content_digest));
+	memset(request.reserved_digest, 0, sizeof(request.reserved_digest));
 	request.retired_epoch = smp_load_acquire(&binding->retired_epoch);
 	request.entries_at_publication = 0;
 	request.active_at_publication = 0;

@@ -28,7 +28,6 @@ struct ebpfos_binding {
 	refcount_t refs;
 	/* Bit 63: retired; bits 16..62: entries; bits 0..15: active. */
 	atomic64_t invocation_state;
-	atomic64_t map_rehashes;
 	u64 retired_epoch;
 	u64 retirement_snapshot;
 	struct bpf_prog *prog;

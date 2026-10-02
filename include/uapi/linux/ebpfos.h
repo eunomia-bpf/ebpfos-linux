@@ -90,9 +90,7 @@ struct ebpfos_ioc_admission_seal {
 	__u64 grant_id;
 	__u32 prog_id;
 	__u32 map_id;
-	__u8 content_digest[32];
-	__u8 program_digest[32];
-	__u8 map_digest[32];
+	__u8 reserved_digests[96];
 };
 
 struct ebpfos_ioc_admission_info {
@@ -103,9 +101,7 @@ struct ebpfos_ioc_admission_info {
 	__u32 prog_id;
 	__u32 map_id;
 	__u32 reserved0;
-	__u8 content_digest[32];
-	__u8 program_digest[32];
-	__u8 map_digest[32];
+	__u8 reserved_digests[96];
 	struct ebpfos_component_desc_v1 descriptor;
 };
 
@@ -118,9 +114,9 @@ struct ebpfos_ioc_admission_runtime_info {
 	__u32 prog_id;
 	__u32 map_id;
 	__u32 active_invocations;
-	__u64 map_rehashes;
+	__u64 reserved_rehashes;
 	__u64 invocation_entries;
-	__u8 content_digest[32];
+	__u8 reserved_digest[32];
 	__u64 retired_epoch;
 	__u64 entries_at_publication;
 	__u32 active_at_publication;
