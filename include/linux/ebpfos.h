@@ -122,13 +122,8 @@ struct ebpfos_executor_root_publish_request {
 
 struct ebpfos_executor_root_role_snapshot {
 	u64 role_type;
-	u64 authority;
-	u64 provider_type_id;
-	u64 schema;
 	u32 prog_id;
 	u32 map_id;
-	u8 content_digest[32];
-	u8 contract_digest[32];
 };
 
 #ifdef CONFIG_EBPFOS

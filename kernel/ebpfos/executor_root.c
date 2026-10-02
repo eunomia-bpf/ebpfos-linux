@@ -3,7 +3,6 @@
 #include <linux/capability.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
-#include <crypto/sha2.h>
 #include <linux/ebpfos.h>
 #include <linux/errno.h>
 #include <linux/filter.h>
@@ -32,7 +31,6 @@ struct ebpfos_executor_root_bundle {
 	struct work_struct retire_work;
 	u64 object_id;
 	u64 epoch;
-	u64 authority;
 	u32 role_count;
 	struct ebpfos_executor_root_role roles[];
 };
@@ -162,16 +160,8 @@ static int ebpfos_executor_root_role_fill(
 		return -EOPNOTSUPP;
 	}
 	role->snapshot.role_type = request->role_type;
-	role->snapshot.authority = le64_to_cpu(descriptor->capability_mask);
-	role->snapshot.provider_type_id =
-		le64_to_cpu(descriptor->provider_type_id);
-	role->snapshot.schema = le64_to_cpu(descriptor->runtime_schema_u64);
 	role->snapshot.prog_id = binding->prog_id;
 	role->snapshot.map_id = binding->map_id;
-	memcpy(role->snapshot.content_digest, binding->content_digest,
-	       SHA256_DIGEST_SIZE);
-	memcpy(role->snapshot.contract_digest, descriptor->contract_sha256,
-	       SHA256_DIGEST_SIZE);
 	role->binding = binding;
 	role->grant = grant;
 	return 0;
@@ -218,7 +208,6 @@ static int ebpfos_executor_root_prepare(
 			ebpfos_executor_root_bundle_release(bundle);
 			return error;
 		}
-		bundle->authority |= bundle->roles[role].snapshot.authority;
 	}
 	ebpfos_executor_root_sort(bundle);
 	for (role = 1; role < bundle->role_count; role++)
@@ -790,14 +779,9 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	source->object_id = target->object_id = request.object_id;
 	source->epoch = request.expected_epoch;
 	target->epoch = request.target_epoch;
-	source->authority = target->authority = 3;
 	source->role_count = target->role_count = 1;
 	source->roles[0].snapshot.role_type = 9;
 	target->roles[0].snapshot.role_type = 9;
-	source->roles[0].snapshot.authority = 3;
-	target->roles[0].snapshot.authority = 3;
-	source->roles[0].snapshot.contract_digest[0] = 0xaa;
-	target->roles[0].snapshot.contract_digest[0] = 0xaa;
 	source->roles[0].binding = (void *)0x10UL;
 
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
@@ -810,18 +794,6 @@ static void ebpfos_executor_root_compare_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
 		&request, source, target), 0);
 	target->roles[0].snapshot.role_type--;
-	target->roles[0].snapshot.contract_digest[0]++;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target), 0);
-	target->roles[0].snapshot.contract_digest[0]--;
-	target->authority = 7;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target), 0);
-	target->authority = source->authority;
-	target->roles[0].snapshot.authority = 7;
-	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
-		&request, source, target), 0);
-	target->roles[0].snapshot.authority = 3;
 	target->role_count = 2;
 	KUNIT_EXPECT_EQ(test, ebpfos_executor_root_source_validate(
 		&request, source, target), -ESTALE);
