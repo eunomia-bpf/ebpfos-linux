@@ -5,6 +5,10 @@
 #include <linux/spinlock_types.h>
 #include <linux/wait.h>
 
+void ebpfos_restricted_irq_event_register(void *key, void *owner);
+void ebpfos_restricted_irq_event_unregister(void *owner);
+void ebpfos_restricted_irq_wake(void *data, void *route_key,
+		void (*native)(void *), wait_queue_head_t *waitqueue);
 irqreturn_t ebpfos_restricted_irq_event(
 	int irq, void *data, void *route_key, irq_handler_t native, spinlock_t *lock,
 	unsigned long *counter, wait_queue_head_t *waitqueue,

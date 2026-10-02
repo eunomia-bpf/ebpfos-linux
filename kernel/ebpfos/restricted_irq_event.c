@@ -8,6 +8,7 @@
 #include <linux/filter.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
@@ -23,6 +24,8 @@
 struct irq_event_route {
 	struct list_head node;
 	void *data;
+	void *owner;
+	u64 id;
 	struct file *target;
 	struct bpf_prog *prog;
 	bool active;
@@ -34,6 +37,7 @@ struct irq_event_route {
 
 static LIST_HEAD(irq_event_routes);
 static DEFINE_MUTEX(irq_event_lock);
+static atomic64_t irq_event_next_id = ATOMIC64_INIT(0);
 
 static struct irq_event_route *route_for(void *data)
 {
@@ -55,6 +59,63 @@ static struct irq_event_route *route_for_locked(void *data)
 	return NULL;
 }
 
+static struct irq_event_route *route_for_id(u64 id)
+{
+	struct irq_event_route *route;
+
+	list_for_each_entry(route, &irq_event_routes, node)
+		if (route->id == id)
+			return route;
+	return NULL;
+}
+
+void ebpfos_restricted_irq_event_register(void *key, void *owner)
+{
+	struct irq_event_route *route;
+	u64 id;
+
+	if (!key || !owner)
+		return;
+	route = kzalloc(sizeof(*route), GFP_KERNEL);
+	if (!route)
+		return;
+	route->data = key;
+	route->owner = owner;
+	id = atomic64_inc_return(&irq_event_next_id);
+	if (id > U32_MAX) {
+		kfree(route);
+		return;
+	}
+	route->id = id;
+	mutex_lock(&irq_event_lock);
+	if (route_for_locked(key)) {
+		mutex_unlock(&irq_event_lock);
+		kfree(route);
+		return;
+	}
+	list_add_rcu(&route->node, &irq_event_routes);
+	mutex_unlock(&irq_event_lock);
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_irq_event_register);
+
+void ebpfos_restricted_irq_event_unregister(void *owner)
+{
+	struct irq_event_route *route, *next;
+
+	mutex_lock(&irq_event_lock);
+	list_for_each_entry_safe(route, next, &irq_event_routes, node) {
+		if (route->owner != owner)
+			continue;
+		list_del_rcu(&route->node);
+		synchronize_rcu();
+		if (route->prog)
+			bpf_prog_put(route->prog);
+		kfree(route);
+	}
+	mutex_unlock(&irq_event_lock);
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_irq_event_unregister);
+
 irqreturn_t ebpfos_restricted_irq_event(
 	int irq, void *data, void *route_key, irq_handler_t native, spinlock_t *lock,
 	unsigned long *counter, wait_queue_head_t *waitqueue,
@@ -71,7 +132,7 @@ irqreturn_t ebpfos_restricted_irq_event(
 
 	rcu_read_lock();
 	route = route_for(route_key);
-	if (!route || !READ_ONCE(route->active) ||
+	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog) ||
 	    (flags & mode_mask) != mode_value)
 		goto native;
 	if (flags & shared_mask)
@@ -113,6 +174,118 @@ out:
 }
 EXPORT_SYMBOL_GPL(ebpfos_restricted_irq_event);
 
+void ebpfos_restricted_irq_wake(void *data, void *route_key,
+		void (*native)(void *), wait_queue_head_t *waitqueue)
+{
+	struct { u64 args[1]; } context = { .args = { 0 } };
+	struct irq_event_route *route;
+	u32 result;
+
+	rcu_read_lock();
+	route = route_for(route_key);
+	if (!route || !READ_ONCE(route->active) || !READ_ONCE(route->prog))
+		goto native;
+	result = bpf_prog_run(route->prog, &context);
+	if (result > 1) {
+		atomic64_inc(&route->faults);
+		WRITE_ONCE(route->active, false);
+		goto native;
+	}
+	atomic64_inc(&route->component_entries);
+	if (in_hardirq())
+		atomic64_inc(&route->hardirq_entries);
+	if (result)
+		wake_up(waitqueue);
+	goto out;
+native:
+	if (route)
+		atomic64_inc(&route->native_entries);
+	native(data);
+out:
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(ebpfos_restricted_irq_wake);
+
+static long control_id_ioctl(unsigned int command,
+		struct ebpfos_restricted_irq_event_request *request,
+		void __user *argument)
+{
+	struct irq_event_route *route;
+	struct bpf_prog *prog = NULL;
+	long result = 0;
+
+	if (command == EBPFOS_RESTRICTED_IRQ_EVENT_ATTACH) {
+		prog = bpf_prog_get_type(request->prog_fd,
+					 BPF_PROG_TYPE_RAW_TRACEPOINT);
+		if (IS_ERR(prog))
+			return PTR_ERR(prog);
+	}
+	mutex_lock(&irq_event_lock);
+	if (command == EBPFOS_RESTRICTED_IRQ_EVENT_NEXT) {
+		u64 next_id = U64_MAX;
+
+		list_for_each_entry(route, &irq_event_routes, node)
+			if (route->owner && route->id > request->id &&
+			    route->id < next_id)
+				next_id = route->id;
+		if (next_id == U64_MAX) {
+			result = -ENOENT;
+			goto out;
+		}
+		request->id = next_id;
+		result = copy_to_user(argument, request, sizeof(*request)) ?
+			 -EFAULT : 0;
+		goto out;
+	}
+	route = route_for_id(request->id);
+	if (!route || !route->owner) {
+		result = -ENOENT;
+		goto out;
+	}
+	switch (command) {
+	case EBPFOS_RESTRICTED_IRQ_EVENT_ATTACH:
+		if (route->prog) {
+			result = -EBUSY;
+			break;
+		}
+		WRITE_ONCE(route->prog, prog);
+		prog = NULL;
+		break;
+	case EBPFOS_RESTRICTED_IRQ_EVENT_SWITCH:
+		if (request->active && !route->prog) {
+			result = -EINVAL;
+			break;
+		}
+		WRITE_ONCE(route->active, !!request->active);
+		synchronize_rcu();
+		break;
+	case EBPFOS_RESTRICTED_IRQ_EVENT_STATS:
+		request->native_entries = atomic64_read(&route->native_entries);
+		request->component_entries = atomic64_read(&route->component_entries);
+		request->hardirq_entries = atomic64_read(&route->hardirq_entries);
+		request->faults = atomic64_read(&route->faults);
+		request->active = READ_ONCE(route->active);
+		result = copy_to_user(argument, request, sizeof(*request)) ?
+			 -EFAULT : 0;
+		break;
+	case EBPFOS_RESTRICTED_IRQ_EVENT_DETACH:
+		WRITE_ONCE(route->active, false);
+		synchronize_rcu();
+		if (route->prog) {
+			bpf_prog_put(route->prog);
+			WRITE_ONCE(route->prog, NULL);
+		}
+		break;
+	default:
+		result = -ENOTTY;
+	}
+out:
+	mutex_unlock(&irq_event_lock);
+	if (prog)
+		bpf_prog_put(prog);
+	return result;
+}
+
 static long control_ioctl(struct file *control, unsigned int command,
 			  unsigned long argument)
 {
@@ -125,6 +298,8 @@ static long control_ioctl(struct file *control, unsigned int command,
 		return -EPERM;
 	if (copy_from_user(&request, (void __user *)argument, sizeof(request)))
 		return -EFAULT;
+	if (request.fd == -1)
+		return control_id_ioctl(command, &request, (void __user *)argument);
 	target = fget(request.fd);
 	if (!target)
 		return -EBADF;
