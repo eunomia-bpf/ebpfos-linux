@@ -403,7 +403,6 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 
 	if (!call || call_data__sz < sizeof(*call) ||
 	    call->version != EBPFOS_EXECUTOR_ROOT_ABI_VERSION ||
-	    call->flags & ~EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH ||
 	    !call->object_id ||
 	    !call->context_size ||
 	    call->context_size > EBPFOS_EXECUTOR_ROOT_MAX_CONTEXT_SIZE ||
