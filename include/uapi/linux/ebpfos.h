@@ -21,26 +21,9 @@ struct ebpfos_ioc_version {
 #define EBPFOS_COMPONENT_DESC_V1_MAGIC "EBPFDES1"
 #define EBPFOS_ADMISSION_FORMAT_VERSION 1U
 
-#define EBPFOS_COMPONENT_F_TEST_ONLY (1U << 0)
-#define EBPFOS_COMPONENT_F_ALL EBPFOS_COMPONENT_F_TEST_ONLY
-
 enum ebpfos_component_domain {
 	EBPFOS_COMPONENT_DOMAIN_COMPONENT = 3,
 };
-
-#define EBPFOS_COMPONENT_DOMAIN_COMPONENT_MASK \
-	(1U << EBPFOS_COMPONENT_DOMAIN_COMPONENT)
-
-enum ebpfos_component_code_format {
-	EBPFOS_COMPONENT_CODE_BPF_ELF = 1,
-};
-
-enum ebpfos_verifier_profile {
-	EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL = 3,
-};
-
-#define EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL_MASK \
-	(1ULL << EBPFOS_VERIFIER_PROFILE_COMPONENT_CALL)
 
 enum ebpfos_admission_state {
 	EBPFOS_ADMISSION_NONE = 0,
@@ -61,12 +44,10 @@ struct ebpfos_component_desc_v1 {
 	__le16 format_version;
 	__le16 header_size;
 	__le32 total_size;
-	__le32 flags;
+	__le32 reserved_flags;
 	__le32 domain;
 	__le32 use;
-	__le32 code_format;
-	__le32 verifier_profile;
-	__le32 reserved0;
+	__u8 reserved_header[12];
 	/* Retained wire space from the original descriptor format. */
 	__u8 reserved_identity[456];
 	__le64 abi_id;
