@@ -41,9 +41,6 @@ struct ebpfos_binding {
 	u32 use;
 	u32 prog_id;
 	u32 map_id;
-	u8 content_digest[32];
-	u8 program_digest[32];
-	u8 map_digest[32];
 };
 
 /* Policy-free generic executor-root substrate. */

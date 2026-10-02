@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include <crypto/sha2.h>
 #include <linux/anon_inodes.h>
 #include <linux/bpf.h>
 #include <linux/bpf_verifier.h>
@@ -118,7 +117,6 @@ static_assert(sizeof(struct ebpfos_component_call_frame) ==
 static_assert(EBPFOS_COMPONENT_IRQ_ARG_COUNT == MAX_BPF_FUNC_ARGS);
 static_assert(sizeof(struct ebpfos_component_irq_frame) ==
 	      EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE);
-static const u8 ebpfos_content_domain[] = "eBPFOS-content-v1";
 
 enum ebpfos_prog_seal_state {
 	EBPFOS_PROG_SEALING = 1,
@@ -129,9 +127,6 @@ struct ebpfos_prog_identity {
 	refcount_t refs;
 	u32 seal_state;
 	struct ebpfos_component_desc_v1 descriptor;
-	u8 content_digest[SHA256_DIGEST_SIZE];
-	u8 program_digest[SHA256_DIGEST_SIZE];
-	u8 map_digest[SHA256_DIGEST_SIZE];
 };
 
 struct ebpfos_admission {
@@ -150,30 +145,6 @@ static DEFINE_SPINLOCK(ebpfos_grant_id_lock);
 static u64 ebpfos_next_grant_id;
 
 static const struct file_operations ebpfos_admission_fops;
-
-static void ebpfos_hash_parts(const u8 *domain, size_t domain_size,
-			      const void *first, size_t first_size,
-			      const void *second, size_t second_size,
-			      u8 digest[SHA256_DIGEST_SIZE])
-{
-	struct sha256_ctx context;
-
-	sha256_init(&context);
-	sha256_update(&context, domain, domain_size);
-	sha256_update(&context, first, first_size);
-	if (second_size)
-		sha256_update(&context, second, second_size);
-	sha256_final(&context, digest);
-}
-
-static void ebpfos_descriptor_content_digest(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	u8 digest[SHA256_DIGEST_SIZE])
-{
-	ebpfos_hash_parts(ebpfos_content_domain,
-			  sizeof(ebpfos_content_domain), descriptor,
-			  sizeof(*descriptor), NULL, 0, digest);
-}
 
 static int ebpfos_validate_component_descriptor(
 	const struct ebpfos_component_desc_v1 *descriptor)
@@ -427,12 +398,6 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	binding->use = le32_to_cpu(descriptor->use);
 	binding->prog_id = prog->aux->id;
 	binding->map_id = binding->map ? binding->map->id : 0;
-	memcpy(binding->content_digest, identity->content_digest,
-	       sizeof(binding->content_digest));
-	memcpy(binding->program_digest, identity->program_digest,
-	       sizeof(binding->program_digest));
-	memcpy(binding->map_digest, identity->map_digest,
-	       sizeof(binding->map_digest));
 	return binding;
 }
 
@@ -537,11 +502,7 @@ out_unlock_maps:
 }
 
 static struct ebpfos_prog_identity *
-ebpfos_prog_identity_alloc(
-	const struct ebpfos_component_desc_v1 *descriptor,
-	const u8 content_digest[SHA256_DIGEST_SIZE],
-	const u8 program_digest[SHA256_DIGEST_SIZE],
-	const u8 map_digest[SHA256_DIGEST_SIZE])
+ebpfos_prog_identity_alloc(const struct ebpfos_component_desc_v1 *descriptor)
 {
 	struct ebpfos_prog_identity *identity;
 
@@ -551,12 +512,6 @@ ebpfos_prog_identity_alloc(
 	refcount_set(&identity->refs, 1);
 	identity->seal_state = EBPFOS_PROG_SEALING;
 	identity->descriptor = *descriptor;
-	memcpy(identity->content_digest, content_digest,
-	       sizeof(identity->content_digest));
-	memcpy(identity->program_digest, program_digest,
-	       sizeof(identity->program_digest));
-	memcpy(identity->map_digest, map_digest,
-	       sizeof(identity->map_digest));
 	return identity;
 }
 
@@ -599,8 +554,6 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	struct bpf_map **maps = NULL;
 	struct file *admission_file = NULL;
 	int *map_fds = NULL;
-	u8 content_digest[SHA256_DIGEST_SIZE];
-	u8 map_digest[SHA256_DIGEST_SIZE] = {};
 	u64 grant_id;
 	u32 map_count, i;
 	int fd = -1;
@@ -653,13 +606,10 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	error = ebpfos_check_program(prog, maps, map_count, NULL);
 	if (error)
 		goto out_put_map;
-	ebpfos_descriptor_content_digest(&request.descriptor, content_digest);
 	error = ebpfos_grant_id_alloc(&grant_id);
 	if (error)
 		goto out_put_map;
-	identity = ebpfos_prog_identity_alloc(&request.descriptor,
-					      content_digest, prog->digest,
-					      map_digest);
+	identity = ebpfos_prog_identity_alloc(&request.descriptor);
 	if (!identity) {
 		error = -ENOMEM;
 		goto out_put_map;
@@ -697,12 +647,9 @@ long ebpfos_admission_seal_ioctl(void __user *argp)
 	request.grant_id = grant_id;
 	request.prog_id = admission->binding->prog_id;
 	request.map_id = admission->binding->map_id;
-	memcpy(request.content_digest, content_digest,
-	       sizeof(request.content_digest));
-	memcpy(request.program_digest, identity->program_digest,
-	       sizeof(request.program_digest));
-	memcpy(request.map_digest, identity->map_digest,
-	       sizeof(request.map_digest));
+	memset(request.content_digest, 0, sizeof(request.content_digest));
+	memset(request.program_digest, 0, sizeof(request.program_digest));
+	memset(request.map_digest, 0, sizeof(request.map_digest));
 
 	mutex_lock(&ebpfos_publish_gate);
 	mutex_lock(&ebpfos_seal_lock);
@@ -816,12 +763,9 @@ long ebpfos_admission_info_ioctl(void __user *argp)
 	request.prog_id = binding->prog_id;
 	request.map_id = binding->map_id;
 	request.reserved0 = 0;
-	memcpy(request.content_digest, binding->content_digest,
-	       sizeof(request.content_digest));
-	memcpy(request.program_digest, binding->program_digest,
-	       sizeof(request.program_digest));
-	memcpy(request.map_digest, binding->map_digest,
-	       sizeof(request.map_digest));
+	memset(request.content_digest, 0, sizeof(request.content_digest));
+	memset(request.program_digest, 0, sizeof(request.program_digest));
+	memset(request.map_digest, 0, sizeof(request.map_digest));
 	request.descriptor = binding->prog_identity->descriptor;
 	mutex_unlock(&ebpfos_publish_gate);
 	ebpfos_admission_put(admission);
@@ -862,8 +806,7 @@ long ebpfos_admission_runtime_info_ioctl(void __user *argp)
 			state, &request.active_invocations,
 			&request.invocation_entries);
 	}
-	memcpy(request.content_digest, binding->content_digest,
-	       sizeof(request.content_digest));
+	memset(request.content_digest, 0, sizeof(request.content_digest));
 	request.retired_epoch = smp_load_acquire(&binding->retired_epoch);
 	if (request.retired_epoch) {
 		u64 snapshot = READ_ONCE(binding->retirement_snapshot);
