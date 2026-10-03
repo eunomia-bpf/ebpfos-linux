@@ -3,15 +3,23 @@
 #include <linux/atomic.h>
 #include <linux/ebpfos.h>
 #include <linux/ebpfos_function_route.h>
+#include <linux/ebpfos_function_direct.h>
 #include <linux/ebpfos_irq_route.h>
 #include <linux/ftrace.h>
 #include <linux/kallsyms.h>
 #include <linux/list.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/percpu.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
 #include "component_graph.h"
+
+struct ebpfos_function_counters {
+	u64 component_calls;
+	u64 native_fallbacks;
+};
 
 struct ebpfos_function_route {
 	struct list_head link;
@@ -21,17 +29,21 @@ struct ebpfos_function_route {
 	unsigned long native;
 	unsigned long stub;
 	unsigned long stub_size;
+	unsigned long direct;
+	bool direct_active;
 	u64 object_id;
 	u64 role_type;
 	u64 last_epoch;
 	u32 last_provider_id;
-	atomic64_t component_calls;
-	atomic64_t native_fallbacks;
+	struct ebpfos_function_counters __percpu *counters;
 	bool enabled;
 };
 
 static LIST_HEAD(ebpfos_function_routes);
 static DEFINE_MUTEX(ebpfos_function_routes_lock);
+static bool direct_calls;
+module_param(direct_calls, bool, 0444);
+MODULE_PARM_DESC(direct_calls, "Use generated direct-ftrace trampolines for function routes");
 
 static void notrace ebpfos_function_ftrace(unsigned long ip,
 		unsigned long parent_ip, struct ftrace_ops *ops,
@@ -68,6 +80,11 @@ int ebpfos_function_route_register(const char *symbol, void *stub,
 		kfree(route);
 		return -ENOENT;
 	}
+	route->counters = alloc_percpu(struct ebpfos_function_counters);
+	if (!route->counters) {
+		kfree(route);
+		return -ENOMEM;
+	}
 	ebpfos_component_gate_init(&route->gate);
 	route->fops.func = ebpfos_function_ftrace;
 	route->fops.flags = FTRACE_OPS_FL_DYNAMIC |
@@ -79,6 +96,7 @@ int ebpfos_function_route_register(const char *symbol, void *stub,
 	list_for_each_entry(entry, &ebpfos_function_routes, link) {
 		if (!strcmp(entry->symbol, symbol)) {
 			mutex_unlock(&ebpfos_function_routes_lock);
+			free_percpu(route->counters);
 			kfree(route);
 			return -EEXIST;
 		}
@@ -86,6 +104,26 @@ int ebpfos_function_route_register(const char *symbol, void *stub,
 	list_add_tail(&route->link, &ebpfos_function_routes);
 	mutex_unlock(&ebpfos_function_routes_lock);
 	*out = route;
+	return 0;
+}
+
+int ebpfos_function_route_register_direct(const char *symbol, void *stub,
+				void *direct, unsigned long *fallback_begin,
+				unsigned long *fallback_end,
+				struct ebpfos_function_route **out)
+{
+	int error;
+
+	/* x86 reserves the low address bit for another direct-entry ABI. */
+	if (!direct || ((unsigned long)direct & 1) ||
+	    !fallback_begin || !fallback_end)
+		return -EINVAL;
+	error = ebpfos_function_route_register(symbol, stub, out);
+	if (error)
+		return error;
+	*fallback_begin = (*out)->stub;
+	*fallback_end = (*out)->stub + (*out)->stub_size;
+	(*out)->direct = (unsigned long)direct;
 	return 0;
 }
 
@@ -112,13 +150,13 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 		*result = value;
 		WRITE_ONCE(route->last_epoch, epoch);
 		WRITE_ONCE(route->last_provider_id, provider);
-		atomic64_inc(&route->component_calls);
+		this_cpu_inc(route->counters->component_calls);
 	}
 	ebpfos_component_gate_exit(&route->gate);
 	if (!error)
 		return true;
 fallback:
-	atomic64_inc(&route->native_fallbacks);
+	this_cpu_inc(route->counters->native_fallbacks);
 	return false;
 }
 
@@ -126,7 +164,7 @@ int ebpfos_function_route_ioctl(struct ebpfos_ioc_function_route *request)
 {
 	struct ebpfos_function_route *route;
 	unsigned long location;
-	int error = -ENOENT;
+	int cpu, error = -ENOENT;
 
 	mutex_lock(&ebpfos_function_routes_lock);
 	list_for_each_entry(route, &ebpfos_function_routes, link) {
@@ -146,7 +184,14 @@ found:
 		error = ftrace_set_filter_ip(&route->fops, location, 0, 0);
 		if (error)
 			goto out;
-		error = register_ftrace_function(&route->fops);
+		route->direct_active = direct_calls && route->direct;
+		if (route->direct_active) {
+			route->fops.func = NULL;
+			route->fops.flags &= ~FTRACE_OPS_FL_IPMODIFY;
+			error = register_ftrace_direct(&route->fops, route->direct);
+		} else {
+			error = register_ftrace_function(&route->fops);
+		}
 		if (error) {
 			ftrace_set_filter_ip(&route->fops, location, 1, 0);
 			goto out;
@@ -154,7 +199,13 @@ found:
 		WRITE_ONCE(route->enabled, true);
 	} else if (request->enable == 0 && route->enabled) {
 		WRITE_ONCE(route->enabled, false);
-		unregister_ftrace_function(&route->fops);
+		if (route->direct_active) {
+			error = unregister_ftrace_direct(&route->fops, route->direct, false);
+			if (error)
+				goto out;
+		} else {
+			unregister_ftrace_function(&route->fops);
+		}
 		ftrace_set_filter_ip(&route->fops, location, 1, 0);
 		error = ebpfos_component_gate_engage(&route->gate);
 		if (!error)
@@ -167,8 +218,15 @@ found:
 	}
 	request->object_id = READ_ONCE(route->object_id);
 	request->role_type = READ_ONCE(route->role_type);
-	request->component_calls = atomic64_read(&route->component_calls);
-	request->native_fallbacks = atomic64_read(&route->native_fallbacks);
+	request->component_calls = 0;
+	request->native_fallbacks = 0;
+	for_each_possible_cpu(cpu) {
+		const struct ebpfos_function_counters *counters =
+			per_cpu_ptr(route->counters, cpu);
+
+		request->component_calls += READ_ONCE(counters->component_calls);
+		request->native_fallbacks += READ_ONCE(counters->native_fallbacks);
+	}
 	request->last_epoch = READ_ONCE(route->last_epoch);
 	request->last_provider_id = READ_ONCE(route->last_provider_id);
 	error = 0;
