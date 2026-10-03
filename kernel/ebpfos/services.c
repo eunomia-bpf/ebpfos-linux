@@ -1011,7 +1011,8 @@ __bpf_kfunc void bpf_ebpfos_effect_io_port_write8(u8 value, u16 port)
 	outb(value, port);
 }
 
-__bpf_kfunc void bpf_ebpfos_effect_send_ipi(int cpu, int vector)
+__attribute__((visibility("default"))) __visible __bpf_kfunc
+void bpf_ebpfos_effect_send_ipi(int cpu, int vector)
 {
 	__apic_send_IPI(cpu, vector);
 }
