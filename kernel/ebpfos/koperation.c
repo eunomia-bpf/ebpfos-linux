@@ -1489,6 +1489,14 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_popf64_restore_set);
 	if (err)
 		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_cli_save_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_popf64_restore_set);
+	if (err)
+		return err;
 #define EBPFOS_REGISTER_READ_CR(number) \
 	do { \
 		if (ebpfos_kprog_read_cr##number##_service_ids.cnt != 1) \
