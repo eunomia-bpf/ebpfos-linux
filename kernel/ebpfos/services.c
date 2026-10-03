@@ -33,6 +33,7 @@
 #include <uapi/linux/ebpfos_block_effect.h>
 #include <uapi/linux/ebpfos_locked_section.h>
 #ifdef CONFIG_X86
+#include <asm/asm.h>
 #include <asm/apic.h>
 #include <asm/cpufeature.h>
 #include <asm/io.h>
@@ -989,6 +990,14 @@ __bpf_kfunc void bpf_ebpfos_effect_time_real_ts64(void *dst, u32 dst__sz,
 	memcpy(dst, &value, sizeof(value));
 }
 
+#ifdef CONFIG_X86
+__bpf_kfunc void bpf_ebpfos_effect_fpu_wait(void)
+{
+	/* Match fpu__drop(): consume a pending user x87 exception and resume. */
+	asm volatile("1: fwait\n2:\n" _ASM_EXTABLE(1b, 2b));
+}
+#endif
+
 __bpf_kfunc void bpf_ebpfos_effect_atomic_or8(void *ptr, u32 ptr__sz, u8 value)
 {
 	if (ptr && ptr__sz == 1)
@@ -1496,6 +1505,9 @@ BTF_KFUNCS_END(ebpfos_l1_services)
 BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
+#ifdef CONFIG_X86
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_fpu_wait)
+#endif
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
