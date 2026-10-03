@@ -3,13 +3,14 @@
 /* Include after linux/bpf.h and crypto/sha2.h. */
 enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PAUSE = 0,
-	EBPFOS_KOP_OPCODE_RDTSC = 1,
-	EBPFOS_KOP_OPCODE_RDTSCP = 2,
-	EBPFOS_KOP_OPCODE_CPUID = 3,
-	EBPFOS_KOP_OPCODE_CLFLUSH = 4,
-	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 5,
-	EBPFOS_KOP_OPCODE_CLWB = 6,
-	EBPFOS_KOP_OPCODE_INVLPG = 7,
+	EBPFOS_KOP_OPCODE_PUSHF64 = 1,
+	EBPFOS_KOP_OPCODE_RDTSC = 2,
+	EBPFOS_KOP_OPCODE_RDTSCP = 3,
+	EBPFOS_KOP_OPCODE_CPUID = 4,
+	EBPFOS_KOP_OPCODE_CLFLUSH = 5,
+	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 6,
+	EBPFOS_KOP_OPCODE_CLWB = 7,
+	EBPFOS_KOP_OPCODE_INVLPG = 8,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -33,6 +34,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_kind = EBPFOS_KOP_PROOF_RETURN_ZERO,
 		.proof_len = 1,
 		.proof = { BPF_MOV64_IMM(BPF_REG_0, 0) },
+	},
+	{
+		.opcode = "PUSHF64",
+		.native_len = 2,
+		.native = { 0x9c, 0x58 },
+		.semantic_sha256 = { 0x2c, 0xab, 0x84, 0x0c, 0x2f, 0x09, 0xa6, 0xe0, 0x4a, 0x93, 0xda, 0xad, 0xa1, 0xa9, 0xd4, 0x85, 0xeb, 0xa4, 0x76, 0x85, 0x96, 0x50, 0x2c, 0x5a, 0x62, 0x27, 0x09, 0x8d, 0x2b, 0xc1, 0x69, 0x80 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
 	{
 		.opcode = "RDTSC",
@@ -106,6 +116,7 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 #define EBPFOS_KOP_HOST_CLFLUSH false
 #endif
 #define EBPFOS_KOP_TYPED_PORTABLE_ROWS(X) \
+	X(pushf64, PUSHF64, true); \
 	X(rdtsc, RDTSC, true); \
 	X(rdtscp, RDTSCP, EBPFOS_KOP_HOST_RDTSCP); \
 	X(cpuid, CPUID, true); \

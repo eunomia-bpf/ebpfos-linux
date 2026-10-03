@@ -12,6 +12,7 @@
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
 #include <asm/current.h>
+#include <asm/irqflags.h>
 #include <asm/tsc.h>
 #endif
 #include "koperation_xadd64.generated.h"
@@ -59,6 +60,18 @@ __bpf_kfunc struct task_struct *bpf_ebpfos_kop_current_task(void)
 __bpf_kfunc u64 bpf_ebpfos_kop_cmp_mask(u64 left, u64 right)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_pushf64(void)
+{
+#ifdef CONFIG_X86
+	return native_save_fl();
+#else
+	return 0;
+#endif
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_pushf64(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
 __bpf_kfunc u64 bpf_ebpfos_x86_rdtsc(void)
 {
@@ -159,6 +172,14 @@ __bpf_kfunc u64 bpf_ebpfos_kop_invlpg(u8 *ptr)
 }
 __bpf_kfunc_end_defs();
 
+BTF_KFUNCS_START(ebpfos_kprog_pushf64_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_pushf64)
+BTF_KFUNCS_END(ebpfos_kprog_pushf64_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_pushf64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_pushf64)
+BTF_KFUNCS_END(ebpfos_kprog_pushf64_ids)
+
 BTF_KFUNCS_START(ebpfos_kprog_rdtsc_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_rdtsc)
 BTF_KFUNCS_END(ebpfos_kprog_rdtsc_service_ids)
@@ -214,6 +235,10 @@ BTF_KFUNCS_END(ebpfos_kprog_invlpg_service_ids)
 BTF_KFUNCS_START(ebpfos_kprog_invlpg_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_invlpg)
 BTF_KFUNCS_END(ebpfos_kprog_invlpg_ids)
+
+static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_service_set = {
+	.set = &ebpfos_kprog_pushf64_service_ids,
+};
 
 static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_service_set = {
 	.set = &ebpfos_kprog_rdtsc_service_ids,
@@ -1275,6 +1300,18 @@ static int __init ebpfos_kprog_register(void)
 	size_t i;
 	int err;
 
+	if (ebpfos_kprog_pushf64_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_pushf64.proof_kfunc_id =
+		ebpfos_kprog_pushf64_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_pushf64_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_pushf64_set);
+	if (err)
+		return err;
 	if (ebpfos_kprog_rdtsc_service_ids.cnt != 1)
 		return -EINVAL;
 	ebpfos_kop_rdtsc.proof_kfunc_id =
