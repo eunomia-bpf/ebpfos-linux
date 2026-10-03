@@ -24,6 +24,7 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/timekeeping.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/uio.h>
@@ -965,6 +966,29 @@ __bpf_kfunc void bpf_ebpfos_effect_fatal_bug(void)
 	BUG();
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_time_real_ts64(void *dst, u32 dst__sz,
+						   u32 mode)
+{
+	struct timespec64 value;
+
+	if (!dst || dst__sz != sizeof(value))
+		return;
+	switch (mode) {
+	case 0:
+		ktime_get_real_ts64(&value);
+		break;
+	case 1:
+		ktime_get_real_ts64_mg(&value);
+		break;
+	case 2:
+		ktime_get_coarse_real_ts64_mg(&value);
+		break;
+	default:
+		return;
+	}
+	memcpy(dst, &value, sizeof(value));
+}
+
 __bpf_kfunc void bpf_ebpfos_effect_atomic_or8(void *ptr, u32 ptr__sz, u8 value)
 {
 	if (ptr && ptr__sz == 1)
@@ -1471,6 +1495,7 @@ BTF_KFUNCS_END(ebpfos_l1_services)
 
 BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
