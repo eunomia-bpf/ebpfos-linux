@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/ebpfos.h>
+#include <linux/ebpfos_function_route.h>
 #include <uapi/linux/ebpfos_root.h>
 #include <linux/capability.h>
 #include <linux/fs.h>
@@ -96,6 +97,19 @@ static long ebpfos_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return error;
 	case EBPFOS_IOC_ROOT_PUBLISH:
 		return ebpfos_executor_root_publish_ioctl(argp);
+	case EBPFOS_IOC_FUNCTION_ROUTE: {
+		struct ebpfos_ioc_function_route route;
+
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		if (copy_from_user(&route, argp, sizeof(route)))
+			return -EFAULT;
+		route.symbol[sizeof(route.symbol) - 1] = '\0';
+		error = ebpfos_function_route_ioctl(&route);
+		if (error)
+			return error;
+		return copy_to_user(argp, &route, sizeof(route)) ? -EFAULT : 0;
+	}
 	default:
 		return -ENOTTY;
 	}
