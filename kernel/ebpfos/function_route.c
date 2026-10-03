@@ -233,7 +233,7 @@ void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
 
 	if (!scope || scope->token != token || scope->route != route ||
 	    !scope->writeback_size || arg != scope->writeback_arg ||
-	    word >= scope->writeback_size / sizeof(u64))
+	    word >= (scope->writeback_size + sizeof(u64) - 1) / sizeof(u64))
 		return;
 	scope->writeback[word] = value;
 	scope->writeback_mask |= 1U << word;
@@ -241,10 +241,12 @@ void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
 
 static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route,
 				const u64 args[12], bool require_full_output,
-				u32 writeback_arg, u32 writeback_size, u64 *result)
+				u32 writeback_arg, u32 writeback_size,
+				bool copyin, u64 *result)
 {
 	struct ebpfos_component_irq_frame frame = {};
 	struct ebpfos_function_result_scope scope = {};
+	u64 before = 0;
 	u64 epoch = 0;
 	u32 provider = 0, value = 0;
 	int error;
@@ -254,10 +256,13 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 		goto fallback;
 	if (writeback_size && (writeback_arg >= 11 || !args[writeback_arg] ||
 			       writeback_size > sizeof(scope.writeback) ||
-			       writeback_size % sizeof(u64))) {
+			       (copyin && writeback_size > sizeof(before)))) {
 		ebpfos_component_gate_exit(&route->gate);
 		goto fallback;
 	}
+	if (copyin)
+		memcpy(&before, (void *)(unsigned long)args[writeback_arg],
+		       writeback_size);
 	memcpy(frame.args, args, sizeof(frame.args));
 	scope.token = atomic64_inc_return(&ebpfos_function_token);
 	scope.route = route;
@@ -275,10 +280,16 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 	if (!error && require_full_output && !scope.written)
 		error = -ENODATA;
 	if (!error && writeback_size &&
-	    scope.writeback_mask != (1U << (writeback_size / sizeof(u64))) - 1)
+	    scope.writeback_mask !=
+	    (1U << ((writeback_size + sizeof(u64) - 1) / sizeof(u64))) - 1)
 		error = -ENODATA;
+	if (!error && copyin &&
+	    memcmp((void *)(unsigned long)args[writeback_arg], &before,
+		   writeback_size))
+		error = -EAGAIN;
 	if (!error) {
-		if (writeback_size)
+		if (writeback_size &&
+		    (!copyin || memcmp(scope.writeback, &before, writeback_size)))
 			memcpy((void *)(unsigned long)args[writeback_arg],
 			       scope.writeback, writeback_size);
 		*result = scope.written ? scope.value : value;
@@ -299,13 +310,21 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 				u64 *result)
 {
 	return ebpfos_function_route_call_inner(route, args, require_full_output,
-						 0, 0, result);
+					 0, 0, false, result);
 }
 
 bool ebpfos_function_route_call_writeback(struct ebpfos_function_route *route,
 				const u64 args[12], u32 arg, u32 size, u64 *result)
 {
-	return ebpfos_function_route_call_inner(route, args, true, arg, size, result);
+	return ebpfos_function_route_call_inner(route, args, true, arg, size,
+					 false, result);
+}
+
+bool ebpfos_function_route_call_inout(struct ebpfos_function_route *route,
+				const u64 args[12], u32 arg, u32 size, u64 *result)
+{
+	return ebpfos_function_route_call_inner(route, args, true, arg, size,
+					 true, result);
 }
 
 int ebpfos_function_route_ioctl(struct ebpfos_ioc_function_route *request)
