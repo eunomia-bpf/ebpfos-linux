@@ -246,7 +246,7 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 {
 	struct ebpfos_component_irq_frame frame = {};
 	struct ebpfos_function_result_scope scope = {};
-	u64 before = 0;
+	u64 before[4] = {};
 	u64 epoch = 0;
 	u32 provider = 0, value = 0;
 	int error;
@@ -261,7 +261,7 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 		goto fallback;
 	}
 	if (copyin)
-		memcpy(&before, (void *)(unsigned long)args[writeback_arg],
+		memcpy(before, (void *)(unsigned long)args[writeback_arg],
 		       writeback_size);
 	memcpy(frame.args, args, sizeof(frame.args));
 	scope.token = atomic64_inc_return(&ebpfos_function_token);
@@ -284,12 +284,12 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 	    (1U << ((writeback_size + sizeof(u64) - 1) / sizeof(u64))) - 1)
 		error = -ENODATA;
 	if (!error && copyin &&
-	    memcmp((void *)(unsigned long)args[writeback_arg], &before,
+	    memcmp((void *)(unsigned long)args[writeback_arg], before,
 		   writeback_size))
 		error = -EAGAIN;
 	if (!error) {
 		if (writeback_size &&
-		    (!copyin || memcmp(scope.writeback, &before, writeback_size)))
+		    (!copyin || memcmp(scope.writeback, before, writeback_size)))
 			memcpy((void *)(unsigned long)args[writeback_arg],
 			       scope.writeback, writeback_size);
 		*result = scope.written ? scope.value : value;
