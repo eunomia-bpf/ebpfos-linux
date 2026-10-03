@@ -57,6 +57,10 @@ struct ebpfos_function_result_scope {
 	const u64 *args;
 	u64 token;
 	u64 value;
+	u64 writeback[4];
+	u32 writeback_arg;
+	u32 writeback_size;
+	u32 writeback_mask;
 	bool written;
 };
 
@@ -210,9 +214,22 @@ void ebpfos_function_route_pointer_result(struct ebpfos_function_route *route,
 	}
 }
 
-bool ebpfos_function_route_call(struct ebpfos_function_route *route,
+void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
+					 u64 token, u32 arg, u32 word, u64 value)
+{
+	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
+
+	if (!scope || scope->token != token || scope->route != route ||
+	    !scope->writeback_size || arg != scope->writeback_arg ||
+	    word >= scope->writeback_size / sizeof(u64))
+		return;
+	scope->writeback[word] = value;
+	scope->writeback_mask |= 1U << word;
+}
+
+static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route,
 				const u64 args[12], bool require_full_output,
-				u64 *result)
+				u32 writeback_arg, u32 writeback_size, u64 *result)
 {
 	struct ebpfos_component_irq_frame frame = {};
 	struct ebpfos_function_result_scope scope = {};
@@ -223,10 +240,18 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 	if (!READ_ONCE(route->enabled) ||
 	    !ebpfos_component_gate_try_enter(&route->gate))
 		goto fallback;
+	if (writeback_size && (writeback_arg >= 11 || !args[writeback_arg] ||
+			       writeback_size > sizeof(scope.writeback) ||
+			       writeback_size % sizeof(u64))) {
+		ebpfos_component_gate_exit(&route->gate);
+		goto fallback;
+	}
 	memcpy(frame.args, args, sizeof(frame.args));
 	scope.token = atomic64_inc_return(&ebpfos_function_token);
 	scope.route = route;
 	scope.args = frame.args;
+	scope.writeback_arg = writeback_arg;
+	scope.writeback_size = writeback_size;
 	frame.args[11] = scope.token;
 	preempt_disable();
 	scope.previous = this_cpu_read(ebpfos_function_result);
@@ -237,7 +262,13 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 	preempt_enable();
 	if (!error && require_full_output && !scope.written)
 		error = -ENODATA;
+	if (!error && writeback_size &&
+	    scope.writeback_mask != (1U << (writeback_size / sizeof(u64))) - 1)
+		error = -ENODATA;
 	if (!error) {
+		if (writeback_size)
+			memcpy((void *)(unsigned long)args[writeback_arg],
+			       scope.writeback, writeback_size);
 		*result = scope.written ? scope.value : value;
 		WRITE_ONCE(route->last_epoch, epoch);
 		WRITE_ONCE(route->last_provider_id, provider);
@@ -249,6 +280,20 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 fallback:
 	this_cpu_inc(route->counters->native_fallbacks);
 	return false;
+}
+
+bool ebpfos_function_route_call(struct ebpfos_function_route *route,
+				const u64 args[12], bool require_full_output,
+				u64 *result)
+{
+	return ebpfos_function_route_call_inner(route, args, require_full_output,
+						 0, 0, result);
+}
+
+bool ebpfos_function_route_call_writeback(struct ebpfos_function_route *route,
+				const u64 args[12], u32 arg, u32 size, u64 *result)
+{
+	return ebpfos_function_route_call_inner(route, args, true, arg, size, result);
 }
 
 int ebpfos_function_route_ioctl(struct ebpfos_ioc_function_route *request)
