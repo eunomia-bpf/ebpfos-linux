@@ -32,6 +32,7 @@
 #include <uapi/linux/ebpfos_block_effect.h>
 #include <uapi/linux/ebpfos_locked_section.h>
 #ifdef CONFIG_X86
+#include <asm/apic.h>
 #include <asm/cpufeature.h>
 #include <asm/io.h>
 #include <asm/pkru.h>
@@ -1001,6 +1002,11 @@ __bpf_kfunc void bpf_ebpfos_effect_io_port_write8(u8 value, u16 port)
 {
 	outb(value, port);
 }
+
+__bpf_kfunc void bpf_ebpfos_effect_send_ipi(int cpu, int vector)
+{
+	__apic_send_IPI(cpu, vector);
+}
 #endif
 
 __bpf_kfunc bool bpf_ebpfos_effect_access_ok(u64 handle, u64 user_addr,
@@ -1462,6 +1468,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_send_ipi)
 #endif
 BTF_KFUNCS_END(ebpfos_l1_nonsleep_services)
 
