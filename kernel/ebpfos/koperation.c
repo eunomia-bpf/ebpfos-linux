@@ -75,11 +75,35 @@ __bpf_kfunc u64 bpf_ebpfos_kop_pushf64(void)
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
 #ifdef CONFIG_X86
+__bpf_kfunc u64 bpf_ebpfos_x86_read_cr0(void)
+{
+	return native_read_cr0();
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_read_cr0(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_read_cr2(void)
+{
+	return native_read_cr2();
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_read_cr2(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 __bpf_kfunc u64 bpf_ebpfos_x86_read_cr3(void)
 {
 	return __read_cr3();
 }
 __bpf_kfunc u64 bpf_ebpfos_kop_read_cr3(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_read_cr4(void)
+{
+	return native_read_cr4();
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_read_cr4(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -203,6 +227,22 @@ BTF_ID_FLAGS(func, bpf_ebpfos_kop_pushf64)
 BTF_KFUNCS_END(ebpfos_kprog_pushf64_ids)
 
 #ifdef CONFIG_X86
+BTF_KFUNCS_START(ebpfos_kprog_read_cr0_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_read_cr0)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr0_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_read_cr0_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_read_cr0)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr0_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_read_cr2_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_read_cr2)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr2_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_read_cr2_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_read_cr2)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr2_ids)
+
 BTF_KFUNCS_START(ebpfos_kprog_read_cr3_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_read_cr3)
 BTF_KFUNCS_END(ebpfos_kprog_read_cr3_service_ids)
@@ -210,6 +250,14 @@ BTF_KFUNCS_END(ebpfos_kprog_read_cr3_service_ids)
 BTF_KFUNCS_START(ebpfos_kprog_read_cr3_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_read_cr3)
 BTF_KFUNCS_END(ebpfos_kprog_read_cr3_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_read_cr4_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_read_cr4)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr4_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_read_cr4_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_read_cr4)
+BTF_KFUNCS_END(ebpfos_kprog_read_cr4_ids)
 #endif
 
 BTF_KFUNCS_START(ebpfos_kprog_rdtsc_service_ids)
@@ -283,8 +331,17 @@ static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_service_set = {
 };
 
 #ifdef CONFIG_X86
+static const struct btf_kfunc_id_set ebpfos_kprog_read_cr0_service_set = {
+	.set = &ebpfos_kprog_read_cr0_service_ids,
+};
+static const struct btf_kfunc_id_set ebpfos_kprog_read_cr2_service_set = {
+	.set = &ebpfos_kprog_read_cr2_service_ids,
+};
 static const struct btf_kfunc_id_set ebpfos_kprog_read_cr3_service_set = {
 	.set = &ebpfos_kprog_read_cr3_service_ids,
+};
+static const struct btf_kfunc_id_set ebpfos_kprog_read_cr4_service_set = {
+	.set = &ebpfos_kprog_read_cr4_service_ids,
 };
 #endif
 
@@ -1367,18 +1424,26 @@ static int __init ebpfos_kprog_register(void)
 	if (err)
 		return err;
 #ifdef CONFIG_X86
-	if (ebpfos_kprog_read_cr3_service_ids.cnt != 1)
-		return -EINVAL;
-	ebpfos_kop_read_cr3.proof_kfunc_id =
-		ebpfos_kprog_read_cr3_service_ids.pairs[0].id;
-	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					    &ebpfos_kprog_read_cr3_service_set);
-	if (err)
-		return err;
-	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					    &ebpfos_kprog_read_cr3_set);
-	if (err)
-		return err;
+#define EBPFOS_REGISTER_READ_CR(number) \
+	do { \
+		if (ebpfos_kprog_read_cr##number##_service_ids.cnt != 1) \
+			return -EINVAL; \
+		ebpfos_kop_read_cr##number.proof_kfunc_id = \
+			ebpfos_kprog_read_cr##number##_service_ids.pairs[0].id; \
+		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, \
+			&ebpfos_kprog_read_cr##number##_service_set); \
+		if (err) \
+			return err; \
+		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, \
+			&ebpfos_kprog_read_cr##number##_set); \
+		if (err) \
+			return err; \
+	} while (0)
+	EBPFOS_REGISTER_READ_CR(0);
+	EBPFOS_REGISTER_READ_CR(2);
+	EBPFOS_REGISTER_READ_CR(3);
+	EBPFOS_REGISTER_READ_CR(4);
+#undef EBPFOS_REGISTER_READ_CR
 #endif
 	if (ebpfos_kprog_rdtsc_service_ids.cnt != 1)
 		return -EINVAL;

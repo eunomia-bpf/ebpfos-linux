@@ -5,14 +5,17 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PAUSE = 0,
 	EBPFOS_KOP_OPCODE_PUSHF64 = 1,
 	EBPFOS_KOP_OPCODE_MOV64rc = 2,
-	EBPFOS_KOP_OPCODE_RDTSC = 3,
-	EBPFOS_KOP_OPCODE_RDTSCP = 4,
-	EBPFOS_KOP_OPCODE_CPUID = 5,
-	EBPFOS_KOP_OPCODE_CLFLUSH = 6,
-	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 7,
-	EBPFOS_KOP_OPCODE_CLWB = 8,
-	EBPFOS_KOP_OPCODE_INVLPG = 9,
-	EBPFOS_KOP_OPCODE_PREFETCHT0 = 10,
+	EBPFOS_KOP_OPCODE_READ_CR0 = 3,
+	EBPFOS_KOP_OPCODE_READ_CR2 = 4,
+	EBPFOS_KOP_OPCODE_READ_CR4 = 5,
+	EBPFOS_KOP_OPCODE_RDTSC = 6,
+	EBPFOS_KOP_OPCODE_RDTSCP = 7,
+	EBPFOS_KOP_OPCODE_CPUID = 8,
+	EBPFOS_KOP_OPCODE_CLFLUSH = 9,
+	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 10,
+	EBPFOS_KOP_OPCODE_CLWB = 11,
+	EBPFOS_KOP_OPCODE_INVLPG = 12,
+	EBPFOS_KOP_OPCODE_PREFETCHT0 = 13,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -51,6 +54,33 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.native_len = 3,
 		.native = { 0x0f, 0x20, 0xd8 },
 		.semantic_sha256 = { 0x3b, 0xd8, 0x5d, 0xc6, 0xc7, 0x66, 0x31, 0x2b, 0x03, 0xe3, 0xb3, 0xa5, 0x12, 0x52, 0x31, 0x1e, 0x88, 0xc4, 0x4f, 0x78, 0xc9, 0xef, 0x31, 0x2e, 0xfc, 0xda, 0xe5, 0xd0, 0x2b, 0x9e, 0xcc, 0xd2 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV64rc",
+		.native_len = 3,
+		.native = { 0x0f, 0x20, 0xc0 },
+		.semantic_sha256 = { 0x24, 0xd3, 0x88, 0x24, 0xca, 0xc9, 0x61, 0x39, 0xcf, 0x85, 0xa1, 0x72, 0x51, 0xf6, 0xa7, 0x66, 0xb6, 0xdc, 0x6c, 0x97, 0xc5, 0x48, 0x7b, 0x3c, 0x52, 0xba, 0x9a, 0x8a, 0xbf, 0x3c, 0xfc, 0x46 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV64rc",
+		.native_len = 3,
+		.native = { 0x0f, 0x20, 0xd0 },
+		.semantic_sha256 = { 0x67, 0x22, 0xe3, 0x50, 0x33, 0xeb, 0x95, 0x97, 0x91, 0xc7, 0xdf, 0x42, 0x2c, 0x86, 0xec, 0xe7, 0x60, 0xbd, 0xb7, 0xd7, 0x9f, 0xba, 0x7a, 0x10, 0x08, 0xfe, 0x63, 0x2d, 0xa6, 0x22, 0xce, 0x87 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV64rc",
+		.native_len = 3,
+		.native = { 0x0f, 0x20, 0xe0 },
+		.semantic_sha256 = { 0xfc, 0xbf, 0x8f, 0x36, 0x41, 0xd9, 0xc5, 0x67, 0x43, 0x1d, 0xb3, 0x30, 0x6d, 0x2b, 0xfe, 0x3d, 0x03, 0x75, 0xfa, 0x68, 0xf8, 0x7f, 0xb1, 0xa8, 0x24, 0x09, 0xb6, 0x49, 0x24, 0x23, 0xf2, 0x34 },
 		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
@@ -143,6 +173,9 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(clflush, CLFLUSH, EBPFOS_KOP_HOST_CLFLUSH);
 #define EBPFOS_KOP_TYPED_X86_ROWS(X) \
 	X(read_cr3, MOV64rc, true); \
+	X(read_cr0, READ_CR0, true); \
+	X(read_cr2, READ_CR2, true); \
+	X(read_cr4, READ_CR4, true); \
 	X(clflushopt, CLFLUSHOPT, boot_cpu_has(X86_FEATURE_CLFLUSHOPT)); \
 	X(clwb, CLWB, boot_cpu_has(X86_FEATURE_CLWB)); \
 	X(invlpg, INVLPG, true); \
