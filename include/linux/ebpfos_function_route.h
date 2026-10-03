@@ -8,13 +8,17 @@
 
 struct ebpfos_function_route;
 
-/* Generated BTF-typed stubs register once at boot.  Only scalar arguments
- * and a <=32-bit scalar result use the non-sleepable call ABI today. */
+/* Generated BTF-typed stubs register once at boot. */
 int ebpfos_function_route_register(const char *symbol, void *stub,
 				   struct ebpfos_function_route **route);
 unsigned long ebpfos_function_route_native(struct ebpfos_function_route *route);
+void *ebpfos_function_route_pointer_arg(struct ebpfos_function_route *route,
+					u64 token, u32 index);
+void ebpfos_function_route_pointer_result(struct ebpfos_function_route *route,
+					 u64 token, const void *value);
 bool ebpfos_function_route_call(struct ebpfos_function_route *route,
-				const u64 args[12], u32 *result);
+				const u64 args[12], bool require_full_output,
+				u64 *result);
 #ifdef CONFIG_FUNCTION_TRACER
 int ebpfos_function_route_ioctl(struct ebpfos_ioc_function_route *request);
 #else

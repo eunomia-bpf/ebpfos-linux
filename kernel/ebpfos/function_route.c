@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* BTF-generated typed stubs enter the existing non-sleepable L1 route. */
 #include <linux/atomic.h>
+#include <linux/bpf.h>
+#include <linux/btf.h>
+#include <linux/btf_ids.h>
 #include <linux/ebpfos.h>
 #include <linux/ebpfos_function_route.h>
 #include <linux/ebpfos_function_direct.h>
 #include <linux/ebpfos_irq_route.h>
 #include <linux/ftrace.h>
+#include <linux/init.h>
 #include <linux/kallsyms.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/percpu.h>
+#include <linux/preempt.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -44,6 +49,58 @@ static DEFINE_MUTEX(ebpfos_function_routes_lock);
 static bool direct_calls;
 module_param(direct_calls, bool, 0444);
 MODULE_PARM_DESC(direct_calls, "Use generated direct-ftrace trampolines for function routes");
+static atomic64_t ebpfos_function_token = ATOMIC64_INIT(0);
+
+struct ebpfos_function_result_scope {
+	struct ebpfos_function_result_scope *previous;
+	struct ebpfos_function_route *route;
+	const u64 *args;
+	u64 token;
+	u64 value;
+	bool written;
+};
+
+static DEFINE_PER_CPU(struct ebpfos_function_result_scope *, ebpfos_function_result);
+
+__bpf_kfunc_start_defs();
+
+/* A non-sleepable provider returns its full-width value to its own call. */
+__bpf_kfunc void bpf_ebpfos_function_output(u64 token, u64 value)
+{
+	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
+
+	if (scope && scope->token == token) {
+		scope->value = value;
+		scope->written = true;
+	}
+}
+
+__bpf_kfunc_end_defs();
+
+BTF_KFUNCS_START(ebpfos_function_output_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_output)
+BTF_KFUNCS_END(ebpfos_function_output_ids)
+
+static int ebpfos_function_output_filter(const struct bpf_prog *prog, u32 id)
+{
+	if (!btf_id_set8_contains(&ebpfos_function_output_ids, id))
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+}
+
+static const struct btf_kfunc_id_set ebpfos_function_output_set = {
+	.owner = THIS_MODULE,
+	.set = &ebpfos_function_output_ids,
+	.filter = ebpfos_function_output_filter,
+};
+
+static int __init ebpfos_function_output_init(void)
+{
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT,
+					 &ebpfos_function_output_set);
+}
+late_initcall(ebpfos_function_output_init);
 
 static void notrace ebpfos_function_ftrace(unsigned long ip,
 		unsigned long parent_ip, struct ftrace_ops *ops,
@@ -132,10 +189,33 @@ unsigned long ebpfos_function_route_native(struct ebpfos_function_route *route)
 	return route->native;
 }
 
+void *ebpfos_function_route_pointer_arg(struct ebpfos_function_route *route,
+					u64 token, u32 index)
+{
+	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
+
+	if (!scope || scope->token != token || scope->route != route || index >= 11)
+		return NULL;
+	return (void *)(unsigned long)scope->args[index];
+}
+
+void ebpfos_function_route_pointer_result(struct ebpfos_function_route *route,
+					 u64 token, const void *value)
+{
+	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
+
+	if (scope && scope->token == token && scope->route == route) {
+		scope->value = (u64)(unsigned long)value;
+		scope->written = true;
+	}
+}
+
 bool ebpfos_function_route_call(struct ebpfos_function_route *route,
-				const u64 args[12], u32 *result)
+				const u64 args[12], bool require_full_output,
+				u64 *result)
 {
 	struct ebpfos_component_irq_frame frame = {};
+	struct ebpfos_function_result_scope scope = {};
 	u64 epoch = 0;
 	u32 provider = 0, value = 0;
 	int error;
@@ -144,10 +224,21 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 	    !ebpfos_component_gate_try_enter(&route->gate))
 		goto fallback;
 	memcpy(frame.args, args, sizeof(frame.args));
+	scope.token = atomic64_inc_return(&ebpfos_function_token);
+	scope.route = route;
+	scope.args = frame.args;
+	frame.args[11] = scope.token;
+	preempt_disable();
+	scope.previous = this_cpu_read(ebpfos_function_result);
+	this_cpu_write(ebpfos_function_result, &scope);
 	error = ebpfos_irq_route_call(READ_ONCE(route->object_id),
 		READ_ONCE(route->role_type), &frame, &epoch, &provider, &value);
+	this_cpu_write(ebpfos_function_result, scope.previous);
+	preempt_enable();
+	if (!error && require_full_output && !scope.written)
+		error = -ENODATA;
 	if (!error) {
-		*result = value;
+		*result = scope.written ? scope.value : value;
 		WRITE_ONCE(route->last_epoch, epoch);
 		WRITE_ONCE(route->last_provider_id, provider);
 		this_cpu_inc(route->counters->component_calls);
