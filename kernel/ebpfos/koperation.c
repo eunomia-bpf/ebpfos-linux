@@ -12,6 +12,7 @@
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
 #include <asm/current.h>
+#include <asm/tsc.h>
 #endif
 #include "koperation_xadd64.generated.h"
 #include "koperation_atomic64.generated.h"
@@ -22,6 +23,7 @@
 #include "koperation_load32.generated.h"
 #include "koperation_current_task.generated.h"
 #include "koperation_cmp_mask.generated.h"
+#include "koperation_opcode.generated.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -58,7 +60,96 @@ __bpf_kfunc u64 bpf_ebpfos_kop_cmp_mask(u64 left, u64 right)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
+__bpf_kfunc u64 bpf_ebpfos_x86_rdtsc(void)
+{
+#ifdef CONFIG_X86
+	return rdtsc();
+#else
+	return 0;
+#endif
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_rdtsc(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 __bpf_kfunc_end_defs();
+
+BTF_KFUNCS_START(ebpfos_kprog_rdtsc_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_rdtsc)
+BTF_KFUNCS_END(ebpfos_kprog_rdtsc_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_rdtsc_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdtsc)
+BTF_KFUNCS_END(ebpfos_kprog_rdtsc_ids)
+
+static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_service_set = {
+	.set = &ebpfos_kprog_rdtsc_service_ids,
+};
+
+static int ebpfos_kop_rdtsc_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	if (!insns || ebpfos_kprog_rdtsc_ids.cnt != 1 ||
+	    ebpfos_kprog_rdtsc_service_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtsc_ids.pairs[0].id)
+		return -EINVAL;
+	insns[0] = EBPFOS_KOP_OPCODE_RDTSC_PROOF(
+		ebpfos_kprog_rdtsc_service_ids.pairs[0].id);
+	return 1;
+}
+
+static int ebpfos_kop_rdtsc_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_RDTSC];
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    ebpfos_kprog_rdtsc_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtsc_ids.pairs[0].id)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_rdtsc_emit_x86(u8 *image, u32 *offset, bool emit,
+		u64 payload, const struct bpf_prog *prog, const u8 *final_ip)
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_RDTSC];
+
+	(void)prog;
+	(void)final_ip;
+#ifndef CONFIG_X86
+	return -EOPNOTSUPP;
+#endif
+	if (!offset || (emit && !image) || ebpfos_kprog_rdtsc_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtsc_ids.pairs[0].id)
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, spec->native, spec->native_len);
+	*offset += spec->native_len;
+	return spec->native_len;
+}
+
+static struct bpf_kop ebpfos_kop_rdtsc = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 16,
+	.requirements = ebpfos_kop_rdtsc_requirements,
+	.instantiate_insn = ebpfos_kop_rdtsc_instantiate,
+	.emit_x86 = ebpfos_kop_rdtsc_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_rdtsc_descs[] = {
+	&ebpfos_kop_rdtsc,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_set = {
+	.set = &ebpfos_kprog_rdtsc_ids,
+	.kop_descs = ebpfos_kprog_rdtsc_descs,
+};
 
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kprog_terminal_effect, KF_NORETURN)
@@ -978,6 +1069,18 @@ static int __init ebpfos_kprog_register(void)
 {
 	int err;
 
+	if (ebpfos_kprog_rdtsc_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_rdtsc.proof_kfunc_id =
+		ebpfos_kprog_rdtsc_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdtsc_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdtsc_set);
+	if (err)
+		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_terminal_set);
 	if (err)

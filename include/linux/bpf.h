@@ -1085,6 +1085,8 @@ struct bpf_kop {
 	u64 capability_mask;
 	u64 effect_mask;
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
+	/* One exact typed effect call allowed inside this descriptor's proof. */
+	u32 proof_kfunc_id;
 	/*
 	 * A descriptor may cover a finite declarative payload family.  When
 	 * present, requirements() resolves the exact sidecar instance to the

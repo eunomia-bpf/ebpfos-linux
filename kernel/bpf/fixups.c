@@ -138,6 +138,16 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			u8 operation = BPF_OP(insn->code);
 			s64 target;
 
+			/* A descriptor may bind one typed effect service. The normal
+			 * verifier still checks its BTF prototype and program-type set.
+			 */
+			if (operation == BPF_CALL && kop->proof_kfunc_id &&
+			    insn->code == (BPF_JMP | BPF_CALL) &&
+			    !insn->dst_reg &&
+			    insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
+			    !insn->off && insn->imm == kop->proof_kfunc_id)
+				continue;
+
 			/* The typed current-task helper is a read-only proof step.
 			 * The ordinary verifier still checks its program-type and BTF
 			 * result rules after proof substitution.

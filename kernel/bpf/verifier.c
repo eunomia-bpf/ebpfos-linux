@@ -3443,6 +3443,19 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		err = bpf_validate_kop_proof_seq(env, desc->kop, proof, count);
 		if (err)
 			goto err_free_proof;
+		if (desc->kop->proof_kfunc_id) {
+			u32 j;
+
+			for (j = 0; j < count; j++) {
+				if (proof[j].code != (BPF_JMP | BPF_CALL) ||
+				    proof[j].src_reg != BPF_PSEUDO_KFUNC_CALL)
+					continue;
+				err = bpf_add_kfunc_call(env, proof[j].imm,
+							 proof[j].off);
+				if (err)
+					goto err_free_proof;
+			}
+		}
 		if (desc->flags & KF_NORETURN) {
 			const struct bpf_insn *terminal = &proof[count - 1];
 			u8 class = BPF_CLASS(terminal->code);
