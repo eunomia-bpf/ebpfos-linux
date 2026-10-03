@@ -98,3 +98,19 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
 };
+#ifdef CONFIG_X86
+#define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
+#define EBPFOS_KOP_HOST_CLFLUSH boot_cpu_has(X86_FEATURE_CLFLUSH)
+#else
+#define EBPFOS_KOP_HOST_RDTSCP false
+#define EBPFOS_KOP_HOST_CLFLUSH false
+#endif
+#define EBPFOS_KOP_TYPED_PORTABLE_ROWS(X) \
+	X(rdtsc, RDTSC, true); \
+	X(rdtscp, RDTSCP, EBPFOS_KOP_HOST_RDTSCP); \
+	X(cpuid, CPUID, true); \
+	X(clflush, CLFLUSH, EBPFOS_KOP_HOST_CLFLUSH);
+#define EBPFOS_KOP_TYPED_X86_ROWS(X) \
+	X(clflushopt, CLFLUSHOPT, boot_cpu_has(X86_FEATURE_CLFLUSHOPT)); \
+	X(clwb, CLWB, boot_cpu_has(X86_FEATURE_CLWB)); \
+	X(invlpg, INVLPG, true);
