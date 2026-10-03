@@ -4,6 +4,7 @@
 enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PAUSE = 0,
 	EBPFOS_KOP_OPCODE_RDTSC = 1,
+	EBPFOS_KOP_OPCODE_RDTSCP = 2,
 };
 struct ebpfos_kop_opcode_spec {
 	const char *opcode;
@@ -32,5 +33,14 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_kind = 2,
 		.proof_len = 0,
 	},
+	{
+		.opcode = "RDTSCP",
+		.native_len = 12,
+		.native = { 0x0f, 0x01, 0xf9, 0x89, 0x0f, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0 },
+		.semantic_sha256 = { 0xfe, 0xcc, 0xf0, 0x8e, 0xa7, 0xff, 0x3a, 0x6d, 0x32, 0x19, 0x53, 0x67, 0xa2, 0x48, 0xe9, 0xed, 0xfd, 0xb0, 0x3d, 0xef, 0x7e, 0x4e, 0x52, 0xa3, 0xda, 0x0d, 0x52, 0x22, 0xae, 0x75, 0xc4, 0x50 },
+		.proof_kind = 2,
+		.proof_len = 0,
+	},
 };
 #define EBPFOS_KOP_OPCODE_RDTSC_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
+#define EBPFOS_KOP_OPCODE_RDTSCP_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)

@@ -72,6 +72,25 @@ __bpf_kfunc u64 bpf_ebpfos_kop_rdtsc(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+__bpf_kfunc u64 bpf_ebpfos_x86_rdtscp(u32 *aux)
+{
+#ifdef CONFIG_X86
+	u32 low, high, tsc_aux;
+
+	if (!boot_cpu_has(X86_FEATURE_RDTSCP))
+		return 0;
+	asm volatile("rdtscp" : "=a"(low), "=d"(high), "=c"(tsc_aux)
+		     : : "memory");
+	*aux = tsc_aux;
+	return (u64)high << 32 | low;
+#else
+	return 0;
+#endif
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_rdtscp(u32 *aux)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_rdtsc_service_ids)
@@ -82,8 +101,20 @@ BTF_KFUNCS_START(ebpfos_kprog_rdtsc_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdtsc)
 BTF_KFUNCS_END(ebpfos_kprog_rdtsc_ids)
 
+BTF_KFUNCS_START(ebpfos_kprog_rdtscp_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_rdtscp)
+BTF_KFUNCS_END(ebpfos_kprog_rdtscp_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_rdtscp_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdtscp)
+BTF_KFUNCS_END(ebpfos_kprog_rdtscp_ids)
+
 static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_service_set = {
 	.set = &ebpfos_kprog_rdtsc_service_ids,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_rdtscp_service_set = {
+	.set = &ebpfos_kprog_rdtscp_service_ids,
 };
 
 static int ebpfos_kop_rdtsc_instantiate(u64 payload, struct bpf_insn *insns)
@@ -149,6 +180,74 @@ static const struct bpf_kop * const ebpfos_kprog_rdtsc_descs[] = {
 static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_set = {
 	.set = &ebpfos_kprog_rdtsc_ids,
 	.kop_descs = ebpfos_kprog_rdtsc_descs,
+};
+
+static int ebpfos_kop_rdtscp_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	if (!insns || ebpfos_kprog_rdtscp_ids.cnt != 1 ||
+	    ebpfos_kprog_rdtscp_service_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtscp_ids.pairs[0].id)
+		return -EINVAL;
+	insns[0] = EBPFOS_KOP_OPCODE_RDTSCP_PROOF(
+		ebpfos_kprog_rdtscp_service_ids.pairs[0].id);
+	return 1;
+}
+
+static int ebpfos_kop_rdtscp_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_RDTSCP];
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    ebpfos_kprog_rdtscp_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtscp_ids.pairs[0].id)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_rdtscp_emit_x86(u8 *image, u32 *offset, bool emit,
+		u64 payload, const struct bpf_prog *prog, const u8 *final_ip)
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_RDTSCP];
+
+	(void)prog;
+	(void)final_ip;
+#ifdef CONFIG_X86
+	if (!boot_cpu_has(X86_FEATURE_RDTSCP))
+		return -EOPNOTSUPP;
+#else
+	return -EOPNOTSUPP;
+#endif
+	if (!offset || (emit && !image) || ebpfos_kprog_rdtscp_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_rdtscp_ids.pairs[0].id)
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, spec->native, spec->native_len);
+	*offset += spec->native_len;
+	return spec->native_len;
+}
+
+static struct bpf_kop ebpfos_kop_rdtscp = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 16,
+	.requirements = ebpfos_kop_rdtscp_requirements,
+	.instantiate_insn = ebpfos_kop_rdtscp_instantiate,
+	.emit_x86 = ebpfos_kop_rdtscp_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_rdtscp_descs[] = {
+	&ebpfos_kop_rdtscp,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_rdtscp_set = {
+	.set = &ebpfos_kprog_rdtscp_ids,
+	.kop_descs = ebpfos_kprog_rdtscp_descs,
 };
 
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
@@ -1065,8 +1164,44 @@ static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
 	.kop_descs = ebpfos_kprog_terminal_descs,
 };
 
+static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
+{
+	(void)id;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+}
+
+#define EBPFOS_COMPONENT_KOP_SET(name) \
+	static const struct btf_kfunc_id_set name##_component_set = { \
+		.set = &name##_ids, \
+		.filter = ebpfos_kprog_component_filter, \
+		.kop_descs = name##_descs, \
+	}
+
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic64);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_bit64);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_compiler_barrier);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
+
 static int __init ebpfos_kprog_register(void)
 {
+	static const struct btf_kfunc_id_set * const component_sets[] = {
+		&ebpfos_kprog_atomic_component_set,
+		&ebpfos_kprog_atomic64_component_set,
+		&ebpfos_kprog_atomic32_component_set,
+		&ebpfos_kprog_bit64_component_set,
+		&ebpfos_kprog_compiler_barrier_component_set,
+		&ebpfos_kprog_tzcnt64_component_set,
+		&ebpfos_kprog_load32_component_set,
+		&ebpfos_kprog_current_task_component_set,
+		&ebpfos_kprog_cmp_mask_component_set,
+	};
+	size_t i;
 	int err;
 
 	if (ebpfos_kprog_rdtsc_service_ids.cnt != 1)
@@ -1079,6 +1214,18 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_rdtsc_set);
+	if (err)
+		return err;
+	if (ebpfos_kprog_rdtscp_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_rdtscp.proof_kfunc_id =
+		ebpfos_kprog_rdtscp_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdtscp_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdtscp_set);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
@@ -1117,7 +1264,16 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_current_task_set);
 	if (err)
 		return err;
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_cmp_mask_set);
+	if (err)
+		return err;
+	for (i = 0; i < ARRAY_SIZE(component_sets); i++) {
+		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT,
+						component_sets[i]);
+		if (err)
+			return err;
+	}
+	return 0;
 }
 late_initcall(ebpfos_kprog_register);
