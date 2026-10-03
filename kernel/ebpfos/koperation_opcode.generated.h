@@ -9,6 +9,7 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_CLFLUSH = 4,
 	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 5,
 	EBPFOS_KOP_OPCODE_CLWB = 6,
+	EBPFOS_KOP_OPCODE_INVLPG = 7,
 };
 struct ebpfos_kop_opcode_spec {
 	const char *opcode;
@@ -77,6 +78,14 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_kind = 2,
 		.proof_len = 0,
 	},
+	{
+		.opcode = "INVLPG",
+		.native_len = 5,
+		.native = { 0x0f, 0x01, 0x3f, 0x31, 0xc0 },
+		.semantic_sha256 = { 0x9b, 0x68, 0xb9, 0x2a, 0x30, 0xc3, 0x7e, 0xe7, 0xbe, 0x42, 0x46, 0x57, 0xcc, 0x66, 0x55, 0x59, 0x3b, 0x33, 0x55, 0x3a, 0x1e, 0x09, 0xb8, 0xd4, 0x17, 0x5f, 0x5f, 0x26, 0xdd, 0x55, 0xb9, 0xea },
+		.proof_kind = 2,
+		.proof_len = 0,
+	},
 };
 #define EBPFOS_KOP_OPCODE_RDTSC_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
 #define EBPFOS_KOP_OPCODE_RDTSCP_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
@@ -84,3 +93,4 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 #define EBPFOS_KOP_OPCODE_CLFLUSH_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
 #define EBPFOS_KOP_OPCODE_CLFLUSHOPT_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
 #define EBPFOS_KOP_OPCODE_CLWB_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
+#define EBPFOS_KOP_OPCODE_INVLPG_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
