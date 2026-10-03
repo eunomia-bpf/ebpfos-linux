@@ -293,8 +293,10 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 			memcpy((void *)(unsigned long)args[writeback_arg],
 			       scope.writeback, writeback_size);
 		*result = scope.written ? scope.value : value;
-		WRITE_ONCE(route->last_epoch, epoch);
-		WRITE_ONCE(route->last_provider_id, provider);
+		if (READ_ONCE(route->last_epoch) != epoch)
+			WRITE_ONCE(route->last_epoch, epoch);
+		if (READ_ONCE(route->last_provider_id) != provider)
+			WRITE_ONCE(route->last_provider_id, provider);
 		this_cpu_inc(route->counters->component_calls);
 	}
 	ebpfos_component_gate_exit(&route->gate);
