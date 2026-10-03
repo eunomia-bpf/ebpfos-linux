@@ -5,11 +5,12 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PAUSE = 0,
 	EBPFOS_KOP_OPCODE_RDTSC = 1,
 	EBPFOS_KOP_OPCODE_RDTSCP = 2,
+	EBPFOS_KOP_OPCODE_CPUID = 3,
 };
 struct ebpfos_kop_opcode_spec {
 	const char *opcode;
 	u8 native_len;
-	u8 native[16];
+	u8 native[48];
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 	u8 proof_kind;
 	u8 proof_len;
@@ -41,6 +42,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_kind = 2,
 		.proof_len = 0,
 	},
+	{
+		.opcode = "CPUID",
+		.native_len = 28,
+		.native = { 0x53, 0x89, 0xf8, 0x89, 0xf1, 0x49, 0x89, 0xd0, 0x0f, 0xa2, 0x48, 0xc1, 0xe3, 0x20, 0x48, 0x09, 0xd8, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd1, 0x49, 0x89, 0x08, 0x5b },
+		.semantic_sha256 = { 0xc2, 0xd9, 0x40, 0x51, 0xdd, 0xa2, 0x01, 0x1f, 0xb8, 0xa9, 0xfd, 0xbc, 0x16, 0xb1, 0x24, 0xfc, 0x6e, 0xe3, 0x36, 0xd7, 0x4f, 0x58, 0xa6, 0x67, 0x85, 0x01, 0xb7, 0x6a, 0x07, 0xae, 0x01, 0xcb },
+		.proof_kind = 2,
+		.proof_len = 0,
+	},
 };
 #define EBPFOS_KOP_OPCODE_RDTSC_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
 #define EBPFOS_KOP_OPCODE_RDTSCP_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
+#define EBPFOS_KOP_OPCODE_CPUID_PROOF(KFUNC_ID) BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, KFUNC_ID)
