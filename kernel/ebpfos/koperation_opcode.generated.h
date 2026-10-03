@@ -4,19 +4,21 @@
 enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PAUSE = 0,
 	EBPFOS_KOP_OPCODE_PUSHF64 = 1,
-	EBPFOS_KOP_OPCODE_MOV64rc = 2,
-	EBPFOS_KOP_OPCODE_READ_CR0 = 3,
-	EBPFOS_KOP_OPCODE_READ_CR2 = 4,
-	EBPFOS_KOP_OPCODE_READ_CR4 = 5,
-	EBPFOS_KOP_OPCODE_RDTSC = 6,
-	EBPFOS_KOP_OPCODE_RDTSCP = 7,
-	EBPFOS_KOP_OPCODE_CPUID = 8,
-	EBPFOS_KOP_OPCODE_CLFLUSH = 9,
-	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 10,
-	EBPFOS_KOP_OPCODE_CLWB = 11,
-	EBPFOS_KOP_OPCODE_INVLPG = 12,
-	EBPFOS_KOP_OPCODE_PREFETCHT0 = 13,
-	EBPFOS_KOP_OPCODE_PREFETCHW = 14,
+	EBPFOS_KOP_OPCODE_CLI = 2,
+	EBPFOS_KOP_OPCODE_POPF64 = 3,
+	EBPFOS_KOP_OPCODE_MOV64rc = 4,
+	EBPFOS_KOP_OPCODE_READ_CR0 = 5,
+	EBPFOS_KOP_OPCODE_READ_CR2 = 6,
+	EBPFOS_KOP_OPCODE_READ_CR4 = 7,
+	EBPFOS_KOP_OPCODE_RDTSC = 8,
+	EBPFOS_KOP_OPCODE_RDTSCP = 9,
+	EBPFOS_KOP_OPCODE_CPUID = 10,
+	EBPFOS_KOP_OPCODE_CLFLUSH = 11,
+	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 12,
+	EBPFOS_KOP_OPCODE_CLWB = 13,
+	EBPFOS_KOP_OPCODE_INVLPG = 14,
+	EBPFOS_KOP_OPCODE_PREFETCHT0 = 15,
+	EBPFOS_KOP_OPCODE_PREFETCHW = 16,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -46,6 +48,24 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.native_len = 2,
 		.native = { 0x9c, 0x58 },
 		.semantic_sha256 = { 0x2c, 0xab, 0x84, 0x0c, 0x2f, 0x09, 0xa6, 0xe0, 0x4a, 0x93, 0xda, 0xad, 0xa1, 0xa9, 0xd4, 0x85, 0xeb, 0xa4, 0x76, 0x85, 0x96, 0x50, 0x2c, 0x5a, 0x62, 0x27, 0x09, 0x8d, 0x2b, 0xc1, 0x69, 0x80 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "CLI",
+		.native_len = 6,
+		.native = { 0x9c, 0x58, 0x48, 0x89, 0x07, 0xfa },
+		.semantic_sha256 = { 0x01, 0x01, 0xe2, 0x43, 0x4f, 0x93, 0x2a, 0x0d, 0xb5, 0x5c, 0x5c, 0x9f, 0xa4, 0xbf, 0x47, 0x5b, 0x81, 0x65, 0x74, 0xc3, 0x79, 0xc0, 0x52, 0xf0, 0x04, 0xe4, 0x89, 0x57, 0x55, 0xad, 0x02, 0x3e },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "POPF64",
+		.native_len = 5,
+		.native = { 0x48, 0x8b, 0x07, 0x50, 0x9d },
+		.semantic_sha256 = { 0xd1, 0x28, 0xd4, 0x4e, 0xe8, 0xed, 0xf5, 0xce, 0x74, 0xfa, 0x4a, 0xc7, 0x02, 0xb7, 0xb5, 0xb7, 0x96, 0x2f, 0xb9, 0xe6, 0x58, 0xe2, 0x50, 0xab, 0x7b, 0x94, 0x77, 0x30, 0x3f, 0xc0, 0x44, 0xf8 },
 		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
@@ -182,6 +202,8 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(cpuid, CPUID, true); \
 	X(clflush, CLFLUSH, EBPFOS_KOP_HOST_CLFLUSH);
 #define EBPFOS_KOP_TYPED_X86_ROWS(X) \
+	X(cli_save, CLI, true); \
+	X(popf64_restore, POPF64, true); \
 	X(read_cr3, MOV64rc, true); \
 	X(read_cr0, READ_CR0, true); \
 	X(read_cr2, READ_CR2, true); \
