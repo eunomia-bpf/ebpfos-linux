@@ -243,15 +243,28 @@ static const struct btf_kfunc_id_set ebpfos_kprog_invlpg_service_set = {
 	.set = &ebpfos_kprog_invlpg_service_ids,
 };
 
+static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
+		u32 service_id, struct bpf_insn *insns)
+{
+	const struct ebpfos_kop_opcode_spec *spec = &ebpfos_kop_opcode_specs[opcode];
+
+	if (!insns || !service_id ||
+	    spec->proof_kind != EBPFOS_KOP_PROOF_TYPED_EFFECT ||
+	    spec->proof_len != 1)
+		return -EINVAL;
+	insns[0] = spec->proof[0];
+	insns[0].imm = service_id;
+	return 1;
+}
+
 static int ebpfos_kop_rdtsc_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	if (!insns || ebpfos_kprog_rdtsc_ids.cnt != 1 ||
 	    ebpfos_kprog_rdtsc_service_ids.cnt != 1 ||
 	    payload != ebpfos_kprog_rdtsc_ids.pairs[0].id)
 		return -EINVAL;
-	insns[0] = EBPFOS_KOP_OPCODE_RDTSC_PROOF(
-		ebpfos_kprog_rdtsc_service_ids.pairs[0].id);
-	return 1;
+	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_RDTSC,
+		ebpfos_kprog_rdtsc_service_ids.pairs[0].id, insns);
 }
 
 static int ebpfos_kop_rdtsc_requirements(u64 payload,
@@ -314,9 +327,8 @@ static int ebpfos_kop_rdtscp_instantiate(u64 payload, struct bpf_insn *insns)
 	    ebpfos_kprog_rdtscp_service_ids.cnt != 1 ||
 	    payload != ebpfos_kprog_rdtscp_ids.pairs[0].id)
 		return -EINVAL;
-	insns[0] = EBPFOS_KOP_OPCODE_RDTSCP_PROOF(
-		ebpfos_kprog_rdtscp_service_ids.pairs[0].id);
-	return 1;
+	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_RDTSCP,
+		ebpfos_kprog_rdtscp_service_ids.pairs[0].id, insns);
 }
 
 static int ebpfos_kop_rdtscp_requirements(u64 payload,
@@ -382,9 +394,8 @@ static int ebpfos_kop_cpuid_instantiate(u64 payload, struct bpf_insn *insns)
 	    ebpfos_kprog_cpuid_service_ids.cnt != 1 ||
 	    payload != ebpfos_kprog_cpuid_ids.pairs[0].id)
 		return -EINVAL;
-	insns[0] = EBPFOS_KOP_OPCODE_CPUID_PROOF(
-		ebpfos_kprog_cpuid_service_ids.pairs[0].id);
-	return 1;
+	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_CPUID,
+		ebpfos_kprog_cpuid_service_ids.pairs[0].id, insns);
 }
 
 static int ebpfos_kop_cpuid_requirements(u64 payload,
@@ -447,9 +458,8 @@ static int ebpfos_kop_clflush_instantiate(u64 payload, struct bpf_insn *insns)
 	    ebpfos_kprog_clflush_service_ids.cnt != 1 ||
 	    payload != ebpfos_kprog_clflush_ids.pairs[0].id)
 		return -EINVAL;
-	insns[0] = EBPFOS_KOP_OPCODE_CLFLUSH_PROOF(
-		ebpfos_kprog_clflush_service_ids.pairs[0].id);
-	return 1;
+	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_CLFLUSH,
+		ebpfos_kprog_clflush_service_ids.pairs[0].id, insns);
 }
 
 static int ebpfos_kop_clflush_requirements(u64 payload,
@@ -516,9 +526,8 @@ static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) 
 	    ebpfos_kprog_##name##_service_ids.cnt != 1 || \
 	    payload != ebpfos_kprog_##name##_ids.pairs[0].id) \
 		return -EINVAL; \
-	insns[0] = EBPFOS_KOP_OPCODE_##opcode##_PROOF( \
-		ebpfos_kprog_##name##_service_ids.pairs[0].id); \
-	return 1; \
+	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_##opcode, \
+		ebpfos_kprog_##name##_service_ids.pairs[0].id, insns); \
 } \
 static int ebpfos_kop_##name##_requirements(u64 payload, \
 		u64 *capability_mask, u64 *effect_mask, \
