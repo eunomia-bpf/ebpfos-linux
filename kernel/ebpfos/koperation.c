@@ -181,6 +181,17 @@ __bpf_kfunc u64 bpf_ebpfos_kop_invlpg(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+#ifdef CONFIG_X86
+__bpf_kfunc u64 bpf_ebpfos_x86_prefetcht0(u8 *ptr)
+{
+	asm volatile("prefetcht0 (%0)" : : "r"(ptr) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_prefetcht0(u8 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+#endif
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_pushf64_service_ids)
@@ -257,6 +268,16 @@ BTF_KFUNCS_START(ebpfos_kprog_invlpg_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_invlpg)
 BTF_KFUNCS_END(ebpfos_kprog_invlpg_ids)
 
+#ifdef CONFIG_X86
+BTF_KFUNCS_START(ebpfos_kprog_prefetcht0_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_prefetcht0)
+BTF_KFUNCS_END(ebpfos_kprog_prefetcht0_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_prefetcht0_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_prefetcht0)
+BTF_KFUNCS_END(ebpfos_kprog_prefetcht0_ids)
+#endif
+
 static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_service_set = {
 	.set = &ebpfos_kprog_pushf64_service_ids,
 };
@@ -294,6 +315,12 @@ static const struct btf_kfunc_id_set ebpfos_kprog_clwb_service_set = {
 static const struct btf_kfunc_id_set ebpfos_kprog_invlpg_service_set = {
 	.set = &ebpfos_kprog_invlpg_service_ids,
 };
+
+#ifdef CONFIG_X86
+static const struct btf_kfunc_id_set ebpfos_kprog_prefetcht0_service_set = {
+	.set = &ebpfos_kprog_prefetcht0_service_ids,
+};
+#endif
 
 static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
 		u32 service_id, struct bpf_insn *insns)
@@ -1435,6 +1462,18 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_invlpg_set);
+	if (err)
+		return err;
+	if (ebpfos_kprog_prefetcht0_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_prefetcht0.proof_kfunc_id =
+		ebpfos_kprog_prefetcht0_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_prefetcht0_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_prefetcht0_set);
 	if (err)
 		return err;
 #endif
