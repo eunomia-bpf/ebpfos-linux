@@ -16,6 +16,8 @@ void *ebpfos_function_route_pointer_arg(struct ebpfos_function_route *route,
 					u64 token, u32 index);
 void ebpfos_function_route_pointer_result(struct ebpfos_function_route *route,
 					 u64 token, const void *value);
+void ebpfos_function_route_identity_result(struct ebpfos_function_route *route,
+					 u64 token, u32 arg, const void *value);
 void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
 					 u64 token, u32 arg, u32 word, u64 value);
 bool ebpfos_function_route_call(struct ebpfos_function_route *route,

@@ -214,6 +214,18 @@ void ebpfos_function_route_pointer_result(struct ebpfos_function_route *route,
 	}
 }
 
+void ebpfos_function_route_identity_result(struct ebpfos_function_route *route,
+					 u64 token, u32 arg, const void *value)
+{
+	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
+
+	if (scope && scope->token == token && scope->route == route &&
+	    arg < 11 && (u64)(unsigned long)value == scope->args[arg]) {
+		scope->value = (u64)(unsigned long)value;
+		scope->written = true;
+	}
+}
+
 void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
 					 u64 token, u32 arg, u32 word, u64 value)
 {
