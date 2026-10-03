@@ -977,6 +977,14 @@ __bpf_kfunc void bpf_ebpfos_effect_atomic_and8(void *ptr, u32 ptr__sz, u8 value)
 		__atomic_fetch_and((u8 *)ptr, value, __ATOMIC_SEQ_CST);
 }
 
+__bpf_kfunc u16 bpf_ebpfos_effect_atomic_xchg16(void *ptr, u32 ptr__sz,
+						 u16 value)
+{
+	if (!ptr || ptr__sz != sizeof(u16))
+		return 0;
+	return __atomic_exchange_n((u16 *)ptr, value, __ATOMIC_SEQ_CST);
+}
+
 #ifdef CONFIG_X86
 __bpf_kfunc u32 bpf_ebpfos_effect_pkru_read(void)
 {
@@ -1464,6 +1472,7 @@ BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
