@@ -215,6 +215,17 @@ __bpf_kfunc u64 bpf_ebpfos_kop_prefetcht0(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+__bpf_kfunc u64 bpf_ebpfos_x86_prefetchw(u8 *ptr)
+{
+	if (!boot_cpu_has(X86_FEATURE_3DNOWPREFETCH))
+		return 0;
+	asm volatile("prefetchw (%0)" : : "r"(ptr) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_prefetchw(u8 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 #endif
 __bpf_kfunc_end_defs();
 
@@ -324,6 +335,14 @@ BTF_KFUNCS_END(ebpfos_kprog_prefetcht0_service_ids)
 BTF_KFUNCS_START(ebpfos_kprog_prefetcht0_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_prefetcht0)
 BTF_KFUNCS_END(ebpfos_kprog_prefetcht0_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_prefetchw_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_prefetchw)
+BTF_KFUNCS_END(ebpfos_kprog_prefetchw_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_prefetchw_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_prefetchw)
+BTF_KFUNCS_END(ebpfos_kprog_prefetchw_ids)
 #endif
 
 static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_service_set = {
@@ -376,6 +395,9 @@ static const struct btf_kfunc_id_set ebpfos_kprog_invlpg_service_set = {
 #ifdef CONFIG_X86
 static const struct btf_kfunc_id_set ebpfos_kprog_prefetcht0_service_set = {
 	.set = &ebpfos_kprog_prefetcht0_service_ids,
+};
+static const struct btf_kfunc_id_set ebpfos_kprog_prefetchw_service_set = {
+	.set = &ebpfos_kprog_prefetchw_service_ids,
 };
 #endif
 
@@ -1539,6 +1561,18 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_prefetcht0_set);
+	if (err)
+		return err;
+	if (ebpfos_kprog_prefetchw_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_prefetchw.proof_kfunc_id =
+		ebpfos_kprog_prefetchw_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_prefetchw_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_prefetchw_set);
 	if (err)
 		return err;
 #endif
