@@ -1004,6 +1004,13 @@ __bpf_kfunc void bpf_ebpfos_effect_atomic_or8(void *ptr, u32 ptr__sz, u8 value)
 		__atomic_fetch_or((u8 *)ptr, value, __ATOMIC_SEQ_CST);
 }
 
+__bpf_kfunc void bpf_ebpfos_effect_atomic_or16(void *ptr, u32 ptr__sz,
+						  u16 value)
+{
+	if (ptr && ptr__sz == sizeof(value))
+		__atomic_fetch_or((u16 *)ptr, value, __ATOMIC_SEQ_CST);
+}
+
 __bpf_kfunc void bpf_ebpfos_effect_atomic_and8(void *ptr, u32 ptr__sz, u8 value)
 {
 	if (ptr && ptr__sz == 1)
@@ -1520,6 +1527,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fpu_wait)
 #endif
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or16)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xor8_sign)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
