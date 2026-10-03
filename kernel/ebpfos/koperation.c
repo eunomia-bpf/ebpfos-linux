@@ -107,6 +107,17 @@ __bpf_kfunc u64 bpf_ebpfos_kop_cpuid(u32 leaf, u32 subleaf, u64 *out)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+__bpf_kfunc u64 bpf_ebpfos_x86_clflush(u8 *ptr)
+{
+#ifdef CONFIG_X86
+	asm volatile("clflush (%0)" : : "r"(ptr) : "memory");
+#endif
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_clflush(u8 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_rdtsc_service_ids)
@@ -133,6 +144,14 @@ BTF_KFUNCS_START(ebpfos_kprog_cpuid_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_cpuid)
 BTF_KFUNCS_END(ebpfos_kprog_cpuid_ids)
 
+BTF_KFUNCS_START(ebpfos_kprog_clflush_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_clflush)
+BTF_KFUNCS_END(ebpfos_kprog_clflush_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_clflush_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_clflush)
+BTF_KFUNCS_END(ebpfos_kprog_clflush_ids)
+
 static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_service_set = {
 	.set = &ebpfos_kprog_rdtsc_service_ids,
 };
@@ -143,6 +162,10 @@ static const struct btf_kfunc_id_set ebpfos_kprog_rdtscp_service_set = {
 
 static const struct btf_kfunc_id_set ebpfos_kprog_cpuid_service_set = {
 	.set = &ebpfos_kprog_cpuid_service_ids,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_clflush_service_set = {
+	.set = &ebpfos_kprog_clflush_service_ids,
 };
 
 static int ebpfos_kop_rdtsc_instantiate(u64 payload, struct bpf_insn *insns)
@@ -341,6 +364,74 @@ static const struct bpf_kop * const ebpfos_kprog_cpuid_descs[] = {
 static const struct btf_kfunc_id_set ebpfos_kprog_cpuid_set = {
 	.set = &ebpfos_kprog_cpuid_ids,
 	.kop_descs = ebpfos_kprog_cpuid_descs,
+};
+
+static int ebpfos_kop_clflush_instantiate(u64 payload, struct bpf_insn *insns)
+{
+	if (!insns || ebpfos_kprog_clflush_ids.cnt != 1 ||
+	    ebpfos_kprog_clflush_service_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_clflush_ids.pairs[0].id)
+		return -EINVAL;
+	insns[0] = EBPFOS_KOP_OPCODE_CLFLUSH_PROOF(
+		ebpfos_kprog_clflush_service_ids.pairs[0].id);
+	return 1;
+}
+
+static int ebpfos_kop_clflush_requirements(u64 payload,
+		u64 *capability_mask, u64 *effect_mask,
+		u8 semantic_sha256[SHA256_DIGEST_SIZE])
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_CLFLUSH];
+
+	if (!capability_mask || !effect_mask || !semantic_sha256 ||
+	    ebpfos_kprog_clflush_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_clflush_ids.pairs[0].id)
+		return -EINVAL;
+	*capability_mask = 0;
+	*effect_mask = 0;
+	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
+	return 0;
+}
+
+static int ebpfos_kop_clflush_emit_x86(u8 *image, u32 *offset, bool emit,
+		u64 payload, const struct bpf_prog *prog, const u8 *final_ip)
+{
+	const struct ebpfos_kop_opcode_spec *spec =
+		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_CLFLUSH];
+
+	(void)prog;
+	(void)final_ip;
+#ifdef CONFIG_X86
+	if (!boot_cpu_has(X86_FEATURE_CLFLUSH))
+		return -EOPNOTSUPP;
+#else
+	return -EOPNOTSUPP;
+#endif
+	if (!offset || (emit && !image) || ebpfos_kprog_clflush_ids.cnt != 1 ||
+	    payload != ebpfos_kprog_clflush_ids.pairs[0].id)
+		return -EINVAL;
+	if (emit)
+		memcpy(image + *offset, spec->native, spec->native_len);
+	*offset += spec->native_len;
+	return spec->native_len;
+}
+
+static struct bpf_kop ebpfos_kop_clflush = {
+	.max_insn_cnt = 1,
+	.max_emit_bytes = 16,
+	.requirements = ebpfos_kop_clflush_requirements,
+	.instantiate_insn = ebpfos_kop_clflush_instantiate,
+	.emit_x86 = ebpfos_kop_clflush_emit_x86,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_clflush_descs[] = {
+	&ebpfos_kop_clflush,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_clflush_set = {
+	.set = &ebpfos_kprog_clflush_ids,
+	.kop_descs = ebpfos_kprog_clflush_descs,
 };
 
 BTF_KFUNCS_START(ebpfos_kprog_terminal_ids)
@@ -1331,6 +1422,18 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_cpuid_set);
+	if (err)
+		return err;
+	if (ebpfos_kprog_clflush_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_clflush.proof_kfunc_id =
+		ebpfos_kprog_clflush_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_clflush_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_clflush_set);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
