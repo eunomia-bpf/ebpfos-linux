@@ -44,6 +44,7 @@ bool ebpfos_component_gate_try_enter(struct ebpfos_component_gate *gate)
 void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate)
 {
 	unsigned long flags;
+	bool wake;
 
 	spin_lock_irqsave(&gate->lock, flags);
 	if (WARN_ON_ONCE(!gate->acquired)) {
@@ -51,8 +52,11 @@ void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate)
 		return;
 	}
 	gate->acquired--;
+	wake = !gate->acquired;
 	spin_unlock_irqrestore(&gate->lock, flags);
-	wake_up_all(&gate->waitq);
+	/* An aborted drain can still be waiting for the final acquisition. */
+	if (wake && wq_has_sleeper(&gate->waitq))
+		wake_up_all(&gate->waitq);
 }
 int ebpfos_component_gate_engage(struct ebpfos_component_gate *gate)
 {
