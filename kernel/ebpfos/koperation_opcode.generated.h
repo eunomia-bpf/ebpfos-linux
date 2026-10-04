@@ -13,13 +13,14 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_READ_CR4 = 8,
 	EBPFOS_KOP_OPCODE_RDTSC = 9,
 	EBPFOS_KOP_OPCODE_RDTSCP = 10,
-	EBPFOS_KOP_OPCODE_CPUID = 11,
-	EBPFOS_KOP_OPCODE_CLFLUSH = 12,
-	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 13,
-	EBPFOS_KOP_OPCODE_CLWB = 14,
-	EBPFOS_KOP_OPCODE_INVLPG = 15,
-	EBPFOS_KOP_OPCODE_PREFETCHT0 = 16,
-	EBPFOS_KOP_OPCODE_PREFETCHW = 17,
+	EBPFOS_KOP_OPCODE_RDSEED64 = 11,
+	EBPFOS_KOP_OPCODE_CPUID = 12,
+	EBPFOS_KOP_OPCODE_CLFLUSH = 13,
+	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 14,
+	EBPFOS_KOP_OPCODE_CLWB = 15,
+	EBPFOS_KOP_OPCODE_INVLPG = 16,
+	EBPFOS_KOP_OPCODE_PREFETCHT0 = 17,
+	EBPFOS_KOP_OPCODE_PREFETCHW = 18,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -135,6 +136,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
 	{
+		.opcode = "RDSEED64r",
+		.native_len = 7,
+		.native = { 0x48, 0x0f, 0xc7, 0xf8, 0x0f, 0x92, 0x07 },
+		.semantic_sha256 = { 0xdb, 0x36, 0x34, 0x69, 0x7f, 0x6c, 0x8a, 0x29, 0x3c, 0x6a, 0x06, 0x3b, 0x15, 0x79, 0x15, 0x08, 0x7a, 0xdb, 0x64, 0x2c, 0x46, 0xbb, 0x49, 0x61, 0xe4, 0x74, 0x6b, 0xaf, 0x9d, 0x46, 0x5d, 0x49 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
 		.opcode = "CPUID",
 		.native_len = 28,
 		.native = { 0x53, 0x89, 0xf8, 0x89, 0xf1, 0x49, 0x89, 0xd0, 0x0f, 0xa2, 0x48, 0xc1, 0xe3, 0x20, 0x48, 0x09, 0xd8, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd1, 0x49, 0x89, 0x08, 0x5b },
@@ -200,15 +210,18 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 };
 #ifdef CONFIG_X86
 #define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
+#define EBPFOS_KOP_HOST_RDSEED boot_cpu_has(X86_FEATURE_RDSEED)
 #define EBPFOS_KOP_HOST_CLFLUSH boot_cpu_has(X86_FEATURE_CLFLUSH)
 #else
 #define EBPFOS_KOP_HOST_RDTSCP false
+#define EBPFOS_KOP_HOST_RDSEED false
 #define EBPFOS_KOP_HOST_CLFLUSH false
 #endif
 #define EBPFOS_KOP_TYPED_PORTABLE_ROWS(X) \
 	X(pushf64, PUSHF64, true); \
 	X(rdtsc, RDTSC, true); \
 	X(rdtscp, RDTSCP, EBPFOS_KOP_HOST_RDTSCP); \
+	X(rdseed64, RDSEED64, EBPFOS_KOP_HOST_RDSEED); \
 	X(cpuid, CPUID, true); \
 	X(clflush, CLFLUSH, EBPFOS_KOP_HOST_CLFLUSH);
 #define EBPFOS_KOP_TYPED_X86_ROWS(X) \

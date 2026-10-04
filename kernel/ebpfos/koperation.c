@@ -151,6 +151,26 @@ __bpf_kfunc u64 bpf_ebpfos_kop_rdtscp(u32 *aux)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+__bpf_kfunc u64 bpf_ebpfos_x86_rdseed64(u8 *success)
+{
+#ifdef CONFIG_X86
+	u64 value;
+
+	if (!boot_cpu_has(X86_FEATURE_RDSEED)) {
+		*success = 0;
+		return 0;
+	}
+	asm volatile("rdseed %0; setc %1" : "=r"(value), "=m"(*success) : : "cc");
+	return value;
+#else
+	*success = 0;
+	return 0;
+#endif
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_rdseed64(u8 *success)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
 __bpf_kfunc u64 bpf_ebpfos_x86_cpuid(u32 leaf, u32 subleaf, u64 *out)
 {
 #ifdef CONFIG_X86
@@ -323,6 +343,14 @@ BTF_KFUNCS_START(ebpfos_kprog_rdtscp_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdtscp)
 BTF_KFUNCS_END(ebpfos_kprog_rdtscp_ids)
 
+BTF_KFUNCS_START(ebpfos_kprog_rdseed64_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_rdseed64)
+BTF_KFUNCS_END(ebpfos_kprog_rdseed64_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_rdseed64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdseed64)
+BTF_KFUNCS_END(ebpfos_kprog_rdseed64_ids)
+
 BTF_KFUNCS_START(ebpfos_kprog_cpuid_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_cpuid)
 BTF_KFUNCS_END(ebpfos_kprog_cpuid_service_ids)
@@ -406,6 +434,10 @@ static const struct btf_kfunc_id_set ebpfos_kprog_rdtsc_service_set = {
 
 static const struct btf_kfunc_id_set ebpfos_kprog_rdtscp_service_set = {
 	.set = &ebpfos_kprog_rdtscp_service_ids,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_rdseed64_service_set = {
+	.set = &ebpfos_kprog_rdseed64_service_ids,
 };
 
 static const struct btf_kfunc_id_set ebpfos_kprog_cpuid_service_set = {
@@ -1563,6 +1595,18 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_rdtscp_set);
+	if (err)
+		return err;
+	if (ebpfos_kprog_rdseed64_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_rdseed64.proof_kfunc_id =
+		ebpfos_kprog_rdseed64_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdseed64_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdseed64_set);
 	if (err)
 		return err;
 	if (ebpfos_kprog_cpuid_service_ids.cnt != 1)
