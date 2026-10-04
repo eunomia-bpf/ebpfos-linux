@@ -1036,6 +1036,14 @@ __bpf_kfunc u16 bpf_ebpfos_effect_atomic_xchg16(void *ptr, u32 ptr__sz,
 	return __atomic_exchange_n((u16 *)ptr, value, __ATOMIC_SEQ_CST);
 }
 
+__bpf_kfunc u16 bpf_ebpfos_effect_atomic_fetch_add16(void *ptr, u32 ptr__sz,
+						      u16 value)
+{
+	if (!ptr || ptr__sz != sizeof(u16))
+		return 0;
+	return __atomic_fetch_add((u16 *)ptr, value, __ATOMIC_SEQ_CST);
+}
+
 #ifdef CONFIG_X86
 __bpf_kfunc u32 bpf_ebpfos_effect_pkru_read(void)
 {
@@ -1531,6 +1539,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or16)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xor8_sign)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_fetch_add16)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
