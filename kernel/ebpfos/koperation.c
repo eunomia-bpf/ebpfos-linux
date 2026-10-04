@@ -206,14 +206,14 @@ __bpf_kfunc u64 bpf_ebpfos_kop_clwb(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_x86_invlpg(u8 *ptr)
+__bpf_kfunc u64 bpf_ebpfos_x86_invlpg(u64 addr)
 {
 #ifdef CONFIG_X86
-	asm volatile("invlpg (%0)" : : "r"(ptr) : "memory");
+	asm volatile("invlpg (%0)" : : "r"(addr) : "memory");
 #endif
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_invlpg(u8 *ptr)
+__bpf_kfunc u64 bpf_ebpfos_kop_invlpg(u64 addr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
