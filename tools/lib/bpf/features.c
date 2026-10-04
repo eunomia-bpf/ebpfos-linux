@@ -73,6 +73,8 @@ static int probe_kern_global_data(int token_fd)
 	insns[0].imm = map;
 
 	ret = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, &prog_opts);
+	if (ret < 0)
+		ret = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, NULL, "GPL", insns, insn_cnt, &prog_opts);
 	close(map);
 	return probe_fd(ret);
 }
