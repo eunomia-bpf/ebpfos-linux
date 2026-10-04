@@ -463,16 +463,19 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 	return 0;
 }
 
-int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
+struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id)
+{
+	return object_id ? xa_load(&ebpfos_executor_roots, object_id) : NULL;
+}
+
+int ebpfos_executor_root_lease_try_begin_slot(
+	struct ebpfos_executor_root_slot *slot, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot)
 {
-	struct ebpfos_executor_root_slot *slot;
-
-	if (!object_id || !lease || !snapshot)
+	if (!lease || !snapshot)
 		return -EINVAL;
 	memset(lease, 0, sizeof(*lease));
-	slot = xa_load(&ebpfos_executor_roots, object_id);
 	if (!slot)
 		return -ENOENT;
 	if (!ebpfos_component_gate_try_enter(&slot->gate))
@@ -488,6 +491,16 @@ int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 	lease->slot = slot;
 	lease->rcu_held = true;
 	return 0;
+}
+
+int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	if (!object_id)
+		return -EINVAL;
+	return ebpfos_executor_root_lease_try_begin_slot(
+		ebpfos_executor_root_lookup(object_id), role_type, lease, snapshot);
 }
 
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)

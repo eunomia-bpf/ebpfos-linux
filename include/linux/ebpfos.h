@@ -150,6 +150,12 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot);
 /* Non-sleepable callers must end this lease in the same context. */
+/* Published root slots have stable lifetime; their active bundle does not. */
+struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id);
+int ebpfos_executor_root_lease_try_begin_slot(
+	struct ebpfos_executor_root_slot *slot, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot);
 int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot);

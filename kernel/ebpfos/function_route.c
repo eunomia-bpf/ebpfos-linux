@@ -41,6 +41,7 @@ struct ebpfos_function_route {
 	bool entry_active;
 	unsigned long native_body;
 	u64 object_id;
+	struct ebpfos_executor_root_slot *root_slot;
 	u64 role_type;
 	u64 last_epoch;
 	u32 last_provider_id;
@@ -281,6 +282,7 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 	u64 before[4] = {};
 	u64 epoch = 0;
 	u32 provider = 0, value = 0;
+	struct ebpfos_executor_root_slot *slot;
 	int error;
 
 	if (!READ_ONCE(route->enabled) ||
@@ -313,7 +315,13 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 	preempt_disable();
 	scope.previous = this_cpu_read(ebpfos_function_result);
 	this_cpu_write(ebpfos_function_result, &scope);
-	error = ebpfos_irq_route_call(READ_ONCE(route->object_id),
+	slot = READ_ONCE(route->root_slot);
+	if (unlikely(!slot)) {
+		/* A route may be enabled before its root's first publication. */
+		slot = ebpfos_executor_root_lookup(READ_ONCE(route->object_id));
+		WRITE_ONCE(route->root_slot, slot);
+	}
+	error = ebpfos_irq_route_call_slot(slot,
 		READ_ONCE(route->role_type), frame, &epoch, &provider, &value);
 	this_cpu_write(ebpfos_function_result, scope.previous);
 	preempt_enable();
@@ -410,6 +418,8 @@ found:
 			goto out;
 		}
 		WRITE_ONCE(route->object_id, request->object_id);
+		WRITE_ONCE(route->root_slot,
+			ebpfos_executor_root_lookup(request->object_id));
 		WRITE_ONCE(route->role_type, request->role_type);
 		error = ftrace_set_filter_ip(&route->fops, location, 0, 0);
 		if (error)

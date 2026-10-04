@@ -7,7 +7,7 @@
 #include <linux/filter.h>
 #include <linux/module.h>
 
-int ebpfos_irq_route_call(u64 handle, u64 role,
+int ebpfos_irq_route_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
 	u64 *epoch, u32 *provider_id, u32 *status)
 {
@@ -19,11 +19,11 @@ int ebpfos_irq_route_call(u64 handle, u64 role,
 	u64 start;
 	int error, attempts = 0;
 
-	if (!handle || !frame || !epoch || !provider_id || !status)
+	if (!frame || !epoch || !provider_id || !status)
 		return -EINVAL;
 retry:
-	error = ebpfos_executor_root_lease_try_begin(handle, role, &lease,
-						      &snapshot);
+	error = ebpfos_executor_root_lease_try_begin_slot(slot, role, &lease,
+							   &snapshot);
 	if (error)
 		return error;
 	binding = lease.binding;
@@ -58,5 +58,16 @@ retry:
 out:
 	ebpfos_executor_root_lease_end(&lease);
 	return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_irq_route_call_slot);
+
+int ebpfos_irq_route_call(u64 handle, u64 role,
+	const struct ebpfos_component_irq_frame *frame,
+	u64 *epoch, u32 *provider_id, u32 *status)
+{
+	if (!handle)
+		return -EINVAL;
+	return ebpfos_irq_route_call_slot(ebpfos_executor_root_lookup(handle),
+		role, frame, epoch, provider_id, status);
 }
 EXPORT_SYMBOL_GPL(ebpfos_irq_route_call);

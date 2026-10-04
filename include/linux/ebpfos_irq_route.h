@@ -5,9 +5,13 @@
 #include <linux/types.h>
 
 struct ebpfos_component_irq_frame;
+struct ebpfos_executor_root_slot;
 
 /* The caller handles -EAGAIN when migration has closed this handle's gate. */
 int ebpfos_irq_route_call(u64 handle, u64 role,
+	const struct ebpfos_component_irq_frame *frame,
+	u64 *epoch, u32 *provider_id, u32 *status);
+int ebpfos_irq_route_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
 	u64 *epoch, u32 *provider_id, u32 *status);
 
