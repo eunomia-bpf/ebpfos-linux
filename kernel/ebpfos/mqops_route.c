@@ -222,7 +222,7 @@ static long ebpfos_mqops_route_ioctl(struct file *control,
 		result = ebpfos_component_gate_engage(&route->gate);
 		break;
 	case EBPFOS_MQOPS_ROUTE_IOC_SWITCH:
-		if (!READ_ONCE(route->gate.draining))
+		if (!ebpfos_component_gate_is_draining(&route->gate))
 			result = -EINVAL;
 		else
 			WRITE_ONCE(route->component,

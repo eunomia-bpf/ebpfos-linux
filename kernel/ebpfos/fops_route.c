@@ -647,7 +647,7 @@ int ebpfos_fops_route_switch(struct file *file, bool component)
 	route = ebpfos_fops_route_get(file);
 	if (!route)
 		error = -ENOENT;
-	else if (!READ_ONCE(route->gate.draining))
+	else if (!ebpfos_component_gate_is_draining(&route->gate))
 		error = -EBUSY;
 	else
 		WRITE_ONCE(route->component, component);

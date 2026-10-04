@@ -2,19 +2,27 @@
 #ifndef _EBPFOS_COMPONENT_GRAPH_H
 #define _EBPFOS_COMPONENT_GRAPH_H
 
-#include <linux/spinlock.h>
+#include <linux/atomic.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 
 #define EBPFOS_COMPONENT_GRAPH_MAX_ROLES 4U
 
+/* Bit 0 closes admission; the remaining bits count acquired calls. */
+#define EBPFOS_GATE_DRAINING 1L
+#define EBPFOS_GATE_ACQUIRED 2L
+
 /* Policy-free acquisition gate shared by component routes. */
 struct ebpfos_component_gate {
-	spinlock_t lock;
+	atomic_long_t state;
 	wait_queue_head_t waitq;
-	unsigned int acquired;
-	bool draining;
 };
+
+static inline bool ebpfos_component_gate_is_draining(
+	const struct ebpfos_component_gate *gate)
+{
+	return atomic_long_read(&gate->state) & EBPFOS_GATE_DRAINING;
+}
 
 void ebpfos_component_gate_init(struct ebpfos_component_gate *gate);
 void ebpfos_component_gate_enter(struct ebpfos_component_gate *gate);

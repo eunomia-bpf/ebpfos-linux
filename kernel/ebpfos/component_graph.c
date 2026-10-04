@@ -6,79 +6,62 @@
 
 void ebpfos_component_gate_init(struct ebpfos_component_gate *gate)
 {
-	spin_lock_init(&gate->lock);
+	atomic_long_set(&gate->state, 0);
 	init_waitqueue_head(&gate->waitq);
-	gate->acquired = 0;
-	gate->draining = false;
 }
 
 void ebpfos_component_gate_enter(struct ebpfos_component_gate *gate)
 {
-	unsigned long flags;
-
-	for (;;) {
-		spin_lock_irqsave(&gate->lock, flags);
-		if (!gate->draining) {
-			gate->acquired++;
-			spin_unlock_irqrestore(&gate->lock, flags);
-			return;
-		}
-		spin_unlock_irqrestore(&gate->lock, flags);
-		wait_event(gate->waitq, !READ_ONCE(gate->draining));
-	}
+	while (!ebpfos_component_gate_try_enter(gate))
+		wait_event(gate->waitq,
+			   !ebpfos_component_gate_is_draining(gate));
 }
 
 bool ebpfos_component_gate_try_enter(struct ebpfos_component_gate *gate)
 {
-	unsigned long flags;
-	bool acquired;
+	long state = atomic_long_read(&gate->state);
 
-	spin_lock_irqsave(&gate->lock, flags);
-	acquired = !gate->draining;
-	if (acquired)
-		gate->acquired++;
-	spin_unlock_irqrestore(&gate->lock, flags);
-	return acquired;
+	for (;;) {
+		if (state & EBPFOS_GATE_DRAINING)
+			return false;
+		/* Admission and drain closure linearize on the same word. */
+		if (atomic_long_try_cmpxchg(&gate->state, &state,
+					  state + EBPFOS_GATE_ACQUIRED))
+			return true;
+	}
 }
 
 void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate)
 {
-	unsigned long flags;
-	bool wake;
+	long state = atomic_long_read(&gate->state);
 
-	spin_lock_irqsave(&gate->lock, flags);
-	if (WARN_ON_ONCE(!gate->acquired)) {
-		spin_unlock_irqrestore(&gate->lock, flags);
-		return;
+	for (;;) {
+		if (WARN_ON_ONCE(!(state & ~EBPFOS_GATE_DRAINING)))
+			return;
+		if (atomic_long_try_cmpxchg(&gate->state, &state,
+					  state - EBPFOS_GATE_ACQUIRED))
+			break;
 	}
-	gate->acquired--;
-	wake = !gate->acquired;
-	spin_unlock_irqrestore(&gate->lock, flags);
 	/* An aborted drain can still be waiting for the final acquisition. */
-	if (wake && wq_has_sleeper(&gate->waitq))
+	if (!((state - EBPFOS_GATE_ACQUIRED) & ~EBPFOS_GATE_DRAINING) &&
+	    wq_has_sleeper(&gate->waitq))
 		wake_up_all(&gate->waitq);
 }
+
 int ebpfos_component_gate_engage(struct ebpfos_component_gate *gate)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&gate->lock, flags);
-	if (gate->draining) {
-		spin_unlock_irqrestore(&gate->lock, flags);
+	if (atomic_long_fetch_or(EBPFOS_GATE_DRAINING, &gate->state) &
+	    EBPFOS_GATE_DRAINING)
 		return -EBUSY;
-	}
-	gate->draining = true;
-	spin_unlock_irqrestore(&gate->lock, flags);
-	wait_event(gate->waitq, !READ_ONCE(gate->acquired));
+	wait_event(gate->waitq,
+		   !(atomic_long_read_acquire(&gate->state) &
+		     ~EBPFOS_GATE_DRAINING));
 	return 0;
 }
 
 void ebpfos_component_gate_abort(struct ebpfos_component_gate *gate)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&gate->lock, flags);
-	gate->draining = false;
-	spin_unlock_irqrestore(&gate->lock, flags);
+	/* Fully ordered RMW publishes the drained provider before readmission. */
+	atomic_long_fetch_andnot(EBPFOS_GATE_DRAINING, &gate->state);
 	wake_up_all(&gate->waitq);
 }
