@@ -42,9 +42,13 @@ void ebpfos_component_gate_exit(struct ebpfos_component_gate *gate)
 					  state - EBPFOS_GATE_ACQUIRED))
 			break;
 	}
-	/* An aborted drain can still be waiting for the final acquisition. */
+	/*
+	 * An aborted drain can still be waiting for the final acquisition.
+	 * The successful fully ordered cmpxchg supplies the barrier between
+	 * updating the count and inspecting the wait queue.
+	 */
 	if (!((state - EBPFOS_GATE_ACQUIRED) & ~EBPFOS_GATE_DRAINING) &&
-	    wq_has_sleeper(&gate->waitq))
+	    waitqueue_active(&gate->waitq))
 		wake_up_all(&gate->waitq);
 }
 

@@ -479,14 +479,20 @@ int ebpfos_executor_root_lease_try_begin_slot(
 	lease->slot = NULL;
 	if (!slot)
 		return -ENOENT;
-	if (!ebpfos_component_gate_try_enter(&slot->gate))
-		return -EAGAIN;
 	rcu_read_lock();
+	/*
+	 * This lease cannot sleep and retains RCU until release. Quiesce closes
+	 * admission before a grace period, which drains these readers without
+	 * modifying the shared gate count on every call.
+	 */
+	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
+		rcu_read_unlock();
+		return -EAGAIN;
+	}
 	lease->binding = ebpfos_executor_root_role_get_rcu(
 		slot, role_type, &lease->epoch, snapshot, false);
 	if (!lease->binding) {
 		rcu_read_unlock();
-		ebpfos_component_gate_exit(&slot->gate);
 		return -ENOENT;
 	}
 	lease->slot = slot;
@@ -513,11 +519,12 @@ void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 	 * The bundle's owned reference is released only after that grace period.
 	 * Sleepable leases drop RCU at acquisition and must own a reference.
 	 */
-	if (!lease->rcu_held)
+	if (!lease->rcu_held) {
 		ebpfos_binding_put(lease->binding);
-	ebpfos_component_gate_exit(&lease->slot->gate);
-	if (lease->rcu_held)
+		ebpfos_component_gate_exit(&lease->slot->gate);
+	} else {
 		rcu_read_unlock();
+	}
 	lease->slot = NULL;
 }
 
@@ -552,6 +559,13 @@ int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch)
 	error = ebpfos_component_gate_engage(&slot->gate);
 	if (error)
 		return error;
+	/*
+	 * Counted sleepable leases are drained above. An RCU reader that saw
+	 * the open gate before closure must finish before this grace period
+	 * returns; readers observing closure never access the provider.
+	 * The control session cannot resume its gate until quiesce returns.
+	 */
+	synchronize_rcu();
 	spin_lock(&slot->lock);
 	active = rcu_dereference_protected(slot->active,
 					   lockdep_is_held(&slot->lock));
