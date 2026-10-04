@@ -1296,6 +1296,7 @@ enum bpf_perf_event_type {
  * bpf_copy_from_user().
  */
 #define BPF_F_SLEEPABLE		(1U << 4)
+#define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
 /* If BPF_F_XDP_HAS_FRAGS is used in BPF_PROG_LOAD command, the loaded program
  * fully support xdp frags.

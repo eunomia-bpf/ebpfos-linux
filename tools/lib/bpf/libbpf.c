@@ -8989,6 +8989,40 @@ static int bpf_object_prepare(struct bpf_object *obj, const char *target_btf_pat
 	return 0;
 }
 
+static int bpf_object_release_component_arena_mmaps(struct bpf_object *obj)
+{
+	bool component = false;
+	size_t i;
+
+	for (i = 0; i < obj->nr_programs; i++) {
+		struct bpf_program *prog = &obj->programs[i];
+
+		if (!prog->autoload || prog_is_subprog(obj, prog))
+			continue;
+		if (!(prog->prog_flags & BPF_F_EBPFOS_COMPONENT))
+			return 0;
+		component = true;
+	}
+	if (!component)
+		return 0;
+	if (obj->gen_loader)
+		return 0;
+
+	/* Arena initialization has finished. The kernel can grant a component
+	 * its exclusive map lease only after this user mapping is gone. */
+	for (i = 0; i < obj->nr_maps; i++) {
+		struct bpf_map *map = &obj->maps[i];
+
+		if (map->def.type != BPF_MAP_TYPE_ARENA || map->reused ||
+		    !map->mmaped)
+			continue;
+		if (munmap(map->mmaped, bpf_map_mmap_sz(map)))
+			return -errno;
+		map->mmaped = NULL;
+	}
+	return 0;
+}
+
 static int bpf_object_load(struct bpf_object *obj, int extra_log_level, const char *target_btf_path)
 {
 	int err;
@@ -9016,7 +9050,8 @@ static int bpf_object_load(struct bpf_object *obj, int extra_log_level, const ch
 		if (err)
 			return libbpf_err(err);
 	}
-	err = bpf_object__load_progs(obj, extra_log_level);
+	err = bpf_object_release_component_arena_mmaps(obj);
+	err = err ? : bpf_object__load_progs(obj, extra_log_level);
 	err = err ? : bpf_object_init_prog_arrays(obj);
 	err = err ? : bpf_object_prepare_struct_ops(obj);
 
