@@ -18,6 +18,8 @@
 #include <linux/preempt.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <asm/ibt.h>
+#include <asm/cpufeature.h>
 
 #include "component_graph.h"
 
@@ -36,6 +38,8 @@ struct ebpfos_function_route {
 	unsigned long stub_size;
 	unsigned long direct;
 	bool direct_active;
+	bool entry_active;
+	unsigned long native_body;
 	u64 object_id;
 	u64 role_type;
 	u64 last_epoch;
@@ -49,6 +53,9 @@ static DEFINE_MUTEX(ebpfos_function_routes_lock);
 static bool direct_calls;
 module_param(direct_calls, bool, 0444);
 MODULE_PARM_DESC(direct_calls, "Use generated direct-ftrace trampolines for function routes");
+static bool own_entry;
+module_param(own_entry, bool, 0444);
+MODULE_PARM_DESC(own_entry, "Jump directly to the BTF-generated component entry");
 static atomic64_t ebpfos_function_token = ATOMIC64_INIT(0);
 
 struct ebpfos_function_result_scope {
@@ -146,6 +153,14 @@ int ebpfos_function_route_register(const char *symbol, void *stub,
 		kfree(route);
 		return -ENOENT;
 	}
+	/* A replacement enters before the native prologue, as does -mfentry.
+	 * Fallback must resume beyond the patched slot, without entering us again.
+	 */
+	offset = ftrace_location(route->native);
+	if (offset == route->native ||
+	    (IS_ENABLED(CONFIG_X86_KERNEL_IBT) &&
+	     offset == route->native + ENDBR_INSN_SIZE))
+		route->native_body = offset + MCOUNT_INSN_SIZE;
 	route->counters = alloc_percpu(struct ebpfos_function_counters);
 	if (!route->counters) {
 		kfree(route);
@@ -195,7 +210,7 @@ int ebpfos_function_route_register_direct(const char *symbol, void *stub,
 
 unsigned long ebpfos_function_route_native(struct ebpfos_function_route *route)
 {
-	return route->native;
+	return route->entry_active ? route->native_body : route->native;
 }
 
 void *ebpfos_function_route_pointer_arg(struct ebpfos_function_route *route,
@@ -384,16 +399,28 @@ found:
 			error = -EINVAL;
 			goto out;
 		}
+		/* The native continuation has no ENDBR. Do not disable CET or
+		 * its checks to enter it on an IBT-enforcing machine.
+		 */
+		if (own_entry && (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
+				  IS_ENABLED(CONFIG_CFI) ||
+				  cpu_feature_enabled(X86_FEATURE_IBT) ||
+				  !route->native_body || (route->stub & 1))) {
+			error = -EOPNOTSUPP;
+			goto out;
+		}
 		WRITE_ONCE(route->object_id, request->object_id);
 		WRITE_ONCE(route->role_type, request->role_type);
 		error = ftrace_set_filter_ip(&route->fops, location, 0, 0);
 		if (error)
 			goto out;
-		route->direct_active = direct_calls && route->direct;
+		route->entry_active = own_entry;
+		route->direct_active = own_entry || (direct_calls && route->direct);
 		if (route->direct_active) {
 			route->fops.func = NULL;
 			route->fops.flags &= ~FTRACE_OPS_FL_IPMODIFY;
-			error = register_ftrace_direct(&route->fops, route->direct);
+			error = register_ftrace_direct(&route->fops,
+				route->entry_active ? ftrace_jmp_set(route->stub) : route->direct);
 		} else {
 			error = register_ftrace_function(&route->fops);
 		}
@@ -405,7 +432,9 @@ found:
 	} else if (request->enable == 0 && route->enabled) {
 		WRITE_ONCE(route->enabled, false);
 		if (route->direct_active) {
-			error = unregister_ftrace_direct(&route->fops, route->direct, false);
+			error = unregister_ftrace_direct(&route->fops,
+				route->entry_active ? ftrace_jmp_set(route->stub) : route->direct,
+				false);
 			if (error)
 				goto out;
 		} else {
