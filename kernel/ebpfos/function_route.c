@@ -284,13 +284,16 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 	int error;
 
 	/*
-	 * All control fields are assigned before exposing this scope to kfuncs.
+	 * Control fields are assigned before exposing this scope to kfuncs.
+	 * Writeback controls are accessed only when their assigned size is nonzero.
 	 * Payloads are read only after their completion flag/full word mask.
 	 * Copy-in snapshots are read only after the native bytes were copied.
 	 */
 	scope.written = false;
-	scope.field_written = false;
-	scope.writeback_mask = 0;
+	if (field_size)
+		scope.field_written = false;
+	if (writeback_size)
+		scope.writeback_mask = 0;
 	/* Disable drains the entire call, including output commit, via RCU. */
 	rcu_read_lock();
 	if (!smp_load_acquire(&route->enabled))
@@ -311,11 +314,14 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 	scope.token = atomic64_inc_return(&ebpfos_function_token);
 	scope.route = route;
 	scope.args = frame->args;
-	scope.writeback_arg = writeback_arg;
 	scope.writeback_size = writeback_size;
-	scope.field_arg = writeback_arg;
-	scope.field_offset = field_offset;
+	if (writeback_size)
+		scope.writeback_arg = writeback_arg;
 	scope.field_size = field_size;
+	if (field_size) {
+		scope.field_arg = writeback_arg;
+		scope.field_offset = field_offset;
+	}
 	frame->args[11] = scope.token;
 	preempt_disable();
 	scope.previous = this_cpu_read(ebpfos_function_result);
