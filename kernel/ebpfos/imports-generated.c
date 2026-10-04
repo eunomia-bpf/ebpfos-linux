@@ -23,6 +23,7 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(ebpfos_import_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_import_fget, KF_ACQUIRE | KF_RET_NULL | KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_import_fput, KF_RELEASE | KF_SLEEPABLE)
+#include "cut-imports-generated.inc"
 BTF_KFUNCS_END(ebpfos_import_ids)
 
 static int ebpfos_import_filter(const struct bpf_prog *prog, u32 id)
@@ -44,5 +45,3 @@ static int __init ebpfos_import_init(void)
 					 &ebpfos_import_set);
 }
 late_initcall(ebpfos_import_init);
-
-#include "cut-imports-generated.inc"
