@@ -16,12 +16,11 @@
 #include <linux/mutex.h>
 #include <linux/percpu.h>
 #include <linux/preempt.h>
+#include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/ibt.h>
 #include <asm/cpufeature.h>
-
-#include "component_graph.h"
 
 struct ebpfos_function_counters {
 	u64 component_calls;
@@ -31,7 +30,6 @@ struct ebpfos_function_counters {
 struct ebpfos_function_route {
 	struct list_head link;
 	struct ftrace_ops fops;
-	struct ebpfos_component_gate gate;
 	char symbol[64];
 	unsigned long native;
 	unsigned long stub;
@@ -167,7 +165,6 @@ int ebpfos_function_route_register(const char *symbol, void *stub,
 		kfree(route);
 		return -ENOMEM;
 	}
-	ebpfos_component_gate_init(&route->gate);
 	route->fops.func = ebpfos_function_ftrace;
 	route->fops.flags = FTRACE_OPS_FL_DYNAMIC |
 #ifndef CONFIG_HAVE_DYNAMIC_FTRACE_WITH_ARGS
@@ -293,19 +290,18 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 	scope.written = false;
 	scope.field_written = false;
 	scope.writeback_mask = 0;
-	if (!READ_ONCE(route->enabled) ||
-	    !ebpfos_component_gate_try_enter(&route->gate))
+	/* Disable drains the entire call, including output commit, via RCU. */
+	rcu_read_lock();
+	if (!smp_load_acquire(&route->enabled))
 		goto fallback;
 	if (writeback_size && (writeback_arg >= 11 || !args[writeback_arg] ||
 			       writeback_size > sizeof(scope.writeback) ||
 			       (copyin && writeback_size > sizeof(before)))) {
-		ebpfos_component_gate_exit(&route->gate);
 		goto fallback;
 	}
 	if (field_size && (writeback_arg >= 11 || !args[writeback_arg] ||
 			   field_size > sizeof(scope.field_value) ||
 			   field_offset > 4096 - field_size)) {
-		ebpfos_component_gate_exit(&route->gate);
 		goto fallback;
 	}
 	if (copyin)
@@ -358,10 +354,12 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 			WRITE_ONCE(route->last_provider_id, provider);
 		this_cpu_inc(route->counters->component_calls);
 	}
-	ebpfos_component_gate_exit(&route->gate);
-	if (!error)
+	if (!error) {
+		rcu_read_unlock();
 		return true;
+	}
 fallback:
+	rcu_read_unlock();
 	this_cpu_inc(route->counters->native_fallbacks);
 	return false;
 }
@@ -446,9 +444,14 @@ found:
 			ftrace_set_filter_ip(&route->fops, location, 1, 0);
 			goto out;
 		}
-		WRITE_ONCE(route->enabled, true);
+		smp_store_release(&route->enabled, true);
 	} else if (request->enable == 0 && route->enabled) {
-		WRITE_ONCE(route->enabled, false);
+		smp_store_release(&route->enabled, false);
+		/*
+		 * Import bridges enter the stub without traversing ftrace. Drain
+		 * their scopes as well before returning or reusing this route.
+		 */
+		synchronize_rcu();
 		if (route->direct_active) {
 			error = unregister_ftrace_direct(&route->fops,
 				route->entry_active ? ftrace_jmp_set(route->stub) : route->direct,
@@ -459,11 +462,6 @@ found:
 			unregister_ftrace_function(&route->fops);
 		}
 		ftrace_set_filter_ip(&route->fops, location, 1, 0);
-		error = ebpfos_component_gate_engage(&route->gate);
-		if (!error)
-			ebpfos_component_gate_abort(&route->gate);
-		if (error)
-			goto out;
 	} else if (request->enable > 1) {
 		error = -EINVAL;
 		goto out;
