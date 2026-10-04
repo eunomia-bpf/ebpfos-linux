@@ -38,7 +38,7 @@ struct ebpfos_executor_root_slot {
 	struct ebpfos_executor_root_bundle __rcu *active;
 };
 
-/* Slots have stable lifetime; readers find them under RCU and pin bindings. */
+/* Slots have stable lifetime; bundles own bindings until after an RCU grace period. */
 static DEFINE_XARRAY(ebpfos_executor_roots);
 
 static struct ebpfos_executor_root_slot *
@@ -401,7 +401,7 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 
 static struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
 	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
-	struct ebpfos_executor_root_role_snapshot *snapshot)
+	struct ebpfos_executor_root_role_snapshot *snapshot, bool pin)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_binding *binding = NULL;
@@ -415,7 +415,9 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
 			continue;
 		if (bundle->roles[role].snapshot.role_type != role_type)
 			break;
-		binding = ebpfos_binding_get(bundle->roles[role].binding);
+		binding = bundle->roles[role].binding;
+		if (pin)
+			ebpfos_binding_get(binding);
 		if (binding) {
 			*epoch = bundle->epoch;
 			*snapshot = bundle->roles[role].snapshot;
@@ -433,7 +435,7 @@ static struct ebpfos_binding *ebpfos_executor_root_role_get(
 
 	rcu_read_lock();
 	binding = ebpfos_executor_root_role_get_rcu(slot, role_type, epoch,
-						      snapshot);
+						      snapshot, true);
 	rcu_read_unlock();
 	return binding;
 }
@@ -477,7 +479,7 @@ int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 		return -EAGAIN;
 	rcu_read_lock();
 	lease->binding = ebpfos_executor_root_role_get_rcu(
-		slot, role_type, &lease->epoch, snapshot);
+		slot, role_type, &lease->epoch, snapshot, false);
 	if (!lease->binding) {
 		rcu_read_unlock();
 		ebpfos_component_gate_exit(&slot->gate);
@@ -492,7 +494,13 @@ void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 {
 	if (!lease || !lease->slot)
 		return;
-	ebpfos_binding_put(lease->binding);
+	/*
+	 * Non-sleepable leases retain RCU through invocation and its release.
+	 * The bundle's owned reference is released only after that grace period.
+	 * Sleepable leases drop RCU at acquisition and must own a reference.
+	 */
+	if (!lease->rcu_held)
+		ebpfos_binding_put(lease->binding);
 	ebpfos_component_gate_exit(&lease->slot->gate);
 	if (lease->rcu_held)
 		rcu_read_unlock();
