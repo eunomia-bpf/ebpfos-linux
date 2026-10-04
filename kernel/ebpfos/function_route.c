@@ -278,13 +278,21 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 				u64 *result)
 {
 	struct ebpfos_component_irq_frame *frame = (void *)args;
-	struct ebpfos_function_result_scope scope = {};
-	u64 before[4] = {};
+	struct ebpfos_function_result_scope scope __uninitialized;
+	u64 before[4] __uninitialized;
 	u64 epoch = 0;
 	u32 provider = 0, value = 0;
 	struct ebpfos_executor_root_slot *slot;
 	int error;
 
+	/*
+	 * All control fields are assigned before exposing this scope to kfuncs.
+	 * Payloads are read only after their completion flag/full word mask.
+	 * Copy-in snapshots are read only after the native bytes were copied.
+	 */
+	scope.written = false;
+	scope.field_written = false;
+	scope.writeback_mask = 0;
 	if (!READ_ONCE(route->enabled) ||
 	    !ebpfos_component_gate_try_enter(&route->gate))
 		goto fallback;

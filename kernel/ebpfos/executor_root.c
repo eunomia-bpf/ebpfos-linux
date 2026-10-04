@@ -475,7 +475,8 @@ int ebpfos_executor_root_lease_try_begin_slot(
 {
 	if (!lease || !snapshot)
 		return -EINVAL;
-	memset(lease, 0, sizeof(*lease));
+	/* Only a successful acquisition makes lease_end own anything. */
+	lease->slot = NULL;
 	if (!slot)
 		return -ENOENT;
 	if (!ebpfos_component_gate_try_enter(&slot->gate))
@@ -517,7 +518,7 @@ void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 	ebpfos_component_gate_exit(&lease->slot->gate);
 	if (lease->rcu_held)
 		rcu_read_unlock();
-	memset(lease, 0, sizeof(*lease));
+	lease->slot = NULL;
 }
 
 int ebpfos_executor_root_quiesce(u64 object_id, u64 expected_epoch)

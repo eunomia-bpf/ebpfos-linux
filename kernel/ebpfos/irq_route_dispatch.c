@@ -11,7 +11,8 @@ int ebpfos_irq_route_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
 	u64 *epoch, u32 *provider_id, u32 *status)
 {
-	struct ebpfos_executor_root_lease lease = {};
+	/* try_begin initializes every field consumed by a successful lease. */
+	struct ebpfos_executor_root_lease lease __uninitialized;
 	struct ebpfos_executor_root_role_snapshot snapshot;
 	struct bpf_tramp_run_ctx run_ctx = {};
 	struct ebpfos_binding *binding;
