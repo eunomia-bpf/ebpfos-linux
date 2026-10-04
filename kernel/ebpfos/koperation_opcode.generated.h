@@ -11,16 +11,17 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_READ_CR0 = 6,
 	EBPFOS_KOP_OPCODE_READ_CR2 = 7,
 	EBPFOS_KOP_OPCODE_READ_CR4 = 8,
-	EBPFOS_KOP_OPCODE_RDTSC = 9,
-	EBPFOS_KOP_OPCODE_RDTSCP = 10,
-	EBPFOS_KOP_OPCODE_RDSEED64 = 11,
-	EBPFOS_KOP_OPCODE_CPUID = 12,
-	EBPFOS_KOP_OPCODE_CLFLUSH = 13,
-	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 14,
-	EBPFOS_KOP_OPCODE_CLWB = 15,
-	EBPFOS_KOP_OPCODE_INVLPG = 16,
-	EBPFOS_KOP_OPCODE_PREFETCHT0 = 17,
-	EBPFOS_KOP_OPCODE_PREFETCHW = 18,
+	EBPFOS_KOP_OPCODE_RELOAD_CR3 = 9,
+	EBPFOS_KOP_OPCODE_RDTSC = 10,
+	EBPFOS_KOP_OPCODE_RDTSCP = 11,
+	EBPFOS_KOP_OPCODE_RDSEED64 = 12,
+	EBPFOS_KOP_OPCODE_CPUID = 13,
+	EBPFOS_KOP_OPCODE_CLFLUSH = 14,
+	EBPFOS_KOP_OPCODE_CLFLUSHOPT = 15,
+	EBPFOS_KOP_OPCODE_CLWB = 16,
+	EBPFOS_KOP_OPCODE_INVLPG = 17,
+	EBPFOS_KOP_OPCODE_PREFETCHT0 = 18,
+	EBPFOS_KOP_OPCODE_PREFETCHW = 19,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -113,6 +114,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.native_len = 3,
 		.native = { 0x0f, 0x20, 0xe0 },
 		.semantic_sha256 = { 0xfc, 0xbf, 0x8f, 0x36, 0x41, 0xd9, 0xc5, 0x67, 0x43, 0x1d, 0xb3, 0x30, 0x6d, 0x2b, 0xfe, 0x3d, 0x03, 0x75, 0xfa, 0x68, 0xf8, 0x7f, 0xb1, 0xa8, 0x24, 0x09, 0xb6, 0x49, 0x24, 0x23, 0xf2, 0x34 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV64cr",
+		.native_len = 8,
+		.native = { 0x0f, 0x20, 0xd8, 0x0f, 0x22, 0xd8, 0x31, 0xc0 },
+		.semantic_sha256 = { 0x0f, 0xc6, 0x5b, 0xff, 0xaa, 0x3f, 0x8f, 0x37, 0x95, 0x9b, 0x6f, 0xc7, 0x69, 0x50, 0x43, 0xb6, 0xe9, 0x28, 0x36, 0x32, 0xb8, 0x87, 0x36, 0x4b, 0xb7, 0x11, 0xb9, 0xcc, 0xca, 0x20, 0x2e, 0x16 },
 		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
@@ -232,6 +242,7 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(read_cr0, READ_CR0, true); \
 	X(read_cr2, READ_CR2, true); \
 	X(read_cr4, READ_CR4, true); \
+	X(reload_cr3, RELOAD_CR3, true); \
 	X(clflushopt, CLFLUSHOPT, boot_cpu_has(X86_FEATURE_CLFLUSHOPT)); \
 	X(clwb, CLWB, boot_cpu_has(X86_FEATURE_CLWB)); \
 	X(invlpg, INVLPG, true); \
