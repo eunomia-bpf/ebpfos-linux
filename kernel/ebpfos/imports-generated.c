@@ -44,3 +44,5 @@ static int __init ebpfos_import_init(void)
 					 &ebpfos_import_set);
 }
 late_initcall(ebpfos_import_init);
+
+#include "cut-imports-generated.inc"
