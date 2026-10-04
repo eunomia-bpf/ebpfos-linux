@@ -35,15 +35,15 @@ retry:
 		error = -EOPNOTSUPP;
 		goto out;
 	}
-	start = bpf_trampoline_enter(provider)(provider, &run_ctx);
+	start = binding->prog_enter(provider, &run_ctx);
 	if (!start) {
-		bpf_trampoline_exit(provider)(provider, 0, &run_ctx);
+		binding->prog_exit(provider, 0, &run_ctx);
 		error = -EBUSY;
 		goto out;
 	}
 	error = ebpfos_binding_invocation_enter(binding);
 	if (error) {
-		bpf_trampoline_exit(provider)(provider, 0, &run_ctx);
+		binding->prog_exit(provider, 0, &run_ctx);
 		if (error == -ESHUTDOWN && !attempts++) {
 			ebpfos_executor_root_lease_end(&lease);
 			goto retry;
@@ -51,7 +51,7 @@ retry:
 		goto out;
 	}
 	*status = bpf_prog_run(provider, frame);
-	bpf_trampoline_exit(provider)(provider, start, &run_ctx);
+	binding->prog_exit(provider, start, &run_ctx);
 	ebpfos_binding_invocation_exit(binding);
 	*epoch = lease.epoch;
 	*provider_id = binding->prog_id;

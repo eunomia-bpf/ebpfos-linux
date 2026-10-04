@@ -4,6 +4,7 @@
 
 #include <linux/atomic.h>
 #include <linux/bits.h>
+#include <linux/bpf.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/refcount.h>
@@ -31,6 +32,9 @@ struct ebpfos_binding {
 	u64 retired_epoch;
 	u64 retirement_snapshot;
 	struct bpf_prog *prog;
+	/* Stock runtime callbacks selected from the immutable loaded program. */
+	bpf_trampoline_enter_t prog_enter;
+	bpf_trampoline_exit_t prog_exit;
 	struct bpf_map *map;
 	struct bpf_map **maps;
 	u32 map_count;

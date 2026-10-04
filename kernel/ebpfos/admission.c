@@ -311,6 +311,8 @@ ebpfos_binding_alloc_bpf(struct bpf_prog *prog, struct bpf_map **maps,
 	refcount_set(&binding->refs, 1);
 	atomic64_set(&binding->invocation_state, 0);
 	binding->prog = prog;
+	binding->prog_enter = bpf_trampoline_enter(prog);
+	binding->prog_exit = bpf_trampoline_exit(prog);
 	binding->maps = maps;
 	binding->map_count = map_count;
 	binding->map = map_count ? maps[0] : NULL;
