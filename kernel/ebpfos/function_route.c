@@ -271,7 +271,7 @@ void ebpfos_function_route_field_writeback(struct ebpfos_function_route *route,
 	}
 }
 
-static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route,
+static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route,
 				u64 args[12], bool require_full_output,
 				u32 writeback_arg, u32 writeback_size,
 				bool copyin, u32 field_offset, u32 field_size,
