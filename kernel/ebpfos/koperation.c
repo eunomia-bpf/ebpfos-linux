@@ -83,6 +83,10 @@ __bpf_kfunc void bpf_ebpfos_kop_popf64_restore(unsigned long *flags)
 {
 	/* Only the stock IRQ-restore proof or bound JIT emission executes. */
 }
+__bpf_kfunc void bpf_ebpfos_kop_sti_restore(unsigned long *flags)
+{
+	/* Only the stock IRQ-restore proof or bound JIT emission executes. */
+}
 __bpf_kfunc u64 bpf_ebpfos_x86_read_cr0(void)
 {
 	return native_read_cr0();
@@ -261,6 +265,14 @@ BTF_KFUNCS_END(ebpfos_kprog_popf64_restore_service_ids)
 BTF_KFUNCS_START(ebpfos_kprog_popf64_restore_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_popf64_restore)
 BTF_KFUNCS_END(ebpfos_kprog_popf64_restore_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_sti_restore_service_ids)
+BTF_ID_FLAGS(func, bpf_local_irq_restore)
+BTF_KFUNCS_END(ebpfos_kprog_sti_restore_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_sti_restore_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_sti_restore)
+BTF_KFUNCS_END(ebpfos_kprog_sti_restore_ids)
 
 BTF_KFUNCS_START(ebpfos_kprog_read_cr0_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_read_cr0)
@@ -1475,12 +1487,15 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 #ifdef CONFIG_X86
 	if (ebpfos_kprog_cli_save_service_ids.cnt != 1 ||
-	    ebpfos_kprog_popf64_restore_service_ids.cnt != 1)
+	    ebpfos_kprog_popf64_restore_service_ids.cnt != 1 ||
+	    ebpfos_kprog_sti_restore_service_ids.cnt != 1)
 		return -EINVAL;
 	ebpfos_kop_cli_save.proof_kfunc_id =
 		ebpfos_kprog_cli_save_service_ids.pairs[0].id;
 	ebpfos_kop_popf64_restore.proof_kfunc_id =
 		ebpfos_kprog_popf64_restore_service_ids.pairs[0].id;
+	ebpfos_kop_sti_restore.proof_kfunc_id =
+		ebpfos_kprog_sti_restore_service_ids.pairs[0].id;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SCHED_CLS,
 					    &ebpfos_kprog_cli_save_set);
 	if (err)
@@ -1495,6 +1510,14 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_popf64_restore_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SCHED_CLS,
+					    &ebpfos_kprog_sti_restore_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_sti_restore_set);
 	if (err)
 		return err;
 #define EBPFOS_REGISTER_READ_CR(number) \
