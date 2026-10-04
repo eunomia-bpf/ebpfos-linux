@@ -22,15 +22,19 @@ void ebpfos_function_route_writeback_word(struct ebpfos_function_route *route,
 					 u64 token, u32 arg, u32 word, u64 value);
 void ebpfos_function_route_field_writeback(struct ebpfos_function_route *route,
 					   u64 value);
+/*
+ * The generated caller owns a writable frame for this non-sleepable call.
+ * Words 0..10 are native arguments; word 11 is scratch for the call token.
+ */
 bool ebpfos_function_route_call(struct ebpfos_function_route *route,
-				const u64 args[12], bool require_full_output,
+				u64 args[12], bool require_full_output,
 				u64 *result);
 bool ebpfos_function_route_call_writeback(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 size, u64 *result);
+				u64 args[12], u32 arg, u32 size, u64 *result);
 bool ebpfos_function_route_call_inout(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 size, u64 *result);
+				u64 args[12], u32 arg, u32 size, u64 *result);
 bool ebpfos_function_route_call_field(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 offset, u32 size,
+				u64 args[12], u32 arg, u32 offset, u32 size,
 				u64 *result);
 #ifdef CONFIG_FUNCTION_TRACER
 int ebpfos_function_route_ioctl(struct ebpfos_ioc_function_route *request);

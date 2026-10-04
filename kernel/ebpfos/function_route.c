@@ -256,12 +256,12 @@ void ebpfos_function_route_field_writeback(struct ebpfos_function_route *route,
 }
 
 static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route,
-				const u64 args[12], bool require_full_output,
+				u64 args[12], bool require_full_output,
 				u32 writeback_arg, u32 writeback_size,
 				bool copyin, u32 field_offset, u32 field_size,
 				u64 *result)
 {
-	struct ebpfos_component_irq_frame frame = {};
+	struct ebpfos_component_irq_frame *frame = (void *)args;
 	struct ebpfos_function_result_scope scope = {};
 	u64 before[4] = {};
 	u64 epoch = 0;
@@ -286,21 +286,20 @@ static bool ebpfos_function_route_call_inner(struct ebpfos_function_route *route
 	if (copyin)
 		memcpy(before, (void *)(unsigned long)args[writeback_arg],
 		       writeback_size);
-	memcpy(frame.args, args, sizeof(frame.args));
 	scope.token = atomic64_inc_return(&ebpfos_function_token);
 	scope.route = route;
-	scope.args = frame.args;
+	scope.args = frame->args;
 	scope.writeback_arg = writeback_arg;
 	scope.writeback_size = writeback_size;
 	scope.field_arg = writeback_arg;
 	scope.field_offset = field_offset;
 	scope.field_size = field_size;
-	frame.args[11] = scope.token;
+	frame->args[11] = scope.token;
 	preempt_disable();
 	scope.previous = this_cpu_read(ebpfos_function_result);
 	this_cpu_write(ebpfos_function_result, &scope);
 	error = ebpfos_irq_route_call(READ_ONCE(route->object_id),
-		READ_ONCE(route->role_type), &frame, &epoch, &provider, &value);
+		READ_ONCE(route->role_type), frame, &epoch, &provider, &value);
 	this_cpu_write(ebpfos_function_result, scope.previous);
 	preempt_enable();
 	if (!error && require_full_output && !scope.written)
@@ -337,7 +336,7 @@ fallback:
 }
 
 bool ebpfos_function_route_call(struct ebpfos_function_route *route,
-				const u64 args[12], bool require_full_output,
+				u64 args[12], bool require_full_output,
 				u64 *result)
 {
 	return ebpfos_function_route_call_inner(route, args, require_full_output,
@@ -345,21 +344,21 @@ bool ebpfos_function_route_call(struct ebpfos_function_route *route,
 }
 
 bool ebpfos_function_route_call_writeback(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 size, u64 *result)
+				u64 args[12], u32 arg, u32 size, u64 *result)
 {
 	return ebpfos_function_route_call_inner(route, args, true, arg, size,
 					 false, 0, 0, result);
 }
 
 bool ebpfos_function_route_call_inout(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 size, u64 *result)
+				u64 args[12], u32 arg, u32 size, u64 *result)
 {
 	return ebpfos_function_route_call_inner(route, args, true, arg, size,
 					 true, 0, 0, result);
 }
 
 bool ebpfos_function_route_call_field(struct ebpfos_function_route *route,
-				const u64 args[12], u32 arg, u32 offset, u32 size,
+				u64 args[12], u32 arg, u32 offset, u32 size,
 				u64 *result)
 {
 	return ebpfos_function_route_call_inner(route, args, true, arg, 0,
