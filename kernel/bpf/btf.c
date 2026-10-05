@@ -7539,6 +7539,58 @@ static u8 __get_type_fmodel_flags(const struct btf_type *t)
 	return flags;
 }
 
+/* Integer aggregates fitting a single native return register need no hidden
+ * result pointer. Never classify pointer fields or an SSE/x87/MEMORY return
+ * as integer bits. Offsets are relative to the complete returned object.
+ */
+static bool btf_integer_return(struct btf *btf, u32 id, u32 offset, u32 depth)
+{
+	const struct btf_type *type;
+	u32 i;
+
+	if (depth > MAX_RESOLVE_DEPTH)
+		return false;
+	type = btf_type_skip_modifiers(btf, id, NULL);
+	if (!type)
+		return false;
+	if (btf_type_is_int(type) || btf_is_any_enum(type))
+		return type->size && type->size <= 8 &&
+			is_power_of_2(type->size) && !(offset % type->size);
+	if (btf_type_is_array(type)) {
+		const struct btf_array *array = btf_type_array(type);
+		const struct btf_type *element = btf_type_by_id(btf, array->type);
+		u32 size;
+
+		element = btf_resolve_size(btf, element, &size);
+		if (IS_ERR(element) || !size || size > 8 || array->nelems > 8 / size)
+			return false;
+		for (i = 0; i < array->nelems; i++)
+			if (!btf_integer_return(btf, array->type, offset + i * size,
+						depth + 1))
+				return false;
+		return array->nelems != 0;
+	}
+	if (!btf_type_is_struct(type) || !type->size || type->size > 8)
+		return false;
+	for (i = 0; i < btf_type_vlen(type); i++) {
+		const struct btf_member *member = &btf_type_member(type)[i];
+		u32 bits = __btf_member_bit_offset(type, member);
+
+		if (__btf_member_bitfield_size(type, member)) {
+			const struct btf_type *field = btf_type_skip_modifiers(btf,
+								member->type, NULL);
+
+			if (!field || (!btf_type_is_int(field) && !btf_is_any_enum(field)))
+				return false;
+			continue;
+		}
+		if (bits % 8 || !btf_integer_return(btf, member->type,
+						  offset + bits / 8, depth + 1))
+			return false;
+	}
+	return btf_type_vlen(type) != 0;
+}
+
 int btf_distill_func_proto(struct bpf_verifier_log *log,
 			   struct btf *btf,
 			   const struct btf_type *func,
@@ -7572,7 +7624,9 @@ int btf_distill_func_proto(struct bpf_verifier_log *log,
 		return -EINVAL;
 	}
 	ret = __get_type_size(btf, func->type, &t);
-	if (ret < 0 || btf_type_is_struct(t)) {
+	if (ret < 0 || (btf_type_is_struct(t) &&
+		       (!IS_ENABLED(CONFIG_X86_64) ||
+			!btf_integer_return(btf, func->type, 0, 0)))) {
 		bpf_log(log,
 			"The function %s return type %s is unsupported.\n",
 			tname, btf_type_str(t));

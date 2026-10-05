@@ -194,9 +194,20 @@ int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 		/* Stock global subprogram returns are scalar. A matching BTF
 		 * pointer declaration cannot authorize scalar bits as a pointer.
 		 */
-		if (!btf_type_is_void(result) && !btf_type_is_int(result) &&
-		    !btf_is_any_enum(result))
+		if (btf_type_is_struct(result)) {
+			struct btf_func_model model;
+
+			/* The native model admits only pointer-free, aligned integer
+			 * aggregates fitting this architecture's return register.
+			 */
+			error = ebpfos_component_entry_model(prog->aux->attach_btf,
+							     prog->aux->attach_btf_id, &model);
+			if (error)
+				return error;
+		} else if (!btf_type_is_void(result) && !btf_type_is_int(result) &&
+			   !btf_is_any_enum(result)) {
 			return -EOPNOTSUPP;
+		}
 		/* Stock CO-RE matching includes prototype, scalar widths and
 		 * pointee identities. No verifier result or type is changed.
 		 */
