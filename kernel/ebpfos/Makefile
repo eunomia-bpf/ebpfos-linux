@@ -7,6 +7,9 @@ obj-$(CONFIG_FUNCTION_TRACER) += function_route.o function_stubs_generated.o
 obj-y += services.o
 obj-y += atomic_byte.o
 obj-y += imports-generated.o
+ifneq ($(EBPFOS_CUT_IMPORTS_INCLUDE),)
+CFLAGS_imports-generated.o += -DEBPFOS_CUT_IMPORTS_INCLUDE=\"$(EBPFOS_CUT_IMPORTS_INCLUDE)\"
+endif
 obj-y += fops_route.o
 obj-$(CONFIG_NET) += netdev_route.o
 obj-$(CONFIG_BLOCK) += bops_route.o mqops_route.o restricted_block.o
