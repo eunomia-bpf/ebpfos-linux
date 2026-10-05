@@ -18,6 +18,8 @@ struct ebpfos_executor_root_role {
 	struct ebpfos_admission *grant;
 	/* Immutable stock JIT entry, selected before publication. */
 	bpf_func_t entry;
+	/* Native ABI subprogram from this same verified image, or NULL. */
+	void *typed_entry;
 	/* Loaded calls select scope use; opaque native calls retain a scope. */
 	bool needs_steps;
 	/* Stock-checked unreferenced kptr channel for a native struct pointer. */

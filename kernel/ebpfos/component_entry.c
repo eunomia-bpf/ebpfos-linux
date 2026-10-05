@@ -79,6 +79,13 @@ retry:
 	}
 	binding = target->binding;
 	prog = binding->prog;
+	/* A typed export's admission root discards its native result. Its
+	 * actual C ABI must be invoked through the typed lease entry instead.
+	 */
+	if (target->typed_entry) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
 	/* The native arguments must match the BTF contract that provided pointer
 	 * authority to stock verification. A different target is a pre-entry
 	 * miss, never an invitation to reinterpret its typed context.

@@ -4,6 +4,7 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/ebpfos.h>
+#include <linux/ebpfos_typed.h>
 #include <linux/errno.h>
 #include <linux/filter.h>
 #include <linux/module.h>
@@ -133,7 +134,9 @@ static int ebpfos_executor_root_role_fill(
 		ebpfos_admission_put(grant);
 		return -EUCLEAN;
 	}
-	error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
+	error = ebpfos_component_typed_export(binding->prog, &role->typed_entry);
+	if (!error && !role->typed_entry)
+		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
 	if (error) {
 		ebpfos_binding_put(binding);
 		ebpfos_admission_put(grant);
