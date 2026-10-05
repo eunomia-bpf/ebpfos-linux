@@ -55,16 +55,19 @@ retry:
 	}
 	binding = target->binding;
 	prog = binding->prog;
-	/* Keep the stock recursion guard, run context and migration protection. */
-	start = binding->prog_enter(prog, &run_ctx);
+	/* Publication only makes non-sleepable RAW_TRACEPOINT roles callable
+	 * here. bpf_trampoline_enter/exit select these stock callbacks for that
+	 * type. Call them directly without changing their guard or accounting.
+	 */
+	start = __bpf_prog_enter_recur(prog, &run_ctx);
 	if (!start) {
-		binding->prog_exit(prog, 0, &run_ctx);
+		__bpf_prog_exit_recur(prog, 0, &run_ctx);
 		error = -EBUSY;
 		goto out;
 	}
 	error = ebpfos_binding_invocation_enter(binding);
 	if (error) {
-		binding->prog_exit(prog, 0, &run_ctx);
+		__bpf_prog_exit_recur(prog, 0, &run_ctx);
 		/* Publication may close the old binding after we observed it. */
 		if (error == -ESHUTDOWN && !retries++)
 			goto retry;
@@ -81,7 +84,7 @@ retry:
 		*result = target->entry(context, prog->insnsi);
 	} while (step.pending);
 	ebpfos_step_exit(&step);
-	binding->prog_exit(prog, start, &run_ctx);
+	__bpf_prog_exit_recur(prog, start, &run_ctx);
 	/* This private path owns one count from its successful enter above and
 	 * releases it exactly once. Other paired exits cannot consume that count;
 	 * retirement changes only bit 63. Subtraction therefore cannot borrow into

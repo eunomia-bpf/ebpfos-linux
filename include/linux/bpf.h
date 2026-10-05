@@ -1442,6 +1442,10 @@ int __must_check arch_protect_bpf_trampoline(void *image, unsigned int size);
 int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 			     struct bpf_tramp_links *tlinks, void *func_addr);
 
+u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog,
+				 struct bpf_tramp_run_ctx *run_ctx);
+void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
+				 struct bpf_tramp_run_ctx *run_ctx);
 u64 notrace __bpf_prog_enter_sleepable_recur(struct bpf_prog *prog,
 					     struct bpf_tramp_run_ctx *run_ctx);
 void notrace __bpf_prog_exit_sleepable_recur(struct bpf_prog *prog, u64 start,
