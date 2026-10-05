@@ -24,6 +24,7 @@ struct ebpfos_component_call {
 	u64 start;
 	int fault;
 	bool step_active;
+	bool context_root;
 };
 
 static DEFINE_PER_CPU(struct ebpfos_component_call *, ebpfos_active_typed_call);
@@ -45,8 +46,18 @@ static int ebpfos_component_context_call(void *cookie, const void *context,
 	struct ebpfos_step_scope *step;
 	typedef u64 (__bpfcall *jit_call_t)(const void *, const struct bpf_insn *);
 
-	if (!call || call->program != prog || current->bpf_ctx != &call->run.run_ctx)
+	if (!call || current->bpf_ctx != &call->run.run_ctx)
 		return -EPROTOTYPE;
+	/* The native marshaller's fallback value is only an unwind placeholder.
+	 * Rejecting another program or backend must reach typed_exit's separate
+	 * fault status, without faulting an unrelated interrupted BPF run.
+	 * Context publication always supplies an initialized result scope.
+	 */
+	if (call->program != prog || !call->context_root) {
+		if (!call->fault)
+			call->fault = -EPROTOTYPE;
+		return -EPROTOTYPE;
+	}
 	step = &call->step;
 	ebpfos_step_result_reset(step);
 	/* Execute the very root whose native context loads and result stores
@@ -220,6 +231,7 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 	if (error)
 		goto release_run;
 	call->step_active = target->needs_steps;
+	call->context_root = target->context_image != NULL;
 	if (call->step_active) {
 		ebpfos_step_enter(&call->step, call->program->aux);
 		call->step.pointer_result = target->pointer_result;
