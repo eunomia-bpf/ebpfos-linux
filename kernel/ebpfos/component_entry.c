@@ -13,6 +13,7 @@ struct ebpfos_native_entry {
 	u64 role;
 	struct btf *btf;
 	u32 func_id;
+	bool pointer_result;
 	void *image;
 };
 
@@ -82,9 +83,10 @@ retry:
 	 * authority to stock verification. A different target is a pre-entry
 	 * miss, never an invitation to reinterpret its typed context.
 	 */
-	if (prog->type == BPF_PROG_TYPE_TRACING &&
+	if ((native && native->pointer_result && !target->pointer_result) ||
+	    (prog->type == BPF_PROG_TYPE_TRACING &&
 	    (!native || prog->aux->attach_btf != native->btf ||
-	     prog->aux->attach_btf_id != native->func_id)) {
+	     prog->aux->attach_btf_id != native->func_id))) {
 		error = -EPROTOTYPE;
 		goto out;
 	}
@@ -113,9 +115,21 @@ retry:
 	cant_migrate();
 	if (target->needs_steps) {
 		ebpfos_step_enter(&step, prog->aux);
+		step.pointer_result = target->pointer_result;
+		if (target->pointer_result) {
+			u32 key = 0;
+
+			/* A one-entry per-CPU array always has key zero. The scope
+			 * pins this CPU through all resumable entries.
+			 */
+			step.pointer_value = target->pointer_result->ops->map_lookup_elem(
+				target->pointer_result, &key);
+		}
 		do {
 			step.pending = false;
 			step.has_result = false;
+			if (step.pointer_value)
+				WRITE_ONCE(*step.pointer_value, NULL);
 			/* Stock JIT returns the full BPF R0 in the native result
 			 * register, as the struct_ops trampoline does. No interpreter
 			 * or native-signature function is called through this ABI.
@@ -123,6 +137,11 @@ retry:
 			*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 			if (prog->type == BPF_PROG_TYPE_TRACING)
 				*result = step.has_result ? step.result : 0;
+			/* Even a provider that omits capture cannot retain a native
+			 * caller's borrowed pointer into the next invocation.
+			 */
+			if (step.pointer_value)
+				WRITE_ONCE(*step.pointer_value, NULL);
 		} while (step.pending);
 		ebpfos_step_exit(&step);
 	} else {
@@ -211,11 +230,15 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 	}
 	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 8)
 		return -EOPNOTSUPP;
-	/* The stock scalar result service cannot transfer pointer ownership.
-	 * Keep that limitation explicit instead of returning forged pointer bits.
-	 */
-	if (btf_type_is_ptr(btf_type_skip_modifiers(btf, prototype->type, NULL)))
-		return -EOPNOTSUPP;
+	if (btf_type_is_ptr(btf_type_skip_modifiers(btf, prototype->type, NULL))) {
+		const struct btf_type *pointee = btf_type_resolve_ptr(btf, prototype->type, NULL);
+
+		/* Stock kptr fields accept pointers to structs, never arbitrary
+		 * scalar addresses. Owned results need a transfer contract too.
+		 */
+		if (!pointee || !btf_type_is_struct(pointee))
+			return -EOPNOTSUPP;
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_entry_model);
@@ -234,6 +257,7 @@ ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
 {
 	struct btf_func_model model;
 	struct ebpfos_native_entry *entry;
+	const struct btf_type *prototype;
 	int error;
 
 	if (!slot || !fallback)
@@ -249,6 +273,9 @@ ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
 	entry->btf = btf;
 	btf_get(btf);
 	entry->func_id = func_id;
+	prototype = btf_type_by_id(btf, btf_type_by_id(btf, func_id)->type);
+	entry->pointer_result = btf_type_is_ptr(
+		btf_type_skip_modifiers(btf, prototype->type, NULL));
 	entry->image = arch_alloc_bpf_trampoline(PAGE_SIZE);
 	if (!entry->image) {
 		error = -ENOMEM;

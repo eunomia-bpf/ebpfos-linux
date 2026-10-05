@@ -7,6 +7,7 @@
 
 struct bpf_prog_aux;
 struct bpf_prog;
+struct bpf_map;
 
 /* Conservative publication-time selection; unknown targets retain a scope. */
 bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog);
@@ -15,6 +16,8 @@ bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog);
 struct ebpfos_step_scope {
 	struct ebpfos_step_scope *previous;
 	const struct bpf_prog_aux *owner;
+	struct bpf_map *pointer_result;
+	void **pointer_value;
 	bool valid;
 	bool pending;
 	bool has_result;
@@ -31,6 +34,8 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 	preempt_disable();
 	scope->previous = this_cpu_read(ebpfos_active_step);
 	scope->owner = owner;
+	scope->pointer_result = NULL;
+	scope->pointer_value = NULL;
 	scope->valid = false;
 	scope->pending = false;
 	scope->has_result = false;

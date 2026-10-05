@@ -20,6 +20,8 @@ struct ebpfos_executor_root_role {
 	bpf_func_t entry;
 	/* Loaded calls select scope use; opaque native calls retain a scope. */
 	bool needs_steps;
+	/* Stock-checked unreferenced kptr channel for a native struct pointer. */
+	struct bpf_map *pointer_result;
 };
 
 struct ebpfos_executor_root_bundle {

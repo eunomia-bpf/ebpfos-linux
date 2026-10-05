@@ -26,6 +26,23 @@ __bpf_kfunc void bpf_ebpfos_component_result(u64 result, struct bpf_prog_aux *au
 	}
 }
 
+/* The map's kptr field, not a scalar argument, carries pointer authority.
+ * Publication checked it against the native result type; the stock verifier
+ * checks every store and rejects stack, map-value and fabricated addresses.
+ * Consume immediately into this logical invocation so nested calls cannot
+ * overwrite an earlier result. No ownership is transferred by UNREF kptrs.
+ */
+__bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
+						   struct bpf_prog_aux *aux)
+{
+	struct ebpfos_step_scope *scope = this_cpu_read(ebpfos_active_step);
+
+	if (!scope || scope->owner != aux || scope->pointer_result != map__map)
+		return;
+	scope->result = (unsigned long)xchg(scope->pointer_value, NULL);
+	scope->has_result = true;
+}
+
 __bpf_kfunc int bpf_ebpfos_function_step_read(void *dst, u32 dst__sz,
 					  struct bpf_prog_aux *aux)
 {
@@ -99,12 +116,30 @@ BTF_KFUNCS_START(ebpfos_step_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_step_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_step_save)
 BTF_ID_FLAGS(func, bpf_ebpfos_component_result)
+BTF_ID_FLAGS(func, bpf_ebpfos_component_pointer_result)
 BTF_KFUNCS_END(ebpfos_step_ids)
+
+BTF_ID_LIST(ebpfos_result_service_ids)
+BTF_ID(func, bpf_ebpfos_component_result)
+BTF_ID(func, bpf_ebpfos_component_pointer_result)
 
 static int ebpfos_step_filter(const struct bpf_prog *prog, u32 id)
 {
 	if (!btf_id_set8_contains(&ebpfos_step_ids, id))
 		return 0;
+	if (prog && prog->type == BPF_PROG_TYPE_TRACING &&
+	    prog->aux && prog->aux->attach_func_proto) {
+		const struct btf_type *result = btf_type_skip_modifiers(
+			prog->aux->attach_btf, prog->aux->attach_func_proto->type, NULL);
+		bool pointer = btf_type_is_ptr(result);
+
+		if ((id == ebpfos_result_service_ids[0] && pointer) ||
+		    (id == ebpfos_result_service_ids[1] && !pointer))
+			return 1;
+	}
+	if (id == ebpfos_result_service_ids[1] &&
+	    (!prog || prog->type != BPF_PROG_TYPE_TRACING))
+		return 1;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
 	       (prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
 		!(prog->type == BPF_PROG_TYPE_TRACING &&

@@ -73,12 +73,55 @@ static void ebpfos_executor_root_retire_rcu(struct rcu_head *rcu)
 	schedule_work(&bundle->retire_work);
 }
 
+static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
+					    struct bpf_map **result)
+{
+	const struct btf_type *pointee;
+	u32 id, index;
+
+	*result = NULL;
+	if (prog->type != BPF_PROG_TYPE_TRACING)
+		return 0;
+	pointee = btf_type_resolve_ptr(prog->aux->attach_btf,
+				       prog->aux->attach_func_proto->type, &id);
+	if (!pointee)
+		return 0;
+	if (!btf_type_is_struct(pointee))
+		return -EOPNOTSUPP;
+	for (index = 0; index < prog->aux->used_map_cnt; index++) {
+		struct bpf_map *map = prog->aux->used_maps[index];
+		const struct btf_field *field;
+
+		if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY ||
+		    map->max_entries != 1 || map->value_size != sizeof(void *) ||
+		    !map->record || map->record->cnt != 1)
+			continue;
+		field = &map->record->fields[0];
+		/* The native caller receives exactly the type stock verification
+		 * checked at each kptr store. Never reinterpret another map field.
+		 */
+		if (field->offset || field->type != BPF_KPTR_UNREF ||
+		    !btf_types_are_same(prog->aux->attach_btf, id,
+				field->kptr.btf, field->kptr.btf_id))
+			continue;
+		/* Names can be absent (including on the observed libbpf load).
+		 * The verified BTF shape identifies the result channel. Never
+		 * guess between two equally compatible channels.
+		 */
+		if (*result)
+			return -EPROTOTYPE;
+		*result = map;
+	}
+	return *result ? 0 : -EPROTOTYPE;
+}
+
 static int ebpfos_executor_root_role_fill(
 	struct ebpfos_executor_root_role *role,
 	const struct ebpfos_executor_root_role_request *request)
 {
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
+	int error;
 
 	if (!role || !request || request->admission_fd < 0)
 		return -EINVAL;
@@ -89,6 +132,12 @@ static int ebpfos_executor_root_role_fill(
 	if (!binding) {
 		ebpfos_admission_put(grant);
 		return -EUCLEAN;
+	}
+	error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
+	if (error) {
+		ebpfos_binding_put(binding);
+		ebpfos_admission_put(grant);
+		return error;
 	}
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;
