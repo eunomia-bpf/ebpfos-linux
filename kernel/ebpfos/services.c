@@ -1533,14 +1533,6 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fpu_wait)
-#endif
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or16)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xor8_sign)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_fetch_add16)
-#ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
@@ -1548,10 +1540,20 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_send_ipi)
 #endif
 BTF_KFUNCS_END(ebpfos_l1_nonsleep_services)
 
+BTF_KFUNCS_START(ebpfos_l1_atomic_services)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_or16)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_and8)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xor8_sign)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_xchg16)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_atomic_fetch_add16)
+BTF_KFUNCS_END(ebpfos_l1_atomic_services)
+
 bool ebpfos_effect_kfunc_allowed(u32 btf_id)
 {
 	return btf_id_set8_contains(&ebpfos_l1_services, btf_id) ||
-		btf_id_set8_contains(&ebpfos_l1_nonsleep_services, btf_id);
+		btf_id_set8_contains(&ebpfos_l1_nonsleep_services, btf_id) ||
+		btf_id_set8_contains(&ebpfos_l1_atomic_services, btf_id);
 }
 
 static int ebpfos_effect_kfunc_filter(const struct bpf_prog *prog, u32 id)
@@ -1582,6 +1584,21 @@ static const struct btf_kfunc_id_set ebpfos_nonsleep_kfunc_set = {
 	.filter = ebpfos_nonsleep_kfunc_filter,
 };
 
+static int ebpfos_atomic_kfunc_filter(const struct bpf_prog *prog, u32 id)
+{
+	if (!btf_id_set8_contains(&ebpfos_l1_atomic_services, id))
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       (prog->type != BPF_PROG_TYPE_SYSCALL &&
+		prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT);
+}
+
+static const struct btf_kfunc_id_set ebpfos_atomic_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &ebpfos_l1_atomic_services,
+	.filter = ebpfos_atomic_kfunc_filter,
+};
+
 static int __init ebpfos_effect_init(void)
 {
 	int err;
@@ -1590,8 +1607,16 @@ static int __init ebpfos_effect_init(void)
 					 &ebpfos_effect_kfunc_set);
 	if (err)
 		return err;
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_nonsleep_kfunc_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_atomic_kfunc_set);
+	if (err)
+		return err;
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT,
+					 &ebpfos_atomic_kfunc_set);
 }
 late_initcall(ebpfos_effect_init);
 

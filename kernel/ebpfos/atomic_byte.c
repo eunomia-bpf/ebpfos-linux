@@ -30,7 +30,8 @@ static int ebpfos_atomic_byte_filter(const struct bpf_prog *prog, u32 id)
 	if (!btf_id_set8_contains(&ebpfos_atomic_byte_ids, id))
 		return 0;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_SYSCALL;
+	       (prog->type != BPF_PROG_TYPE_SYSCALL &&
+		prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT);
 }
 
 static const struct btf_kfunc_id_set ebpfos_atomic_byte_set = {
@@ -41,7 +42,13 @@ static const struct btf_kfunc_id_set ebpfos_atomic_byte_set = {
 
 static int __init ebpfos_atomic_byte_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+	int err;
+
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_atomic_byte_set);
+	if (err)
+		return err;
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT,
 					 &ebpfos_atomic_byte_set);
 }
 late_initcall(ebpfos_atomic_byte_init);
