@@ -6,6 +6,7 @@
 #include <linux/ebpfos.h>
 #include <linux/errno.h>
 #include <linux/filter.h>
+#include "executor_root.h"
 
 /* Shared implementation for typed entries and the exported IRQ API. */
 static __always_inline int
@@ -27,8 +28,8 @@ ebpfos_irq_route_call_slot_steps_ctx(struct ebpfos_executor_root_slot *slot, u64
 		return -EINVAL;
 retry:
 	if (rcu_borrowed)
-		error = ebpfos_executor_root_lease_try_begin_slot_rcu(slot, role,
-			&lease, &snapshot);
+		error = ebpfos_executor_root_lease_try_begin_slot_inner(slot, role,
+			&lease, &snapshot, true);
 	else
 		error = ebpfos_executor_root_lease_try_begin_slot(slot, role,
 			&lease, &snapshot);

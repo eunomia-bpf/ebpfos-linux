@@ -15,28 +15,7 @@
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
 #include <uapi/linux/ebpfos_root.h>
-#include "component_graph.h"
-
-struct ebpfos_executor_root_role {
-	struct ebpfos_executor_root_role_snapshot snapshot;
-	struct ebpfos_binding *binding;
-	struct ebpfos_admission *grant;
-};
-
-struct ebpfos_executor_root_bundle {
-	struct rcu_head rcu;
-	struct work_struct retire_work;
-	u64 object_id;
-	u64 epoch;
-	u32 role_count;
-	struct ebpfos_executor_root_role roles[];
-};
-
-struct ebpfos_executor_root_slot {
-	spinlock_t lock;
-	struct ebpfos_component_gate gate;
-	struct ebpfos_executor_root_bundle __rcu *active;
-};
+#include "executor_root.h"
 
 /* Slots have stable lifetime; bundles own bindings until after an RCU grace period. */
 static DEFINE_XARRAY(ebpfos_executor_roots);
@@ -399,34 +378,6 @@ static int ebpfos_executor_call_size(struct ebpfos_executor_call *call,
 	return 0;
 }
 
-static struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
-	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
-	struct ebpfos_executor_root_role_snapshot *snapshot, bool pin)
-{
-	struct ebpfos_executor_root_bundle *bundle;
-	struct ebpfos_binding *binding = NULL;
-	u32 role;
-
-	bundle = rcu_dereference(slot->active);
-	if (!bundle)
-		return NULL;
-	for (role = 0; role < bundle->role_count; role++) {
-		if (bundle->roles[role].snapshot.role_type < role_type)
-			continue;
-		if (bundle->roles[role].snapshot.role_type != role_type)
-			break;
-		binding = bundle->roles[role].binding;
-		if (pin)
-			ebpfos_binding_get(binding);
-		if (binding) {
-			*epoch = bundle->epoch;
-			*snapshot = bundle->roles[role].snapshot;
-		}
-		break;
-	}
-	return binding;
-}
-
 static struct ebpfos_binding *ebpfos_executor_root_role_get(
 	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
 	struct ebpfos_executor_root_role_snapshot *snapshot)
@@ -466,43 +417,6 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id)
 {
 	return object_id ? xa_load(&ebpfos_executor_roots, object_id) : NULL;
-}
-
-static __always_inline int ebpfos_executor_root_lease_try_begin_slot_inner(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot, bool borrowed)
-{
-	if (!lease || !snapshot)
-		return -EINVAL;
-	/* Only a successful acquisition makes lease_end own anything. */
-	lease->slot = NULL;
-	if (!slot)
-		return -ENOENT;
-	if (!borrowed)
-		rcu_read_lock();
-	/*
-	 * This lease cannot sleep. Its own or its caller's RCU hold protects
-	 * the bundle. Quiesce closes
-	 * admission before a grace period, which drains these readers without
-	 * modifying the shared gate count on every call.
-	 */
-	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
-		if (!borrowed)
-			rcu_read_unlock();
-		return -EAGAIN;
-	}
-	lease->binding = ebpfos_executor_root_role_get_rcu(
-		slot, role_type, &lease->epoch, snapshot, false);
-	if (!lease->binding) {
-		if (!borrowed)
-			rcu_read_unlock();
-		return -ENOENT;
-	}
-	lease->slot = slot;
-	lease->rcu_held = true;
-	lease->rcu_borrowed = borrowed;
-	return 0;
 }
 
 int ebpfos_executor_root_lease_try_begin_slot(
