@@ -468,10 +468,10 @@ struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id)
 	return object_id ? xa_load(&ebpfos_executor_roots, object_id) : NULL;
 }
 
-int ebpfos_executor_root_lease_try_begin_slot(
+static __always_inline int ebpfos_executor_root_lease_try_begin_slot_inner(
 	struct ebpfos_executor_root_slot *slot, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot)
+	struct ebpfos_executor_root_role_snapshot *snapshot, bool borrowed)
 {
 	if (!lease || !snapshot)
 		return -EINVAL;
@@ -479,25 +479,48 @@ int ebpfos_executor_root_lease_try_begin_slot(
 	lease->slot = NULL;
 	if (!slot)
 		return -ENOENT;
-	rcu_read_lock();
+	if (!borrowed)
+		rcu_read_lock();
 	/*
-	 * This lease cannot sleep and retains RCU until release. Quiesce closes
+	 * This lease cannot sleep. Its own or its caller's RCU hold protects
+	 * the bundle. Quiesce closes
 	 * admission before a grace period, which drains these readers without
 	 * modifying the shared gate count on every call.
 	 */
 	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
-		rcu_read_unlock();
+		if (!borrowed)
+			rcu_read_unlock();
 		return -EAGAIN;
 	}
 	lease->binding = ebpfos_executor_root_role_get_rcu(
 		slot, role_type, &lease->epoch, snapshot, false);
 	if (!lease->binding) {
-		rcu_read_unlock();
+		if (!borrowed)
+			rcu_read_unlock();
 		return -ENOENT;
 	}
 	lease->slot = slot;
 	lease->rcu_held = true;
+	lease->rcu_borrowed = borrowed;
 	return 0;
+}
+
+int ebpfos_executor_root_lease_try_begin_slot(
+	struct ebpfos_executor_root_slot *slot, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	return ebpfos_executor_root_lease_try_begin_slot_inner(
+		slot, role_type, lease, snapshot, false);
+}
+
+int ebpfos_executor_root_lease_try_begin_slot_rcu(
+	struct ebpfos_executor_root_slot *slot, u64 role_type,
+	struct ebpfos_executor_root_lease *lease,
+	struct ebpfos_executor_root_role_snapshot *snapshot)
+{
+	return ebpfos_executor_root_lease_try_begin_slot_inner(
+		slot, role_type, lease, snapshot, true);
 }
 
 int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
@@ -515,14 +538,15 @@ void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 	if (!lease || !lease->slot)
 		return;
 	/*
-	 * Non-sleepable leases retain RCU through invocation and its release.
+	 * Non-sleepable leases use owned or caller-held RCU through invocation.
+	 * A borrowed lease never releases its caller's hold.
 	 * The bundle's owned reference is released only after that grace period.
 	 * Sleepable leases drop RCU at acquisition and must own a reference.
 	 */
 	if (!lease->rcu_held) {
 		ebpfos_binding_put(lease->binding);
 		ebpfos_component_gate_exit(&lease->slot->gate);
-	} else {
+	} else if (!lease->rcu_borrowed) {
 		rcu_read_unlock();
 	}
 	lease->slot = NULL;

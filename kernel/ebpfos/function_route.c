@@ -332,7 +332,7 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 		slot = ebpfos_executor_root_lookup(READ_ONCE(route->object_id));
 		WRITE_ONCE(route->root_slot, slot);
 	}
-	error = ebpfos_irq_route_call_slot_inner(slot,
+	error = ebpfos_irq_route_call_slot_rcu(slot,
 		READ_ONCE(route->role_type), frame, &epoch, &provider, &value);
 	this_cpu_write(ebpfos_function_result, scope.previous);
 	preempt_enable();
