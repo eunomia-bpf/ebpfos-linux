@@ -47,16 +47,13 @@ static int ebpfos_component_context_call(void *cookie, const void *context,
 	if (!call || call->program != prog || current->bpf_ctx != &call->run.run_ctx)
 		return -EPROTOTYPE;
 	step = &call->step;
-	step->has_result = false;
-	if (step->pointer_value)
-		WRITE_ONCE(*step->pointer_value, NULL);
+	ebpfos_step_result_reset(step);
 	/* Execute the very root whose native context loads and result stores
 	 * stock verification checked. Static subprogram facts remain internal.
 	 */
 	((jit_call_t)prog->bpf_func)(context, prog->insnsi);
 	*result = step->has_result ? step->result : 0;
-	if (step->pointer_value)
-		WRITE_ONCE(*step->pointer_value, NULL);
+	ebpfos_step_pointer_clear(step);
 	return 0;
 }
 
@@ -254,6 +251,8 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 		return 1;
 	}
 	this_cpu_write(ebpfos_active_typed_call, call->previous);
+	if (!fault)
+		ebpfos_step_result_transfer(&call->step);
 	ebpfos_step_exit(&call->step);
 	__bpf_prog_exit_recur(call->program, call->start, &call->run);
 	ebpfos_binding_invocation_exit(call->binding);

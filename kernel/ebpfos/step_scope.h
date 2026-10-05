@@ -18,6 +18,7 @@ struct ebpfos_step_scope {
 	const struct bpf_prog_aux *owner;
 	struct bpf_map *pointer_result;
 	void **pointer_value;
+	void *owned_result;
 	bool valid;
 	bool pending;
 	bool has_result;
@@ -28,6 +29,11 @@ struct ebpfos_step_scope {
 
 DECLARE_PER_CPU(struct ebpfos_step_scope *, ebpfos_active_step);
 
+void ebpfos_step_pointer_clear(struct ebpfos_step_scope *scope);
+void ebpfos_step_result_reset(struct ebpfos_step_scope *scope);
+/* Only a completed, fault-free native call may transfer this reference. */
+void ebpfos_step_result_transfer(struct ebpfos_step_scope *scope);
+
 static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 				     const struct bpf_prog_aux *owner)
 {
@@ -36,6 +42,7 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 	scope->owner = owner;
 	scope->pointer_result = NULL;
 	scope->pointer_value = NULL;
+	scope->owned_result = NULL;
 	scope->valid = false;
 	scope->pending = false;
 	scope->has_result = false;
@@ -45,6 +52,7 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 
 static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)
 {
+	ebpfos_step_result_reset(scope);
 	this_cpu_write(ebpfos_active_step, scope->previous);
 	preempt_enable();
 }

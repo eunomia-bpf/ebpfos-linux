@@ -11,6 +11,40 @@
 
 DEFINE_PER_CPU(struct ebpfos_step_scope *, ebpfos_active_step);
 
+/* Publication accepts only the native prototype's exact kernel BTF type.
+ * Stock kptr metadata owns the destructor and its module lifetime; the
+ * invocation's program/map lease keeps both live through this cleanup.
+ */
+static void ebpfos_step_pointer_put(struct ebpfos_step_scope *scope, void *value)
+{
+	const struct btf_field *field;
+
+	if (!value || !scope->pointer_result)
+		return;
+	field = &scope->pointer_result->record->fields[0];
+	if (field->type == BPF_KPTR_REF)
+		field->kptr.dtor(value);
+}
+
+void ebpfos_step_pointer_clear(struct ebpfos_step_scope *scope)
+{
+	if (scope->pointer_value)
+		ebpfos_step_pointer_put(scope, xchg(scope->pointer_value, NULL));
+}
+
+void ebpfos_step_result_reset(struct ebpfos_step_scope *scope)
+{
+	ebpfos_step_pointer_clear(scope);
+	ebpfos_step_pointer_put(scope, scope->owned_result);
+	scope->owned_result = NULL;
+	scope->has_result = false;
+}
+
+void ebpfos_step_result_transfer(struct ebpfos_step_scope *scope)
+{
+	scope->owned_result = NULL;
+}
+
 __bpf_kfunc_start_defs();
 
 /* A tracing entry must return zero under stock FENTRY verification. Its
@@ -30,7 +64,8 @@ __bpf_kfunc void bpf_ebpfos_component_result(u64 result, struct bpf_prog_aux *au
  * Publication checked it against the native result type; the stock verifier
  * checks every store and rejects stack, map-value and fabricated addresses.
  * Consume immediately into this logical invocation so nested calls cannot
- * overwrite an earlier result. No ownership is transferred by UNREF kptrs.
+ * overwrite an earlier result. REF kptrs transfer their checked reference
+ * to the invocation; only successful native exit transfers it to the caller.
  */
 __bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
 						   struct bpf_prog_aux *aux)
@@ -39,7 +74,10 @@ __bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
 
 	if (!scope || scope->owner != aux || scope->pointer_result != map__map)
 		return;
+	ebpfos_step_pointer_put(scope, scope->owned_result);
 	scope->result = (unsigned long)xchg(scope->pointer_value, NULL);
+	scope->owned_result = map__map->record->fields[0].type == BPF_KPTR_REF ?
+		(void *)(unsigned long)scope->result : NULL;
 	scope->has_result = true;
 }
 

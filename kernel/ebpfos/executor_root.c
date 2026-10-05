@@ -102,7 +102,10 @@ static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
 		/* The native caller receives exactly the type stock verification
 		 * checked at each kptr store. Never reinterpret another map field.
 		 */
-		if (field->offset || field->type != BPF_KPTR_UNREF ||
+		if (field->offset ||
+		    (field->type != BPF_KPTR_UNREF && field->type != BPF_KPTR_REF) ||
+		    (field->type == BPF_KPTR_REF &&
+		     (!btf_is_kernel(field->kptr.btf) || !field->kptr.dtor)) ||
 		    !btf_types_are_same(prog->aux->attach_btf, id,
 				field->kptr.btf, field->kptr.btf_id))
 			continue;

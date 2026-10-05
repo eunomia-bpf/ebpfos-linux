@@ -86,6 +86,14 @@ retry:
 		error = -EPROTOTYPE;
 		goto out;
 	}
+	/* Reference transfer needs the native lease's separate fault status.
+	 * The legacy context API cannot commit a fault-free owned C result.
+	 */
+	if (target->pointer_result &&
+	    target->pointer_result->record->fields[0].type == BPF_KPTR_REF) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
 	/* The native arguments must match the BTF contract that provided pointer
 	 * authority to stock verification. A different target is a pre-entry
 	 * miss, never an invitation to reinterpret its typed context.
@@ -134,9 +142,7 @@ retry:
 		}
 		do {
 			step.pending = false;
-			step.has_result = false;
-			if (step.pointer_value)
-				WRITE_ONCE(*step.pointer_value, NULL);
+			ebpfos_step_result_reset(&step);
 			/* Stock JIT returns the full BPF R0 in the native result
 			 * register, as the struct_ops trampoline does. No interpreter
 			 * or native-signature function is called through this ABI.
@@ -147,9 +153,9 @@ retry:
 			/* Even a provider that omits capture cannot retain a native
 			 * caller's borrowed pointer into the next invocation.
 			 */
-			if (step.pointer_value)
-				WRITE_ONCE(*step.pointer_value, NULL);
+			ebpfos_step_pointer_clear(&step);
 		} while (step.pending);
+		ebpfos_step_result_transfer(&step);
 		ebpfos_step_exit(&step);
 	} else {
 		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
