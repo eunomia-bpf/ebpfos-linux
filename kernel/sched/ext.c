@@ -7532,7 +7532,8 @@ static bool bpf_scx_is_valid_access(int off, int size,
 	return btf_ctx_access(off, size, type, prog, info);
 }
 
-static int bpf_scx_btf_struct_access(struct bpf_verifier_log *log,
+static int bpf_scx_btf_struct_access(const struct bpf_prog *prog __maybe_unused,
+				     struct bpf_verifier_log *log,
 				     const struct bpf_reg_state *reg, int off,
 				     int size)
 {
