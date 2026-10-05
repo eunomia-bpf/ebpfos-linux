@@ -9,9 +9,10 @@
 
 /* Shared implementation for typed entries and the exported IRQ API. */
 static __always_inline int
-ebpfos_irq_route_call_slot_ctx(struct ebpfos_executor_root_slot *slot, u64 role,
+ebpfos_irq_route_call_slot_steps_ctx(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
-	u64 *epoch, u32 *provider_id, u32 *status, bool rcu_borrowed)
+	u64 *epoch, u32 *provider_id, u32 *status, bool *pending,
+	const struct bpf_prog_aux **owner, bool rcu_borrowed)
 {
 	/* try_begin initializes every field consumed by a successful lease. */
 	struct ebpfos_executor_root_lease lease __uninitialized;
@@ -57,7 +58,16 @@ retry:
 		}
 		goto out;
 	}
-	*status = bpf_prog_run(provider, frame);
+	/* Keep the invocation and epoch lease across all verified bounded steps.
+	 * The function entry disables preemption around this entire call.
+	 */
+	if (owner)
+		*owner = provider->aux;
+	do {
+		if (pending)
+			*pending = false;
+		*status = bpf_prog_run(provider, frame);
+	} while (pending && *pending);
 	binding->prog_exit(provider, start, &run_ctx);
 	ebpfos_binding_invocation_exit(binding);
 	*epoch = lease.epoch;
@@ -68,23 +78,44 @@ out:
 		ebpfos_executor_root_lease_end(&lease);
 	return error;
 }
+
 /* Standalone callers own a nested RCU lease. */
+static __always_inline int
+ebpfos_irq_route_call_slot_steps(struct ebpfos_executor_root_slot *slot, u64 role,
+	const struct ebpfos_component_irq_frame *frame,
+	u64 *epoch, u32 *provider_id, u32 *status, bool *pending,
+	const struct bpf_prog_aux **owner)
+{
+	return ebpfos_irq_route_call_slot_steps_ctx(slot, role, frame, epoch,
+		provider_id, status, pending, owner, false);
+}
+
+/* The typed function scope holds RCU through native result commit. */
+static __always_inline int
+ebpfos_irq_route_call_slot_steps_rcu(struct ebpfos_executor_root_slot *slot, u64 role,
+	const struct ebpfos_component_irq_frame *frame,
+	u64 *epoch, u32 *provider_id, u32 *status, bool *pending,
+	const struct bpf_prog_aux **owner)
+{
+	return ebpfos_irq_route_call_slot_steps_ctx(slot, role, frame, epoch,
+		provider_id, status, pending, owner, true);
+}
+
 static __always_inline int
 ebpfos_irq_route_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
 	u64 *epoch, u32 *provider_id, u32 *status)
 {
-	return ebpfos_irq_route_call_slot_ctx(slot, role, frame, epoch,
-		provider_id, status, false);
+	return ebpfos_irq_route_call_slot_steps(slot, role, frame, epoch,
+					      provider_id, status, NULL, NULL);
 }
 
-/* The typed function scope holds RCU through native result commit. */
 static __always_inline int
 ebpfos_irq_route_call_slot_rcu(struct ebpfos_executor_root_slot *slot, u64 role,
 	const struct ebpfos_component_irq_frame *frame,
 	u64 *epoch, u32 *provider_id, u32 *status)
 {
-	return ebpfos_irq_route_call_slot_ctx(slot, role, frame, epoch,
-		provider_id, status, true);
+	return ebpfos_irq_route_call_slot_steps_rcu(slot, role, frame, epoch,
+		provider_id, status, NULL, NULL);
 }
 #endif
