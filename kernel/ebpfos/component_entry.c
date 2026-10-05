@@ -13,7 +13,11 @@ ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 rol
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
 	struct bpf_tramp_run_ctx run_ctx = {};
-	struct ebpfos_step_scope step;
+	/* step_enter initializes all metadata; step_read cannot expose state until
+	 * step_save has initialized exactly size bytes. Avoid clearing unused
+	 * checkpoint storage on every call, including programs that never yield.
+	 */
+	struct ebpfos_step_scope step __uninitialized;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
 	u64 start;
