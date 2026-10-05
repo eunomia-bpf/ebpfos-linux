@@ -15,3 +15,4 @@ obj-$(CONFIG_VIRTIO) += restricted_vq_drain.o
 obj-y += restricted_work.o
 obj-$(CONFIG_NET) += restricted_napi.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += pointer_tag.o
