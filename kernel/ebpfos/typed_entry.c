@@ -299,7 +299,13 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 		preempt_enable();
 	}
 	__bpf_prog_exit_recur(call->program, call->start, &call->run);
-	ebpfos_binding_invocation_exit(call->binding);
+	/* A successful typed_enter owns one active count through all retained
+	 * steps. This final exit releases it exactly once. Retirement changes
+	 * only bit 63; other paired exits cannot consume this call's count.
+	 * The decrement cannot borrow into the cumulative entry sequence and
+	 * retains the full ordering of the public exit's successful CAS.
+	 */
+	atomic64_dec_return(&call->binding->invocation_state);
 	ebpfos_executor_root_lease_end(&call->lease);
 	return fault;
 }
