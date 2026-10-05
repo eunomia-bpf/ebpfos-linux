@@ -241,7 +241,8 @@ BTF_ID(struct, nf_conn)
 BTF_ID(struct, nf_conn___init)
 
 /* Check writes into `struct nf_conn` */
-static int _nf_conntrack_btf_struct_access(struct bpf_verifier_log *log,
+static int _nf_conntrack_btf_struct_access(const struct bpf_prog *prog __maybe_unused,
+					   struct bpf_verifier_log *log,
 					   const struct bpf_reg_state *reg,
 					   int off, int size)
 {

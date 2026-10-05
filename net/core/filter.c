@@ -9280,12 +9280,14 @@ static bool tc_cls_act_is_valid_access(int off, int size,
 DEFINE_MUTEX(nf_conn_btf_access_lock);
 EXPORT_SYMBOL_GPL(nf_conn_btf_access_lock);
 
-int (*nfct_btf_struct_access)(struct bpf_verifier_log *log,
+int (*nfct_btf_struct_access)(const struct bpf_prog *prog,
+			      struct bpf_verifier_log *log,
 			      const struct bpf_reg_state *reg,
 			      int off, int size);
 EXPORT_SYMBOL_GPL(nfct_btf_struct_access);
 
-static int tc_cls_act_btf_struct_access(struct bpf_verifier_log *log,
+static int tc_cls_act_btf_struct_access(const struct bpf_prog *prog,
+					struct bpf_verifier_log *log,
 					const struct bpf_reg_state *reg,
 					int off, int size)
 {
@@ -9293,7 +9295,7 @@ static int tc_cls_act_btf_struct_access(struct bpf_verifier_log *log,
 
 	mutex_lock(&nf_conn_btf_access_lock);
 	if (nfct_btf_struct_access)
-		ret = nfct_btf_struct_access(log, reg, off, size);
+		ret = nfct_btf_struct_access(prog, log, reg, off, size);
 	mutex_unlock(&nf_conn_btf_access_lock);
 
 	return ret;
@@ -9367,7 +9369,8 @@ void bpf_warn_invalid_xdp_action(const struct net_device *dev,
 }
 EXPORT_SYMBOL_GPL(bpf_warn_invalid_xdp_action);
 
-static int xdp_btf_struct_access(struct bpf_verifier_log *log,
+static int xdp_btf_struct_access(const struct bpf_prog *prog,
+				 struct bpf_verifier_log *log,
 				 const struct bpf_reg_state *reg,
 				 int off, int size)
 {
@@ -9375,7 +9378,7 @@ static int xdp_btf_struct_access(struct bpf_verifier_log *log,
 
 	mutex_lock(&nf_conn_btf_access_lock);
 	if (nfct_btf_struct_access)
-		ret = nfct_btf_struct_access(log, reg, off, size);
+		ret = nfct_btf_struct_access(prog, log, reg, off, size);
 	mutex_unlock(&nf_conn_btf_access_lock);
 
 	return ret;

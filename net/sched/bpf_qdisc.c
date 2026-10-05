@@ -93,7 +93,8 @@ static int bpf_qdisc_sk_buff_access(struct bpf_verifier_log *log,
 	return 0;
 }
 
-static int bpf_qdisc_btf_struct_access(struct bpf_verifier_log *log,
+static int bpf_qdisc_btf_struct_access(const struct bpf_prog *prog __maybe_unused,
+				       struct bpf_verifier_log *log,
 				       const struct bpf_reg_state *reg,
 				       int off, int size)
 {

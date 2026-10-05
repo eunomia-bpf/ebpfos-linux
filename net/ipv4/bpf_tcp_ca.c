@@ -58,7 +58,8 @@ static bool bpf_tcp_ca_is_valid_access(int off, int size,
 	return true;
 }
 
-static int bpf_tcp_ca_btf_struct_access(struct bpf_verifier_log *log,
+static int bpf_tcp_ca_btf_struct_access(const struct bpf_prog *prog __maybe_unused,
+					struct bpf_verifier_log *log,
 					const struct bpf_reg_state *reg,
 					int off, int size)
 {

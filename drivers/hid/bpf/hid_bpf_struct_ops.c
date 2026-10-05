@@ -62,7 +62,8 @@ struct hid_bpf_offset_write_range {
 	u32 end;
 };
 
-static int hid_bpf_ops_btf_struct_access(struct bpf_verifier_log *log,
+static int hid_bpf_ops_btf_struct_access(const struct bpf_prog *prog __maybe_unused,
+					   struct bpf_verifier_log *log,
 					   const struct bpf_reg_state *reg,
 					   int off, int size)
 {
