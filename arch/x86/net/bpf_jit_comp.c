@@ -3689,13 +3689,9 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 int arch_prepare_bpf_call(void *image, unsigned int size,
 			  const struct btf_func_model *m, void *cookie,
 			  int (*callback)(void *, const void *, u64 *),
-			  void *native_ip, void *fallback)
+			  void *native_ip, void *fallback, bool raw_context)
 {
-	const int context_off = MAX_BPF_FUNC_ARGS * 8;
-	const int metadata_off = context_off + 8;
-	const int ip_off = metadata_off + 8;
-	const int result_off = ip_off + 8;
-	const int stack_size = round_up(result_off, 16);
+	int context_words, context_off, metadata_off, ip_off, result_off, stack_size;
 	u8 *rw_image, *prog, *failed;
 	void *copied;
 	int i, words = 0, error = -EINVAL;
@@ -3707,6 +3703,17 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 		words += DIV_ROUND_UP(m->arg_size[i], 8);
 	if (words > MAX_BPF_FUNC_ARGS)
 		return -EOPNOTSUPP;
+	/* A tracing context exposes only the prototype's argument words. Raw
+	 * contexts expose all twelve slots, including their initialized tail.
+	 * Keep helper metadata at ctx[-1/-2] in either layout. No program can
+	 * observe the smaller tracing frame outside its checked argument range.
+	 */
+	context_words = raw_context ? MAX_BPF_FUNC_ARGS : words;
+	context_off = context_words * 8;
+	metadata_off = context_off + 8;
+	ip_off = metadata_off + 8;
+	result_off = ip_off + 8;
+	stack_size = round_up(result_off, 16);
 	rw_image = kzalloc(size, GFP_KERNEL);
 	if (!rw_image)
 		return -ENOMEM;
@@ -3722,7 +3729,7 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	/* The stock raw context permits all twelve words to be read. Initialize
 	 * its unused tail as well as the result, without exposing stack bytes.
 	 */
-	for (i = words; i < MAX_BPF_FUNC_ARGS; i++)
+	for (i = words; i < context_words; i++)
 		emit_store_stack_imm64(&prog, BPF_REG_0, -context_off + i * 8, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -result_off, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -metadata_off, words);

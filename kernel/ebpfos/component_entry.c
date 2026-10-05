@@ -386,7 +386,7 @@ ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
 		goto free_entry;
 	}
 	error = arch_prepare_bpf_call(entry->image, PAGE_SIZE, &model, entry,
-				      ebpfos_native_call, fallback, fallback);
+				      ebpfos_native_call, fallback, fallback, true);
 	if (error > 0)
 		error = arch_protect_bpf_trampoline(entry->image, PAGE_SIZE);
 	if (error < 0) {

@@ -104,7 +104,7 @@ int ebpfos_component_context_export(struct bpf_prog *prog, void **entry,
 	error = arch_prepare_bpf_call(*image, PAGE_SIZE, &model, prog,
 				      ebpfos_component_context_call,
 				      prog->aux->dst_trampoline->func.addr,
-				      ebpfos_component_no_lease);
+				      ebpfos_component_no_lease, false);
 	if (error > 0)
 		error = arch_protect_bpf_trampoline(*image, PAGE_SIZE);
 	if (error < 0) {
