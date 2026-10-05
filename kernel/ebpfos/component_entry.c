@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Direct C entry through an immutable executor-root binding. */
 #include <linux/ebpfos_entry.h>
-#include <linux/ebpfos_typed.h>
 #include <linux/btf.h>
 #include <linux/filter.h>
 #include <linux/module.h>
@@ -79,11 +78,6 @@ retry:
 	}
 	binding = target->binding;
 	prog = binding->prog;
-	/* Its load root discards the native result. Use the typed lease API. */
-	if (ebpfos_component_is_typed_program(prog)) {
-		error = -EPROTOTYPE;
-		goto out;
-	}
 	/* The native arguments must match the BTF contract that provided pointer
 	 * authority to stock verification. A different target is a pre-entry
 	 * miss, never an invitation to reinterpret its typed context.
