@@ -1490,7 +1490,6 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_read, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_write, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_file_flags, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_mb, KF_SLEEPABLE)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_tsc, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_cpu_feature, KF_SLEEPABLE)
@@ -1529,6 +1528,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_net_tx_complete, KF_SLEEPABLE)
 BTF_KFUNCS_END(ebpfos_l1_services)
 
 BTF_KFUNCS_START(ebpfos_l1_nonsleep_services)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_mb)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fatal_bug, KF_NORETURN)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
 #ifdef CONFIG_X86
@@ -1575,7 +1575,8 @@ static int ebpfos_nonsleep_kfunc_filter(const struct bpf_prog *prog, u32 id)
 	if (!btf_id_set8_contains(&ebpfos_l1_nonsleep_services, id))
 		return 0;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_SYSCALL;
+	       (prog->type != BPF_PROG_TYPE_SYSCALL &&
+		prog->type != BPF_PROG_TYPE_TRACING);
 }
 
 static const struct btf_kfunc_id_set ebpfos_nonsleep_kfunc_set = {
@@ -1609,6 +1610,10 @@ static int __init ebpfos_effect_init(void)
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &ebpfos_nonsleep_kfunc_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING,
 					 &ebpfos_nonsleep_kfunc_set);
 	if (err)
 		return err;
