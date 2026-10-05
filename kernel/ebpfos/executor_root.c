@@ -16,6 +16,7 @@
 #include <linux/xarray.h>
 #include <uapi/linux/ebpfos_root.h>
 #include "executor_root.h"
+#include "step_scope.h"
 
 /* Slots have stable lifetime; bundles own bindings until after an RCU grace period. */
 static DEFINE_XARRAY(ebpfos_executor_roots);
@@ -98,8 +99,10 @@ static int ebpfos_executor_root_role_fill(
 	 */
 	if (binding->prog->jited && !binding->prog->sleepable &&
 	    binding->prog->aux->ebpfos_component &&
-	    binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT)
+	    binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT) {
 		role->entry = binding->prog->bpf_func;
+		role->needs_steps = ebpfos_step_program_needs_scope(binding->prog);
+	}
 	role->binding = binding;
 	role->grant = grant;
 	return 0;

@@ -6,6 +6,10 @@
 #include <linux/preempt.h>
 
 struct bpf_prog_aux;
+struct bpf_prog;
+
+/* Conservative publication-time selection; unknown targets retain a scope. */
+bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog);
 
 /* One logical invocation owns its checkpoint across all bounded entries. */
 struct ebpfos_step_scope {

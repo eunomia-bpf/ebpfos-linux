@@ -18,6 +18,8 @@ struct ebpfos_executor_root_role {
 	struct ebpfos_admission *grant;
 	/* Immutable stock JIT entry, selected before publication. */
 	bpf_func_t entry;
+	/* Selected from loaded call targets, not an untrusted compiler hint. */
+	bool needs_steps;
 };
 
 struct ebpfos_executor_root_bundle {

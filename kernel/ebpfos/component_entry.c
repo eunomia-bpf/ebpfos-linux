@@ -78,12 +78,16 @@ retry:
 	 * The stock enter/exit callbacks also account optional BPF statistics.
 	 */
 	cant_migrate();
-	ebpfos_step_enter(&step, prog->aux);
-	do {
-		step.pending = false;
+	if (target->needs_steps) {
+		ebpfos_step_enter(&step, prog->aux);
+		do {
+			step.pending = false;
+			*result = target->entry(context, prog->insnsi);
+		} while (step.pending);
+		ebpfos_step_exit(&step);
+	} else {
 		*result = target->entry(context, prog->insnsi);
-	} while (step.pending);
-	ebpfos_step_exit(&step);
+	}
 	__bpf_prog_exit_recur(prog, start, &run_ctx);
 	/* This private path owns one count from its successful enter above and
 	 * releases it exactly once. Other paired exits cannot consume that count;
