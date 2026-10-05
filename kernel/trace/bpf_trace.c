@@ -1792,6 +1792,7 @@ int __weak bpf_prog_test_run_tracing(struct bpf_prog *prog,
 const struct bpf_verifier_ops raw_tracepoint_verifier_ops = {
 	.get_func_proto  = raw_tp_prog_func_proto,
 	.is_valid_access = raw_tp_prog_is_valid_access,
+	.btf_struct_access = ebpfos_btf_struct_access,
 };
 
 const struct bpf_prog_ops raw_tracepoint_prog_ops = {

@@ -2931,7 +2931,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		return -EINVAL;
 	if (attr->ebpfos_field_access_cnt &&
 	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
-	     type != BPF_PROG_TYPE_SYSCALL || !capable(CAP_SYS_ADMIN)))
+	     (type != BPF_PROG_TYPE_SYSCALL &&
+	      type != BPF_PROG_TYPE_RAW_TRACEPOINT) ||
+	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
 	if (attr->ebpfos_field_access_cnt >
 	    PAGE_SIZE / sizeof(struct bpf_ebpfos_field_access))
@@ -6678,10 +6680,10 @@ syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	}
 }
 
-static int ebpfos_syscall_btf_struct_access(const struct bpf_prog *prog,
-					   struct bpf_verifier_log *log,
-					   const struct bpf_reg_state *reg,
-					   int off, int size)
+int ebpfos_btf_struct_access(const struct bpf_prog *prog,
+			     struct bpf_verifier_log *log,
+			     const struct bpf_reg_state *reg,
+			     int off, int size)
 {
 	const struct bpf_ebpfos_field_access *field;
 	const char *field_name = NULL;
@@ -6710,7 +6712,7 @@ static int ebpfos_syscall_btf_struct_access(const struct bpf_prog *prog,
 const struct bpf_verifier_ops bpf_syscall_verifier_ops = {
 	.get_func_proto  = syscall_prog_func_proto,
 	.is_valid_access = syscall_prog_is_valid_access,
-	.btf_struct_access = ebpfos_syscall_btf_struct_access,
+	.btf_struct_access = ebpfos_btf_struct_access,
 };
 
 const struct bpf_prog_ops bpf_syscall_prog_ops = {
