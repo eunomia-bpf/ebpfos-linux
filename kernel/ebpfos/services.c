@@ -1491,7 +1491,6 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_block_write, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_current_handle, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_file_flags, KF_SLEEPABLE)
 #ifdef CONFIG_X86
-BTF_ID_FLAGS(func, bpf_ebpfos_effect_tsc, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_cpu_feature, KF_SLEEPABLE)
 #endif
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_access_ok, KF_SLEEPABLE)
@@ -1534,6 +1533,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_effect_time_real_ts64)
 #ifdef CONFIG_X86
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_fpu_wait)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_pkru_read)
+BTF_ID_FLAGS(func, bpf_ebpfos_effect_tsc)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_read8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_io_port_write8)
 BTF_ID_FLAGS(func, bpf_ebpfos_effect_send_ipi)
