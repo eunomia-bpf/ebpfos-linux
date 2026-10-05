@@ -46,7 +46,8 @@ ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 rol
 	struct bpf_prog *prog;
 	u64 start;
 	u32 index;
-	int error, retries = 0;
+	int error;
+	bool locked = false;
 
 	if (!context || !result)
 		return -EINVAL;
@@ -118,10 +119,22 @@ retry:
 	error = ebpfos_binding_invocation_enter(binding);
 	if (error) {
 		__bpf_prog_exit_recur(prog, 0, &run_ctx);
-		/* Publication may close the old binding after we observed it. */
-		if (error == -ESHUTDOWN && !retries++)
+		/* A publisher may retire the selected binding before count
+		 * acquisition. No BPF instruction or count has been acquired.
+		 * Serialize the retry with publication so repeated replacement
+		 * cannot turn this race into a native fallback. Recheck the gate,
+		 * role and native contract under the same RCU epoch hold.
+		 */
+		if (error == -ESHUTDOWN && !locked) {
+			spin_lock(&slot->lock);
+			locked = true;
 			goto retry;
+		}
 		goto out;
+	}
+	if (unlikely(locked)) {
+		spin_unlock(&slot->lock);
+		locked = false;
 	}
 	/* The loaded stock JIT implements this C ABI. No redirection handler,
 	 * function scope, argument accessor, staged return or per-shape stub.
@@ -170,6 +183,8 @@ retry:
 	atomic64_dec_return(&binding->invocation_state);
 	error = 0;
 out:
+	if (unlikely(locked))
+		spin_unlock(&slot->lock);
 	if (!borrowed)
 		rcu_read_unlock();
 	return error;
