@@ -3,6 +3,7 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/ebpfos_typed.h>
+#include <linux/ebpfos_entry.h>
 #include <linux/filter.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -25,6 +26,83 @@ struct ebpfos_component_call {
 };
 
 static DEFINE_PER_CPU(struct ebpfos_component_call *, ebpfos_active_typed_call);
+
+static u64 ebpfos_component_no_lease(void)
+{
+	/* The returned address is a kernel API, usable only under typed_enter.
+	 * An invalid caller must execute no BPF instruction or manufacture a
+	 * native pointer. All supported native results fit in this register.
+	 */
+	return 0;
+}
+
+static int ebpfos_component_context_call(void *cookie, const void *context,
+					 u64 *result)
+{
+	struct ebpfos_component_call *call = this_cpu_read(ebpfos_active_typed_call);
+	struct bpf_prog *prog = cookie;
+	struct ebpfos_step_scope *step;
+	typedef u64 (__bpfcall *jit_call_t)(const void *, const struct bpf_insn *);
+
+	if (!call || call->program != prog || current->bpf_ctx != &call->run.run_ctx)
+		return -EPROTOTYPE;
+	step = &call->step;
+	step->has_result = false;
+	if (step->pointer_value)
+		WRITE_ONCE(*step->pointer_value, NULL);
+	/* Execute the very root whose native context loads and result stores
+	 * stock verification checked. Static subprogram facts remain internal.
+	 */
+	((jit_call_t)prog->bpf_func)(context, prog->insnsi);
+	*result = step->has_result ? step->result : 0;
+	if (step->pointer_value)
+		WRITE_ONCE(*step->pointer_value, NULL);
+	return 0;
+}
+
+int ebpfos_component_context_export(struct bpf_prog *prog, void **entry,
+				    void **image)
+{
+	struct btf_func_model model;
+	int error;
+
+	*image = NULL;
+	if (prog->type != BPF_PROG_TYPE_TRACING ||
+	    prog->expected_attach_type != BPF_TRACE_FENTRY ||
+	    !prog->aux->ebpfos_component || prog->sleepable)
+		return 0;
+	if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI) || !prog->jited ||
+	    !prog->aux->attach_btf || !prog->aux->dst_trampoline ||
+	    prog->aux->exception_cb || prog->aux->arena ||
+	    prog->aux->tail_call_reachable)
+		return -EOPNOTSUPP;
+	error = ebpfos_component_entry_model(prog->aux->attach_btf,
+					     prog->aux->attach_btf_id, &model);
+	if (error)
+		return error;
+	*image = arch_alloc_bpf_trampoline(PAGE_SIZE);
+	if (!*image)
+		return -ENOMEM;
+	error = arch_prepare_bpf_call(*image, PAGE_SIZE, &model, prog,
+				      ebpfos_component_context_call,
+				      prog->aux->dst_trampoline->func.addr,
+				      ebpfos_component_no_lease);
+	if (error > 0)
+		error = arch_protect_bpf_trampoline(*image, PAGE_SIZE);
+	if (error < 0) {
+		ebpfos_component_context_free(*image);
+		*image = NULL;
+		return error;
+	}
+	*entry = *image;
+	return 0;
+}
+
+void ebpfos_component_context_free(void *image)
+{
+	if (image)
+		arch_free_bpf_trampoline(image, PAGE_SIZE);
+}
 
 int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 {
@@ -144,6 +222,13 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 	if (error)
 		goto release_run;
 	ebpfos_step_enter(&call->step, call->program->aux);
+	call->step.pointer_result = target->pointer_result;
+	if (target->pointer_result) {
+		u32 key = 0;
+
+		call->step.pointer_value = target->pointer_result->ops->map_lookup_elem(
+			target->pointer_result, &key);
+	}
 	call->previous = this_cpu_read(ebpfos_active_typed_call);
 	call->fault = 0;
 	this_cpu_write(ebpfos_active_typed_call, call);

@@ -23,4 +23,12 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call);
  */
 int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry);
 
+/* A stock-verified tracing context root can also expose a native C entry.
+ * Its publication-owned image marshals the actual native BTF prototype;
+ * only the checked main root executes, never a caller-specialized subprog.
+ */
+int ebpfos_component_context_export(struct bpf_prog *prog, void **entry,
+				    void **image);
+void ebpfos_component_context_free(void *image);
+
 #endif

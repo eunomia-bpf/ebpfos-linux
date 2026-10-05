@@ -1452,7 +1452,7 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 int arch_prepare_bpf_call(void *image, unsigned int size,
 			  const struct btf_func_model *model, void *cookie,
 			  int (*callback)(void *, const void *, u64 *),
-			  void *fallback);
+			  void *native_ip, void *fallback);
 
 u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog,
 				 struct bpf_tramp_run_ctx *run_ctx);

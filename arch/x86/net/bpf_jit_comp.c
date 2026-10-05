@@ -3689,7 +3689,7 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 int arch_prepare_bpf_call(void *image, unsigned int size,
 			  const struct btf_func_model *m, void *cookie,
 			  int (*callback)(void *, const void *, u64 *),
-			  void *fallback)
+			  void *native_ip, void *fallback)
 {
 	const int context_off = MAX_BPF_FUNC_ARGS * 8;
 	const int metadata_off = context_off + 8;
@@ -3726,7 +3726,7 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 		emit_store_stack_imm64(&prog, BPF_REG_0, -context_off + i * 8, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -result_off, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -metadata_off, words);
-	emit_store_stack_imm64(&prog, BPF_REG_0, -ip_off, (long)fallback);
+	emit_store_stack_imm64(&prog, BPF_REG_0, -ip_off, (long)native_ip);
 	save_args(m, &prog, context_off, false, BPF_TRAMP_F_NATIVE_CALL);
 	emit_mov_imm64(&prog, BPF_REG_1, (long)cookie >> 32, (u32)(long)cookie);
 	/* lea rsi,[rbp-context_off]; lea rdx,[rbp-result_off] */

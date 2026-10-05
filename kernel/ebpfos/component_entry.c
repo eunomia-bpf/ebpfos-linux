@@ -82,7 +82,7 @@ retry:
 	/* A typed export's admission root discards its native result. Its
 	 * actual C ABI must be invoked through the typed lease entry instead.
 	 */
-	if (target->typed_entry) {
+	if (target->typed_entry && !target->context_image) {
 		error = -EPROTOTYPE;
 		goto out;
 	}
@@ -289,7 +289,7 @@ ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
 		goto free_entry;
 	}
 	error = arch_prepare_bpf_call(entry->image, PAGE_SIZE, &model, entry,
-				      ebpfos_native_call, fallback);
+				      ebpfos_native_call, fallback, fallback);
 	if (error > 0)
 		error = arch_protect_bpf_trampoline(entry->image, PAGE_SIZE);
 	if (error < 0) {

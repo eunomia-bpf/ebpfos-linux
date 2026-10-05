@@ -52,6 +52,7 @@ static void ebpfos_executor_root_bundle_release(
 	if (!bundle)
 		return;
 	for (role = 0; role < bundle->role_count; role++) {
+		ebpfos_component_context_free(bundle->roles[role].context_image);
 		ebpfos_binding_put(bundle->roles[role].binding);
 		ebpfos_admission_put(bundle->roles[role].grant);
 	}
@@ -137,6 +138,9 @@ static int ebpfos_executor_root_role_fill(
 	error = ebpfos_component_typed_export(binding->prog, &role->typed_entry);
 	if (!error && !role->typed_entry)
 		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
+	if (!error && !role->typed_entry)
+		error = ebpfos_component_context_export(binding->prog, &role->typed_entry,
+						&role->context_image);
 	if (error) {
 		ebpfos_binding_put(binding);
 		ebpfos_admission_put(grant);
