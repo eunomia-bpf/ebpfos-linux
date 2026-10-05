@@ -187,6 +187,16 @@ static int ebpfos_executor_root_role_fill(
 		ebpfos_admission_put(grant);
 		return error;
 	}
+	if (role->pointer_result) {
+		struct bpf_array *array = container_of(role->pointer_result,
+						     struct bpf_array, map);
+
+		/* Channel selection checked a one-entry per-CPU array. Bind its
+		 * immutable anchor, not this publication CPU's value. The admitted
+		 * program and the invocation's epoch hold keep the map alive.
+		 */
+		role->pointer_value_percpu = array->pptrs[0];
+	}
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;
 	role->snapshot.map_id = binding->map_id;

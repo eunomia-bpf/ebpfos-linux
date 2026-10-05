@@ -145,13 +145,10 @@ retry:
 		ebpfos_step_enter(&step, prog->aux);
 		step.pointer_result = target->pointer_result;
 		if (target->pointer_result) {
-			u32 key = 0;
-
-			/* A one-entry per-CPU array always has key zero. The scope
+			/* Publication bound the channel's per-CPU anchor. The scope
 			 * pins this CPU through all resumable entries.
 			 */
-			step.pointer_value = target->pointer_result->ops->map_lookup_elem(
-				target->pointer_result, &key);
+			step.pointer_value = this_cpu_ptr(target->pointer_value_percpu);
 		}
 		do {
 			step.pending = false;

@@ -167,9 +167,12 @@ int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 					      prog->aux->func_info[i].type_id);
 		if (error < 0)
 			return error;
-		/* Retain the original producer ABI for existing objects. */
-		if (!error && strcmp(btf_name_by_offset(prog->aux->btf, function->name_off),
-				     "ebpfos_function_entry"))
+		/* The legacy name identifies a tracing export, not a raw context
+		 * root. An explicit declaration still requires all checks below.
+		 */
+		if (!error && (prog->type != BPF_PROG_TYPE_TRACING ||
+			      strcmp(btf_name_by_offset(prog->aux->btf, function->name_off),
+				     "ebpfos_function_entry")))
 			continue;
 		if (!i || *entry || !prog->jited || prog->sleepable ||
 		    !prog->aux->ebpfos_component ||
@@ -296,12 +299,8 @@ retry:
 	if (call->step_active) {
 		ebpfos_step_enter(&call->step, call->program->aux);
 		call->step.pointer_result = target->pointer_result;
-		if (target->pointer_result) {
-			u32 key = 0;
-
-			call->step.pointer_value = target->pointer_result->ops->map_lookup_elem(
-				target->pointer_result, &key);
-		}
+		if (target->pointer_result)
+			call->step.pointer_value = this_cpu_ptr(target->pointer_value_percpu);
 	} else {
 		/* Fault tracking is per-CPU even for a service-free export. The
 		 * conservative loaded-call scan also covers its BPF subprograms.
