@@ -41,27 +41,24 @@ __bpf_kfunc void bpf_ebpfos_function_step_save(const void *src, u32 src__sz,
 
 __bpf_kfunc_end_defs();
 
-static bool ebpfos_step_calls_service(const struct bpf_prog *prog)
+static bool ebpfos_step_calls_native(const struct bpf_prog *prog)
 {
 	u32 index;
 
 	for (index = 0; index < prog->len; index++) {
 		const struct bpf_insn *call = &prog->insnsi[index];
-		u64 address;
-		bool fixed;
 
+		/* A tail call's destination is not in this program's call graph. */
+		if (call->code == (BPF_JMP | BPF_TAIL_CALL))
+			return true;
 		if (call->code != (BPF_JMP | BPF_CALL) ||
-		    call->src_reg != BPF_PSEUDO_KFUNC_CALL)
+		    call->src_reg == BPF_PSEUDO_CALL)
 			continue;
-		/* Use the stock JIT's resolution of the already checked call. Some
-		 * JITs need descriptors discarded after compilation: unresolved
-		 * calls conservatively keep the scope rather than guessing an ID.
+		/* Native helpers/kfuncs are opaque and can wrap a step service.
+		 * Keep a scope for them without inspecting or assuming their bodies.
+		 * Compiled BPF subprograms are inspected separately below.
 		 */
-		if (bpf_jit_get_func_addr(prog, call, true, &address, &fixed) || !fixed)
-			return true;
-		if (address == (unsigned long)bpf_ebpfos_function_step_read ||
-		    address == (unsigned long)bpf_ebpfos_function_step_save)
-			return true;
+		return true;
 	}
 	return false;
 }
@@ -70,7 +67,7 @@ bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog)
 {
 	u32 index;
 
-	if (!prog || !prog->jited || ebpfos_step_calls_service(prog))
+	if (!prog || !prog->jited || ebpfos_step_calls_native(prog))
 		return true;
 	/* A service may live in a compiled subprogram rather than the entry. */
 	for (index = 0; index < prog->aux->real_func_cnt; index++) {
@@ -79,7 +76,7 @@ bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog)
 		if (!prog->aux->func)
 			return true;
 		function = prog->aux->func[index];
-		if (!function || ebpfos_step_calls_service(function))
+		if (!function || ebpfos_step_calls_native(function))
 			return true;
 	}
 	return false;
