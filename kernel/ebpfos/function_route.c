@@ -22,6 +22,7 @@
 #include <asm/ibt.h>
 #include <asm/cpufeature.h>
 #include "irq_route_dispatch.h"
+#include "step_scope.h"
 
 struct ebpfos_function_counters {
 	u64 component_calls;
@@ -74,11 +75,7 @@ struct ebpfos_function_result_scope {
 	u32 field_size;
 	bool field_written;
 	bool written;
-	bool step_valid;
-	bool step_pending;
-	u32 step_size;
-	const struct bpf_prog_aux *step_owner;
-	u8 step_state[64];
+	struct ebpfos_step_scope step;
 };
 
 static DEFINE_PER_CPU(struct ebpfos_function_result_scope *, ebpfos_function_result);
@@ -96,39 +93,10 @@ __bpf_kfunc void bpf_ebpfos_function_output(u64 token, u64 value)
 	}
 }
 
-/* Scalar checkpoints belong to this invocation, including nested calls. */
-__bpf_kfunc int bpf_ebpfos_function_step_read(void *dst, u32 dst__sz,
-					  struct bpf_prog_aux *aux)
-{
-	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
-
-	if (!scope || scope->step_owner != aux || !scope->step_valid ||
-	    dst__sz != scope->step_size)
-		return 0;
-	memcpy(dst, scope->step_state, dst__sz);
-	return 1;
-}
-
-__bpf_kfunc void bpf_ebpfos_function_step_save(const void *src, u32 src__sz,
-					   struct bpf_prog_aux *aux)
-{
-	struct ebpfos_function_result_scope *scope = this_cpu_read(ebpfos_function_result);
-
-	if (!scope || scope->step_owner != aux || !src__sz ||
-	    src__sz > sizeof(scope->step_state))
-		return;
-	memcpy(scope->step_state, src, src__sz);
-	scope->step_size = src__sz;
-	scope->step_valid = true;
-	scope->step_pending = true;
-}
-
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_function_output_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_output)
-BTF_ID_FLAGS(func, bpf_ebpfos_function_step_read)
-BTF_ID_FLAGS(func, bpf_ebpfos_function_step_save)
 BTF_KFUNCS_END(ebpfos_function_output_ids)
 
 static int ebpfos_function_output_filter(const struct bpf_prog *prog, u32 id)
@@ -328,10 +296,6 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 		scope.field_written = false;
 	if (writeback_size)
 		scope.writeback_mask = 0;
-	scope.step_valid = false;
-	scope.step_pending = false;
-	scope.step_size = 0;
-	scope.step_owner = NULL;
 	/* Disable drains the entire call, including output commit, via RCU. */
 	rcu_read_lock();
 	if (!smp_load_acquire(&route->enabled))
@@ -364,6 +328,7 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 	preempt_disable();
 	scope.previous = this_cpu_read(ebpfos_function_result);
 	this_cpu_write(ebpfos_function_result, &scope);
+	ebpfos_step_enter(&scope.step, NULL);
 	slot = READ_ONCE(route->root_slot);
 	if (unlikely(!slot)) {
 		/* A route may be enabled before its root's first publication. */
@@ -372,7 +337,8 @@ static __always_inline bool ebpfos_function_route_call_inner(struct ebpfos_funct
 	}
 	error = ebpfos_irq_route_call_slot_steps_rcu(slot,
 		READ_ONCE(route->role_type), frame, &epoch, &provider, &value,
-		&scope.step_pending, &scope.step_owner);
+		&scope.step.pending, &scope.step.owner);
+	ebpfos_step_exit(&scope.step);
 	this_cpu_write(ebpfos_function_result, scope.previous);
 	preempt_enable();
 	if (!error && require_full_output && !scope.written)

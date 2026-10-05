@@ -4,6 +4,7 @@
 #include <linux/filter.h>
 #include <linux/module.h>
 #include "executor_root.h"
+#include "step_scope.h"
 
 static __always_inline int
 ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 role,
@@ -12,6 +13,7 @@ ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 rol
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
 	struct bpf_tramp_run_ctx run_ctx = {};
+	struct ebpfos_step_scope step;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
 	u64 start;
@@ -69,7 +71,12 @@ retry:
 	 * The stock enter/exit callbacks also account optional BPF statistics.
 	 */
 	cant_migrate();
-	*result = target->entry(context, prog->insnsi);
+	ebpfos_step_enter(&step, prog->aux);
+	do {
+		step.pending = false;
+		*result = target->entry(context, prog->insnsi);
+	} while (step.pending);
+	ebpfos_step_exit(&step);
 	binding->prog_exit(prog, start, &run_ctx);
 	/* This private path owns one count from its successful enter above and
 	 * releases it exactly once. Other paired exits cannot consume that count;
