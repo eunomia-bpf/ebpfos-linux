@@ -18,6 +18,20 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 				void **typed_entry);
 int ebpfos_component_typed_exit(struct ebpfos_component_call *call);
 
+/* Bit i denotes a NULL native pointer argument. Publication caches the
+ * checked global BTF contract; invalid NULLs miss before program entry.
+ */
+int ebpfos_component_typed_enter_args(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, u64 null_args);
+int ebpfos_component_typed_enter_caller_args(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, u64 null_args,
+				unsigned long caller);
+int ebpfos_component_typed_null_args(struct bpf_prog *prog, void *entry, u64 *mask);
+
 /* The compiler captures the logical native caller before entering L1.
  * Keep it with the lease, including across bounded-step re-entry.
  */

@@ -7855,12 +7855,12 @@ enum btf_arg_tag {
  * EINVAL - cannot convert BTF.
  * 0 - Successfully processed BTF and constructed argument expectations.
  */
-int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog)
+static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
+				     struct bpf_subprog_info *sub,
+				     struct bpf_verifier_log *log,
+				     struct bpf_verifier_env *env)
 {
-	bool is_global = subprog_aux(env, subprog)->linkage == BTF_FUNC_GLOBAL;
-	struct bpf_subprog_info *sub = subprog_info(env, subprog);
-	struct bpf_verifier_log *log = &env->log;
-	struct bpf_prog *prog = env->prog;
+	bool is_global = prog->aux->func_info_aux[subprog].linkage == BTF_FUNC_GLOBAL;
 	enum bpf_prog_type prog_type = prog->type;
 	struct btf *btf = prog->aux->btf;
 	const struct btf_param *args;
@@ -7872,7 +7872,10 @@ int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog)
 		return 0;
 
 	if (!prog->aux->func_info) {
-		verifier_bug(env, "func_info undefined");
+		if (env)
+			verifier_bug(env, "func_info undefined");
+		else
+			bpf_log(log, "func_info undefined\n");
 		return -EFAULT;
 	}
 
@@ -7896,7 +7899,10 @@ int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog)
 	tname = btf_name_by_offset(btf, fn_t->name_off);
 
 	if (prog->aux->func_info_aux[subprog].unreliable) {
-		verifier_bug(env, "unreliable BTF for function %s()", tname);
+		if (env)
+			verifier_bug(env, "unreliable BTF for function %s()", tname);
+		else
+			bpf_log(log, "unreliable BTF for function %s()\n", tname);
 		return -EFAULT;
 	}
 	if (prog_type == BPF_PROG_TYPE_EXT)
@@ -8099,6 +8105,35 @@ skip_pointer:
 	sub->arg_cnt = nargs;
 	sub->args_cached = true;
 
+	return 0;
+}
+
+int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog)
+{
+	return btf_prepare_func_arg_info(env->prog, subprog,
+					subprog_info(env, subprog), &env->log, env);
+}
+
+/* Decode the same argument contract used at stock global verification.
+ * This models loaded BTF only; no verifier analysis is rerun at publication.
+ */
+int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
+{
+	struct bpf_subprog_info info = {};
+	struct bpf_verifier_log log = {};
+	int error;
+	u32 i;
+
+	*mask = 0;
+	if (!prog->aux->func_info || !prog->aux->func_info_aux ||
+	    subprog >= prog->aux->func_info_cnt)
+		return -EINVAL;
+	error = btf_prepare_func_arg_info(prog, subprog, &info, &log, NULL);
+	if (error)
+		return error;
+	for (i = 0; i < info.arg_cnt; i++)
+		if (info.args[i].arg_type & PTR_MAYBE_NULL)
+			*mask |= BIT_ULL(i);
 	return 0;
 }
 

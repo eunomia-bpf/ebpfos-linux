@@ -139,6 +139,9 @@ static int ebpfos_executor_root_role_fill(
 		return -EUCLEAN;
 	}
 	error = ebpfos_component_typed_export(binding->prog, &role->typed_entry);
+	if (!error && role->typed_entry)
+		error = ebpfos_component_typed_null_args(binding->prog,
+						       role->typed_entry, &role->null_args);
 	if (!error && !role->typed_entry)
 		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
 	if (!error && !role->typed_entry)

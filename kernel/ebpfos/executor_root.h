@@ -20,6 +20,8 @@ struct ebpfos_executor_root_role {
 	bpf_func_t entry;
 	/* Native ABI subprogram from this same verified image, or NULL. */
 	void *typed_entry;
+	/* Nullable argument bits from this checked global export, never its root. */
+	u64 null_args;
 	/* Optional native marshaller around the verified context root. */
 	void *context_image;
 	/* Loaded calls select scope use; opaque native calls retain a scope. */

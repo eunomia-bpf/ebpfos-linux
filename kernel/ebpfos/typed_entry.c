@@ -216,10 +216,10 @@ int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 	return 0;
 }
 
-int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
+static int ebpfos_component_typed_enter_inner(struct ebpfos_executor_root_slot *slot,
 				u64 role, u32 native_func_id,
 				struct ebpfos_component_call *call,
-				void **typed_entry)
+				void **typed_entry, u64 null_args)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
@@ -247,6 +247,10 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 	}
 	if (i == bundle->role_count || !target->typed_entry) {
 		error = -EPROTOTYPE;
+		goto release_rcu;
+	}
+	if (null_args & ~target->null_args) {
+		error = -EINVAL;
 		goto release_rcu;
 	}
 	call->lease.slot = slot;
@@ -301,7 +305,41 @@ release_rcu:
 	rcu_read_unlock();
 	return error;
 }
+int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call, void **typed_entry)
+{
+	return ebpfos_component_typed_enter_inner(slot, role, native_func_id,
+						 call, typed_entry, 0);
+}
 EXPORT_SYMBOL_GPL(ebpfos_component_typed_enter);
+
+int ebpfos_component_typed_enter_args(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, u64 null_args)
+{
+	return ebpfos_component_typed_enter_inner(slot, role, native_func_id,
+						 call, typed_entry, null_args);
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_typed_enter_args);
+
+int ebpfos_component_typed_enter_caller_args(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, u64 null_args,
+				unsigned long caller)
+{
+	int error = ebpfos_component_typed_enter_args(slot, role, native_func_id,
+						    call, typed_entry, null_args);
+
+	if (!error) {
+		call->caller = caller;
+		call->has_caller = true;
+	}
+	return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_typed_enter_caller_args);
 
 int ebpfos_component_typed_enter_caller(struct ebpfos_executor_root_slot *slot,
 				u64 role, u32 native_func_id,
