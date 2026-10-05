@@ -122,6 +122,31 @@ void ebpfos_component_context_free(void *image)
 		arch_free_bpf_trampoline(image, PAGE_SIZE);
 }
 
+/* The compiler marks a callable export independently of its ELF name. Unit
+ * assembly gives helpers distinct names in a multi-entry object. The marker
+ * chooses a candidate only: stock global verification and native BTF matching
+ * below still authorize the call. Parameter tags are not export declarations.
+ */
+static int ebpfos_typed_export_tag(const struct btf *btf, u32 func_id)
+{
+	u32 i;
+	bool found = false;
+
+	for (i = 1; i < btf_nr_types(btf); i++) {
+		const struct btf_type *type = btf_type_by_id(btf, i);
+
+		if (!type || BTF_INFO_KIND(type->info) != BTF_KIND_DECL_TAG ||
+		    type->type != func_id ||
+		    strcmp(btf_name_by_offset(btf, type->name_off),
+			   "ebpfos.component.typed_entry"))
+			continue;
+		if (btf_decl_tag(type)->component_idx != -1)
+			return -EPROTOTYPE;
+		found = true;
+	}
+	return found;
+}
+
 int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 {
 	const struct btf_type *function, *native, *prototype, *result;
@@ -131,17 +156,22 @@ int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 	*entry = NULL;
 	if (!prog->aux->btf || !prog->aux->func_info)
 		return 0;
-	for (i = 1; i < prog->aux->func_info_cnt; i++) {
+	for (i = 0; i < prog->aux->func_info_cnt; i++) {
 		struct bpf_prog *subprog;
 
 		function = btf_type_by_id(prog->aux->btf,
 					prog->aux->func_info[i].type_id);
 		if (!function || !btf_type_is_func(function))
 			return -EINVAL;
-		if (strcmp(btf_name_by_offset(prog->aux->btf, function->name_off),
-			   "ebpfos_function_entry"))
+		error = ebpfos_typed_export_tag(prog->aux->btf,
+					      prog->aux->func_info[i].type_id);
+		if (error < 0)
+			return error;
+		/* Retain the original producer ABI for existing objects. */
+		if (!error && strcmp(btf_name_by_offset(prog->aux->btf, function->name_off),
+				     "ebpfos_function_entry"))
 			continue;
-		if (*entry || !prog->jited || prog->sleepable ||
+		if (!i || *entry || !prog->jited || prog->sleepable ||
 		    !prog->aux->ebpfos_component ||
 		    prog->type != BPF_PROG_TYPE_TRACING ||
 		    prog->expected_attach_type != BPF_TRACE_FENTRY ||
