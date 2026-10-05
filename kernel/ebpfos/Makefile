@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 obj-y += admission.o component_graph.o executor_root.o core.o
 obj-y += fops_route_dispatch.o
-obj-y += irq_route_dispatch.o
+obj-y += irq_route_dispatch.o component_entry.o
 obj-$(CONFIG_FUNCTION_TRACER) += function_route.o function_stubs_generated.o
 obj-y += services.o
 obj-y += atomic_byte.o

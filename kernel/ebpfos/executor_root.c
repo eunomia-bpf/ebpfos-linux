@@ -92,6 +92,14 @@ static int ebpfos_executor_root_role_fill(
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;
 	role->snapshot.map_id = binding->map_id;
+	/* Only the verifier-checked context ABI is callable through this entry.
+	 * Other root roles retain their existing execution mechanism. No address
+	 * supplied by userspace is accepted as executable code.
+	 */
+	if (binding->prog->jited && !binding->prog->sleepable &&
+	    binding->prog->aux->ebpfos_component &&
+	    binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT)
+		role->entry = binding->prog->bpf_func;
 	role->binding = binding;
 	role->grant = grant;
 	return 0;

@@ -16,6 +16,8 @@ struct ebpfos_executor_root_role {
 	struct ebpfos_executor_root_role_snapshot snapshot;
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
+	/* Immutable stock JIT entry, selected before publication. */
+	bpf_func_t entry;
 };
 
 struct ebpfos_executor_root_bundle {
