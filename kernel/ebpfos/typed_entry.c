@@ -22,9 +22,11 @@ struct ebpfos_component_call {
 	struct bpf_prog *program;
 	struct ebpfos_step_scope step;
 	u64 start;
+	unsigned long caller;
 	int fault;
 	bool step_active;
 	bool context_root;
+	bool has_caller;
 };
 
 static DEFINE_PER_CPU(struct ebpfos_component_call *, ebpfos_active_typed_call);
@@ -249,6 +251,7 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 	}
 	call->previous = this_cpu_read(ebpfos_active_typed_call);
 	call->fault = 0;
+	call->has_caller = false;
 	this_cpu_write(ebpfos_active_typed_call, call);
 	*typed_entry = target->typed_entry;
 	return 0;
@@ -262,6 +265,22 @@ release_rcu:
 	return error;
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_typed_enter);
+
+int ebpfos_component_typed_enter_caller(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, unsigned long caller)
+{
+	int error = ebpfos_component_typed_enter(slot, role, native_func_id,
+					       call, typed_entry);
+
+	if (!error) {
+		call->caller = caller;
+		call->has_caller = true;
+	}
+	return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_typed_enter_caller);
 
 int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 {
@@ -287,6 +306,30 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 EXPORT_SYMBOL_GPL(ebpfos_component_typed_exit);
 
 __bpf_kfunc_start_defs();
+/* An address is observation, not pointer authority. The toolchain guards
+ * the source body with this query, before any of its effects, so an old
+ * native entry cannot silently substitute its own frame or zero.
+ */
+__bpf_kfunc int bpf_ebpfos_component_caller(u64 *caller, u32 caller__sz,
+					struct bpf_prog_aux *aux)
+{
+	struct ebpfos_component_call *call = this_cpu_read(ebpfos_active_typed_call);
+
+	if (caller__sz != sizeof(*caller))
+		return 0;
+	*caller = 0;
+	if (!call || call->program->aux != aux ||
+	    current->bpf_ctx != &call->run.run_ctx)
+		return 0;
+	if (!call->has_caller) {
+		if (!call->fault)
+			call->fault = -ENODATA;
+		return 0;
+	}
+	*caller = call->caller;
+	return 1;
+}
+
 __bpf_kfunc void bpf_ebpfos_component_fault(s32 error)
 {
 	struct ebpfos_component_call *call = this_cpu_read(ebpfos_active_typed_call);
@@ -300,6 +343,7 @@ __bpf_kfunc void bpf_ebpfos_component_fault(s32 error)
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_typed_fault_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_component_caller)
 BTF_ID_FLAGS(func, bpf_ebpfos_component_fault)
 BTF_KFUNCS_END(ebpfos_typed_fault_ids)
 

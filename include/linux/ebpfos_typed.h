@@ -18,6 +18,14 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 				void **typed_entry);
 int ebpfos_component_typed_exit(struct ebpfos_component_call *call);
 
+/* The compiler captures the logical native caller before entering L1.
+ * Keep it with the lease, including across bounded-step re-entry.
+ */
+int ebpfos_component_typed_enter_caller(struct ebpfos_executor_root_slot *slot,
+				u64 role, u32 native_func_id,
+				struct ebpfos_component_call *call,
+				void **typed_entry, unsigned long caller);
+
 /* Publication resolves this from verified func_info, never a supplied code
  * address. Absence means the old context entry; malformed typed exports fail.
  */
