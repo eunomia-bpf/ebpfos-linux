@@ -14,6 +14,12 @@ endif
 ifneq ($(EBPFOS_CUT_TRACING_IMPORTS_INCLUDE),)
 CFLAGS_imports-generated.o += -DEBPFOS_CUT_TRACING_IMPORTS_INCLUDE=\"$(EBPFOS_CUT_TRACING_IMPORTS_INCLUDE)\"
 endif
+ifneq ($(EBPFOS_CONTEXT_DEFS_INCLUDE),)
+CFLAGS_imports-generated.o += -DEBPFOS_CONTEXT_DEFS_INCLUDE=\"$(EBPFOS_CONTEXT_DEFS_INCLUDE)\"
+endif
+ifneq ($(EBPFOS_CONTEXT_IDS_INCLUDE),)
+CFLAGS_imports-generated.o += -DEBPFOS_CONTEXT_IDS_INCLUDE=\"$(EBPFOS_CONTEXT_IDS_INCLUDE)\"
+endif
 obj-y += fops_route.o
 obj-$(CONFIG_NET) += netdev_route.o
 obj-$(CONFIG_BLOCK) += bops_route.o mqops_route.o restricted_block.o

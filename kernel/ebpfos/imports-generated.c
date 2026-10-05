@@ -18,6 +18,10 @@ __bpf_kfunc void bpf_ebpfos_import_fput(struct file *arg0)
 	fput(arg0);
 }
 
+#ifdef EBPFOS_CONTEXT_DEFS_INCLUDE
+#include EBPFOS_CONTEXT_DEFS_INCLUDE
+#endif
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_import_ids)
@@ -33,6 +37,9 @@ BTF_KFUNCS_END(ebpfos_import_ids)
 #ifdef EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
 BTF_KFUNCS_START(ebpfos_tracing_import_ids)
 #include EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+#ifdef EBPFOS_CONTEXT_IDS_INCLUDE
+#include EBPFOS_CONTEXT_IDS_INCLUDE
+#endif
 BTF_KFUNCS_END(ebpfos_tracing_import_ids)
 #endif
 
