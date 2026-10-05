@@ -5,8 +5,9 @@
 #include <linux/module.h>
 #include "executor_root.h"
 
-int ebpfos_component_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
-			       const void *context, u32 *result)
+static __always_inline int
+ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 role,
+				 const void *context, u32 *result, bool borrowed)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
@@ -21,7 +22,8 @@ int ebpfos_component_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
 		return -EINVAL;
 	if (!slot)
 		return -ENOENT;
-	rcu_read_lock();
+	if (!borrowed)
+		rcu_read_lock();
 retry:
 	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
 		error = -EAGAIN;
@@ -69,10 +71,30 @@ retry:
 	cant_migrate();
 	*result = target->entry(context, prog->insnsi);
 	binding->prog_exit(prog, start, &run_ctx);
-	ebpfos_binding_invocation_exit(binding);
+	/* This private path owns one count from its successful enter above and
+	 * releases it exactly once. Other paired exits cannot consume that count;
+	 * retirement changes only bit 63. Subtraction therefore cannot borrow into
+	 * the entry sequence. Keep the full ordering of the former successful CAS.
+	 * The public exit API retains its defensive zero-count check.
+	 */
+	atomic64_dec_return(&binding->invocation_state);
 	error = 0;
 out:
-	rcu_read_unlock();
+	if (!borrowed)
+		rcu_read_unlock();
 	return error;
 }
+
+int ebpfos_component_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
+			       const void *context, u32 *result)
+{
+	return ebpfos_component_call_slot_inner(slot, role, context, result, false);
+}
 EXPORT_SYMBOL_GPL(ebpfos_component_call_slot);
+
+int ebpfos_component_call_slot_rcu(struct ebpfos_executor_root_slot *slot, u64 role,
+				   const void *context, u32 *result)
+{
+	return ebpfos_component_call_slot_inner(slot, role, context, result, true);
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_call_slot_rcu);
