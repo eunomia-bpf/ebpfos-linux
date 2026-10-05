@@ -1482,12 +1482,7 @@ static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
 	.kop_descs = ebpfos_kprog_terminal_descs,
 };
 
-static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	(void)id;
-	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
-}
+static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id);
 
 #define EBPFOS_COMPONENT_KOP_SET(name) \
 	static const struct btf_kfunc_id_set name##_component_set = { \
@@ -1506,9 +1501,7 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
 
-static int __init ebpfos_kprog_register(void)
-{
-	static const struct btf_kfunc_id_set * const component_sets[] = {
+static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_atomic_component_set,
 		&ebpfos_kprog_atomic64_component_set,
 		&ebpfos_kprog_atomic32_component_set,
@@ -1519,6 +1512,26 @@ static int __init ebpfos_kprog_register(void)
 		&ebpfos_kprog_current_task_component_set,
 		&ebpfos_kprog_cmp_mask_component_set,
 	};
+
+static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
+{
+	size_t i;
+
+	/* Tracing, raw tracepoints and LSM share one stock kfunc hook. This
+	 * filter must not reject unrelated services registered in that hook.
+	 */
+	for (i = 0; i < ARRAY_SIZE(component_sets); i++)
+		if (btf_id_set8_contains(component_sets[i]->set, id))
+			return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+			       (prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
+				!(prog->type == BPF_PROG_TYPE_TRACING &&
+				  prog->expected_attach_type == BPF_TRACE_FENTRY)) ||
+			       prog->sleepable;
+	return 0;
+}
+
+static int __init ebpfos_kprog_register(void)
+{
 	size_t i;
 	int err;
 

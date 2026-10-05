@@ -1372,6 +1372,14 @@ int __weak arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 	return -ENOTSUPP;
 }
 
+int __weak arch_prepare_bpf_call(void *image, unsigned int size,
+				const struct btf_func_model *model, void *cookie,
+				int (*callback)(void *, const void *, u64 *),
+				void *fallback)
+{
+	return -EOPNOTSUPP;
+}
+
 static int __init init_trampolines(void)
 {
 	int i;

@@ -3000,7 +3000,8 @@ static void save_args(const struct btf_func_model *m, u8 **prog,
 			 */
 			for (j = 0; j < arg_regs; j++) {
 				emit_ldx(prog, BPF_DW, BPF_REG_0, BPF_REG_FP,
-					 nr_stack_slots * 8 + 16 + (!use_jmp) * 8);
+					 nr_stack_slots * 8 + 16 +
+					 (!(flags & BPF_TRAMP_F_NATIVE_CALL) && !use_jmp) * 8);
 				emit_stx(prog, BPF_DW, BPF_REG_FP, BPF_REG_0,
 					 -stack_size);
 
@@ -3679,6 +3680,79 @@ int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 					    m, flags, tlinks, func_addr);
 	bpf_jit_free_exec(image);
 	return ret;
+}
+
+/* The caller has the original C prototype. Reuse the trampoline argument
+ * marshaller, but call a bound-slot callback instead of a tracing hook.
+ * The extra instrumentation return address is absent on this path.
+ */
+int arch_prepare_bpf_call(void *image, unsigned int size,
+			  const struct btf_func_model *m, void *cookie,
+			  int (*callback)(void *, const void *, u64 *),
+			  void *fallback)
+{
+	const int context_off = MAX_BPF_FUNC_ARGS * 8;
+	const int metadata_off = context_off + 8;
+	const int ip_off = metadata_off + 8;
+	const int result_off = ip_off + 8;
+	const int stack_size = round_up(result_off, 16);
+	u8 *rw_image, *prog, *failed;
+	void *copied;
+	int i, words = 0, error = -EINVAL;
+
+	if (!m || !callback || !fallback || size < 512 ||
+	    m->nr_args > MAX_BPF_FUNC_ARGS || m->ret_size > 8)
+		return -EINVAL;
+	for (i = 0; i < m->nr_args; i++)
+		words += DIV_ROUND_UP(m->arg_size[i], 8);
+	if (words > MAX_BPF_FUNC_ARGS)
+		return -EOPNOTSUPP;
+	rw_image = kzalloc(size, GFP_KERNEL);
+	if (!rw_image)
+		return -ENOMEM;
+	prog = rw_image;
+	emit_cfi(&prog, image, cfi_get_func_hash(fallback),
+		 cfi_get_func_arity(fallback));
+	EMIT1(0x55); /* push rbp */
+	EMIT3(0x48, 0x89, 0xE5); /* mov rbp,rsp */
+	if (is_imm8(stack_size))
+		EMIT4(0x48, 0x83, 0xEC, stack_size);
+	else
+		EMIT3_off32(0x48, 0x81, 0xEC, stack_size);
+	/* The stock raw context permits all twelve words to be read. Initialize
+	 * its unused tail as well as the result, without exposing stack bytes.
+	 */
+	for (i = words; i < MAX_BPF_FUNC_ARGS; i++)
+		emit_store_stack_imm64(&prog, BPF_REG_0, -context_off + i * 8, 0);
+	emit_store_stack_imm64(&prog, BPF_REG_0, -result_off, 0);
+	emit_store_stack_imm64(&prog, BPF_REG_0, -metadata_off, words);
+	emit_store_stack_imm64(&prog, BPF_REG_0, -ip_off, (long)fallback);
+	save_args(m, &prog, context_off, false, BPF_TRAMP_F_NATIVE_CALL);
+	emit_mov_imm64(&prog, BPF_REG_1, (long)cookie >> 32, (u32)(long)cookie);
+	/* lea rsi,[rbp-context_off]; lea rdx,[rbp-result_off] */
+	EMIT4(0x48, 0x8D, 0x75, -context_off);
+	EMIT4(0x48, 0x8D, 0x55, -result_off);
+	if (emit_rsb_call(&prog, callback, image + (prog - rw_image)))
+		goto out;
+	EMIT2(0x85, 0xC0); /* test eax,eax */
+	failed = prog;
+	prog += 6; /* jne fallback */
+	emit_ldx(&prog, BPF_DW, BPF_REG_0, BPF_REG_FP, -result_off);
+	EMIT1(0xC9); /* leave */
+	emit_return(&prog, image + (prog - rw_image));
+	emit_cond_near_jump(&failed, image + (prog - rw_image),
+			    image + (failed - rw_image), X86_JNE);
+	restore_regs(m, &prog, context_off);
+	EMIT1(0xC9);
+	if (emit_jump(&prog, fallback, image + (prog - rw_image)))
+		goto out;
+	if (WARN_ON_ONCE(prog > rw_image + size - BPF_INSN_SAFETY))
+		goto out;
+	copied = bpf_arch_text_copy(image, rw_image, size);
+	error = IS_ERR(copied) ? PTR_ERR(copied) : prog - rw_image;
+out:
+	kfree(rw_image);
+	return error;
 }
 
 static int emit_bpf_dispatcher(u8 **pprog, int a, int b, s64 *progs, u8 *image, u8 *buf)

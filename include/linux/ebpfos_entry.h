@@ -5,6 +5,9 @@
 #include <linux/types.h>
 
 struct ebpfos_executor_root_slot;
+struct ebpfos_native_entry;
+struct btf;
+struct btf_func_model;
 
 /*
  * C entry to a published, non-sleepable component. The context layout is the
@@ -28,5 +31,27 @@ int ebpfos_component_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
  */
 int ebpfos_component_call_slot_rcu(struct ebpfos_executor_root_slot *slot, u64 role,
 				   const void *context, u32 *result);
+
+/* The JIT's complete scalar R0, separate from pre-entry errors. The stock
+ * verifier still governs whether a program may return a scalar or pointer.
+ */
+int ebpfos_component_call_slot64(struct ebpfos_executor_root_slot *slot, u64 role,
+				 const void *context, u64 *result);
+
+/* Distill the actual BTF FUNC, never a guessed prototype. Architecture limits
+ * remain explicit (currently <=12 words, <=16-byte struct arguments, no
+ * aggregate result or variadic arguments). This is marshalling, not authority
+ * for dereferencing pointer arguments in a loaded BPF program.
+ */
+int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
+				 struct btf_func_model *model);
+struct ebpfos_native_entry *
+ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
+			      struct btf *btf, u32 func_id, void *fallback);
+void *ebpfos_component_entry_address(const struct ebpfos_native_entry *entry);
+/* Caller must first remove/drain every native call site referencing the entry.
+ * Root drain alone does not cover a caller still in the marshalling prologue.
+ */
+void ebpfos_component_entry_destroy(struct ebpfos_native_entry *entry);
 
 #endif

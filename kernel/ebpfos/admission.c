@@ -113,6 +113,11 @@ static int ebpfos_validate_component_descriptor(
 		EBPFOS_COMPONENT_IRQ_ABI_VERSION &&
 	    context_size == EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE)
 		return 0;
+	if (prog_type == BPF_PROG_TYPE_TRACING &&
+	    abi_id == EBPFOS_COMPONENT_NATIVE_ABI_ID &&
+	    le32_to_cpu(descriptor->abi_version) == EBPFOS_COMPONENT_NATIVE_ABI_VERSION &&
+	    context_size == EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE)
+		return 0;
 	return -EPROTO;
 }
 
@@ -367,7 +372,10 @@ static int ebpfos_check_program(struct bpf_prog *prog,
 
 	if (!prog->aux->ebpfos_component ||
 	    !((prog->type == BPF_PROG_TYPE_SYSCALL && prog->sleepable) ||
-	      (prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT && !prog->sleepable)))
+	      (prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT && !prog->sleepable) ||
+	      (prog->type == BPF_PROG_TYPE_TRACING && !prog->sleepable &&
+	       prog->expected_attach_type == BPF_TRACE_FENTRY &&
+	       prog->aux->attach_btf && prog->aux->attach_btf_id)))
 		return -EKEYREJECTED;
 	mutex_lock(&prog->aux->used_maps_mutex);
 	if (prog->aux->used_map_cnt != map_count ||

@@ -83,6 +83,12 @@ struct ebpfos_component_irq_frame {
 #define EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE \
 	((u32)sizeof(struct ebpfos_component_irq_frame))
 
+/* Stock tracing/FENTRY verification against the native BTF FUNC. No tracing
+ * link is attached; L1 enters the admitted program through the bound slot.
+ */
+#define EBPFOS_COMPONENT_NATIVE_ABI_ID 0x454243414c4c0003ULL
+#define EBPFOS_COMPONENT_NATIVE_ABI_VERSION 1U
+
 #define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH BIT(0)
 
 struct ebpfos_executor_call {

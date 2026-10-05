@@ -13,6 +13,19 @@ DEFINE_PER_CPU(struct ebpfos_step_scope *, ebpfos_active_step);
 
 __bpf_kfunc_start_defs();
 
+/* A tracing entry must return zero under stock FENTRY verification. Its
+ * native scalar result travels separately in the invocation, never in ctx.
+ */
+__bpf_kfunc void bpf_ebpfos_component_result(u64 result, struct bpf_prog_aux *aux)
+{
+	struct ebpfos_step_scope *scope = this_cpu_read(ebpfos_active_step);
+
+	if (scope && scope->owner == aux) {
+		scope->result = result;
+		scope->has_result = true;
+	}
+}
+
 __bpf_kfunc int bpf_ebpfos_function_step_read(void *dst, u32 dst__sz,
 					  struct bpf_prog_aux *aux)
 {
@@ -85,6 +98,7 @@ bool ebpfos_step_program_needs_scope(const struct bpf_prog *prog)
 BTF_KFUNCS_START(ebpfos_step_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_step_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_step_save)
+BTF_ID_FLAGS(func, bpf_ebpfos_component_result)
 BTF_KFUNCS_END(ebpfos_step_ids)
 
 static int ebpfos_step_filter(const struct bpf_prog *prog, u32 id)
@@ -92,7 +106,9 @@ static int ebpfos_step_filter(const struct bpf_prog *prog, u32 id)
 	if (!btf_id_set8_contains(&ebpfos_step_ids, id))
 		return 0;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+	       (prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
+		!(prog->type == BPF_PROG_TYPE_TRACING &&
+		  prog->expected_attach_type == BPF_TRACE_FENTRY)) || prog->sleepable;
 }
 
 static const struct btf_kfunc_id_set ebpfos_step_set = {
@@ -103,6 +119,7 @@ static const struct btf_kfunc_id_set ebpfos_step_set = {
 
 static int __init ebpfos_step_init(void)
 {
+	/* RAW_TRACEPOINT and TRACING resolve to the same stock tracing hook. */
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT,
 					 &ebpfos_step_set);
 }

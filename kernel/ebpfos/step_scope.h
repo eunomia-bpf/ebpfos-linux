@@ -17,6 +17,8 @@ struct ebpfos_step_scope {
 	const struct bpf_prog_aux *owner;
 	bool valid;
 	bool pending;
+	bool has_result;
+	u64 result;
 	u32 size;
 	u8 state[64];
 };
@@ -31,6 +33,7 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 	scope->owner = owner;
 	scope->valid = false;
 	scope->pending = false;
+	scope->has_result = false;
 	scope->size = 0;
 	this_cpu_write(ebpfos_active_step, scope);
 }

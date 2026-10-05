@@ -1,14 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Direct C entry through an immutable executor-root binding. */
 #include <linux/ebpfos_entry.h>
+#include <linux/ebpfos_typed.h>
+#include <linux/btf.h>
 #include <linux/filter.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include "executor_root.h"
 #include "step_scope.h"
 
+struct ebpfos_native_entry {
+	struct ebpfos_executor_root_slot *slot;
+	u64 role;
+	struct btf *btf;
+	u32 func_id;
+	void *image;
+};
+
+/* Like the stock dispatcher, the target is a verified, loaded JIT image,
+ * not a C function with a compiler CFI hash. Its native result register is
+ * the complete 64-bit BPF R0; the legacy bpf_func_t API exposes only u32.
+ */
+static __always_inline __bpfcall u64
+ebpfos_run_jit(bpf_func_t entry, const void *context, const struct bpf_insn *insns)
+{
+	u64 (*function)(const void *, const struct bpf_insn *) = (void *)entry;
+
+	return function(context, insns);
+}
+
 static __always_inline int
 ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 role,
-				 const void *context, u32 *result, bool borrowed)
+				 const void *context, u64 *result, bool borrowed,
+				 const struct ebpfos_native_entry *native)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
@@ -55,6 +79,21 @@ retry:
 	}
 	binding = target->binding;
 	prog = binding->prog;
+	/* Its load root discards the native result. Use the typed lease API. */
+	if (ebpfos_component_is_typed_program(prog)) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
+	/* The native arguments must match the BTF contract that provided pointer
+	 * authority to stock verification. A different target is a pre-entry
+	 * miss, never an invitation to reinterpret its typed context.
+	 */
+	if (prog->type == BPF_PROG_TYPE_TRACING &&
+	    (!native || prog->aux->attach_btf != native->btf ||
+	     prog->aux->attach_btf_id != native->func_id)) {
+		error = -EPROTOTYPE;
+		goto out;
+	}
 	/* Publication only makes non-sleepable RAW_TRACEPOINT roles callable
 	 * here. bpf_trampoline_enter/exit select these stock callbacks for that
 	 * type. Call them directly without changing their guard or accounting.
@@ -82,11 +121,18 @@ retry:
 		ebpfos_step_enter(&step, prog->aux);
 		do {
 			step.pending = false;
-			*result = target->entry(context, prog->insnsi);
+			step.has_result = false;
+			/* Stock JIT returns the full BPF R0 in the native result
+			 * register, as the struct_ops trampoline does. No interpreter
+			 * or native-signature function is called through this ABI.
+			 */
+			*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
+			if (prog->type == BPF_PROG_TYPE_TRACING)
+				*result = step.has_result ? step.result : 0;
 		} while (step.pending);
 		ebpfos_step_exit(&step);
 	} else {
-		*result = target->entry(context, prog->insnsi);
+		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 	}
 	__bpf_prog_exit_recur(prog, start, &run_ctx);
 	/* This private path owns one count from its successful enter above and
@@ -106,13 +152,140 @@ out:
 int ebpfos_component_call_slot(struct ebpfos_executor_root_slot *slot, u64 role,
 			       const void *context, u32 *result)
 {
-	return ebpfos_component_call_slot_inner(slot, role, context, result, false);
+	u64 value __uninitialized;
+	int error;
+
+	if (!result)
+		return -EINVAL;
+	error = ebpfos_component_call_slot_inner(slot, role, context, &value, false, NULL);
+	if (!error)
+		*result = value;
+	return error;
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_call_slot);
 
 int ebpfos_component_call_slot_rcu(struct ebpfos_executor_root_slot *slot, u64 role,
 				   const void *context, u32 *result)
 {
-	return ebpfos_component_call_slot_inner(slot, role, context, result, true);
+	u64 value __uninitialized;
+	int error;
+
+	if (!result)
+		return -EINVAL;
+	error = ebpfos_component_call_slot_inner(slot, role, context, &value, true, NULL);
+	if (!error)
+		*result = value;
+	return error;
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_call_slot_rcu);
+
+int ebpfos_component_call_slot64(struct ebpfos_executor_root_slot *slot, u64 role,
+				 const void *context, u64 *result)
+{
+	return ebpfos_component_call_slot_inner(slot, role, context, result, false, NULL);
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_call_slot64);
+
+int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
+				 struct btf_func_model *model)
+{
+	const struct btf_type *function, *prototype;
+	u32 i, words = 0;
+	int error;
+
+	if (!btf || !model)
+		return -EINVAL;
+	function = btf_type_by_id(btf, func_id);
+	if (!function || !btf_type_is_func(function))
+		return -EINVAL;
+	prototype = btf_type_by_id(btf, function->type);
+	if (!prototype || !btf_type_is_func_proto(prototype))
+		return -EINVAL;
+	memset(model, 0, sizeof(*model));
+	error = btf_distill_func_proto(NULL, btf, prototype,
+				       btf_name_by_offset(btf, function->name_off), model);
+	if (error)
+		return error;
+	for (i = 0; i < model->nr_args; i++) {
+		/* The model has no alignment/class information for native i128.
+		 * Its stack ABI cannot be inferred from size alone.
+		 */
+		if (model->arg_size[i] > 8 &&
+		    !(model->arg_flags[i] & BTF_FMODEL_STRUCT_ARG))
+			return -EOPNOTSUPP;
+		words += DIV_ROUND_UP(model->arg_size[i], 8);
+	}
+	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 8)
+		return -EOPNOTSUPP;
+	/* The stock scalar result service cannot transfer pointer ownership.
+	 * Keep that limitation explicit instead of returning forged pointer bits.
+	 */
+	if (btf_type_is_ptr(btf_type_skip_modifiers(btf, prototype->type, NULL)))
+		return -EOPNOTSUPP;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_entry_model);
+
+static int ebpfos_native_call(void *cookie, const void *context, u64 *result)
+{
+	struct ebpfos_native_entry *entry = cookie;
+
+	return ebpfos_component_call_slot_inner(entry->slot, entry->role, context,
+					       result, false, entry);
+}
+
+struct ebpfos_native_entry *
+ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
+			      struct btf *btf, u32 func_id, void *fallback)
+{
+	struct btf_func_model model;
+	struct ebpfos_native_entry *entry;
+	int error;
+
+	if (!slot || !fallback)
+		return ERR_PTR(-EINVAL);
+	error = ebpfos_component_entry_model(btf, func_id, &model);
+	if (error)
+		return ERR_PTR(error);
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return ERR_PTR(-ENOMEM);
+	entry->slot = slot;
+	entry->role = role;
+	entry->btf = btf;
+	btf_get(btf);
+	entry->func_id = func_id;
+	entry->image = arch_alloc_bpf_trampoline(PAGE_SIZE);
+	if (!entry->image) {
+		error = -ENOMEM;
+		goto free_entry;
+	}
+	error = arch_prepare_bpf_call(entry->image, PAGE_SIZE, &model, entry,
+				      ebpfos_native_call, fallback);
+	if (error > 0)
+		error = arch_protect_bpf_trampoline(entry->image, PAGE_SIZE);
+	if (error < 0) {
+		arch_free_bpf_trampoline(entry->image, PAGE_SIZE);
+		goto free_entry;
+	}
+	return entry;
+free_entry:
+	btf_put(entry->btf);
+	kfree(entry);
+	return ERR_PTR(error);
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_entry_create);
+
+void *ebpfos_component_entry_address(const struct ebpfos_native_entry *entry)
+{
+	return entry->image;
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_entry_address);
+
+void ebpfos_component_entry_destroy(struct ebpfos_native_entry *entry)
+{
+	arch_free_bpf_trampoline(entry->image, PAGE_SIZE);
+	btf_put(entry->btf);
+	kfree(entry);
+}
+EXPORT_SYMBOL_GPL(ebpfos_component_entry_destroy);

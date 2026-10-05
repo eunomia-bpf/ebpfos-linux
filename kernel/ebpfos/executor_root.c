@@ -99,9 +99,12 @@ static int ebpfos_executor_root_role_fill(
 	 */
 	if (binding->prog->jited && !binding->prog->sleepable &&
 	    binding->prog->aux->ebpfos_component &&
-	    binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT) {
+	    (binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT ||
+	     (binding->prog->type == BPF_PROG_TYPE_TRACING &&
+	      binding->prog->expected_attach_type == BPF_TRACE_FENTRY))) {
 		role->entry = binding->prog->bpf_func;
-		role->needs_steps = ebpfos_step_program_needs_scope(binding->prog);
+		role->needs_steps = binding->prog->type == BPF_PROG_TYPE_TRACING ||
+			ebpfos_step_program_needs_scope(binding->prog);
 	}
 	role->binding = binding;
 	role->grant = grant;
