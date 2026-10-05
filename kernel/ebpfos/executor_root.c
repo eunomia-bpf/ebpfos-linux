@@ -75,10 +75,31 @@ static void ebpfos_executor_root_retire_rcu(struct rcu_head *rcu)
 	schedule_work(&bundle->retire_work);
 }
 
+static bool ebpfos_pointer_result_tag(const struct bpf_map *map)
+{
+	u32 i;
+
+	if (!map->btf)
+		return false;
+	for (i = 1; i < btf_nr_types(map->btf); i++) {
+		const struct btf_type *type = btf_type_by_id(map->btf, i);
+
+		if (type && BTF_INFO_KIND(type->info) == BTF_KIND_DECL_TAG &&
+		    type->type == map->btf_value_type_id &&
+		    btf_decl_tag(type)->component_idx == -1 &&
+		    !strcmp(btf_name_by_offset(map->btf, type->name_off),
+			    "ebpfos.component.pointer_result"))
+			return true;
+	}
+	return false;
+}
+
 static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
 					    struct bpf_map **result)
 {
 	const struct btf_type *pointee;
+	struct bpf_map *declared = NULL, *legacy = NULL;
+	bool ambiguous = false;
 	u32 id, index;
 
 	*result = NULL;
@@ -93,11 +114,15 @@ static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
 	for (index = 0; index < prog->aux->used_map_cnt; index++) {
 		struct bpf_map *map = prog->aux->used_maps[index];
 		const struct btf_field *field;
+		bool tagged = ebpfos_pointer_result_tag(map);
 
 		if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY ||
 		    map->max_entries != 1 || map->value_size != sizeof(void *) ||
-		    IS_ERR_OR_NULL(map->record) || map->record->cnt != 1)
+		    IS_ERR_OR_NULL(map->record) || map->record->cnt != 1) {
+			if (tagged)
+				return -EPROTOTYPE;
 			continue;
+		}
 		field = &map->record->fields[0];
 		/* The native caller receives exactly the type stock verification
 		 * checked at each kptr store. Never reinterpret another map field.
@@ -107,16 +132,26 @@ static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
 		    (field->type == BPF_KPTR_REF &&
 		     (!btf_is_kernel(field->kptr.btf) || !field->kptr.dtor)) ||
 		    !btf_types_are_same(prog->aux->attach_btf, id,
-				field->kptr.btf, field->kptr.btf_id))
+				field->kptr.btf, field->kptr.btf_id)) {
+			if (tagged)
+				return -EPROTOTYPE;
 			continue;
-		/* Names can be absent (including on the observed libbpf load).
-		 * The verified BTF shape identifies the result channel. Never
-		 * guess between two equally compatible channels.
+		}
+		/* Ordinary provider maps can have the same native kptr type.
+		 * The compiler's declaration selects the return channel, never
+		 * its authority: the stock field/type checks above still apply.
+		 * Preserve unambiguous legacy producers without guessing a map.
 		 */
-		if (*result)
-			return -EPROTOTYPE;
-		*result = map;
+		if (tagged) {
+			if (declared)
+				return -EPROTOTYPE;
+			declared = map;
+		} else {
+			ambiguous |= legacy != NULL;
+			legacy = map;
+		}
 	}
+	*result = declared ?: (ambiguous ? NULL : legacy);
 	return *result ? 0 : -EPROTOTYPE;
 }
 
