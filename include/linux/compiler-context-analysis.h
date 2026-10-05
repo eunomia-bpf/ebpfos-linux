@@ -6,6 +6,22 @@
 #ifndef _LINUX_COMPILER_CONTEXT_ANALYSIS_H
 #define _LINUX_COMPILER_CONTEXT_ANALYSIS_H
 
+/* Keep context effects in BTF for consumers of the compiled kernel image.
+ * The ordinary context checker still decides whether to diagnose source.
+ */
+#if defined(__clang__) && !defined(__CHECKER__) && !defined(__GENKSYMS__)
+# if __has_attribute(btf_decl_tag)
+# define __ctx_btf_acquires(...) __attribute__((btf_decl_tag("context_acquire:" #__VA_ARGS__)))
+# define __ctx_btf_releases(...) __attribute__((btf_decl_tag("context_release:" #__VA_ARGS__)))
+# define __ctx_btf_try_acquires(ret, var) __attribute__((btf_decl_tag("context_try_acquire:" #ret ":" #var)))
+# endif
+#endif
+#ifndef __ctx_btf_acquires
+# define __ctx_btf_acquires(...)
+# define __ctx_btf_releases(...)
+# define __ctx_btf_try_acquires(ret, var)
+#endif
+
 #if defined(WARN_CONTEXT_ANALYSIS) && !defined(__CHECKER__) && !defined(__GENKSYMS__)
 
 /*
@@ -14,11 +30,11 @@
  */
 # define __ctx_lock_type(name)			__attribute__((capability(#name)))
 # define __reentrant_ctx_lock			__attribute__((reentrant_capability))
-# define __acquires_ctx_lock(...)		__attribute__((acquire_capability(__VA_ARGS__)))
+# define __acquires_ctx_lock(...)		__attribute__((acquire_capability(__VA_ARGS__))) __ctx_btf_acquires(__VA_ARGS__)
 # define __acquires_shared_ctx_lock(...)	__attribute__((acquire_shared_capability(__VA_ARGS__)))
-# define __try_acquires_ctx_lock(ret, var)	__attribute__((try_acquire_capability(ret, var)))
+# define __try_acquires_ctx_lock(ret, var)	__attribute__((try_acquire_capability(ret, var))) __ctx_btf_try_acquires(ret, var)
 # define __try_acquires_shared_ctx_lock(ret, var) __attribute__((try_acquire_shared_capability(ret, var)))
-# define __releases_ctx_lock(...)		__attribute__((release_capability(__VA_ARGS__)))
+# define __releases_ctx_lock(...)		__attribute__((release_capability(__VA_ARGS__))) __ctx_btf_releases(__VA_ARGS__)
 # define __releases_shared_ctx_lock(...)	__attribute__((release_shared_capability(__VA_ARGS__)))
 # define __returns_ctx_lock(var)		__attribute__((lock_returned(var)))
 
@@ -149,11 +165,11 @@
 
 # define __ctx_lock_type(name)
 # define __reentrant_ctx_lock
-# define __acquires_ctx_lock(...)
+# define __acquires_ctx_lock(...) __ctx_btf_acquires(__VA_ARGS__)
 # define __acquires_shared_ctx_lock(...)
-# define __try_acquires_ctx_lock(ret, var)
+# define __try_acquires_ctx_lock(ret, var) __ctx_btf_try_acquires(ret, var)
 # define __try_acquires_shared_ctx_lock(ret, var)
-# define __releases_ctx_lock(...)
+# define __releases_ctx_lock(...) __ctx_btf_releases(__VA_ARGS__)
 # define __releases_shared_ctx_lock(...)
 # define __assumes_ctx_lock(...)
 # define __assumes_shared_ctx_lock(...)
