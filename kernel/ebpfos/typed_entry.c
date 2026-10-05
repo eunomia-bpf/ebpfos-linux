@@ -61,13 +61,20 @@ static int ebpfos_component_context_call(void *cookie, const void *context,
 		return -EPROTOTYPE;
 	}
 	step = &call->step;
-	ebpfos_step_result_reset(step);
+	/* A scalar context has no pointer channel. Its initialized ownership
+	 * fields stay empty; only the per-entry scalar result needs resetting.
+	 */
+	if (step->pointer_result)
+		ebpfos_step_result_reset(step);
+	else
+		step->has_result = false;
 	/* Execute the very root whose native context loads and result stores
 	 * stock verification checked. Static subprogram facts remain internal.
 	 */
 	((jit_call_t)prog->bpf_func)(context, prog->insnsi);
 	*result = step->has_result ? step->result : 0;
-	ebpfos_step_pointer_clear(step);
+	if (step->pointer_result)
+		ebpfos_step_pointer_clear(step);
 	return 0;
 }
 
@@ -292,7 +299,7 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 	}
 	this_cpu_write(ebpfos_active_typed_call, call->previous);
 	if (call->step_active) {
-		if (!fault)
+		if (!fault && call->step.pointer_result)
 			ebpfos_step_result_transfer(&call->step);
 		ebpfos_step_exit(&call->step);
 	} else {

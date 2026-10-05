@@ -52,7 +52,13 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 
 static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)
 {
-	ebpfos_step_result_reset(scope);
+	/* Without a published pointer channel, enter initialized owned_result
+	 * to NULL and no result service can acquire a reference in this scope.
+	 */
+	if (scope->pointer_result)
+		ebpfos_step_result_reset(scope);
+	else
+		scope->has_result = false;
 	this_cpu_write(ebpfos_active_step, scope->previous);
 	preempt_enable();
 }
