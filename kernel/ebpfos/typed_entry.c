@@ -225,12 +225,14 @@ static int ebpfos_component_typed_enter_inner(struct ebpfos_executor_root_slot *
 	struct ebpfos_executor_root_role *target;
 	u32 i;
 	int error;
+	bool locked = false;
 
 	if (!call || !typed_entry)
 		return -EINVAL;
 	if (!slot)
 		return -ENOENT;
 	rcu_read_lock();
+retry:
 	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
 		error = -EAGAIN;
 		goto release_rcu;
@@ -271,8 +273,24 @@ static int ebpfos_component_typed_enter_inner(struct ebpfos_executor_root_slot *
 		goto release_run;
 	}
 	error = ebpfos_binding_invocation_enter(call->binding);
-	if (error)
-		goto release_run;
+	if (error) {
+		__bpf_prog_exit_recur(call->program, call->start, &call->run);
+		/* A publisher can retire the binding after this reader selects it.
+		 * No BPF instruction or invocation count has been acquired. On
+		 * this slow path only, serialize selection and count acquisition
+		 * with publication. Repeated replacement cannot retire the retry's
+		 * binding between those two operations. Keep the same RCU hold and
+		 * repeat every gate, prototype and NULL-contract check.
+		 */
+		if (error == -ESHUTDOWN && !locked) {
+			spin_lock(&slot->lock);
+			locked = true;
+			goto retry;
+		}
+		goto release_lease;
+	}
+	if (unlikely(locked))
+		spin_unlock(&slot->lock);
 	call->step_active = target->needs_steps;
 	call->context_root = target->context_image != NULL;
 	if (call->step_active) {
@@ -299,9 +317,13 @@ static int ebpfos_component_typed_enter_inner(struct ebpfos_executor_root_slot *
 release_run:
 	__bpf_prog_exit_recur(call->program, call->start, &call->run);
 release_lease:
+	if (unlikely(locked))
+		spin_unlock(&slot->lock);
 	ebpfos_executor_root_lease_end(&call->lease);
 	return error;
 release_rcu:
+	if (unlikely(locked))
+		spin_unlock(&slot->lock);
 	rcu_read_unlock();
 	return error;
 }
