@@ -240,7 +240,7 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 		  const struct bpf_insn *insns, size_t insn_cnt,
 		  struct bpf_prog_load_opts *opts)
 {
-	const size_t attr_sz = offsetofend(union bpf_attr, keyring_id);
+	const size_t attr_sz = offsetofend(union bpf_attr, ebpfos_field_access_cnt);
 	void *finfo = NULL, *linfo = NULL;
 	const char *func_info, *line_info;
 	__u32 log_size, log_level, attach_prog_fd, attach_btf_obj_fd;
@@ -314,6 +314,8 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 
 	attr.fd_array = ptr_to_u64(OPTS_GET(opts, fd_array, NULL));
 	attr.fd_array_cnt = OPTS_GET(opts, fd_array_cnt, 0);
+	attr.ebpfos_field_accesses = ptr_to_u64(OPTS_GET(opts, ebpfos_field_accesses, NULL));
+	attr.ebpfos_field_access_cnt = OPTS_GET(opts, ebpfos_field_access_cnt, 0);
 
 	if (log_level) {
 		attr.log_buf = ptr_to_u64(log_buf);

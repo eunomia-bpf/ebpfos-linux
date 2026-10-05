@@ -113,9 +113,12 @@ struct bpf_prog_load_opts {
 
 	/* if set, provides the length of fd_array */
 	__u32 fd_array_cnt;
+	/* Exact vmlinux-BTF scalar fields declared by the component runtime. */
+	const struct bpf_ebpfos_field_access *ebpfos_field_accesses;
+	__u32 ebpfos_field_access_cnt;
 	size_t :0;
 };
-#define bpf_prog_load_opts__last_field fd_array_cnt
+#define bpf_prog_load_opts__last_field ebpfos_field_access_cnt
 
 LIBBPF_API int bpf_prog_load(enum bpf_prog_type prog_type,
 			     const char *prog_name, const char *license,

@@ -510,6 +510,8 @@ struct bpf_program {
 	__u32 line_info_rec_size;
 	__u32 line_info_cnt;
 	__u32 prog_flags;
+	const struct bpf_ebpfos_field_access *ebpfos_field_accesses;
+	__u32 ebpfos_field_access_cnt;
 	__u8  hash[SHA256_DIGEST_LENGTH];
 
 	struct bpf_light_subprog *subprogs;
@@ -7894,6 +7896,8 @@ static int bpf_object_load_prog(struct bpf_object *obj, struct bpf_program *prog
 	}
 	load_attr.log_level = log_level;
 	load_attr.prog_flags = prog->prog_flags;
+	load_attr.ebpfos_field_accesses = prog->ebpfos_field_accesses;
+	load_attr.ebpfos_field_access_cnt = prog->ebpfos_field_access_cnt;
 	load_attr.fd_array = obj->fd_array;
 
 	load_attr.token_fd = obj->token_fd;
@@ -9831,6 +9835,19 @@ int bpf_program__set_flags(struct bpf_program *prog, __u32 flags)
 		return libbpf_err(-EBUSY);
 
 	prog->prog_flags = flags;
+	return 0;
+}
+
+int bpf_program__set_ebpfos_field_accesses(struct bpf_program *prog,
+				const struct bpf_ebpfos_field_access *fields,
+				__u32 count)
+{
+	if (prog->obj->state >= OBJ_LOADED)
+		return libbpf_err(-EBUSY);
+	if (!!fields != !!count)
+		return libbpf_err(-EINVAL);
+	prog->ebpfos_field_accesses = fields;
+	prog->ebpfos_field_access_cnt = count;
 	return 0;
 }
 

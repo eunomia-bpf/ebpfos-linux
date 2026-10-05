@@ -995,6 +995,9 @@ bpf_program__set_expected_attach_type(struct bpf_program *prog,
 
 LIBBPF_API __u32 bpf_program__flags(const struct bpf_program *prog);
 LIBBPF_API int bpf_program__set_flags(struct bpf_program *prog, __u32 flags);
+LIBBPF_API int bpf_program__set_ebpfos_field_accesses(
+	struct bpf_program *prog, const struct bpf_ebpfos_field_access *fields,
+	__u32 count);
 
 /* Per-program log level and log buffer getters/setters.
  * See bpf_object_open_opts comments regarding log_level and log_buf

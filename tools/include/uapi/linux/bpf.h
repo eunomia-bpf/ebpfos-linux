@@ -1521,6 +1521,13 @@ enum {
 	BPF_STREAM_STDERR = 2,
 };
 
+struct bpf_ebpfos_field_access {
+	__u32 btf_id;
+	__u32 offset;
+	__u32 size;
+	__u32 reserved;
+};
+
 union bpf_attr {
 	struct { /* anonymous struct used by BPF_MAP_CREATE command */
 		__u32	map_type;	/* one of enum bpf_map_type */
@@ -1661,6 +1668,8 @@ union bpf_attr {
 		 * verification.
 		 */
 		__s32		keyring_id;
+		__aligned_u64	ebpfos_field_accesses;
+		__u32		ebpfos_field_access_cnt;
 	};
 
 	struct { /* anonymous struct used by BPF_OBJ_* commands */
