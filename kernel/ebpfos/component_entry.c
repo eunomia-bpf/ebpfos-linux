@@ -212,6 +212,85 @@ int ebpfos_component_call_slot64(struct ebpfos_executor_root_slot *slot, u64 rol
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_call_slot64);
 
+/* Classify the integer-only native x86 ABI supported by typed contexts.
+ * An aggregate containing an unaligned field is MEMORY, irrespective of
+ * its size or the number of available registers. Pointers end here. Bound
+ * this walk as well as the stock BTF resolver: previously resolved child
+ * types can form a deeper valid graph, which must not exhaust kernel stack.
+ */
+static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset, u32 depth,
+				     u32 *alignment, bool *memory)
+{
+	const struct btf_type *type = btf_type_skip_modifiers(btf, id, NULL);
+	u32 size, i;
+	int error;
+
+	if (depth >= 32)
+		return -E2BIG;
+	if (!type)
+		return -EINVAL;
+	*alignment = 1;
+	if (btf_type_is_ptr(type)) {
+		*alignment = sizeof(void *);
+	} else if (btf_type_is_int(type) || btf_is_any_enum(type)) {
+		if (!type->size || type->size > 8 || !is_power_of_2(type->size))
+			return -EOPNOTSUPP;
+		*alignment = type->size;
+	} else if (btf_type_is_array(type)) {
+		const struct btf_array *array = btf_array(type);
+		const struct btf_type *element;
+
+		if (!array->nelems)
+			return 0;
+		element = btf_type_by_id(btf, array->type);
+		element = btf_resolve_size(btf, element, &size);
+		if (IS_ERR(element))
+			return PTR_ERR(element);
+		if (!size)
+			return 0;
+		error = ebpfos_native_arg_alignment(btf, array->type, offset, depth + 1,
+						    alignment, memory);
+		if (error)
+			return error;
+		if (array->nelems > 1 && size % *alignment)
+			*memory = true;
+		return 0;
+	} else if (btf_type_is_struct(type)) {
+		const struct btf_member *member = btf_type_member(type);
+
+		for (i = 0; i < btf_type_vlen(type); i++, member++) {
+			const struct btf_type *field;
+			u32 field_alignment, bits = __btf_member_bit_offset(type, member);
+
+			/* Bitfields are integer bits, not unaligned native loads. */
+			if (__btf_member_bitfield_size(type, member))
+				continue;
+			field = btf_type_by_id(btf, member->type);
+			field = btf_resolve_size(btf, field, &size);
+			if (IS_ERR(field))
+				return PTR_ERR(field);
+			if (!size)
+				continue;
+			if (bits % 8)
+				*memory = true;
+			error = ebpfos_native_arg_alignment(btf, member->type,
+							    offset + bits / 8,
+							    depth + 1,
+							    &field_alignment, memory);
+			if (error)
+				return error;
+			*alignment = max(*alignment, field_alignment);
+		}
+		return 0;
+	} else {
+		/* SSE/x87 and wide integers require a different native model. */
+		return -EOPNOTSUPP;
+	}
+	if (offset % *alignment)
+		*memory = true;
+	return 0;
+}
+
 int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 				 struct btf_func_model *model)
 {
@@ -233,6 +312,18 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 	if (error)
 		return error;
 	for (i = 0; i < model->nr_args; i++) {
+		if (IS_ENABLED(CONFIG_X86_64) &&
+		    model->arg_flags[i] & BTF_FMODEL_STRUCT_ARG) {
+			u32 alignment;
+			bool memory = false;
+
+			error = ebpfos_native_arg_alignment(btf, btf_params(prototype)[i].type,
+							    0, 0, &alignment, &memory);
+			if (error)
+				return error;
+			if (memory)
+				model->arg_flags[i] |= BTF_FMODEL_MEMORY_ARG;
+		}
 		/* The model has no alignment/class information for native i128.
 		 * Its stack ABI cannot be inferred from size alone.
 		 */

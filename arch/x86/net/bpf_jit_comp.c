@@ -2890,11 +2890,10 @@ emit_jmp:
 	return proglen;
 }
 
-static void clean_stack_garbage(const struct btf_func_model *m,
-				u8 **pprog, int nr_stack_slots,
-				int stack_size)
+static void clean_stack_garbage(u8 **pprog, int nr_stack_slots,
+				int stack_size, int arg_size)
 {
-	int arg_size, off;
+	int off;
 	u8 *prog;
 
 	/* Generally speaking, the compiler will pass the arguments
@@ -2923,8 +2922,6 @@ static void clean_stack_garbage(const struct btf_func_model *m,
 	if (nr_stack_slots != 1)
 		return;
 
-	/* the size of the last argument */
-	arg_size = m->arg_size[m->nr_args - 1];
 	if (arg_size <= 4) {
 		off = -(stack_size - 4);
 		prog = *pprog;
@@ -2945,7 +2942,8 @@ static int get_nr_used_regs(const struct btf_func_model *m)
 
 	for (i = 0; i < min_t(int, m->nr_args, MAX_BPF_FUNC_ARGS); i++) {
 		arg_regs = (m->arg_size[i] + 7) / 8;
-		if (nr_used_regs + arg_regs <= 6)
+		if (!(m->arg_flags[i] & BTF_FMODEL_MEMORY_ARG) &&
+		    nr_used_regs + arg_regs <= 6)
 			nr_used_regs += arg_regs;
 
 		if (nr_used_regs >= 6)
@@ -2959,6 +2957,7 @@ static void save_args(const struct btf_func_model *m, u8 **prog,
 		      int stack_size, bool for_call_origin, u32 flags)
 {
 	int arg_regs, first_off = 0, nr_regs = 0, nr_stack_slots = 0;
+	int stack_arg_size = 0;
 	bool use_jmp = bpf_trampoline_use_jmp(flags);
 	int i, j;
 
@@ -2987,7 +2986,8 @@ static void save_args(const struct btf_func_model *m, u8 **prog,
 		 * the arg1-5,arg7 will be passed by regs, and arg6 will
 		 * by stack.
 		 */
-		if (nr_regs + arg_regs > 6) {
+		if ((m->arg_flags[i] & BTF_FMODEL_MEMORY_ARG) || nr_regs + arg_regs > 6) {
+			stack_arg_size = m->arg_size[i];
 			/* copy function arguments from origin stack frame
 			 * into current stack frame.
 			 *
@@ -3031,7 +3031,7 @@ static void save_args(const struct btf_func_model *m, u8 **prog,
 		}
 	}
 
-	clean_stack_garbage(m, prog, nr_stack_slots, first_off);
+	clean_stack_garbage(prog, nr_stack_slots, first_off, stack_arg_size);
 }
 
 static void restore_regs(const struct btf_func_model *m, u8 **prog,
@@ -3048,7 +3048,7 @@ static void restore_regs(const struct btf_func_model *m, u8 **prog,
 	 */
 	for (i = 0; i < min_t(int, m->nr_args, MAX_BPF_FUNC_ARGS); i++) {
 		arg_regs = (m->arg_size[i] + 7) / 8;
-		if (nr_regs + arg_regs <= 6) {
+		if (!(m->arg_flags[i] & BTF_FMODEL_MEMORY_ARG) && nr_regs + arg_regs <= 6) {
 			for (j = 0; j < arg_regs; j++) {
 				emit_ldx(prog, BPF_DW,
 					 nr_regs == 5 ? X86_REG_R9 : BPF_REG_1 + nr_regs,

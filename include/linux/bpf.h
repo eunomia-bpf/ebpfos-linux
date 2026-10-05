@@ -1336,6 +1336,9 @@ struct bpf_prog_offload {
 /* The argument is signed. */
 #define BTF_FMODEL_SIGNED_ARG		BIT(1)
 
+/* The native ABI passes this argument in memory even with free registers. */
+#define BTF_FMODEL_MEMORY_ARG		BIT(2)
+
 struct btf_func_model {
 	u8 ret_size;
 	u8 ret_flags;
