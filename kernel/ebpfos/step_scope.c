@@ -11,6 +11,9 @@
 
 DEFINE_PER_CPU(struct ebpfos_step_scope *, ebpfos_active_step);
 
+/* Shared first-fault recorder checks the active stock run context. */
+extern void bpf_ebpfos_component_fault(s32 error);
+
 /* Publication accepts only the native prototype's exact kernel BTF type.
  * Stock kptr metadata owns the destructor and its module lifetime; the
  * invocation's program/map lease keeps both live through this cleanup.
@@ -72,8 +75,13 @@ __bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
 {
 	struct ebpfos_step_scope *scope = this_cpu_read(ebpfos_active_step);
 
-	if (!scope || scope->owner != aux || scope->pointer_result != map__map)
+	if (!scope || scope->owner != aux)
 		return;
+	if (scope->pointer_result != map__map) {
+		/* A discarded result is not a successful native NULL return. */
+		bpf_ebpfos_component_fault(-EPROTO);
+		return;
+	}
 	ebpfos_step_pointer_put(scope, scope->owned_result);
 	scope->result = (unsigned long)xchg(scope->pointer_value, NULL);
 	scope->owned_result = map__map->record->fields[0].type == BPF_KPTR_REF ?

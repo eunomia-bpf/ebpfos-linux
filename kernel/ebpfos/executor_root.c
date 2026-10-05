@@ -96,7 +96,7 @@ static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
 
 		if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY ||
 		    map->max_entries != 1 || map->value_size != sizeof(void *) ||
-		    !map->record || map->record->cnt != 1)
+		    IS_ERR_OR_NULL(map->record) || map->record->cnt != 1)
 			continue;
 		field = &map->record->fields[0];
 		/* The native caller receives exactly the type stock verification
