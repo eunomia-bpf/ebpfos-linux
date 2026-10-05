@@ -2932,7 +2932,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (attr->ebpfos_field_access_cnt &&
 	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
 	     (type != BPF_PROG_TYPE_SYSCALL &&
-	      type != BPF_PROG_TYPE_RAW_TRACEPOINT) ||
+	      type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
+	      (type != BPF_PROG_TYPE_TRACING ||
+	       attr->expected_attach_type != BPF_TRACE_FENTRY)) ||
 	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
 	if (attr->ebpfos_field_access_cnt >
