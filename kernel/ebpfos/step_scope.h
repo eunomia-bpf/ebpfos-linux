@@ -22,8 +22,9 @@ struct ebpfos_step_scope {
 	bool valid;
 	bool pending;
 	bool has_result;
-	u64 result;
 	u32 size;
+	u64 result;
+	u64 result_high;
 	u8 state[64];
 };
 

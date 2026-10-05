@@ -179,9 +179,20 @@ static int ebpfos_executor_root_role_fill(
 						       role->typed_entry, &role->null_args);
 	if (!error && !role->typed_entry)
 		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
-	if (!error && !role->typed_entry)
+	if (!error && !role->typed_entry) {
 		error = ebpfos_component_context_export(binding->prog, &role->typed_entry,
 						&role->context_image);
+		if (!error && role->context_image) {
+			/* The native model has already checked this immutable
+			 * prototype. Bind width once, never walk BTF on invocation.
+			 */
+			const struct btf_type *result = btf_type_skip_modifiers(
+				binding->prog->aux->attach_btf,
+				binding->prog->aux->attach_func_proto->type, NULL);
+
+			role->wide_result = btf_type_is_struct(result) && result->size > 8;
+		}
+	}
 	if (error) {
 		ebpfos_binding_put(binding);
 		ebpfos_admission_put(grant);

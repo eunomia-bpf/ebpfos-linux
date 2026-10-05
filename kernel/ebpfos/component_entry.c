@@ -14,6 +14,7 @@ struct ebpfos_native_entry {
 	struct btf *btf;
 	u32 func_id;
 	bool pointer_result;
+	bool wide_result;
 	void *image;
 };
 
@@ -160,6 +161,8 @@ retry:
 			*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 			if (prog->type == BPF_PROG_TYPE_TRACING)
 				*result = step.has_result ? step.result : 0;
+			if (native && native->wide_result)
+				result[1] = step.has_result ? step.result_high : 0;
 			/* Even a provider that omits capture cannot retain a native
 			 * caller's borrowed pointer into the next invocation.
 			 */
@@ -344,7 +347,8 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 			return -EOPNOTSUPP;
 		words += DIV_ROUND_UP(model->arg_size[i], 8);
 	}
-	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 8)
+	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 16 ||
+	    (model->ret_size > 8 && !(model->ret_flags & BTF_FMODEL_STRUCT_ARG)))
 		return -EOPNOTSUPP;
 	if (btf_type_is_ptr(btf_type_skip_modifiers(btf, prototype->type, NULL))) {
 		const struct btf_type *pointee = btf_type_resolve_ptr(btf, prototype->type, NULL);
@@ -389,6 +393,7 @@ ebpfos_component_entry_create(struct ebpfos_executor_root_slot *slot, u64 role,
 	entry->btf = btf;
 	btf_get(btf);
 	entry->func_id = func_id;
+	entry->wide_result = model.ret_size > 8;
 	prototype = btf_type_by_id(btf, btf_type_by_id(btf, func_id)->type);
 	entry->pointer_result = btf_type_is_ptr(
 		btf_type_skip_modifiers(btf, prototype->type, NULL));

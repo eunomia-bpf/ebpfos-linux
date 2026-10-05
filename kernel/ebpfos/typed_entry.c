@@ -26,18 +26,19 @@ struct ebpfos_component_call {
 	int fault;
 	bool step_active;
 	bool context_root;
+	bool wide_result;
 	bool has_caller;
 };
 
 static DEFINE_PER_CPU(struct ebpfos_component_call *, ebpfos_active_typed_call);
 
-static u64 ebpfos_component_no_lease(void)
+static struct { u64 first, second; } ebpfos_component_no_lease(void)
 {
 	/* The returned address is a kernel API, usable only under typed_enter.
 	 * An invalid caller must execute no BPF instruction or manufacture a
-	 * native pointer. All supported native results fit in this register.
+	 * native pointer. Clear both possible native integer return registers.
 	 */
-	return 0;
+	return (typeof(ebpfos_component_no_lease())) {0, 0};
 }
 
 static int ebpfos_component_context_call(void *cookie, const void *context,
@@ -73,6 +74,8 @@ static int ebpfos_component_context_call(void *cookie, const void *context,
 	 */
 	((jit_call_t)prog->bpf_func)(context, prog->insnsi);
 	*result = step->has_result ? step->result : 0;
+	if (call->wide_result)
+		result[1] = step->has_result ? step->result_high : 0;
 	if (step->pointer_result)
 		ebpfos_step_pointer_clear(step);
 	return 0;
@@ -198,12 +201,17 @@ int ebpfos_component_typed_export(struct bpf_prog *prog, void **entry)
 			struct btf_func_model model;
 
 			/* The native model admits only pointer-free, aligned integer
-			 * aggregates fitting this architecture's return register.
+			 * aggregates fitting this architecture's return registers.
 			 */
 			error = ebpfos_component_entry_model(prog->aux->attach_btf,
 							     prog->aux->attach_btf_id, &model);
 			if (error)
 				return error;
+			/* A stock global BPF subprogram returns only R0. Two native
+			 * registers require the checked context/result-pair backend.
+			 */
+			if (model.ret_size > 8)
+				return -EOPNOTSUPP;
 		} else if (!btf_type_is_void(result) && !btf_type_is_int(result) &&
 			   !btf_is_any_enum(result)) {
 			return -EOPNOTSUPP;
@@ -307,6 +315,7 @@ retry:
 		spin_unlock(&slot->lock);
 	call->step_active = target->needs_steps;
 	call->context_root = target->context_image != NULL;
+	call->wide_result = target->wide_result;
 	if (call->step_active) {
 		ebpfos_step_enter(&call->step, call->program->aux);
 		call->step.pointer_result = target->pointer_result;

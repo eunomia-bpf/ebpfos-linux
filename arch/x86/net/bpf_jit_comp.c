@@ -3373,6 +3373,12 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	/* room for return value of orig_call or fentry prog */
 	save_ret = flags & (BPF_TRAMP_F_CALL_ORIG | BPF_TRAMP_F_RET_FENTRY_RET);
+	/* This tracing/struct_ops trampoline saves only RAX. Native direct
+	 * entries below carry two integer words, but must not make this path
+	 * silently clobber RDX or manufacture a two-register BPF return.
+	 */
+	if (save_ret && m->ret_size > 8)
+		return -EOPNOTSUPP;
 	if (save_ret)
 		stack_size += 8;
 
@@ -3697,7 +3703,8 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	int i, words = 0, error = -EINVAL;
 
 	if (!m || !callback || !fallback || size < 512 ||
-	    m->nr_args > MAX_BPF_FUNC_ARGS || m->ret_size > 8)
+	    m->nr_args > MAX_BPF_FUNC_ARGS || m->ret_size > 16 ||
+	    (m->ret_size > 8 && !(m->ret_flags & BTF_FMODEL_STRUCT_ARG)))
 		return -EINVAL;
 	for (i = 0; i < m->nr_args; i++)
 		words += DIV_ROUND_UP(m->arg_size[i], 8);
@@ -3712,7 +3719,7 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	context_off = context_words * 8;
 	metadata_off = context_off + 8;
 	ip_off = metadata_off + 8;
-	result_off = ip_off + 8;
+	result_off = ip_off + (m->ret_size > 8 ? 16 : 8);
 	stack_size = round_up(result_off, 16);
 	rw_image = kzalloc(size, GFP_KERNEL);
 	if (!rw_image)
@@ -3732,6 +3739,8 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	for (i = words; i < context_words; i++)
 		emit_store_stack_imm64(&prog, BPF_REG_0, -context_off + i * 8, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -result_off, 0);
+	if (m->ret_size > 8)
+		emit_store_stack_imm64(&prog, BPF_REG_0, -result_off + 8, 0);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -metadata_off, words);
 	emit_store_stack_imm64(&prog, BPF_REG_0, -ip_off, (long)native_ip);
 	save_args(m, &prog, context_off, false, BPF_TRAMP_F_NATIVE_CALL);
@@ -3745,6 +3754,8 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	failed = prog;
 	prog += 6; /* jne fallback */
 	emit_ldx(&prog, BPF_DW, BPF_REG_0, BPF_REG_FP, -result_off);
+	if (m->ret_size > 8)
+		emit_ldx(&prog, BPF_DW, BPF_REG_3, BPF_REG_FP, -result_off + 8);
 	EMIT1(0xC9); /* leave */
 	emit_return(&prog, image + (prog - rw_image));
 	emit_cond_near_jump(&failed, image + (prog - rw_image),

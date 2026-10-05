@@ -7539,7 +7539,7 @@ static u8 __get_type_fmodel_flags(const struct btf_type *t)
 	return flags;
 }
 
-/* Integer aggregates fitting a single native return register need no hidden
+/* Integer aggregates fitting the native integer return registers need no hidden
  * result pointer. Never classify pointer fields or an SSE/x87/MEMORY return
  * as integer bits. Offsets are relative to the complete returned object.
  */
@@ -7562,7 +7562,7 @@ static bool btf_integer_return(struct btf *btf, u32 id, u32 offset, u32 depth)
 		u32 size;
 
 		element = btf_resolve_size(btf, element, &size);
-		if (IS_ERR(element) || !size || size > 8 || array->nelems > 8 / size)
+		if (IS_ERR(element) || !size || size > 16 || array->nelems > 16 / size)
 			return false;
 		for (i = 0; i < array->nelems; i++)
 			if (!btf_integer_return(btf, array->type, offset + i * size,
@@ -7570,7 +7570,7 @@ static bool btf_integer_return(struct btf *btf, u32 id, u32 offset, u32 depth)
 				return false;
 		return array->nelems != 0;
 	}
-	if (!btf_type_is_struct(type) || !type->size || type->size > 8)
+	if (!btf_type_is_struct(type) || !type->size || type->size > 16)
 		return false;
 	for (i = 0; i < btf_type_vlen(type); i++) {
 		const struct btf_member *member = &btf_type_member(type)[i];

@@ -26,6 +26,7 @@ struct ebpfos_executor_root_role {
 	void *context_image;
 	/* Loaded calls select scope use; opaque native calls retain a scope. */
 	bool needs_steps;
+	bool wide_result;
 	/* Stock-checked kptr channel for a native struct pointer. */
 	struct bpf_map *pointer_result;
 	/* Immutable per-CPU storage, kept alive by the role's admitted program. */

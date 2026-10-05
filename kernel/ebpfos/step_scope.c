@@ -59,6 +59,22 @@ __bpf_kfunc void bpf_ebpfos_component_result(u64 result, struct bpf_prog_aux *au
 
 	if (scope && scope->owner == aux) {
 		scope->result = result;
+		scope->result_high = 0;
+		scope->has_result = true;
+	}
+}
+
+/* Both words remain scalars. The native model admits only pointer-free
+ * integer aggregates; typed pointers retain their checked kptr channel.
+ */
+__bpf_kfunc void bpf_ebpfos_component_result_pair(u64 first, u64 second,
+						struct bpf_prog_aux *aux)
+{
+	struct ebpfos_step_scope *scope = this_cpu_read(ebpfos_active_step);
+
+	if (scope && scope->owner == aux) {
+		scope->result = first;
+		scope->result_high = second;
 		scope->has_result = true;
 	}
 }
@@ -84,6 +100,7 @@ __bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
 	}
 	ebpfos_step_pointer_put(scope, scope->owned_result);
 	scope->result = (unsigned long)xchg(scope->pointer_value, NULL);
+	scope->result_high = 0;
 	scope->owned_result = map__map->record->fields[0].type == BPF_KPTR_REF ?
 		(void *)(unsigned long)scope->result : NULL;
 	scope->has_result = true;
@@ -163,11 +180,13 @@ BTF_ID_FLAGS(func, bpf_ebpfos_function_step_read)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_step_save)
 BTF_ID_FLAGS(func, bpf_ebpfos_component_result)
 BTF_ID_FLAGS(func, bpf_ebpfos_component_pointer_result)
+BTF_ID_FLAGS(func, bpf_ebpfos_component_result_pair)
 BTF_KFUNCS_END(ebpfos_step_ids)
 
 BTF_ID_LIST(ebpfos_result_service_ids)
 BTF_ID(func, bpf_ebpfos_component_result)
 BTF_ID(func, bpf_ebpfos_component_pointer_result)
+BTF_ID(func, bpf_ebpfos_component_result_pair)
 
 static int ebpfos_step_filter(const struct bpf_prog *prog, u32 id)
 {
@@ -179,11 +198,15 @@ static int ebpfos_step_filter(const struct bpf_prog *prog, u32 id)
 			prog->aux->attach_btf, prog->aux->attach_func_proto->type, NULL);
 		bool pointer = btf_type_is_ptr(result);
 
-		if ((id == ebpfos_result_service_ids[0] && pointer) ||
+		if (((id == ebpfos_result_service_ids[0] ||
+		      id == ebpfos_result_service_ids[2]) && pointer) ||
 		    (id == ebpfos_result_service_ids[1] && !pointer))
 			return 1;
+		if (id == ebpfos_result_service_ids[2] &&
+		    (!btf_type_is_struct(result) || result->size <= 8 || result->size > 16))
+			return 1;
 	}
-	if (id == ebpfos_result_service_ids[1] &&
+	if ((id == ebpfos_result_service_ids[1] || id == ebpfos_result_service_ids[2]) &&
 	    (!prog || prog->type != BPF_PROG_TYPE_TRACING))
 		return 1;
 	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
