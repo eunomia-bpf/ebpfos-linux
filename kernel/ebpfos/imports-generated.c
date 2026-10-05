@@ -30,6 +30,12 @@ BTF_ID_FLAGS(func, bpf_ebpfos_import_fput, KF_RELEASE | KF_SLEEPABLE)
 #endif
 BTF_KFUNCS_END(ebpfos_import_ids)
 
+#ifdef EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+BTF_KFUNCS_START(ebpfos_tracing_import_ids)
+#include EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+BTF_KFUNCS_END(ebpfos_tracing_import_ids)
+#endif
+
 static int ebpfos_import_filter(const struct bpf_prog *prog, u32 id)
 {
 	if (!btf_id_set8_contains(&ebpfos_import_ids, id))
@@ -43,9 +49,29 @@ static const struct btf_kfunc_id_set ebpfos_import_set = {
 	.set = &ebpfos_import_ids,
 	.filter = ebpfos_import_filter,
 };
+#ifdef EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+static int ebpfos_tracing_import_filter(const struct bpf_prog *prog, u32 id)
+{
+	if (!btf_id_set8_contains(&ebpfos_tracing_import_ids, id))
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable;
+}
+static const struct btf_kfunc_id_set ebpfos_tracing_import_set = {
+	.owner = THIS_MODULE,
+	.set = &ebpfos_tracing_import_ids,
+	.filter = ebpfos_tracing_import_filter,
+};
+#endif
 static int __init ebpfos_import_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
-					 &ebpfos_import_set);
+	int err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					  &ebpfos_import_set);
+#ifdef EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+	if (!err)
+		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING,
+						&ebpfos_tracing_import_set);
+#endif
+	return err;
 }
 late_initcall(ebpfos_import_init);
