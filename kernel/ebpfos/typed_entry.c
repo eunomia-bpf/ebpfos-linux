@@ -23,6 +23,7 @@ struct ebpfos_component_call {
 	struct ebpfos_step_scope step;
 	u64 start;
 	int fault;
+	bool step_active;
 };
 
 static DEFINE_PER_CPU(struct ebpfos_component_call *, ebpfos_active_typed_call);
@@ -218,13 +219,21 @@ int ebpfos_component_typed_enter(struct ebpfos_executor_root_slot *slot,
 	error = ebpfos_binding_invocation_enter(call->binding);
 	if (error)
 		goto release_run;
-	ebpfos_step_enter(&call->step, call->program->aux);
-	call->step.pointer_result = target->pointer_result;
-	if (target->pointer_result) {
-		u32 key = 0;
+	call->step_active = target->needs_steps;
+	if (call->step_active) {
+		ebpfos_step_enter(&call->step, call->program->aux);
+		call->step.pointer_result = target->pointer_result;
+		if (target->pointer_result) {
+			u32 key = 0;
 
-		call->step.pointer_value = target->pointer_result->ops->map_lookup_elem(
-			target->pointer_result, &key);
+			call->step.pointer_value = target->pointer_result->ops->map_lookup_elem(
+				target->pointer_result, &key);
+		}
+	} else {
+		/* Fault tracking is per-CPU even for a service-free export. The
+		 * conservative loaded-call scan also covers its BPF subprograms.
+		 */
+		preempt_disable();
 	}
 	call->previous = this_cpu_read(ebpfos_active_typed_call);
 	call->fault = 0;
@@ -246,14 +255,18 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 {
 	int fault = call->fault;
 
-	if (!fault && call->step.pending) {
+	if (call->step_active && !fault && call->step.pending) {
 		call->step.pending = false;
 		return 1;
 	}
 	this_cpu_write(ebpfos_active_typed_call, call->previous);
-	if (!fault)
-		ebpfos_step_result_transfer(&call->step);
-	ebpfos_step_exit(&call->step);
+	if (call->step_active) {
+		if (!fault)
+			ebpfos_step_result_transfer(&call->step);
+		ebpfos_step_exit(&call->step);
+	} else {
+		preempt_enable();
+	}
 	__bpf_prog_exit_recur(call->program, call->start, &call->run);
 	ebpfos_binding_invocation_exit(call->binding);
 	ebpfos_executor_root_lease_end(&call->lease);

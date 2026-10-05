@@ -162,7 +162,11 @@ static int ebpfos_executor_root_role_fill(
 	     (binding->prog->type == BPF_PROG_TYPE_TRACING &&
 	      binding->prog->expected_attach_type == BPF_TRACE_FENTRY))) {
 		role->entry = binding->prog->bpf_func;
-		role->needs_steps = binding->prog->type == BPF_PROG_TYPE_TRACING ||
+		/* Checked context roots need their result scope even without a
+		 * service call. A native global export returns directly; retain
+		 * its scope only when the loaded call graph can reach a service.
+		 */
+		role->needs_steps = role->context_image ||
 			ebpfos_step_program_needs_scope(binding->prog);
 	}
 	role->binding = binding;
