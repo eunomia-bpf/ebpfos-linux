@@ -10,33 +10,13 @@
 #include "component_graph.h"
 
 /* Private L1 layout and shared non-sleepable acquisition. Published slots have
- * stable lifetime; RCU protects their active bundles through native commit.
+ * stable lifetime; RCU protects their active bundles through component publication.
  */
 struct ebpfos_executor_root_role {
 	struct ebpfos_executor_root_role_snapshot snapshot;
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
-	/* Immutable stock JIT entry, selected before publication. */
-	bpf_func_t entry;
-	/* Native ABI subprogram from this same verified image, or NULL. */
-	void *typed_entry;
-	/* Nullable argument bits from this checked global export, never its root. */
-	u64 null_args;
-	/* Optional native marshaller around the verified context root. */
-	void *context_image;
-	/* Loaded calls select scope use; opaque native calls retain a scope. */
-	bool needs_steps;
-	bool wide_result;
-	/* Immutable stock kptr ownership classification, bound at publication. */
-	bool pointer_owned;
-	/* Native typed API uses vmlinux FUNC IDs. Zero means a different BTF
-	 * namespace or no native export; explicit-BTF context entries are separate.
-	 */
-	u32 native_func_id;
-	/* Stock-checked kptr channel for a native struct pointer. */
-	struct bpf_map *pointer_result;
-	/* Immutable per-CPU storage, kept alive by the role's admitted program. */
-	void __percpu *pointer_value_percpu;
+
 };
 
 struct ebpfos_executor_root_bundle {
@@ -104,41 +84,5 @@ static __always_inline struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
 	return binding;
 }
 
-static __always_inline int ebpfos_executor_root_lease_try_begin_slot_inner(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot, bool borrowed)
-{
-	if (!lease || !snapshot)
-		return -EINVAL;
-	/* Only a successful acquisition makes lease_end own anything. */
-	lease->slot = NULL;
-	if (!slot)
-		return -ENOENT;
-	if (!borrowed)
-		rcu_read_lock();
-	/*
-	 * This lease cannot sleep. Its own or its caller's RCU hold protects
-	 * the bundle. Quiesce closes
-	 * admission before a grace period, which drains these readers without
-	 * modifying the shared gate count on every call.
-	 */
-	if (atomic_long_read_acquire(&slot->gate.state) & EBPFOS_GATE_DRAINING) {
-		if (!borrowed)
-			rcu_read_unlock();
-		return -EAGAIN;
-	}
-	lease->binding = ebpfos_executor_root_role_get_rcu(
-		slot, role_type, &lease->epoch, snapshot, false);
-	if (!lease->binding) {
-		if (!borrowed)
-			rcu_read_unlock();
-		return -ENOENT;
-	}
-	lease->slot = slot;
-	lease->rcu_held = true;
-	lease->rcu_borrowed = borrowed;
-	return 0;
-}
 
 #endif

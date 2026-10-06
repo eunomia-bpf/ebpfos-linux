@@ -4,7 +4,6 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/ebpfos.h>
-#include <linux/ebpfos_typed.h>
 #include <linux/errno.h>
 #include <linux/filter.h>
 #include <linux/module.h>
@@ -17,7 +16,6 @@
 #include <linux/xarray.h>
 #include <uapi/linux/ebpfos_root.h>
 #include "executor_root.h"
-#include "step_scope.h"
 
 /* Slots have stable lifetime; bundles own bindings until after an RCU grace period. */
 static DEFINE_XARRAY(ebpfos_executor_roots);
@@ -52,7 +50,6 @@ static void ebpfos_executor_root_bundle_release(
 	if (!bundle)
 		return;
 	for (role = 0; role < bundle->role_count; role++) {
-		ebpfos_component_context_free(bundle->roles[role].context_image);
 		ebpfos_binding_put(bundle->roles[role].binding);
 		ebpfos_admission_put(bundle->roles[role].grant);
 	}
@@ -75,93 +72,12 @@ static void ebpfos_executor_root_retire_rcu(struct rcu_head *rcu)
 	schedule_work(&bundle->retire_work);
 }
 
-static bool ebpfos_pointer_result_tag(const struct bpf_map *map)
-{
-	u32 i;
-
-	if (!map->btf)
-		return false;
-	for (i = 1; i < btf_nr_types(map->btf); i++) {
-		const struct btf_type *type = btf_type_by_id(map->btf, i);
-
-		if (type && BTF_INFO_KIND(type->info) == BTF_KIND_DECL_TAG &&
-		    type->type == map->btf_value_type_id &&
-		    btf_decl_tag(type)->component_idx == -1 &&
-		    !strcmp(btf_name_by_offset(map->btf, type->name_off),
-			    "ebpfos.component.pointer_result"))
-			return true;
-	}
-	return false;
-}
-
-static int ebpfos_executor_root_pointer_result(struct bpf_prog *prog,
-					    struct bpf_map **result)
-{
-	const struct btf_type *pointee;
-	struct bpf_map *declared = NULL, *legacy = NULL;
-	bool ambiguous = false;
-	u32 id, index;
-
-	*result = NULL;
-	if (prog->type != BPF_PROG_TYPE_TRACING)
-		return 0;
-	pointee = btf_type_resolve_ptr(prog->aux->attach_btf,
-				       prog->aux->attach_func_proto->type, &id);
-	if (!pointee)
-		return 0;
-	if (!btf_type_is_struct(pointee))
-		return -EOPNOTSUPP;
-	for (index = 0; index < prog->aux->used_map_cnt; index++) {
-		struct bpf_map *map = prog->aux->used_maps[index];
-		const struct btf_field *field;
-		bool tagged = ebpfos_pointer_result_tag(map);
-
-		if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY ||
-		    map->max_entries != 1 || map->value_size != sizeof(void *) ||
-		    IS_ERR_OR_NULL(map->record) || map->record->cnt != 1) {
-			if (tagged)
-				return -EPROTOTYPE;
-			continue;
-		}
-		field = &map->record->fields[0];
-		/* The native caller receives exactly the type stock verification
-		 * checked at each kptr store. Never reinterpret another map field.
-		 */
-		if (field->offset ||
-		    (field->type != BPF_KPTR_UNREF && field->type != BPF_KPTR_REF) ||
-		    (field->type == BPF_KPTR_REF &&
-		     (!btf_is_kernel(field->kptr.btf) || !field->kptr.dtor)) ||
-		    !btf_types_are_same(prog->aux->attach_btf, id,
-				field->kptr.btf, field->kptr.btf_id)) {
-			if (tagged)
-				return -EPROTOTYPE;
-			continue;
-		}
-		/* Ordinary provider maps can have the same native kptr type.
-		 * The compiler's declaration selects the return channel, never
-		 * its authority: the stock field/type checks above still apply.
-		 * Preserve unambiguous legacy producers without guessing a map.
-		 */
-		if (tagged) {
-			if (declared)
-				return -EPROTOTYPE;
-			declared = map;
-		} else {
-			ambiguous |= legacy != NULL;
-			legacy = map;
-		}
-	}
-	*result = declared ?: (ambiguous ? NULL : legacy);
-	return *result ? 0 : -EPROTOTYPE;
-}
-
 static int ebpfos_executor_root_role_fill(
 	struct ebpfos_executor_root_role *role,
 	const struct ebpfos_executor_root_role_request *request)
 {
 	struct ebpfos_binding *binding;
 	struct ebpfos_admission *grant;
-	int error;
 
 	if (!role || !request || request->admission_fd < 0)
 		return -EINVAL;
@@ -173,78 +89,9 @@ static int ebpfos_executor_root_role_fill(
 		ebpfos_admission_put(grant);
 		return -EUCLEAN;
 	}
-	error = ebpfos_component_typed_export(binding->prog, &role->typed_entry);
-	if (!error && role->typed_entry)
-		error = ebpfos_component_typed_null_args(binding->prog,
-						       role->typed_entry, &role->null_args);
-	if (!error && !role->typed_entry)
-		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
-	if (!error && !role->typed_entry &&
-	    binding->prog->type == BPF_PROG_TYPE_TRACING &&
-	    binding->prog->expected_attach_type == BPF_TRACE_FENTRY)
-		error = ebpfos_component_context_null_args(binding->prog, &role->null_args);
-	if (!error && !role->typed_entry) {
-		error = ebpfos_component_context_export(binding->prog, &role->typed_entry,
-						&role->context_image);
-		if (!error && role->context_image) {
-			/* The native model has already checked this immutable
-			 * prototype. Bind width once, never walk BTF on invocation.
-			 */
-			const struct btf_type *result = btf_type_skip_modifiers(
-				binding->prog->aux->attach_btf,
-				binding->prog->aux->attach_func_proto->type, NULL);
-
-			role->wide_result = btf_type_is_struct(result) && result->size > 8;
-		}
-	}
-	if (error) {
-		ebpfos_binding_put(binding);
-		ebpfos_admission_put(grant);
-		return error;
-	}
-	if (role->pointer_result) {
-		struct bpf_array *array = container_of(role->pointer_result,
-						     struct bpf_array, map);
-
-		/* Channel selection checked a one-entry per-CPU array. Bind its
-		 * immutable anchor, not this publication CPU's value. The admitted
-		 * program and the invocation's epoch hold keep the map alive.
-		 */
-		role->pointer_value_percpu = array->pptrs[0];
-		/* Channel selection checked the exact kptr type and destructor.
-		 * Its ownership class cannot change during this binding's epoch.
-		 */
-		role->pointer_owned =
-			role->pointer_result->record->fields[0].type == BPF_KPTR_REF;
-	}
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;
 	role->snapshot.map_id = binding->map_id;
-	/* Only the verifier-checked context ABI is callable through this entry.
-	 * Other root roles retain their existing execution mechanism. No address
-	 * supplied by userspace is accepted as executable code.
-	 */
-	if (binding->prog->jited && !binding->prog->sleepable &&
-	    binding->prog->aux->ebpfos_component &&
-	    (binding->prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT ||
-	     (binding->prog->type == BPF_PROG_TYPE_TRACING &&
-	      binding->prog->expected_attach_type == BPF_TRACE_FENTRY))) {
-		role->entry = binding->prog->bpf_func;
-		/* Checked context roots need their result scope even without a
-		 * service call. A native global export returns directly; retain
-		 * its scope only when the loaded call graph can reach a service.
-		 */
-		role->needs_steps = role->context_image ||
-			ebpfos_step_program_needs_scope(binding->prog);
-	}
-	/* The loaded program and its BTF contract are immutable. Bind the native
-	 * API's namespace and FUNC together at publication, before exposing this
-	 * role under RCU. Each invocation need only match that bound FUNC ID.
-	 * A module's same numeric ID must never alias a vmlinux prototype.
-	 */
-	role->native_func_id = role->typed_entry &&
-		binding->prog->aux->attach_btf == bpf_get_btf_vmlinux() ?
-		binding->prog->aux->attach_btf_id : 0;
 	role->binding = binding;
 	role->grant = grant;
 	return 0;
@@ -567,55 +414,12 @@ int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
 	return 0;
 }
 
-struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id)
-{
-	return object_id ? xa_load(&ebpfos_executor_roots, object_id) : NULL;
-}
-
-int ebpfos_executor_root_lease_try_begin_slot(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot)
-{
-	return ebpfos_executor_root_lease_try_begin_slot_inner(
-		slot, role_type, lease, snapshot, false);
-}
-
-int ebpfos_executor_root_lease_try_begin_slot_rcu(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot)
-{
-	return ebpfos_executor_root_lease_try_begin_slot_inner(
-		slot, role_type, lease, snapshot, true);
-}
-
-int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot)
-{
-	if (!object_id)
-		return -EINVAL;
-	return ebpfos_executor_root_lease_try_begin_slot(
-		ebpfos_executor_root_lookup(object_id), role_type, lease, snapshot);
-}
-
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease)
 {
 	if (!lease || !lease->slot)
 		return;
-	/*
-	 * Non-sleepable leases use owned or caller-held RCU through invocation.
-	 * A borrowed lease never releases its caller's hold.
-	 * The bundle's owned reference is released only after that grace period.
-	 * Sleepable leases drop RCU at acquisition and must own a reference.
-	 */
-	if (!lease->rcu_held) {
-		ebpfos_binding_put(lease->binding);
-		ebpfos_component_gate_exit(&lease->slot->gate);
-	} else if (!lease->rcu_borrowed) {
-		rcu_read_unlock();
-	}
+	ebpfos_binding_put(lease->binding);
+	ebpfos_component_gate_exit(&lease->slot->gate);
 	lease->slot = NULL;
 }
 

@@ -121,18 +121,4 @@ struct ebpfos_ioc_root_quiesce {
 #define EBPFOS_IOC_ROOT_RESUME _IO(EBPFOS_IOC_MAGIC, 0x3a)
 
 /* A BTF-generated typed stub must be registered for symbol before enable. */
-struct ebpfos_ioc_function_route {
-	char symbol[64];
-	__u64 object_id;
-	__u64 role_type;
-	__u64 component_calls;
-	__u64 native_fallbacks;
-	__u64 last_epoch;
-	__u32 last_provider_id;
-	__u32 enable;
-};
-
-#define EBPFOS_IOC_FUNCTION_ROUTE \
-	_IOWR(EBPFOS_IOC_MAGIC, 0x3b, struct ebpfos_ioc_function_route)
-
 #endif /* _UAPI_EBPFOS_H */

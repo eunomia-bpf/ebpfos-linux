@@ -22,8 +22,6 @@ struct ebpfos_executor_root_lease {
 	struct ebpfos_binding *binding;
 	struct ebpfos_executor_root_slot *slot;
 	u64 epoch;
-	bool rcu_held;
-	bool rcu_borrowed;
 };
 
 struct ebpfos_binding {
@@ -73,21 +71,6 @@ struct ebpfos_component_call_frame {
 #define EBPFOS_COMPONENT_CALL_CONTEXT_SIZE \
 	((u32)sizeof(struct ebpfos_component_call_frame))
 
-/* Non-sleepable raw-tracepoint providers read arguments and return a status. */
-#define EBPFOS_COMPONENT_IRQ_ABI_ID 0x454243414c4c0002ULL
-#define EBPFOS_COMPONENT_IRQ_ABI_VERSION 1U
-#define EBPFOS_COMPONENT_IRQ_ARG_COUNT 12U
-struct ebpfos_component_irq_frame {
-	u64 args[EBPFOS_COMPONENT_IRQ_ARG_COUNT];
-};
-#define EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE \
-	((u32)sizeof(struct ebpfos_component_irq_frame))
-
-/* Stock tracing/FENTRY verification against the native BTF FUNC. No tracing
- * link is attached; L1 enters the admitted program through the bound slot.
- */
-#define EBPFOS_COMPONENT_NATIVE_ABI_ID 0x454243414c4c0003ULL
-#define EBPFOS_COMPONENT_NATIVE_ABI_VERSION 1U
 
 #define EBPFOS_EXECUTOR_CALL_F_EXPECT_EPOCH BIT(0)
 
@@ -158,21 +141,6 @@ ebpfos_binding_descriptor(const struct ebpfos_binding *binding);
 struct bpf_prog *ebpfos_binding_prog(const struct ebpfos_binding *binding);
 struct bpf_map *ebpfos_binding_map(const struct ebpfos_binding *binding);
 int ebpfos_executor_root_lease_begin(u64 object_id, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot);
-/* Non-sleepable callers must end this lease in the same context. */
-/* Published root slots have stable lifetime; their active bundle does not. */
-struct ebpfos_executor_root_slot *ebpfos_executor_root_lookup(u64 object_id);
-int ebpfos_executor_root_lease_try_begin_slot(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot);
-/* Caller retains RCU through invocation and native result commit. */
-int ebpfos_executor_root_lease_try_begin_slot_rcu(
-	struct ebpfos_executor_root_slot *slot, u64 role_type,
-	struct ebpfos_executor_root_lease *lease,
-	struct ebpfos_executor_root_role_snapshot *snapshot);
-int ebpfos_executor_root_lease_try_begin(u64 object_id, u64 role_type,
 	struct ebpfos_executor_root_lease *lease,
 	struct ebpfos_executor_root_role_snapshot *snapshot);
 void ebpfos_executor_root_lease_end(struct ebpfos_executor_root_lease *lease);

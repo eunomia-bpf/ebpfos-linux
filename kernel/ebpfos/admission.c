@@ -66,10 +66,6 @@ static_assert((BPF_F_EBPFOS_COMPONENT | BPF_F_SLEEPABLE) ==
 	      EBPFOS_COMPONENT_CALL_PROG_FLAGS);
 static_assert(sizeof(struct ebpfos_component_call_frame) ==
 	      EBPFOS_COMPONENT_CALL_CONTEXT_SIZE);
-static_assert(EBPFOS_COMPONENT_IRQ_ARG_COUNT == MAX_BPF_FUNC_ARGS);
-static_assert(sizeof(struct ebpfos_component_irq_frame) ==
-	      EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE);
-
 enum ebpfos_prog_seal_state {
 	EBPFOS_PROG_SEALING = 1,
 	EBPFOS_PROG_SEALED = 2,
@@ -107,17 +103,6 @@ static int ebpfos_validate_component_descriptor(
 	    le32_to_cpu(descriptor->abi_version) ==
 		EBPFOS_COMPONENT_CALL_ABI_VERSION &&
 	    context_size == EBPFOS_COMPONENT_CALL_CONTEXT_SIZE)
-		return 0;
-	if (prog_type == BPF_PROG_TYPE_RAW_TRACEPOINT &&
-	    abi_id == EBPFOS_COMPONENT_IRQ_ABI_ID &&
-	    le32_to_cpu(descriptor->abi_version) ==
-		EBPFOS_COMPONENT_IRQ_ABI_VERSION &&
-	    context_size == EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE)
-		return 0;
-	if (prog_type == BPF_PROG_TYPE_TRACING &&
-	    abi_id == EBPFOS_COMPONENT_NATIVE_ABI_ID &&
-	    le32_to_cpu(descriptor->abi_version) == EBPFOS_COMPONENT_NATIVE_ABI_VERSION &&
-	    context_size == EBPFOS_COMPONENT_IRQ_CONTEXT_SIZE)
 		return 0;
 	return -EPROTO;
 }
