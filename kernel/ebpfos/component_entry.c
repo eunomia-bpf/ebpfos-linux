@@ -166,7 +166,7 @@ retry:
 			/* Even a provider that omits capture cannot retain a native
 			 * caller's borrowed pointer into the next invocation.
 			 */
-			ebpfos_step_pointer_clear(&step);
+			ebpfos_step_pointer_clear_if_live(&step);
 		} while (step.pending);
 		ebpfos_step_result_transfer(&step);
 		ebpfos_step_exit(&step);

@@ -31,13 +31,19 @@ static void ebpfos_step_pointer_put(struct ebpfos_step_scope *scope, void *value
 
 void ebpfos_step_pointer_clear(struct ebpfos_step_scope *scope)
 {
-	if (scope->pointer_value)
+	/* The per-CPU channel is usually already empty: capture consumed it, or
+	 * this entry has not produced a result yet. An empty observation has no
+	 * reference to release and needs no locked exchange. Keep the exchange
+	 * for every nonempty observation so stale/faulted results are consumed
+	 * exactly once before invoking the stock kptr destructor.
+	 */
+	if (scope->pointer_value && READ_ONCE(*scope->pointer_value))
 		ebpfos_step_pointer_put(scope, xchg(scope->pointer_value, NULL));
 }
 
 void ebpfos_step_result_reset(struct ebpfos_step_scope *scope)
 {
-	ebpfos_step_pointer_clear(scope);
+	ebpfos_step_pointer_clear_if_live(scope);
 	ebpfos_step_pointer_put(scope, scope->owned_result);
 	scope->owned_result = NULL;
 	scope->has_result = false;

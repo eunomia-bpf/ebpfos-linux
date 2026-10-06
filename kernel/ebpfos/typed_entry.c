@@ -77,7 +77,7 @@ static int ebpfos_component_context_call(void *cookie, const void *context,
 	if (call->wide_result)
 		result[1] = step->has_result ? step->result_high : 0;
 	if (step->pointer_result)
-		ebpfos_step_pointer_clear(step);
+		ebpfos_step_pointer_clear_if_live(step);
 	return 0;
 }
 

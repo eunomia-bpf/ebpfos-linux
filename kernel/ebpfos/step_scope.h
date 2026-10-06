@@ -31,6 +31,16 @@ struct ebpfos_step_scope {
 DECLARE_PER_CPU(struct ebpfos_step_scope *, ebpfos_active_step);
 
 void ebpfos_step_pointer_clear(struct ebpfos_step_scope *scope);
+/* Capture normally empties this CPU's channel before cleanup. Keep the
+ * empty path at the caller; a live reference still reaches atomic removal
+ * and the stock destructor in ebpfos_step_pointer_clear().
+ */
+static __always_inline void ebpfos_step_pointer_clear_if_live(struct ebpfos_step_scope *scope)
+{
+	if (scope->pointer_value && READ_ONCE(*scope->pointer_value))
+		ebpfos_step_pointer_clear(scope);
+}
+
 void ebpfos_step_result_reset(struct ebpfos_step_scope *scope);
 /* Only a completed, fault-free native call may transfer this reference. */
 void ebpfos_step_result_transfer(struct ebpfos_step_scope *scope);
