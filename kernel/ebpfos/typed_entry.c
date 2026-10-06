@@ -285,14 +285,17 @@ retry:
 	}
 	call->binding = target->binding;
 	call->program = call->binding->prog;
-	call->start = __bpf_prog_enter_recur(call->program, &call->run);
+	/* Keep the epoch acquired before selection through final exit. The stock
+	 * callback body can borrow it without nesting another RCU read section.
+	 */
+	call->start = __bpf_prog_enter_recur_rcu(call->program, &call->run);
 	if (!call->start) {
 		error = -EBUSY;
 		goto release_run;
 	}
 	error = ebpfos_binding_acquire_invocation(call->binding);
 	if (error) {
-		__bpf_prog_exit_recur(call->program, call->start, &call->run);
+		__bpf_prog_exit_recur_rcu(call->program, call->start, &call->run);
 		/* A publisher can retire the binding after this reader selects it.
 		 * No BPF instruction or invocation count has been acquired. On
 		 * this slow path only, serialize selection and count acquisition
@@ -330,7 +333,7 @@ retry:
 	*typed_entry = target->typed_entry;
 	return 0;
 release_run:
-	__bpf_prog_exit_recur(call->program, call->start, &call->run);
+	__bpf_prog_exit_recur_rcu(call->program, call->start, &call->run);
 release_rcu:
 	if (unlikely(locked))
 		spin_unlock(&slot->lock);
@@ -405,7 +408,7 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 	} else {
 		preempt_enable();
 	}
-	__bpf_prog_exit_recur(call->program, call->start, &call->run);
+	__bpf_prog_exit_recur_rcu(call->program, call->start, &call->run);
 	/* A successful typed_enter owns one active count through all retained
 	 * steps. This final exit releases it exactly once. Retirement changes
 	 * only bit 63; other paired exits cannot consume this call's count.

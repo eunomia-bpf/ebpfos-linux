@@ -1463,6 +1463,15 @@ u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog,
 				 struct bpf_tramp_run_ctx *run_ctx);
 void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
 				 struct bpf_tramp_run_ctx *run_ctx);
+/* Borrow the caller's non-sleepable RCU hold; retain the stock CPU pin,
+ * recursion, run-context and statistics pairing, including a zero start.
+ */
+u64 notrace __bpf_prog_enter_recur_rcu(struct bpf_prog *prog,
+				     struct bpf_tramp_run_ctx *run_ctx)
+	__must_hold_shared(RCU);
+void notrace __bpf_prog_exit_recur_rcu(struct bpf_prog *prog, u64 start,
+				     struct bpf_tramp_run_ctx *run_ctx)
+	__must_hold_shared(RCU);
 u64 notrace __bpf_prog_enter_sleepable_recur(struct bpf_prog *prog,
 					     struct bpf_tramp_run_ctx *run_ctx);
 void notrace __bpf_prog_exit_sleepable_recur(struct bpf_prog *prog, u64 start,

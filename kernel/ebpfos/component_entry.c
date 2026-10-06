@@ -103,19 +103,19 @@ retry:
 		error = -EPROTOTYPE;
 		goto out;
 	}
-	/* Publication only makes non-sleepable RAW_TRACEPOINT roles callable
-	 * here. bpf_trampoline_enter/exit select these stock callbacks for that
-	 * type. Call them directly without changing their guard or accounting.
+	/* The owned or caller-borrowed RCU epoch already protects this role.
+	 * Use the shared stock recursion/run-context/statistics callbacks without
+	 * acquiring a second RCU hold; their CPU pin and pairing remain intact.
 	 */
-	start = __bpf_prog_enter_recur(prog, &run_ctx);
+	start = __bpf_prog_enter_recur_rcu(prog, &run_ctx);
 	if (!start) {
-		__bpf_prog_exit_recur(prog, 0, &run_ctx);
+		__bpf_prog_exit_recur_rcu(prog, 0, &run_ctx);
 		error = -EBUSY;
 		goto out;
 	}
 	error = ebpfos_binding_acquire_invocation(binding);
 	if (error) {
-		__bpf_prog_exit_recur(prog, 0, &run_ctx);
+		__bpf_prog_exit_recur_rcu(prog, 0, &run_ctx);
 		/* A publisher may retire the selected binding before count
 		 * acquisition. No BPF instruction or count has been acquired.
 		 * Serialize the retry with publication so repeated replacement
@@ -178,7 +178,7 @@ retry:
 	} else {
 		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 	}
-	__bpf_prog_exit_recur(prog, start, &run_ctx);
+	__bpf_prog_exit_recur_rcu(prog, start, &run_ctx);
 	/* This private path owns one count from its successful enter above and
 	 * releases it exactly once. Other paired exits cannot consume that count;
 	 * retirement changes only bit 63. Subtraction therefore cannot borrow into

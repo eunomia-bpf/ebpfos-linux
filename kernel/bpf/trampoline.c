@@ -1140,11 +1140,9 @@ static __always_inline u64 notrace bpf_prog_start_time(void)
  * [2..MAX_U64] - execute bpf prog and record execution time.
  *     This is start time.
  */
-u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog, struct bpf_tramp_run_ctx *run_ctx)
-	__acquires(RCU)
+static __always_inline u64 notrace
+__bpf_prog_enter_recur_inner(struct bpf_prog *prog, struct bpf_tramp_run_ctx *run_ctx)
 {
-	rcu_read_lock_dont_migrate();
-
 	run_ctx->saved_run_ctx = bpf_set_run_ctx(&run_ctx->run_ctx);
 
 	if (unlikely(!bpf_prog_get_recursion_context(prog))) {
@@ -1154,6 +1152,24 @@ u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog, struct bpf_tramp_run_c
 		return 0;
 	}
 	return bpf_prog_start_time();
+}
+
+u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog, struct bpf_tramp_run_ctx *run_ctx)
+	__acquires(RCU)
+{
+	rcu_read_lock_dont_migrate();
+	return __bpf_prog_enter_recur_inner(prog, run_ctx);
+}
+
+u64 notrace __bpf_prog_enter_recur_rcu(struct bpf_prog *prog,
+				     struct bpf_tramp_run_ctx *run_ctx)
+{
+	/* The caller's RCU hold already pins the CPU on non-preemptible RCU.
+	 * Preemptible RCU still needs the same migration pin as the trampoline.
+	 */
+	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+		migrate_disable();
+	return __bpf_prog_enter_recur_inner(prog, run_ctx);
 }
 
 static void notrace __update_prog_stats(struct bpf_prog *prog, u64 start)
@@ -1184,15 +1200,30 @@ static __always_inline void notrace update_prog_stats(struct bpf_prog *prog,
 		__update_prog_stats(prog, start);
 }
 
-void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
-					  struct bpf_tramp_run_ctx *run_ctx)
-	__releases(RCU)
+static __always_inline void notrace
+__bpf_prog_exit_recur_inner(struct bpf_prog *prog, u64 start,
+			    struct bpf_tramp_run_ctx *run_ctx)
 {
 	bpf_reset_run_ctx(run_ctx->saved_run_ctx);
 
 	update_prog_stats(prog, start);
 	bpf_prog_put_recursion_context(prog);
+}
+
+void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
+				  struct bpf_tramp_run_ctx *run_ctx)
+	__releases(RCU)
+{
+	__bpf_prog_exit_recur_inner(prog, start, run_ctx);
 	rcu_read_unlock_migrate();
+}
+
+void notrace __bpf_prog_exit_recur_rcu(struct bpf_prog *prog, u64 start,
+				     struct bpf_tramp_run_ctx *run_ctx)
+{
+	__bpf_prog_exit_recur_inner(prog, start, run_ctx);
+	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+		migrate_enable();
 }
 
 static u64 notrace __bpf_prog_enter_lsm_cgroup(struct bpf_prog *prog,
