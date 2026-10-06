@@ -52,30 +52,52 @@ struct ebpfos_executor_root_slot {
 	struct ebpfos_executor_root_bundle __rcu *active;
 };
 
+/* Publication sorts and rejects duplicate unsigned role keys. Keep the
+ * single-role/first-role path short, then bound selection by log2(N) for a
+ * component with many entries. RCU keeps this immutable array alive.
+ */
+static __always_inline struct ebpfos_executor_root_role *
+ebpfos_executor_root_find_role(struct ebpfos_executor_root_bundle *bundle,
+			       u64 role_type)
+{
+	u32 low = 1, high = bundle->role_count;
+
+	if (high && bundle->roles[0].snapshot.role_type == role_type)
+		return &bundle->roles[0];
+	while (low < high) {
+		u32 middle = low + (high - low) / 2;
+		struct ebpfos_executor_root_role *role = &bundle->roles[middle];
+
+		if (role->snapshot.role_type == role_type)
+			return role;
+		if (role->snapshot.role_type < role_type)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return NULL;
+}
+
 static __always_inline struct ebpfos_binding *ebpfos_executor_root_role_get_rcu(
 	struct ebpfos_executor_root_slot *slot, u64 role_type, u64 *epoch,
 	struct ebpfos_executor_root_role_snapshot *snapshot, bool pin)
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_binding *binding = NULL;
-	u32 role;
+	struct ebpfos_executor_root_role *role;
 
 	bundle = rcu_dereference(slot->active);
 	if (!bundle)
 		return NULL;
-	for (role = 0; role < bundle->role_count; role++) {
-		if (bundle->roles[role].snapshot.role_type < role_type)
-			continue;
-		if (bundle->roles[role].snapshot.role_type != role_type)
-			break;
-		binding = bundle->roles[role].binding;
+	role = ebpfos_executor_root_find_role(bundle, role_type);
+	if (role) {
+		binding = role->binding;
 		if (pin)
 			ebpfos_binding_get(binding);
 		if (binding) {
 			*epoch = bundle->epoch;
-			*snapshot = bundle->roles[role].snapshot;
+			*snapshot = role->snapshot;
 		}
-		break;
 	}
 	return binding;
 }

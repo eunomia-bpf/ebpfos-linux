@@ -245,7 +245,6 @@ static int ebpfos_component_typed_enter_inner(struct ebpfos_executor_root_slot *
 {
 	struct ebpfos_executor_root_bundle *bundle;
 	struct ebpfos_executor_root_role *target;
-	u32 i;
 	int error;
 	bool locked = false;
 
@@ -264,12 +263,8 @@ retry:
 		error = -ENOENT;
 		goto release_rcu;
 	}
-	for (i = 0; i < bundle->role_count; i++) {
-		target = &bundle->roles[i];
-		if (target->snapshot.role_type == role)
-			break;
-	}
-	if (i == bundle->role_count || !target->typed_entry) {
+	target = ebpfos_executor_root_find_role(bundle, role);
+	if (!target || !target->typed_entry) {
 		error = -EPROTOTYPE;
 		goto release_rcu;
 	}

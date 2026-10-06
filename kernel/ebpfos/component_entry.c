@@ -47,7 +47,6 @@ ebpfos_component_call_slot_inner(struct ebpfos_executor_root_slot *slot, u64 rol
 	struct ebpfos_binding *binding;
 	struct bpf_prog *prog;
 	u64 start;
-	u32 index;
 	int error;
 	bool locked = false;
 
@@ -67,12 +66,8 @@ retry:
 		error = -ENOENT;
 		goto out;
 	}
-	for (index = 0; index < bundle->role_count; index++) {
-		target = &bundle->roles[index];
-		if (target->snapshot.role_type >= role)
-			break;
-	}
-	if (index == bundle->role_count || target->snapshot.role_type != role) {
+	target = ebpfos_executor_root_find_role(bundle, role);
+	if (!target) {
 		error = -ENOENT;
 		goto out;
 	}
