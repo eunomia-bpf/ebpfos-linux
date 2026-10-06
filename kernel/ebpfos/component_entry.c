@@ -153,7 +153,15 @@ retry:
 		}
 		do {
 			step.pending = false;
-			ebpfos_step_result_reset(&step);
+			/* A scalar scope has no channel or reference to release. As
+			 * with the typed context entry, reset only its result flag.
+			 * Pointer scopes still consume the channel and any result
+			 * retained by a preceding resumable entry.
+			 */
+			if (step.pointer_result)
+				ebpfos_step_result_reset(&step);
+			else
+				step.has_result = false;
 			/* Stock JIT returns the full BPF R0 in the native result
 			 * register, as the struct_ops trampoline does. No interpreter
 			 * or native-signature function is called through this ABI.
@@ -168,7 +176,8 @@ retry:
 			 */
 			ebpfos_step_pointer_clear_if_live(&step);
 		} while (step.pending);
-		ebpfos_step_result_transfer(&step);
+		if (step.pointer_result)
+			ebpfos_step_result_transfer(&step);
 		ebpfos_step_exit(&step);
 	} else {
 		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
