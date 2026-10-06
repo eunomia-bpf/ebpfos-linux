@@ -243,7 +243,7 @@ EXPORT_SYMBOL_GPL(ebpfos_component_call_slot64);
  * types can form a deeper valid graph, which must not exhaust kernel stack.
  */
 static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset, u32 depth,
-				     u32 *alignment, bool *memory)
+				     u32 *alignment, bool *memory, bool *ambiguous)
 {
 	const struct btf_type *type = btf_type_skip_modifiers(btf, id, NULL);
 	u32 size, i;
@@ -273,7 +273,7 @@ static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset
 		if (!size)
 			return 0;
 		error = ebpfos_native_arg_alignment(btf, array->type, offset, depth + 1,
-						    alignment, memory);
+						    alignment, memory, ambiguous);
 		if (error)
 			return error;
 		if (array->nelems > 1 && size % *alignment)
@@ -286,9 +286,27 @@ static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset
 			const struct btf_type *field;
 			u32 field_alignment, bits = __btf_member_bit_offset(type, member);
 
-			/* Bitfields are integer bits, not unaligned native loads. */
-			if (__btf_member_bitfield_size(type, member))
+			/* A bitfield does not require an aligned integer load, but
+			 * its enclosing record can still have that integer's native
+			 * alignment. BTF omits packed/alignment attributes: an 8-byte
+			 * record containing one unsigned-long bit and char[7] has
+			 * identical BTF with native alignment 8 or 1. Nested at byte
+			 * 1, these are MEMORY and INTEGER respectively. Do not guess
+			 * a native ABI from the bitfield's occupied bits alone.
+			 * sizeof is a multiple of alignment, bounding the possible
+			 * alignment even for a compact packed bitfield record.
+			 */
+			if (__btf_member_bitfield_size(type, member)) {
+				field = btf_type_skip_modifiers(btf, member->type, NULL);
+				if (!field || (!btf_type_is_int(field) && !btf_is_any_enum(field)) ||
+				    !field->size || field->size > 8 || !is_power_of_2(field->size))
+					return -EOPNOTSUPP;
+				field_alignment = min(field->size, type->size & -type->size);
+				*alignment = max(*alignment, field_alignment);
+				if (offset % field_alignment)
+					*ambiguous = true;
 				continue;
+			}
 			field = btf_type_by_id(btf, member->type);
 			field = btf_resolve_size(btf, field, &size);
 			if (IS_ERR(field))
@@ -300,7 +318,7 @@ static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset
 			error = ebpfos_native_arg_alignment(btf, member->type,
 							    offset + bits / 8,
 							    depth + 1,
-							    &field_alignment, memory);
+							    &field_alignment, memory, ambiguous);
 			if (error)
 				return error;
 			*alignment = max(*alignment, field_alignment);
@@ -339,12 +357,18 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 		if (IS_ENABLED(CONFIG_X86_64) &&
 		    model->arg_flags[i] & BTF_FMODEL_STRUCT_ARG) {
 			u32 alignment;
-			bool memory = false;
+			bool memory = false, ambiguous = false;
 
 			error = ebpfos_native_arg_alignment(btf, btf_params(prototype)[i].type,
-							    0, 0, &alignment, &memory);
+							    0, 0, &alignment, &memory, &ambiguous);
 			if (error)
 				return error;
+			/* A definitely unaligned ordinary field fixes the entire
+			 * argument to MEMORY, irrespective of a bitfield container's
+			 * alignment. Otherwise BTF cannot choose the call convention.
+			 */
+			if (ambiguous && !memory)
+				return -EOPNOTSUPP;
 			if (memory)
 				model->arg_flags[i] |= BTF_FMODEL_MEMORY_ARG;
 		}
@@ -359,6 +383,21 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 16 ||
 	    (model->ret_size > 8 && !(model->ret_flags & BTF_FMODEL_STRUCT_ARG)))
 		return -EOPNOTSUPP;
+	if (IS_ENABLED(CONFIG_X86_64) && model->ret_flags & BTF_FMODEL_STRUCT_ARG) {
+		u32 alignment;
+		bool memory = false, ambiguous = false;
+
+		/* Integer return words have no hidden native result pointer.
+		 * The stock integer-field walk skips bitfields, so apply the
+		 * same aggregate alignment classification to the return too.
+		 */
+		error = ebpfos_native_arg_alignment(btf, prototype->type, 0, 0,
+						    &alignment, &memory, &ambiguous);
+		if (error)
+			return error;
+		if (memory || ambiguous)
+			return -EOPNOTSUPP;
+	}
 	if (btf_type_is_ptr(btf_type_skip_modifiers(btf, prototype->type, NULL))) {
 		const struct btf_type *pointee = btf_type_resolve_ptr(btf, prototype->type, NULL);
 
