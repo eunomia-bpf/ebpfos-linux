@@ -38,4 +38,16 @@ ebpfos_binding_acquire_invocation(struct ebpfos_binding *binding)
 	return 0;
 }
 
+/* A paired private exit owns one active count, even after retirement. Other
+ * paired exits cannot consume that count, so subtraction cannot borrow into
+ * the cumulative entry field. Keep a fully ordered RMW without requesting
+ * the unused counter word; dec_and_test has full ordering on every arch.
+ * Public exit retains its defensive zero-count check.
+ */
+static __always_inline void
+ebpfos_binding_release_invocation(struct ebpfos_binding *binding)
+{
+	(void)atomic64_dec_and_test(&binding->invocation_state);
+}
+
 #endif

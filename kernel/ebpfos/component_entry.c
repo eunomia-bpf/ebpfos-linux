@@ -179,13 +179,7 @@ retry:
 		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 	}
 	__bpf_prog_exit_recur_rcu(prog, start, &run_ctx);
-	/* This private path owns one count from its successful enter above and
-	 * releases it exactly once. Other paired exits cannot consume that count;
-	 * retirement changes only bit 63. Subtraction therefore cannot borrow into
-	 * the entry sequence. Keep the full ordering of the former successful CAS.
-	 * The public exit API retains its defensive zero-count check.
-	 */
-	atomic64_dec_return(&binding->invocation_state);
+	ebpfos_binding_release_invocation(binding);
 	error = 0;
 out:
 	if (unlikely(locked))
