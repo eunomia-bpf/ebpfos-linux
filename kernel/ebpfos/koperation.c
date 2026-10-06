@@ -1500,6 +1500,13 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
+
+/* The descriptor's scalar proof calls this same read-only flags service. */
+static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_component_service_set = {
+	.set = &ebpfos_kprog_pushf64_service_ids,
+	.filter = ebpfos_kprog_component_filter,
+};
 
 static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_atomic_component_set,
@@ -1511,6 +1518,8 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_load32_component_set,
 		&ebpfos_kprog_current_task_component_set,
 		&ebpfos_kprog_cmp_mask_component_set,
+		&ebpfos_kprog_pushf64_component_set,
+		&ebpfos_kprog_pushf64_component_service_set,
 	};
 
 static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
