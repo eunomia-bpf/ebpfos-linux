@@ -282,6 +282,16 @@ static int ebpfos_native_arg_alignment(const struct btf *btf, u32 id, u32 offset
 	} else if (btf_type_is_struct(type)) {
 		const struct btf_member *member = btf_type_member(type);
 
+		/* BTF also omits explicit alignment of an ordinary record. A
+		 * char[8] record has the same BTF with alignment 1 or 8, but
+		 * nested at byte 1 the latter changes the native argument to
+		 * MEMORY (and a return to hidden sret). Record size is always a
+		 * multiple of its alignment, bounding the possible alignments.
+		 * If this offset satisfies even the largest possible alignment,
+		 * the missing attribute cannot change the classification here.
+		 */
+		if (type->size && offset % (type->size & -type->size))
+			*ambiguous = true;
 		for (i = 0; i < btf_type_vlen(type); i++, member++) {
 			const struct btf_type *field;
 			u32 field_alignment, bits = __btf_member_bit_offset(type, member);
@@ -337,7 +347,7 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 				 struct btf_func_model *model)
 {
 	const struct btf_type *function, *prototype;
-	u32 i, words = 0;
+	u32 i, words = 0, registers = 0, stack_words = 0;
 	int error;
 
 	if (!btf || !model)
@@ -364,7 +374,7 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 			if (error)
 				return error;
 			/* A definitely unaligned ordinary field fixes the entire
-			 * argument to MEMORY, irrespective of a bitfield container's
+			 * argument to MEMORY, irrespective of a nested record's
 			 * alignment. Otherwise BTF cannot choose the call convention.
 			 */
 			if (ambiguous && !memory)
@@ -378,6 +388,27 @@ int ebpfos_component_entry_model(struct btf *btf, u32 func_id,
 		if (model->arg_size[i] > 8 &&
 		    !(model->arg_flags[i] & BTF_FMODEL_STRUCT_ARG))
 			return -EOPNOTSUPP;
+		if (IS_ENABLED(CONFIG_X86_64)) {
+			u32 count = DIV_ROUND_UP(model->arg_size[i], 8);
+
+			if ((model->arg_flags[i] & BTF_FMODEL_MEMORY_ARG) ||
+			    registers + count > 6) {
+				if (model->arg_flags[i] & BTF_FMODEL_STRUCT_ARG) {
+					u32 alignment = model->arg_size[i] & -model->arg_size[i];
+
+					/* Explicit record alignment can also insert padding
+					 * between stack arguments. The stock marshaller uses
+					 * contiguous eight-byte slots, so reject a placement
+					 * whose padding depends on an omitted BTF attribute.
+					 */
+					if (alignment > 8 && (stack_words * 8) % alignment)
+						return -EOPNOTSUPP;
+				}
+				stack_words += count;
+			} else {
+				registers += count;
+			}
+		}
 		words += DIV_ROUND_UP(model->arg_size[i], 8);
 	}
 	if (words > MAX_BPF_FUNC_ARGS || model->ret_size > 16 ||
