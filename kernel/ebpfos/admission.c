@@ -18,6 +18,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include "invocation.h"
 
 #define EBPFOS_COMPONENT_CALL_PROG_FLAGS 0x410U
 
@@ -168,15 +169,6 @@ void ebpfos_binding_put(struct ebpfos_binding *binding)
 	kfree(binding);
 }
 
-#define EBPFOS_BINDING_ACTIVE_BITS 16
-#define EBPFOS_BINDING_ACTIVE_MASK ((1ULL << EBPFOS_BINDING_ACTIVE_BITS) - 1)
-#define EBPFOS_BINDING_ENTRY_ONE (1ULL << EBPFOS_BINDING_ACTIVE_BITS)
-#define EBPFOS_BINDING_ENTRY_BITS 47
-#define EBPFOS_BINDING_ENTRY_MASK \
-	(((1ULL << EBPFOS_BINDING_ENTRY_BITS) - 1) << \
-	 EBPFOS_BINDING_ACTIVE_BITS)
-#define EBPFOS_BINDING_RETIRED BIT_ULL(63)
-
 static void ebpfos_binding_decode_invocation_state(u64 state, u32 *active,
 						   u64 *entries)
 {
@@ -187,24 +179,9 @@ static void ebpfos_binding_decode_invocation_state(u64 state, u32 *active,
 
 int ebpfos_binding_invocation_enter(struct ebpfos_binding *binding)
 {
-	u64 old, new;
-
 	if (!binding)
 		return -EINVAL;
-	do {
-		old = atomic64_read(&binding->invocation_state);
-		if (old & EBPFOS_BINDING_RETIRED)
-			return -ESHUTDOWN;
-		new = old + EBPFOS_BINDING_ENTRY_ONE + 1;
-		/* With retirement clear, this increment cannot wrap the word.
-		 * An exhausted active field wraps to zero; an exhausted entry
-		 * field carries into retirement. Reject both before the CAS.
-		 */
-		if (!(new & EBPFOS_BINDING_ACTIVE_MASK) ||
-		    (new & EBPFOS_BINDING_RETIRED))
-			return -EOVERFLOW;
-	} while (atomic64_cmpxchg(&binding->invocation_state, old, new) != old);
-	return 0;
+	return ebpfos_binding_acquire_invocation(binding);
 }
 
 void ebpfos_binding_invocation_exit(struct ebpfos_binding *binding)

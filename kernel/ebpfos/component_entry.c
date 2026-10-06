@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include "executor_root.h"
+#include "invocation.h"
 #include "step_scope.h"
 
 struct ebpfos_native_entry {
@@ -117,7 +118,7 @@ retry:
 		error = -EBUSY;
 		goto out;
 	}
-	error = ebpfos_binding_invocation_enter(binding);
+	error = ebpfos_binding_acquire_invocation(binding);
 	if (error) {
 		__bpf_prog_exit_recur(prog, 0, &run_ctx);
 		/* A publisher may retire the selected binding before count

@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include "executor_root.h"
+#include "invocation.h"
 #include "step_scope.h"
 #include "../../tools/lib/bpf/relo_core.h"
 
@@ -292,7 +293,7 @@ retry:
 		error = -EBUSY;
 		goto release_run;
 	}
-	error = ebpfos_binding_invocation_enter(call->binding);
+	error = ebpfos_binding_acquire_invocation(call->binding);
 	if (error) {
 		__bpf_prog_exit_recur(call->program, call->start, &call->run);
 		/* A publisher can retire the binding after this reader selects it.
