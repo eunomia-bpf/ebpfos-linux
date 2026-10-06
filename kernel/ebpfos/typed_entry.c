@@ -316,11 +316,10 @@ retry:
 	call->context_root = target->context_image != NULL;
 	call->wide_result = target->wide_result;
 	if (call->step_active) {
-		ebpfos_step_enter(&call->step, call->program->aux);
-		call->step.pointer_result = target->pointer_result;
-		call->step.pointer_owned = target->pointer_owned;
-		if (target->pointer_result)
-			call->step.pointer_value = this_cpu_ptr(target->pointer_value_percpu);
+		ebpfos_step_enter_result(&call->step, call->program->aux,
+					 target->pointer_result,
+					 target->pointer_value_percpu,
+					 target->pointer_owned);
 	} else {
 		/* Fault tracking is per-CPU even for a service-free export. The
 		 * conservative loaded-call scan also covers its BPF subprograms.

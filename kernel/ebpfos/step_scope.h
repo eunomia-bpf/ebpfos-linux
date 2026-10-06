@@ -46,21 +46,33 @@ void ebpfos_step_result_reset(struct ebpfos_step_scope *scope);
 /* Only a completed, fault-free native call may transfer this reference. */
 void ebpfos_step_result_transfer(struct ebpfos_step_scope *scope);
 
-static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
-				     const struct bpf_prog_aux *owner)
+static inline void ebpfos_step_enter_result(struct ebpfos_step_scope *scope,
+				 const struct bpf_prog_aux *owner,
+				 struct bpf_map *pointer_result,
+				 void __percpu *pointer_value, bool pointer_owned)
 {
 	preempt_disable();
 	scope->previous = this_cpu_read(ebpfos_active_step);
 	scope->owner = owner;
-	scope->pointer_result = NULL;
-	scope->pointer_value = NULL;
+	scope->pointer_result = pointer_result;
+	/* Resolve the immutable per-CPU anchor only after pinning this CPU.
+	 * Publish the scope after all result metadata is initialized, rather
+	 * than publishing an empty channel and overwriting it on every entry.
+	 */
+	scope->pointer_value = pointer_result ? this_cpu_ptr(pointer_value) : NULL;
 	scope->owned_result = NULL;
 	scope->valid = false;
 	scope->pending = false;
 	scope->has_result = false;
-	scope->pointer_owned = false;
+	scope->pointer_owned = pointer_owned;
 	scope->size = 0;
 	this_cpu_write(ebpfos_active_step, scope);
+}
+
+static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
+				     const struct bpf_prog_aux *owner)
+{
+	ebpfos_step_enter_result(scope, owner, NULL, NULL, false);
 }
 
 static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)

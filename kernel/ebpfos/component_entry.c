@@ -138,15 +138,9 @@ retry:
 	 */
 	cant_migrate();
 	if (target->needs_steps) {
-		ebpfos_step_enter(&step, prog->aux);
-		step.pointer_result = target->pointer_result;
-		step.pointer_owned = target->pointer_owned;
-		if (target->pointer_result) {
-			/* Publication bound the channel's per-CPU anchor. The scope
-			 * pins this CPU through all resumable entries.
-			 */
-			step.pointer_value = this_cpu_ptr(target->pointer_value_percpu);
-		}
+		ebpfos_step_enter_result(&step, prog->aux, target->pointer_result,
+					 target->pointer_value_percpu,
+					 target->pointer_owned);
 		do {
 			step.pending = false;
 			/* A scalar scope has no channel or reference to release. As
