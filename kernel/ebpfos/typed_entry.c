@@ -16,7 +16,6 @@
  */
 struct ebpfos_component_call {
 	struct ebpfos_component_call *previous;
-	struct ebpfos_executor_root_lease lease;
 	struct bpf_tramp_run_ctx run;
 	struct ebpfos_binding *binding;
 	struct bpf_prog *program;
@@ -277,17 +276,16 @@ retry:
 		error = -EINVAL;
 		goto release_rcu;
 	}
-	call->lease.slot = slot;
-	call->lease.binding = target->binding;
-	call->lease.epoch = bundle->epoch;
-	call->lease.rcu_held = true;
-	call->lease.rcu_borrowed = false;
+	/* This API always owns a non-sleepable RCU hold. The selected binding
+	 * and its entry remain immutable through that epoch; no sleepable or
+	 * caller-borrowed lease state is needed in the opaque call storage.
+	 */
 	call->binding = target->binding;
 	call->program = call->binding->prog;
 	if (call->program->aux->attach_btf_id != native_func_id ||
 	    call->program->aux->attach_btf != bpf_get_btf_vmlinux()) {
 		error = -EPROTOTYPE;
-		goto release_lease;
+		goto release_rcu;
 	}
 	call->start = __bpf_prog_enter_recur(call->program, &call->run);
 	if (!call->start) {
@@ -309,7 +307,7 @@ retry:
 			locked = true;
 			goto retry;
 		}
-		goto release_lease;
+		goto release_rcu;
 	}
 	if (unlikely(locked))
 		spin_unlock(&slot->lock);
@@ -335,11 +333,6 @@ retry:
 	return 0;
 release_run:
 	__bpf_prog_exit_recur(call->program, call->start, &call->run);
-release_lease:
-	if (unlikely(locked))
-		spin_unlock(&slot->lock);
-	ebpfos_executor_root_lease_end(&call->lease);
-	return error;
 release_rcu:
 	if (unlikely(locked))
 		spin_unlock(&slot->lock);
@@ -422,7 +415,10 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 	 * retains the full ordering of the public exit's successful CAS.
 	 */
 	atomic64_dec_return(&call->binding->invocation_state);
-	ebpfos_executor_root_lease_end(&call->lease);
+	/* Paired with this call's successful enter, through every retained
+	 * step. Publication retires the immutable binding only after this hold.
+	 */
+	rcu_read_unlock();
 	return fault;
 }
 EXPORT_SYMBOL_GPL(ebpfos_component_typed_exit);
