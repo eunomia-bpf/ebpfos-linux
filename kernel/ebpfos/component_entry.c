@@ -138,7 +138,7 @@ retry:
 	 */
 	cant_migrate();
 	if (target->needs_steps) {
-		ebpfos_step_enter_result(&step, prog->aux, target->pointer_result,
+		ebpfos_step_enter_result_rcu(&step, prog->aux, target->pointer_result,
 					 target->pointer_value_percpu,
 					 target->pointer_owned);
 		do {
@@ -168,7 +168,7 @@ retry:
 		} while (step.pending);
 		if (step.pointer_result)
 			ebpfos_step_result_transfer(&step);
-		ebpfos_step_exit(&step);
+		ebpfos_step_exit_rcu(&step);
 	} else {
 		*result = ebpfos_run_jit(target->entry, context, prog->insnsi);
 	}

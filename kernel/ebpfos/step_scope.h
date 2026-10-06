@@ -46,12 +46,12 @@ void ebpfos_step_result_reset(struct ebpfos_step_scope *scope);
 /* Only a completed, fault-free native call may transfer this reference. */
 void ebpfos_step_result_transfer(struct ebpfos_step_scope *scope);
 
-static inline void ebpfos_step_enter_result(struct ebpfos_step_scope *scope,
+/* The caller must keep this CPU pinned until the matching pinned exit. */
+static inline void ebpfos_step_enter_result_pinned(struct ebpfos_step_scope *scope,
 				 const struct bpf_prog_aux *owner,
 				 struct bpf_map *pointer_result,
 				 void __percpu *pointer_value, bool pointer_owned)
 {
-	preempt_disable();
 	scope->previous = this_cpu_read(ebpfos_active_step);
 	scope->owner = owner;
 	scope->pointer_result = pointer_result;
@@ -69,13 +69,38 @@ static inline void ebpfos_step_enter_result(struct ebpfos_step_scope *scope,
 	this_cpu_write(ebpfos_active_step, scope);
 }
 
+static inline void ebpfos_step_enter_result(struct ebpfos_step_scope *scope,
+				 const struct bpf_prog_aux *owner,
+				 struct bpf_map *pointer_result,
+				 void __percpu *pointer_value, bool pointer_owned)
+{
+	preempt_disable();
+	ebpfos_step_enter_result_pinned(scope, owner, pointer_result,
+					pointer_value, pointer_owned);
+}
+
+/* A held non-sleepable RCU epoch already disables preemption without
+ * PREEMPT_RCU. Preemptible RCU still needs an explicit pin for these per-CPU
+ * scopes; the stock callback's migration pin alone is insufficient.
+ */
+static inline void ebpfos_step_enter_result_rcu(struct ebpfos_step_scope *scope,
+				 const struct bpf_prog_aux *owner,
+				 struct bpf_map *pointer_result,
+				 void __percpu *pointer_value, bool pointer_owned)
+{
+	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+		preempt_disable();
+	ebpfos_step_enter_result_pinned(scope, owner, pointer_result,
+					pointer_value, pointer_owned);
+}
+
 static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 				     const struct bpf_prog_aux *owner)
 {
 	ebpfos_step_enter_result(scope, owner, NULL, NULL, false);
 }
 
-static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)
+static inline void ebpfos_step_exit_pinned(struct ebpfos_step_scope *scope)
 {
 	/* Without a published pointer channel, enter initialized owned_result
 	 * to NULL and no result service can acquire a reference in this scope.
@@ -85,7 +110,19 @@ static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)
 	else
 		scope->has_result = false;
 	this_cpu_write(ebpfos_active_step, scope->previous);
+}
+
+static inline void ebpfos_step_exit(struct ebpfos_step_scope *scope)
+{
+	ebpfos_step_exit_pinned(scope);
 	preempt_enable();
+}
+
+static inline void ebpfos_step_exit_rcu(struct ebpfos_step_scope *scope)
+{
+	ebpfos_step_exit_pinned(scope);
+	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+		preempt_enable();
 }
 
 #endif

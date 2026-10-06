@@ -316,15 +316,17 @@ retry:
 	call->context_root = target->context_image != NULL;
 	call->wide_result = target->wide_result;
 	if (call->step_active) {
-		ebpfos_step_enter_result(&call->step, call->program->aux,
+		ebpfos_step_enter_result_rcu(&call->step, call->program->aux,
 					 target->pointer_result,
 					 target->pointer_value_percpu,
 					 target->pointer_owned);
 	} else {
 		/* Fault tracking is per-CPU even for a service-free export. The
 		 * conservative loaded-call scan also covers its BPF subprograms.
+		 * Non-preemptible RCU already pins this CPU through final exit.
 		 */
-		preempt_disable();
+		if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+			preempt_disable();
 	}
 	call->previous = this_cpu_read(ebpfos_active_typed_call);
 	call->fault = 0;
@@ -404,8 +406,8 @@ int ebpfos_component_typed_exit(struct ebpfos_component_call *call)
 	if (call->step_active) {
 		if (!fault && call->step.pointer_result)
 			ebpfos_step_result_transfer(&call->step);
-		ebpfos_step_exit(&call->step);
-	} else {
+		ebpfos_step_exit_rcu(&call->step);
+	} else if (IS_ENABLED(CONFIG_PREEMPT_RCU)) {
 		preempt_enable();
 	}
 	__bpf_prog_exit_recur_rcu(call->program, call->start, &call->run);
