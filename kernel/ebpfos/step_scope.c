@@ -22,11 +22,10 @@ static void ebpfos_step_pointer_put(struct ebpfos_step_scope *scope, void *value
 {
 	const struct btf_field *field;
 
-	if (!value || !scope->pointer_result)
+	if (!value || !scope->pointer_owned)
 		return;
 	field = &scope->pointer_result->record->fields[0];
-	if (field->type == BPF_KPTR_REF)
-		field->kptr.dtor(value);
+	field->kptr.dtor(value);
 }
 
 void ebpfos_step_pointer_clear(struct ebpfos_step_scope *scope)
@@ -107,7 +106,7 @@ __bpf_kfunc void bpf_ebpfos_component_pointer_result(struct bpf_map *map__map,
 	ebpfos_step_pointer_put(scope, scope->owned_result);
 	scope->result = (unsigned long)xchg(scope->pointer_value, NULL);
 	scope->result_high = 0;
-	scope->owned_result = map__map->record->fields[0].type == BPF_KPTR_REF ?
+	scope->owned_result = scope->pointer_owned ?
 		(void *)(unsigned long)scope->result : NULL;
 	scope->has_result = true;
 }

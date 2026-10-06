@@ -22,6 +22,7 @@ struct ebpfos_step_scope {
 	bool valid;
 	bool pending;
 	bool has_result;
+	bool pointer_owned;
 	u32 size;
 	u64 result;
 	u64 result_high;
@@ -57,6 +58,7 @@ static inline void ebpfos_step_enter(struct ebpfos_step_scope *scope,
 	scope->valid = false;
 	scope->pending = false;
 	scope->has_result = false;
+	scope->pointer_owned = false;
 	scope->size = 0;
 	this_cpu_write(ebpfos_active_step, scope);
 }

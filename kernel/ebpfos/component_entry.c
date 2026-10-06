@@ -87,8 +87,7 @@ retry:
 	/* Reference transfer needs the native lease's separate fault status.
 	 * The legacy context API cannot commit a fault-free owned C result.
 	 */
-	if (target->pointer_result &&
-	    target->pointer_result->record->fields[0].type == BPF_KPTR_REF) {
+	if (target->pointer_owned) {
 		error = -EPROTOTYPE;
 		goto out;
 	}
@@ -141,6 +140,7 @@ retry:
 	if (target->needs_steps) {
 		ebpfos_step_enter(&step, prog->aux);
 		step.pointer_result = target->pointer_result;
+		step.pointer_owned = target->pointer_owned;
 		if (target->pointer_result) {
 			/* Publication bound the channel's per-CPU anchor. The scope
 			 * pins this CPU through all resumable entries.

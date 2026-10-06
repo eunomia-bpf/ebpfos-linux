@@ -318,6 +318,7 @@ retry:
 	if (call->step_active) {
 		ebpfos_step_enter(&call->step, call->program->aux);
 		call->step.pointer_result = target->pointer_result;
+		call->step.pointer_owned = target->pointer_owned;
 		if (target->pointer_result)
 			call->step.pointer_value = this_cpu_ptr(target->pointer_value_percpu);
 	} else {

@@ -211,6 +211,11 @@ static int ebpfos_executor_root_role_fill(
 		 * program and the invocation's epoch hold keep the map alive.
 		 */
 		role->pointer_value_percpu = array->pptrs[0];
+		/* Channel selection checked the exact kptr type and destructor.
+		 * Its ownership class cannot change during this binding's epoch.
+		 */
+		role->pointer_owned =
+			role->pointer_result->record->fields[0].type == BPF_KPTR_REF;
 	}
 	role->snapshot.role_type = request->role_type;
 	role->snapshot.prog_id = binding->prog_id;

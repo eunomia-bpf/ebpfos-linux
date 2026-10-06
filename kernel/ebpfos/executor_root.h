@@ -27,6 +27,8 @@ struct ebpfos_executor_root_role {
 	/* Loaded calls select scope use; opaque native calls retain a scope. */
 	bool needs_steps;
 	bool wide_result;
+	/* Immutable stock kptr ownership classification, bound at publication. */
+	bool pointer_owned;
 	/* Native typed API uses vmlinux FUNC IDs. Zero means a different BTF
 	 * namespace or no native export; explicit-BTF context entries are separate.
 	 */
