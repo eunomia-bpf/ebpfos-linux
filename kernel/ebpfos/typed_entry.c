@@ -281,13 +281,15 @@ retry:
 	 * and its entry remain immutable through that epoch; no sleepable or
 	 * caller-borrowed lease state is needed in the opaque call storage.
 	 */
-	call->binding = target->binding;
-	call->program = call->binding->prog;
-	if (call->program->aux->attach_btf_id != native_func_id ||
-	    call->program->aux->attach_btf != bpf_get_btf_vmlinux()) {
+	/* Publication bound the immutable native prototype in the vmlinux BTF
+	 * namespace. Zero cannot name a FUNC, including a module-only export.
+	 */
+	if (!target->native_func_id || target->native_func_id != native_func_id) {
 		error = -EPROTOTYPE;
 		goto release_rcu;
 	}
+	call->binding = target->binding;
+	call->program = call->binding->prog;
 	call->start = __bpf_prog_enter_recur(call->program, &call->run);
 	if (!call->start) {
 		error = -EBUSY;

@@ -232,6 +232,14 @@ static int ebpfos_executor_root_role_fill(
 		role->needs_steps = role->context_image ||
 			ebpfos_step_program_needs_scope(binding->prog);
 	}
+	/* The loaded program and its BTF contract are immutable. Bind the native
+	 * API's namespace and FUNC together at publication, before exposing this
+	 * role under RCU. Each invocation need only match that bound FUNC ID.
+	 * A module's same numeric ID must never alias a vmlinux prototype.
+	 */
+	role->native_func_id = role->typed_entry &&
+		binding->prog->aux->attach_btf == bpf_get_btf_vmlinux() ?
+		binding->prog->aux->attach_btf_id : 0;
 	role->binding = binding;
 	role->grant = grant;
 	return 0;
