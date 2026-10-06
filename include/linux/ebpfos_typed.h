@@ -31,6 +31,8 @@ int ebpfos_component_typed_enter_caller_args(struct ebpfos_executor_root_slot *s
 				void **typed_entry, u64 null_args,
 				unsigned long caller);
 int ebpfos_component_typed_null_args(struct bpf_prog *prog, void *entry, u64 *mask);
+/* Checked context roots use their stock native BTF context-access contract. */
+int ebpfos_component_context_null_args(struct bpf_prog *prog, u64 *mask);
 
 /* The compiler captures the logical native caller before entering L1.
  * Keep it with the lease, including across bounded-step re-entry.

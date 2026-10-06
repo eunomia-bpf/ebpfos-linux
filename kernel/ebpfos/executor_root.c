@@ -179,6 +179,10 @@ static int ebpfos_executor_root_role_fill(
 						       role->typed_entry, &role->null_args);
 	if (!error && !role->typed_entry)
 		error = ebpfos_executor_root_pointer_result(binding->prog, &role->pointer_result);
+	if (!error && !role->typed_entry &&
+	    binding->prog->type == BPF_PROG_TYPE_TRACING &&
+	    binding->prog->expected_attach_type == BPF_TRACE_FENTRY)
+		error = ebpfos_component_context_null_args(binding->prog, &role->null_args);
 	if (!error && !role->typed_entry) {
 		error = ebpfos_component_context_export(binding->prog, &role->typed_entry,
 						&role->context_image);
