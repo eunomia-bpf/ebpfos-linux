@@ -195,12 +195,14 @@ int ebpfos_binding_invocation_enter(struct ebpfos_binding *binding)
 		old = atomic64_read(&binding->invocation_state);
 		if (old & EBPFOS_BINDING_RETIRED)
 			return -ESHUTDOWN;
-		if ((old & EBPFOS_BINDING_ACTIVE_MASK) ==
-		    EBPFOS_BINDING_ACTIVE_MASK ||
-		    (old & EBPFOS_BINDING_ENTRY_MASK) ==
-		    EBPFOS_BINDING_ENTRY_MASK)
-			return -EOVERFLOW;
 		new = old + EBPFOS_BINDING_ENTRY_ONE + 1;
+		/* With retirement clear, this increment cannot wrap the word.
+		 * An exhausted active field wraps to zero; an exhausted entry
+		 * field carries into retirement. Reject both before the CAS.
+		 */
+		if (!(new & EBPFOS_BINDING_ACTIVE_MASK) ||
+		    (new & EBPFOS_BINDING_RETIRED))
+			return -EOVERFLOW;
 	} while (atomic64_cmpxchg(&binding->invocation_state, old, new) != old);
 	return 0;
 }
