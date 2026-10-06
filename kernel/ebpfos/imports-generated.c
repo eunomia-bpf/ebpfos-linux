@@ -75,8 +75,13 @@ static int __init ebpfos_import_init(void)
 	int err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					  &ebpfos_import_set);
 #ifdef EBPFOS_CUT_TRACING_IMPORTS_INCLUDE
+	/* The common hook has its own bounded ID set. The filter below
+	 * still grants these imports only to non-sleepable tracing
+	 * components; it also avoids consuming the tracing hook's slots
+	 * needed by the component operation services.
+	 */
 	if (!err)
-		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING,
+		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_UNSPEC,
 						&ebpfos_tracing_import_set);
 #endif
 	return err;
