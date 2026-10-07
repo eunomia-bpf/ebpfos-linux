@@ -1532,9 +1532,7 @@ static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
 	for (i = 0; i < ARRAY_SIZE(component_sets); i++)
 		if (btf_id_set8_contains(component_sets[i]->set, id))
 			return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-			       (prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
-				!(prog->type == BPF_PROG_TYPE_TRACING &&
-				  prog->expected_attach_type == BPF_TRACE_FENTRY)) ||
+			       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT ||
 			       prog->sleepable;
 	return 0;
 }

@@ -336,10 +336,7 @@ static int ebpfos_check_program(struct bpf_prog *prog,
 
 	if (!prog->aux->ebpfos_component ||
 	    !((prog->type == BPF_PROG_TYPE_SYSCALL && prog->sleepable) ||
-	      (prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT && !prog->sleepable) ||
-	      (prog->type == BPF_PROG_TYPE_TRACING && !prog->sleepable &&
-	       prog->expected_attach_type == BPF_TRACE_FENTRY &&
-	       prog->aux->attach_btf && prog->aux->attach_btf_id)))
+	      (prog->type == BPF_PROG_TYPE_RAW_TRACEPOINT && !prog->sleepable)))
 		return -EKEYREJECTED;
 	mutex_lock(&prog->aux->used_maps_mutex);
 	if (prog->aux->used_map_cnt != map_count ||
