@@ -19,6 +19,8 @@
 #include "koperation_xadd64.generated.h"
 #include "koperation_atomic64.generated.h"
 #include "koperation_atomic32.generated.h"
+#include "koperation_local_add32.generated.h"
+#include "koperation_local_add64.generated.h"
 #include "koperation_bit64.generated.h"
 #include "koperation_compiler_barrier.generated.h"
 #include "koperation_tzcnt64.generated.h"
@@ -40,6 +42,14 @@ __bpf_kfunc u64 bpf_ebpfos_kop_atomic64(u64 *ptr, u64 value, u64 expected)
 __bpf_kfunc u32 bpf_ebpfos_kop_atomic32(u32 *ptr, u32 value, u32 expected)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
+}
+__bpf_kfunc u32 bpf_ebpfos_kop_local_add32(u32 *ptr, u32 delta)
+{
+	return 0; /* Only the typed proof or its bound unlocked XADD executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_local_add64(u64 *ptr, u64 delta)
+{
+	return 0; /* Only the typed proof or its bound unlocked XADD executes. */
 }
 __bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 {
@@ -583,6 +593,14 @@ BTF_KFUNCS_END(ebpfos_kprog_atomic64_ids)
 BTF_KFUNCS_START(ebpfos_kprog_atomic32_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_atomic32)
 BTF_KFUNCS_END(ebpfos_kprog_atomic32_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_local_add32_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_add32)
+BTF_KFUNCS_END(ebpfos_kprog_local_add32_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_local_add64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_add64)
+BTF_KFUNCS_END(ebpfos_kprog_local_add64_ids)
 
 BTF_KFUNCS_START(ebpfos_kprog_bit64_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_bit64)
@@ -1231,6 +1249,66 @@ static const struct btf_kfunc_id_set ebpfos_kprog_atomic32_set = {
 	.kop_descs = ebpfos_kprog_atomic32_descs,
 };
 
+/* One unlocked memory instruction, not a LOCK atomic. The ordinary proof
+ * checks the exact load and store span. CPU affinity through the instruction
+ * belongs to the entry/re-entry context, not to a native per-CPU address.
+ * The proof returns the old word; flags are derived by compiled code without
+ * a second load. MOV only normalizes the operand/result ABI for XADD.
+ */
+#define EBPFOS_LOCAL_ADD(width, bpf_width, word) \
+static bool ebpfos_kop_local_add##width##_payload(u64 payload) \
+{ \
+	return ebpfos_kprog_local_add##width##_ids.cnt == 1 && \
+		payload == ebpfos_kprog_local_add##width##_ids.pairs[0].id; \
+} \
+static int ebpfos_kop_local_add##width##_instantiate(u64 payload, struct bpf_insn *insns) \
+{ \
+	if (!insns || !ebpfos_kop_local_add##width##_payload(payload)) \
+		return -EINVAL; \
+	insns[0] = BPF_LDX_MEM(bpf_width, BPF_REG_0, BPF_REG_1, 0); \
+	insns[1] = BPF_MOV##word##_REG(BPF_REG_4, BPF_REG_0); \
+	insns[2] = BPF_ALU##word##_REG(BPF_ADD, BPF_REG_4, BPF_REG_2); \
+	insns[3] = BPF_STX_MEM(bpf_width, BPF_REG_1, BPF_REG_4, 0); \
+	return 4; \
+} \
+static int ebpfos_kop_local_add##width##_requirements(u64 payload, u64 *capability_mask, \
+	u64 *effect_mask, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
+{ \
+	static const u8 digest[SHA256_DIGEST_SIZE] = EBPFOS_KOP_LOCAL_ADD##width##_SEMANTIC_SHA256; \
+	if (!capability_mask || !effect_mask || !semantic_sha256 || \
+	    !ebpfos_kop_local_add##width##_payload(payload)) \
+		return -EINVAL; \
+	*capability_mask = 0; *effect_mask = 0; \
+	memcpy(semantic_sha256, digest, sizeof(digest)); \
+	return 0; \
+} \
+static int ebpfos_kop_local_add##width##_emit_x86(u8 *image, u32 *offset, bool emit, \
+	u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
+{ \
+	static const u8 native[] = EBPFOS_KOP_LOCAL_ADD##width##_NATIVE_BYTES; \
+	if (!offset || (emit && !image) || !ebpfos_kop_local_add##width##_payload(payload)) \
+		return -EINVAL; \
+	if (emit) memcpy(image + *offset, native, sizeof(native)); \
+	*offset += sizeof(native); return sizeof(native); \
+} \
+static struct bpf_kop ebpfos_kop_local_add##width = { \
+	.max_insn_cnt = 4, .max_emit_bytes = 8, \
+	.requirements = ebpfos_kop_local_add##width##_requirements, \
+	.instantiate_insn = ebpfos_kop_local_add##width##_instantiate, \
+	.emit_x86 = ebpfos_kop_local_add##width##_emit_x86, \
+}; \
+static const struct bpf_kop * const ebpfos_kprog_local_add##width##_descs[] = { \
+	&ebpfos_kop_local_add##width, \
+}; \
+static const struct btf_kfunc_id_set ebpfos_kprog_local_add##width##_set = { \
+	.set = &ebpfos_kprog_local_add##width##_ids, \
+	.kop_descs = ebpfos_kprog_local_add##width##_descs, \
+}
+
+EBPFOS_LOCAL_ADD(32, BPF_W, 32);
+EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
+#undef EBPFOS_LOCAL_ADD
+
 static const struct ebpfos_kop_atomic64_spec *
 ebpfos_kop_atomic64_spec(u64 payload)
 {
@@ -1494,6 +1572,8 @@ static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add32);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_bit64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_compiler_barrier);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
@@ -1512,6 +1592,8 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_atomic_component_set,
 		&ebpfos_kprog_atomic64_component_set,
 		&ebpfos_kprog_atomic32_component_set,
+		&ebpfos_kprog_local_add32_component_set,
+		&ebpfos_kprog_local_add64_component_set,
 		&ebpfos_kprog_bit64_component_set,
 		&ebpfos_kprog_compiler_barrier_component_set,
 		&ebpfos_kprog_tzcnt64_component_set,
@@ -1761,6 +1843,15 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_atomic32_set);
+	if (err)
+		return err;
+
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_local_add32_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_local_add64_set);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
