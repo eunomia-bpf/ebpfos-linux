@@ -51,6 +51,14 @@ __bpf_kfunc u64 bpf_ebpfos_kop_local_add64(u64 *ptr, u64 delta)
 {
 	return 0; /* Only the typed proof or its bound unlocked XADD executes. */
 }
+__bpf_kfunc u32 bpf_ebpfos_kop_local_cmpxchg32(u32 *ptr, u32 desired, u32 expected)
+{
+	return 0; /* Only the proof or bound unlocked CMPXCHG executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_local_cmpxchg64(u64 *ptr, u64 desired, u64 expected)
+{
+	return 0; /* Only the proof or bound unlocked CMPXCHG executes. */
+}
 __bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
@@ -626,6 +634,13 @@ BTF_KFUNCS_END(ebpfos_kprog_local_add32_ids)
 BTF_KFUNCS_START(ebpfos_kprog_local_add64_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_add64)
 BTF_KFUNCS_END(ebpfos_kprog_local_add64_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_local_cmpxchg32_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_cmpxchg32)
+BTF_KFUNCS_END(ebpfos_kprog_local_cmpxchg32_ids)
+BTF_KFUNCS_START(ebpfos_kprog_local_cmpxchg64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_cmpxchg64)
+BTF_KFUNCS_END(ebpfos_kprog_local_cmpxchg64_ids)
 
 BTF_KFUNCS_START(ebpfos_kprog_bit64_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_bit64)
@@ -1334,6 +1349,8 @@ EBPFOS_LOCAL_ADD(32, BPF_W, 32);
 EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
 #undef EBPFOS_LOCAL_ADD
 
+#include "koperation_local_cmpxchg.h"
+
 static const struct ebpfos_kop_atomic64_spec *
 ebpfos_kop_atomic64_spec(u64 payload)
 {
@@ -1599,6 +1616,8 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add64);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_cmpxchg32);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_cmpxchg64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_bit64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_compiler_barrier);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
@@ -1626,6 +1645,8 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_atomic32_component_set,
 		&ebpfos_kprog_local_add32_component_set,
 		&ebpfos_kprog_local_add64_component_set,
+		&ebpfos_kprog_local_cmpxchg32_component_set,
+		&ebpfos_kprog_local_cmpxchg64_component_set,
 		&ebpfos_kprog_bit64_component_set,
 		&ebpfos_kprog_compiler_barrier_component_set,
 		&ebpfos_kprog_tzcnt64_component_set,
@@ -1900,6 +1921,14 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_local_add64_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_local_cmpxchg32_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_local_cmpxchg64_set);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
