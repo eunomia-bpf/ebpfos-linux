@@ -1350,6 +1350,7 @@ EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
 #undef EBPFOS_LOCAL_ADD
 
 #include "koperation_local_cmpxchg.h"
+#include "koperation_local_bits.h"
 
 static const struct ebpfos_kop_atomic64_spec *
 ebpfos_kop_atomic64_spec(u64 payload)
@@ -1614,6 +1615,10 @@ static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
+#define EBPFOS_LOCAL_BITS_COMPONENT(op, upper, width, span, alu, type, mask_type) \
+ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_##op##width);
+EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_COMPONENT)
+#undef EBPFOS_LOCAL_BITS_COMPONENT
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_cmpxchg32);
@@ -1639,7 +1644,10 @@ static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_component_service_set 
 	.filter = ebpfos_kprog_component_filter,
 };
 
+#define EBPFOS_LOCAL_BITS_COMPONENT_PTR(op, upper, width, span, alu, type, mask_type) \
+ &ebpfos_kprog_local_##op##width##_component_set,
 static const struct btf_kfunc_id_set * const component_sets[] = {
+ EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_COMPONENT_PTR)
 		&ebpfos_kprog_atomic_component_set,
 		&ebpfos_kprog_atomic64_component_set,
 		&ebpfos_kprog_atomic32_component_set,
@@ -1915,6 +1923,11 @@ static int __init ebpfos_kprog_register(void)
 	if (err)
 		return err;
 
+#define EBPFOS_LOCAL_BITS_REGISTER(op, upper, width, span, alu, type, mask_type) \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_local_##op##width##_set); \
+ if (err) return err;
+ EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_REGISTER)
+#undef EBPFOS_LOCAL_BITS_REGISTER
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_local_add32_set);
 	if (err)
