@@ -140,6 +140,19 @@ __bpf_kfunc u64 bpf_ebpfos_kop_reload_cr3(void)
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
 #endif
+#ifdef CONFIG_X86
+/* Proof service and native emission implement the same single source opcode.
+ * The return value is ABI bookkeeping, not a source-register effect. */
+__bpf_kfunc u64 bpf_ebpfos_x86_lfence(void)
+{
+	asm volatile("lfence" : : : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_lfence(void)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+#endif
 __bpf_kfunc u64 bpf_ebpfos_x86_rdtsc(void)
 {
 #ifdef CONFIG_X86
@@ -420,6 +433,18 @@ BTF_ID_FLAGS(func, bpf_ebpfos_kop_invlpg)
 BTF_KFUNCS_END(ebpfos_kprog_invlpg_ids)
 
 #ifdef CONFIG_X86
+BTF_KFUNCS_START(ebpfos_kprog_lfence_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_lfence)
+BTF_KFUNCS_END(ebpfos_kprog_lfence_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_lfence_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_lfence)
+BTF_KFUNCS_END(ebpfos_kprog_lfence_ids)
+
+static const struct btf_kfunc_id_set ebpfos_kprog_lfence_service_set = {
+	.set = &ebpfos_kprog_lfence_service_ids,
+};
+
 BTF_KFUNCS_START(ebpfos_kprog_prefetcht0_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_prefetcht0)
 BTF_KFUNCS_END(ebpfos_kprog_prefetcht0_service_ids)
@@ -1581,6 +1606,13 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
+#ifdef CONFIG_X86
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_lfence);
+static const struct btf_kfunc_id_set ebpfos_kprog_lfence_component_service_set = {
+	.set = &ebpfos_kprog_lfence_service_ids,
+	.filter = ebpfos_kprog_component_filter,
+};
+#endif
 
 /* The descriptor's scalar proof calls this same read-only flags service. */
 static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_component_service_set = {
@@ -1602,6 +1634,10 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_cmp_mask_component_set,
 		&ebpfos_kprog_pushf64_component_set,
 		&ebpfos_kprog_pushf64_component_service_set,
+#ifdef CONFIG_X86
+		&ebpfos_kprog_lfence_component_set,
+		&ebpfos_kprog_lfence_component_service_set,
+#endif
 	};
 
 static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
@@ -1769,6 +1805,18 @@ static int __init ebpfos_kprog_register(void)
 	if (err)
 		return err;
 #ifdef CONFIG_X86
+	if (ebpfos_kprog_lfence_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_lfence.proof_kfunc_id =
+		ebpfos_kprog_lfence_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_lfence_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_lfence_set);
+	if (err)
+		return err;
 	if (ebpfos_kprog_clflushopt_service_ids.cnt != 1 ||
 	    ebpfos_kprog_clwb_service_ids.cnt != 1)
 		return -EINVAL;
