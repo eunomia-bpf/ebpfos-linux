@@ -1350,6 +1350,9 @@ EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
 #undef EBPFOS_LOCAL_ADD
 
 #include "koperation_local_cmpxchg.h"
+#ifdef CONFIG_X86
+#include "koperation_frame_addresses.h"
+#endif
 #include "koperation_local_bits.h"
 
 static const struct ebpfos_kop_atomic64_spec *
@@ -1615,6 +1618,14 @@ static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
+#ifdef CONFIG_X86
+#define EBPFOS_FRAME_ADDRESS_COMPONENT(name, upper, value) \
+ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
+ static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
+ .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
+#undef EBPFOS_FRAME_ADDRESS_COMPONENT
+#endif
 #define EBPFOS_LOCAL_BITS_COMPONENT(op, upper, width, span, alu, type, mask_type) \
  EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_##op##width);
 EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_COMPONENT)
@@ -1647,6 +1658,12 @@ static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_component_service_set 
 #define EBPFOS_LOCAL_BITS_COMPONENT_PTR(op, upper, width, span, alu, type, mask_type) \
  &ebpfos_kprog_local_##op##width##_component_set,
 static const struct btf_kfunc_id_set * const component_sets[] = {
+#ifdef CONFIG_X86
+#define EBPFOS_FRAME_ADDRESS_COMPONENT_PTR(name, upper, value) \
+ &ebpfos_kprog_##name##_component_set, &ebpfos_kprog_##name##_component_service_set,
+ EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT_PTR)
+#undef EBPFOS_FRAME_ADDRESS_COMPONENT_PTR
+#endif
  EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_COMPONENT_PTR)
 		&ebpfos_kprog_atomic_component_set,
 		&ebpfos_kprog_atomic64_component_set,
@@ -1928,6 +1945,17 @@ static int __init ebpfos_kprog_register(void)
  if (err) return err;
  EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_REGISTER)
 #undef EBPFOS_LOCAL_BITS_REGISTER
+#ifdef CONFIG_X86
+#define EBPFOS_FRAME_ADDRESS_REGISTER(name, upper, value) \
+ if (ebpfos_kprog_##name##_service_ids.cnt != 1) return -EINVAL; \
+ ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
+ if (err) return err; \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_set); \
+ if (err) return err;
+ EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_REGISTER)
+#undef EBPFOS_FRAME_ADDRESS_REGISTER
+#endif
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_local_add32_set);
 	if (err)
