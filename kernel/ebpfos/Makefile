@@ -5,3 +5,4 @@ obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o pointer_tag.o fault_loads.o faul
 obj-$(CONFIG_EBPFOS_KOPERATION) += fault_movzx.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += fault_prefetch.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += rdmsr.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += wrmsr.o
