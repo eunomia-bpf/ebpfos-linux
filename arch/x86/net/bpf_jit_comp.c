@@ -579,7 +579,8 @@ static int emit_call(u8 **pprog, void *func, void *ip)
 static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
-			      const u8 *final_ip)
+			      const u8 *final_ip, u8 *image, u8 *rw_image,
+			      unsigned int *excnt)
 {
 	const struct bpf_kop *kop;
 	u8 scratch[BPF_MAX_INSN_SIZE];
@@ -602,6 +603,32 @@ static int emit_kop_desc_call(u8 **pprog,
 		return ret;
 	if (ret != off || ret > kop->max_emit_bytes)
 		return -EFAULT;
+	if (kop->num_exentries && !kop->exception_entry)
+		return -EINVAL;
+	if (image && bpf_prog->aux->extable) {
+		unsigned int index;
+
+		for (index = 0; index < kop->num_exentries; index++) {
+			struct bpf_kop_exception entry;
+			struct exception_table_entry *ex, *rw_ex;
+			s64 insn_delta, fixup_delta;
+
+			if (*excnt >= bpf_prog->aux->num_exentries)
+				return -EFAULT;
+			ret = kop->exception_entry(payload, index, &entry);
+			if (ret || entry.insn_offset >= off || entry.fixup_offset > off)
+				return ret ?: -EINVAL;
+			ex = &bpf_prog->aux->extable[(*excnt)++];
+			insn_delta = final_ip + entry.insn_offset - (u8 *)&ex->insn;
+			fixup_delta = final_ip + entry.fixup_offset - (u8 *)&ex->fixup;
+			if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
+				return -ERANGE;
+			rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
+			rw_ex->insn = insn_delta;
+			rw_ex->fixup = fixup_delta;
+			rw_ex->data = entry.data;
+		}
+	}
 	if (emit)
 		memcpy(prog, scratch, off);
 
@@ -2536,7 +2563,8 @@ populate_extable:
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
-							 image ? ip : NULL);
+							 image ? ip : NULL,
+							 image, rw_image, &excnt);
 				if (err)
 					return err;
 				break;

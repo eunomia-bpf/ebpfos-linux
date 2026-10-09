@@ -1066,10 +1066,20 @@ struct bpf_func_proto {
 	bool (*allowed)(const struct bpf_prog *prog);
 };
 
+/* Section-relative Linux exception records within one native emission. */
+struct bpf_kop_exception {
+	u16 insn_offset;
+	u16 fixup_offset;
+	u32 data;
+};
+
 struct bpf_kop {
 	struct module *owner; /* NULL for built-in/vmlinux descriptors */
 	u16 max_insn_cnt;
 	u16 max_emit_bytes;
+	u16 num_exentries;
+	int (*exception_entry)(u64 payload, unsigned int index,
+			       struct bpf_kop_exception *entry);
 	/*
 	 * A no-return operation with this flag emits one iteration effect and
 	 * reaches an immediately following, verifier-hidden native backedge.
@@ -1087,6 +1097,8 @@ struct bpf_kop {
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 	/* One exact typed effect call allowed inside this descriptor's proof. */
 	u32 proof_kfunc_id;
+	/* Select one exact typed proof service for a declarative payload instance. */
+	u32 (*proof_kfunc_id_for_payload)(u64 payload);
 	/*
 	 * A descriptor may cover a finite declarative payload family.  When
 	 * present, requirements() resolves the exact sidecar instance to the

@@ -1512,7 +1512,7 @@ bool bpf_verifier_inlines_helper_call(struct bpf_verifier_env *env, s32 imm);
 int bpf_add_kfunc_call(struct bpf_verifier_env *env, u32 func_id, u16 offset);
 int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			       const struct bpf_kop *kop,
-			       const struct bpf_insn *insns, u32 count);
+			       u64 payload, const struct bpf_insn *insns, u32 count);
 int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
 				  const struct bpf_insn *insns, u32 count);
 int bpf_verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 count);

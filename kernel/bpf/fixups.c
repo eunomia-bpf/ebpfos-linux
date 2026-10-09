@@ -119,9 +119,11 @@ int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
 
 int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			       const struct bpf_kop *kop,
-			       const struct bpf_insn *insns, u32 count)
+			       u64 payload, const struct bpf_insn *insns, u32 count)
 {
 	u32 index;
+	u32 service = kop->proof_kfunc_id_for_payload ?
+		kop->proof_kfunc_id_for_payload(payload) : kop->proof_kfunc_id;
 
 	if (!count || count > kop->max_insn_cnt)
 		return -EINVAL;
@@ -141,11 +143,11 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			/* A descriptor may bind one typed effect service. The normal
 			 * verifier still checks its BTF prototype and program-type set.
 			 */
-			if (operation == BPF_CALL && kop->proof_kfunc_id &&
+			if (operation == BPF_CALL && service &&
 			    insn->code == (BPF_JMP | BPF_CALL) &&
 			    !insn->dst_reg &&
 			    insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
-			    !insn->off && insn->imm == kop->proof_kfunc_id)
+			    !insn->off && insn->imm == service)
 				continue;
 
 			/* The typed current-task helper is a read-only proof step.
@@ -1304,8 +1306,17 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 			     BPF_MODE(insn->code) == BPF_PROBE_MEM32)
 				num_exentries++;
 			if (BPF_CLASS(insn->code) == BPF_STX &&
-			     BPF_MODE(insn->code) == BPF_PROBE_ATOMIC)
+			    BPF_MODE(insn->code) == BPF_PROBE_ATOMIC)
 				num_exentries++;
+			if (bpf_pseudo_kop_call(insn)) {
+				const struct bpf_kop *kop;
+				u64 payload;
+
+				err = bpf_jit_get_kop_payload(func[i], insn, &kop, &payload);
+				if (err)
+					goto out_free;
+				num_exentries += kop->num_exentries;
+			}
 		}
 		func[i]->aux->num_exentries = num_exentries;
 		func[i]->aux->tail_call_reachable = env->subprog_info[i].tail_call_reachable;
@@ -1674,8 +1685,10 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 			ret = bpf_jit_get_kop_payload(env->prog, call, &kop, &payload);
 			if (ret)
 				return ret;
-			if (prog->jit_requested && bpf_kop_has_native_emit(kop))
+			if (prog->jit_requested && bpf_kop_has_native_emit(kop)) {
+				env->prog->aux->num_exentries += kop->num_exentries;
 				goto next_insn;
+			}
 
 			proof = kvcalloc(kop->max_insn_cnt, sizeof(*proof),
 					 GFP_KERNEL_ACCOUNT);
@@ -1686,7 +1699,7 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 				ret = cnt ?: -EINVAL;
 				goto out_free_kop_proof;
 			}
-			ret = bpf_validate_kop_proof_seq(env, kop, proof, cnt);
+			ret = bpf_validate_kop_proof_seq(env, kop, payload, proof, cnt);
 			if (ret)
 				goto out_free_kop_proof;
 			ret = bpf_verifier_remove_insns(env, i + delta + 1, 1);

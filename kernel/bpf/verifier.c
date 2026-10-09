@@ -3440,10 +3440,10 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 			err = count ?: -EINVAL;
 			goto err_free_proof;
 		}
-		err = bpf_validate_kop_proof_seq(env, desc->kop, proof, count);
+		err = bpf_validate_kop_proof_seq(env, desc->kop, payload, proof, count);
 		if (err)
 			goto err_free_proof;
-		if (desc->kop->proof_kfunc_id) {
+		if (desc->kop->proof_kfunc_id || desc->kop->proof_kfunc_id_for_payload) {
 			u32 j;
 
 			for (j = 0; j < count; j++) {
