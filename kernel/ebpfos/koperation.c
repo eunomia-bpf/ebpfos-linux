@@ -28,6 +28,7 @@
 #include "koperation_current_task.generated.h"
 #include "koperation_cmp_mask.generated.h"
 #include "koperation_opcode.generated.h"
+#include "fault_prefetch.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -1904,6 +1905,11 @@ static int __init ebpfos_kprog_register(void)
 		ebpfos_kprog_prefetcht0_service_ids.pairs[0].id;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_prefetcht0_service_set);
+	if (err)
+		return err;
+	err = ebpfos_prefetcht0_initialize(&ebpfos_kop_prefetcht0,
+				ebpfos_kprog_prefetcht0_ids.pairs[0].id,
+				ebpfos_kprog_prefetcht0_service_ids.pairs[0].id);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
