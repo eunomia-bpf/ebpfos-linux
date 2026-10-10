@@ -217,6 +217,23 @@ __bpf_kfunc u64 bpf_ebpfos_kop_rdseed64(u8 *success)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+#ifdef CONFIG_X86
+__bpf_kfunc u64 bpf_ebpfos_x86_rdrand64(u8 *success)
+{
+	u64 value;
+
+	if (!boot_cpu_has(X86_FEATURE_RDRAND)) {
+		*success = 0;
+		return 0;
+	}
+	asm volatile("rdrand %0; setc %1" : "=r"(value), "=m"(*success) : : "cc");
+	return value;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_rdrand64(u8 *success)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+#endif
 __bpf_kfunc u64 bpf_ebpfos_x86_cpuid(u32 leaf, u32 subleaf, u64 *out)
 {
 #ifdef CONFIG_X86
@@ -404,6 +421,15 @@ BTF_KFUNCS_END(ebpfos_kprog_rdseed64_service_ids)
 BTF_KFUNCS_START(ebpfos_kprog_rdseed64_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdseed64)
 BTF_KFUNCS_END(ebpfos_kprog_rdseed64_ids)
+#ifdef CONFIG_X86
+BTF_KFUNCS_START(ebpfos_kprog_rdrand64_service_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_x86_rdrand64)
+BTF_KFUNCS_END(ebpfos_kprog_rdrand64_service_ids)
+
+BTF_KFUNCS_START(ebpfos_kprog_rdrand64_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_rdrand64)
+BTF_KFUNCS_END(ebpfos_kprog_rdrand64_ids)
+#endif
 
 BTF_KFUNCS_START(ebpfos_kprog_cpuid_service_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_cpuid)
@@ -508,6 +534,11 @@ static const struct btf_kfunc_id_set ebpfos_kprog_rdtscp_service_set = {
 static const struct btf_kfunc_id_set ebpfos_kprog_rdseed64_service_set = {
 	.set = &ebpfos_kprog_rdseed64_service_ids,
 };
+#ifdef CONFIG_X86
+static const struct btf_kfunc_id_set ebpfos_kprog_rdrand64_service_set = {
+	.set = &ebpfos_kprog_rdrand64_service_ids,
+};
+#endif
 
 static const struct btf_kfunc_id_set ebpfos_kprog_cpuid_service_set = {
 	.set = &ebpfos_kprog_cpuid_service_ids,
@@ -1687,6 +1718,11 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
 #ifdef CONFIG_X86
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_lfence);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_rdrand64);
+static const struct btf_kfunc_id_set ebpfos_kprog_rdrand64_component_service_set = {
+	.set = &ebpfos_kprog_rdrand64_service_ids,
+	.filter = ebpfos_kprog_component_filter,
+};
 static const struct btf_kfunc_id_set ebpfos_kprog_lfence_component_service_set = {
 	.set = &ebpfos_kprog_lfence_service_ids,
 	.filter = ebpfos_kprog_component_filter,
@@ -1728,6 +1764,8 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 #ifdef CONFIG_X86
 		&ebpfos_kprog_lfence_component_set,
 		&ebpfos_kprog_lfence_component_service_set,
+		&ebpfos_kprog_rdrand64_component_set,
+		&ebpfos_kprog_rdrand64_component_service_set,
 #endif
 	};
 
@@ -1871,6 +1909,20 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_rdseed64_set);
 	if (err)
 		return err;
+#ifdef CONFIG_X86
+	if (ebpfos_kprog_rdrand64_service_ids.cnt != 1)
+		return -EINVAL;
+	ebpfos_kop_rdrand64.proof_kfunc_id =
+		ebpfos_kprog_rdrand64_service_ids.pairs[0].id;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdrand64_service_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_rdrand64_set);
+	if (err)
+		return err;
+#endif
 	if (ebpfos_kprog_cpuid_service_ids.cnt != 1)
 		return -EINVAL;
 	ebpfos_kop_cpuid.proof_kfunc_id =

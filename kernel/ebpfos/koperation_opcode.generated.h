@@ -23,6 +23,7 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_PREFETCHT0 = 18,
 	EBPFOS_KOP_OPCODE_PREFETCHW = 19,
 	EBPFOS_KOP_OPCODE_LFENCE = 20,
+	EBPFOS_KOP_OPCODE_RDRAND64 = 21,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -227,6 +228,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
+	{
+		.opcode = "RDRAND64r",
+		.native_len = 7,
+		.native = { 0x48, 0x0f, 0xc7, 0xf0, 0x0f, 0x92, 0x07 },
+		.semantic_sha256 = { 0x2c, 0xaa, 0x70, 0xfa, 0x43, 0xa2, 0xd3, 0x76, 0xa5, 0x81, 0x46, 0xd7, 0x47, 0x97, 0xb7, 0xce, 0xcc, 0xe8, 0x21, 0xc1, 0x79, 0xa3, 0xf7, 0x8c, 0x81, 0xa0, 0x58, 0x8f, 0x12, 0x9b, 0x05, 0x6e },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
 };
 #ifdef CONFIG_X86
 #define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
@@ -258,4 +268,5 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(invlpg, INVLPG, true); \
 	X(prefetcht0, PREFETCHT0, true); \
 	X(prefetchw, PREFETCHW, boot_cpu_has(X86_FEATURE_3DNOWPREFETCH)); \
-	X(lfence, LFENCE, boot_cpu_has(X86_FEATURE_XMM2));
+	X(lfence, LFENCE, boot_cpu_has(X86_FEATURE_XMM2)); \
+	X(rdrand64, RDRAND64, boot_cpu_has(X86_FEATURE_RDRAND));
