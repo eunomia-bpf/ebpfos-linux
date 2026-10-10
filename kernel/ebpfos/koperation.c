@@ -64,6 +64,10 @@ __bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
+__bpf_kfunc u64 bpf_ebpfos_kop_local_bit64_carry(u64 *base, u64 index)
+{
+	return 0; /* One unlocked BTS/BTR, returning its old bit through CF. */
+}
 __bpf_kfunc void bpf_ebpfos_kop_compiler_barrier(void) { }
 __bpf_kfunc u64 bpf_ebpfos_kop_tzcnt64(u64 value)
 {
@@ -647,6 +651,10 @@ BTF_KFUNCS_START(ebpfos_kprog_bit64_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_bit64)
 BTF_KFUNCS_END(ebpfos_kprog_bit64_ids)
 
+BTF_KFUNCS_START(ebpfos_kprog_local_bit64_carry_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_local_bit64_carry)
+BTF_KFUNCS_END(ebpfos_kprog_local_bit64_carry_ids)
+
 BTF_KFUNCS_START(ebpfos_kprog_compiler_barrier_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_compiler_barrier)
 BTF_KFUNCS_END(ebpfos_kprog_compiler_barrier_ids)
@@ -1075,9 +1083,15 @@ static const struct ebpfos_kop_bit64_spec *ebpfos_kop_bit64_spec(u64 payload)
 	u8 op = payload & 0xff;
 	u32 i;
 
-	if (ebpfos_kprog_bit64_ids.cnt != 1 ||
-	    payload >> 8 != ebpfos_kprog_bit64_ids.pairs[0].id)
+	if (op == EBPFOS_KOP_BIT64_RESET_NOLOCK_CARRY ||
+	    op == EBPFOS_KOP_BIT64_SET_NOLOCK_CARRY) {
+		if (ebpfos_kprog_local_bit64_carry_ids.cnt != 1 ||
+		    payload >> 8 != ebpfos_kprog_local_bit64_carry_ids.pairs[0].id)
+			return NULL;
+	} else if (ebpfos_kprog_bit64_ids.cnt != 1 ||
+		   payload >> 8 != ebpfos_kprog_bit64_ids.pairs[0].id) {
 		return NULL;
+	}
 	for (i = 0; i < ARRAY_SIZE(ebpfos_kop_bit64_specs); i++)
 		if (ebpfos_kop_bit64_specs[i].op == op)
 			return &ebpfos_kop_bit64_specs[i];
@@ -1111,6 +1125,25 @@ static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
 			BPF_REG_4, BPF_REG_0);
 		insns[n++] = BPF_STX_MEM(BPF_DW, BPF_REG_3, BPF_REG_4, 0);
 		insns[n++] = BPF_MOV64_IMM(BPF_REG_0, 0);
+	} else if (spec->op == EBPFOS_KOP_BIT64_RESET_NOLOCK_CARRY ||
+		   spec->op == EBPFOS_KOP_BIT64_SET_NOLOCK_CARRY) {
+		/* The proof checks the same selected word's read, write and CF.
+		 * Native emission remains the single unlocked source instruction.
+		 */
+		insns[n++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0);
+		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_4, 63);
+		insns[n++] = BPF_MOV64_IMM(BPF_REG_5, 1);
+		insns[n++] = BPF_ALU64_REG(BPF_LSH, BPF_REG_5, BPF_REG_4);
+		if (spec->op == EBPFOS_KOP_BIT64_RESET_NOLOCK_CARRY)
+			insns[n++] = BPF_ALU64_IMM(BPF_XOR, BPF_REG_5, -1);
+		insns[n++] = BPF_ALU64_REG(
+			spec->op == EBPFOS_KOP_BIT64_SET_NOLOCK_CARRY ? BPF_OR : BPF_AND,
+			BPF_REG_5, BPF_REG_0);
+		insns[n++] = BPF_STX_MEM(BPF_DW, BPF_REG_3, BPF_REG_5, 0);
+		insns[n++] = BPF_ALU64_REG(BPF_RSH, BPF_REG_0, BPF_REG_4);
+		insns[n++] = BPF_ALU64_IMM(BPF_AND, BPF_REG_0, 1);
+		insns[n++] = BPF_MOV64_IMM(BPF_REG_5, 0);
 	} else if (spec->op == EBPFOS_KOP_BIT64_TEST) {
 		insns[n++] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0);
 		insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
@@ -1170,7 +1203,7 @@ static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
 
 static struct bpf_kop ebpfos_kop_bit64 = {
 	.max_insn_cnt = 18,
-	.max_emit_bytes = 15,
+	.max_emit_bytes = 17,
 	.requirements = ebpfos_kop_bit64_requirements,
 	.instantiate_insn = ebpfos_kop_bit64_instantiate,
 	.emit_x86 = ebpfos_kop_bit64_emit_x86,
@@ -1183,6 +1216,15 @@ static const struct bpf_kop * const ebpfos_kprog_bit64_descs[] = {
 static const struct btf_kfunc_id_set ebpfos_kprog_bit64_set = {
 	.set = &ebpfos_kprog_bit64_ids,
 	.kop_descs = ebpfos_kprog_bit64_descs,
+};
+
+static const struct bpf_kop * const ebpfos_kprog_local_bit64_carry_descs[] = {
+	&ebpfos_kop_bit64,
+};
+
+static const struct btf_kfunc_id_set ebpfos_kprog_local_bit64_carry_set = {
+	.set = &ebpfos_kprog_local_bit64_carry_ids,
+	.kop_descs = ebpfos_kprog_local_bit64_carry_descs,
 };
 
 static const struct ebpfos_kop_atomic32_spec *
@@ -1636,6 +1678,7 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_add64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_cmpxchg32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_cmpxchg64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_bit64);
+EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_local_bit64_carry);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_compiler_barrier);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
@@ -1674,6 +1717,7 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_local_cmpxchg32_component_set,
 		&ebpfos_kprog_local_cmpxchg64_component_set,
 		&ebpfos_kprog_bit64_component_set,
+		&ebpfos_kprog_local_bit64_carry_component_set,
 		&ebpfos_kprog_compiler_barrier_component_set,
 		&ebpfos_kprog_tzcnt64_component_set,
 		&ebpfos_kprog_load32_component_set,
@@ -1980,6 +2024,10 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					    &ebpfos_kprog_bit64_set);
+	if (err)
+		return err;
+	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					    &ebpfos_kprog_local_bit64_carry_set);
 	if (err)
 		return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
