@@ -326,6 +326,68 @@ __bpf_kfunc u64 bpf_ebpfos_kop_prefetchw(u8 *ptr)
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
 #endif
+#ifdef CONFIG_X86
+__bpf_kfunc u64 bpf_ebpfos_x86_in8(u64 port)
+{
+	u8 value;
+
+	asm volatile("inb %w1, %0" : "=a"(value) : "d"((u16)port));
+	return value;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_in8(u64 port)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_out8(u64 port, u64 value)
+{
+	asm volatile("outb %0, %w1" : : "a"((u8)value), "d"((u16)port));
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_out8(u64 port, u64 value)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_in16(u64 port)
+{
+	u16 value;
+
+	asm volatile("inw %w1, %0" : "=a"(value) : "d"((u16)port));
+	return value;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_in16(u64 port)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_out16(u64 port, u64 value)
+{
+	asm volatile("outw %0, %w1" : : "a"((u16)value), "d"((u16)port));
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_out16(u64 port, u64 value)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_in32(u64 port)
+{
+	u32 value;
+
+	asm volatile("inl %w1, %0" : "=a"(value) : "d"((u16)port));
+	return value;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_in32(u64 port)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_out32(u64 port, u64 value)
+{
+	asm volatile("outl %0, %w1" : : "a"((u32)value), "d"((u16)port));
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_out32(u64 port, u64 value)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+#endif
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_pushf64_service_ids)
@@ -587,6 +649,21 @@ static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
 	return 1;
 }
 
+#ifdef CONFIG_X86
+#define EBPFOS_PORT_IO_ROWS(M) \
+ M(in8) M(out8) M(in16) M(out16) M(in32) M(out32)
+#define EBPFOS_PORT_IO_IDS(name) \
+ BTF_KFUNCS_START(ebpfos_kprog_##name##_service_ids) \
+ BTF_ID_FLAGS(func, bpf_ebpfos_x86_##name) \
+ BTF_KFUNCS_END(ebpfos_kprog_##name##_service_ids) \
+ BTF_KFUNCS_START(ebpfos_kprog_##name##_ids) \
+ BTF_ID_FLAGS(func, bpf_ebpfos_kop_##name) \
+ BTF_KFUNCS_END(ebpfos_kprog_##name##_ids) \
+ static const struct btf_kfunc_id_set ebpfos_kprog_##name##_service_set = { \
+ .set = &ebpfos_kprog_##name##_service_ids };
+EBPFOS_PORT_IO_ROWS(EBPFOS_PORT_IO_IDS)
+#undef EBPFOS_PORT_IO_IDS
+#endif
 /* Each reviewed MC recipe expands to exactly one bound KOperation. */
 #define EBPFOS_DEFINE_TYPED_OPCODE_KOP(name, opcode, available) \
 static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) \
@@ -1740,6 +1817,12 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
 #ifdef CONFIG_X86
+#define EBPFOS_PORT_IO_COMPONENT(name) \
+ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
+ static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
+ .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+EBPFOS_PORT_IO_ROWS(EBPFOS_PORT_IO_COMPONENT)
+#undef EBPFOS_PORT_IO_COMPONENT
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_lfence);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_rdrand64);
 static const struct btf_kfunc_id_set ebpfos_kprog_rdrand64_component_service_set = {
@@ -1786,6 +1869,10 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_pushf64_component_set,
 		&ebpfos_kprog_pushf64_component_service_set,
 #ifdef CONFIG_X86
+#define EBPFOS_PORT_IO_COMPONENT_PTR(name) \
+ &ebpfos_kprog_##name##_component_set, &ebpfos_kprog_##name##_component_service_set,
+ EBPFOS_PORT_IO_ROWS(EBPFOS_PORT_IO_COMPONENT_PTR)
+#undef EBPFOS_PORT_IO_COMPONENT_PTR
 		&ebpfos_kprog_lfence_component_set,
 		&ebpfos_kprog_lfence_component_service_set,
 		&ebpfos_kprog_rdrand64_component_set,
@@ -1934,6 +2021,15 @@ static int __init ebpfos_kprog_register(void)
 	if (err)
 		return err;
 #ifdef CONFIG_X86
+#define EBPFOS_PORT_IO_REGISTER(name) \
+ if (ebpfos_kprog_##name##_service_ids.cnt != 1) return -EINVAL; \
+ ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
+ if (err) return err; \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_set); \
+ if (err) return err;
+ EBPFOS_PORT_IO_ROWS(EBPFOS_PORT_IO_REGISTER)
+#undef EBPFOS_PORT_IO_REGISTER
 	if (ebpfos_kprog_rdrand64_service_ids.cnt != 1)
 		return -EINVAL;
 	ebpfos_kop_rdrand64.proof_kfunc_id =
