@@ -1638,48 +1638,6 @@ out:
 	return ret;
 }
 
-int bpf_prog_test_run_syscall(struct bpf_prog *prog,
-			      const union bpf_attr *kattr,
-			      union bpf_attr __user *uattr)
-{
-	void __user *ctx_in = u64_to_user_ptr(kattr->test.ctx_in);
-	__u32 ctx_size_in = kattr->test.ctx_size_in;
-	void *ctx = NULL;
-	u32 retval;
-	int err = 0;
-
-	/* doesn't support data_in/out, ctx_out, duration, or repeat or flags */
-	if (kattr->test.data_in || kattr->test.data_out ||
-	    kattr->test.ctx_out || kattr->test.duration ||
-	    kattr->test.repeat || kattr->test.flags ||
-	    kattr->test.batch_size)
-		return -EINVAL;
-
-	if (ctx_size_in < prog->aux->max_ctx_offset ||
-	    ctx_size_in > U16_MAX)
-		return -EINVAL;
-
-	if (ctx_size_in) {
-		ctx = memdup_user(ctx_in, ctx_size_in);
-		if (IS_ERR(ctx))
-			return PTR_ERR(ctx);
-	}
-
-	rcu_read_lock_trace();
-	retval = bpf_prog_run_pin_on_cpu(prog, ctx);
-	rcu_read_unlock_trace();
-
-	if (copy_to_user(&uattr->test.retval, &retval, sizeof(u32))) {
-		err = -EFAULT;
-		goto out;
-	}
-	if (ctx_size_in)
-		if (copy_to_user(ctx_in, ctx, ctx_size_in))
-			err = -EFAULT;
-out:
-	kfree(ctx);
-	return err;
-}
 
 static int verify_and_copy_hook_state(struct nf_hook_state *state,
 				      const struct nf_hook_state *user,

@@ -3670,6 +3670,10 @@ void __bpf_free_used_maps(struct bpf_prog_aux *aux,
 
 bool bpf_prog_get_ok(struct bpf_prog *, enum bpf_prog_type *, bool);
 
+int bpf_prog_test_run_syscall(struct bpf_prog *prog,
+			      const union bpf_attr *kattr,
+			      union bpf_attr __user *uattr);
+
 int bpf_prog_offload_compile(struct bpf_prog *prog);
 void bpf_prog_dev_bound_destroy(struct bpf_prog *prog);
 int bpf_prog_offload_info_fill(struct bpf_prog_info *info,
@@ -3726,10 +3730,6 @@ static inline bool bpf_map_is_offloaded(struct bpf_map *map)
 struct bpf_map *bpf_map_offload_map_alloc(union bpf_attr *attr);
 void bpf_map_offload_map_free(struct bpf_map *map);
 u64 bpf_map_offload_map_mem_usage(const struct bpf_map *map);
-int bpf_prog_test_run_syscall(struct bpf_prog *prog,
-			      const union bpf_attr *kattr,
-			      union bpf_attr __user *uattr);
-
 int sock_map_get_from_fd(const union bpf_attr *attr, struct bpf_prog *prog);
 int sock_map_prog_detach(const union bpf_attr *attr, enum bpf_prog_type ptype);
 int sock_map_update_elem_sys(struct bpf_map *map, void *key, void *value, u64 flags);
@@ -3801,13 +3801,6 @@ static inline void bpf_map_offload_map_free(struct bpf_map *map)
 static inline u64 bpf_map_offload_map_mem_usage(const struct bpf_map *map)
 {
 	return 0;
-}
-
-static inline int bpf_prog_test_run_syscall(struct bpf_prog *prog,
-					    const union bpf_attr *kattr,
-					    union bpf_attr __user *uattr)
-{
-	return -ENOTSUPP;
 }
 
 #ifdef CONFIG_BPF_SYSCALL
