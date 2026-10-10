@@ -7112,10 +7112,33 @@ enum bpf_struct_walk_result {
 	WALK_STRUCT,
 };
 
+static void btf_pointer_store_flags(const struct btf *btf, u32 id,
+				    enum bpf_type_flag *flags, bool *nullable)
+{
+	const struct btf_type *t = btf_type_by_id(btf, id);
+	const char *tag;
+
+	*nullable = true;
+	for (; t && (btf_type_is_modifier(t) || btf_type_is_type_tag(t));
+	     t = btf_type_by_id(btf, t->type)) {
+		if (!btf_type_is_type_tag(t) || btf_type_kflag(t))
+			continue;
+		tag = __btf_name_by_offset(btf, t->name_off);
+		if (!strcmp(tag, "user"))
+			*flags |= MEM_USER;
+		if (!strcmp(tag, "percpu"))
+			*flags |= MEM_PERCPU;
+		if (!strcmp(tag, "rcu"))
+			*flags |= MEM_RCU;
+		if (!strcmp(tag, "nonnull"))
+			*nullable = false;
+	}
+}
+
 static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 			   const struct btf_type *t, int off, int size,
 			   u32 *next_btf_id, enum bpf_type_flag *flag,
-			   const char **field_name)
+			   const char **field_name, bool *nullable)
 {
 	u32 i, moff, mtrue_end, msize = 0, total_nelems = 0;
 	const struct btf_type *mtype, *elem_type = NULL;
@@ -7329,20 +7352,26 @@ error:
 
 			/* check type tag */
 			t = btf_type_by_id(btf, mtype->type);
+			if (nullable)
+				btf_pointer_store_flags(btf, mtype->type, &tmp_flag, nullable);
 			if (btf_type_is_type_tag(t) && !btf_type_kflag(t)) {
 				tag_value = __btf_name_by_offset(btf, t->name_off);
 				/* check __user tag */
 				if (strcmp(tag_value, "user") == 0)
-					tmp_flag = MEM_USER;
+					tmp_flag |= MEM_USER;
 				/* check __percpu tag */
 				if (strcmp(tag_value, "percpu") == 0)
-					tmp_flag = MEM_PERCPU;
+					tmp_flag |= MEM_PERCPU;
 				/* check __rcu tag */
 				if (strcmp(tag_value, "rcu") == 0)
-					tmp_flag = MEM_RCU;
+					tmp_flag |= MEM_RCU;
 			}
 
 			stype = btf_type_skip_modifiers(btf, mtype->type, &id);
+			if (nullable) {
+				*next_btf_id = id;
+				*flag |= tmp_flag;
+			}
 			if (btf_type_is_struct(stype)) {
 				*next_btf_id = id;
 				*flag |= tmp_flag;
@@ -7409,7 +7438,7 @@ int btf_struct_access(struct bpf_verifier_log *log,
 
 	t = btf_type_by_id(btf, id);
 	do {
-		err = btf_struct_walk(log, btf, t, off, size, &id, &tmp_flag, field_name);
+		err = btf_struct_walk(log, btf, t, off, size, &id, &tmp_flag, field_name, NULL);
 
 		switch (err) {
 		case WALK_PTR:
@@ -7450,6 +7479,33 @@ int btf_struct_access(struct bpf_verifier_log *log,
 	return -EINVAL;
 }
 
+/* Describe a stored pointer even where the read ABI deliberately returns a
+ * scalar (local allocated objects). This grants no write or lifetime rights.
+ */
+int btf_struct_store_access(struct bpf_verifier_log *log,
+			    const struct bpf_reg_state *reg, int off, int size,
+			    u32 *pointee_id, enum bpf_type_flag *flag,
+			    bool *nullable, const char **field_name)
+{
+	const struct btf_type *t = btf_type_by_id(reg->btf, reg->btf_id);
+	u32 id = reg->btf_id;
+	int ret;
+
+	do {
+		ret = btf_struct_walk(log, reg->btf, t, off, size, &id, flag,
+				      field_name, nullable);
+		if (ret == WALK_PTR || ret == WALK_PTR_UNTRUSTED) {
+			*pointee_id = id;
+			return PTR_TO_BTF_ID;
+		}
+		if (ret != WALK_STRUCT)
+			return ret;
+		t = btf_type_by_id(reg->btf, id);
+		off = 0;
+	} while (t);
+	return -EINVAL;
+}
+
 /* Check that two BTF types, each specified as an BTF object + id, are exactly
  * the same. Trivial ID check is not enough due to module BTFs, because we can
  * end up with two different module BTFs, but IDs point to the common type in
@@ -7487,7 +7543,7 @@ again:
 	type = btf_type_by_id(btf, id);
 	if (!type)
 		return false;
-	err = btf_struct_walk(log, btf, type, off, 1, &id, &flag, NULL);
+	err = btf_struct_walk(log, btf, type, off, 1, &id, &flag, NULL, NULL);
 	if (err != WALK_STRUCT)
 		return false;
 

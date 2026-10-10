@@ -6537,7 +6537,7 @@ BTF_TYPE_SAFE_TRUSTED_OR_NULL(struct vm_area_struct) {
 };
 
 static bool type_is_rcu(struct bpf_verifier_env *env,
-			struct bpf_reg_state *reg,
+			const struct bpf_reg_state *reg,
 			const char *field_name, u32 btf_id)
 {
 	BTF_TYPE_EMIT(BTF_TYPE_SAFE_RCU(struct task_struct));
@@ -6549,7 +6549,7 @@ static bool type_is_rcu(struct bpf_verifier_env *env,
 }
 
 static bool type_is_rcu_or_null(struct bpf_verifier_env *env,
-				struct bpf_reg_state *reg,
+				const struct bpf_reg_state *reg,
 				const char *field_name, u32 btf_id)
 {
 	BTF_TYPE_EMIT(BTF_TYPE_SAFE_RCU_OR_NULL(struct mm_struct));
@@ -6560,7 +6560,7 @@ static bool type_is_rcu_or_null(struct bpf_verifier_env *env,
 }
 
 static bool type_is_trusted(struct bpf_verifier_env *env,
-			    struct bpf_reg_state *reg,
+			    const struct bpf_reg_state *reg,
 			    const char *field_name, u32 btf_id)
 {
 	BTF_TYPE_EMIT(BTF_TYPE_SAFE_TRUSTED(struct bpf_iter_meta));
@@ -6572,7 +6572,7 @@ static bool type_is_trusted(struct bpf_verifier_env *env,
 }
 
 static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
-				    struct bpf_reg_state *reg,
+				    const struct bpf_reg_state *reg,
 				    const char *field_name, u32 btf_id)
 {
 	BTF_TYPE_EMIT(BTF_TYPE_SAFE_TRUSTED_OR_NULL(struct socket));
@@ -6581,6 +6581,153 @@ static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
 
 	return btf_nested_type_is_trusted(&env->log, reg, field_name, btf_id,
 					  "__safe_trusted_or_null");
+}
+
+/* A field permission is not a stored-value capability. Run this check before
+ * any subsystem write hook, including for allocated objects whose reads use
+ * the scalar ABI. Check modeled resources without inventing a lifetime model
+ * for borrowed Linux objects; their lifetime follows source synchronization.
+ */
+static int check_btf_pointer_store(struct bpf_verifier_env *env,
+				   struct bpf_reg_state *dst,
+				   struct bpf_reg_state *value,
+				   int off, int size, bool *pointer_field)
+{
+	enum bpf_type_flag flags = 0;
+	const char *field_name = NULL;
+	u32 pointee = 0;
+	bool nullable = true;
+	int ret;
+
+	ret = btf_struct_store_access(&env->log, dst, off, size,
+				      &pointee, &flags, &nullable, &field_name);
+	if (ret < 0)
+		return ret;
+	*pointer_field = ret == PTR_TO_BTF_ID;
+	if (!*pointer_field)
+		return 0;
+	/* A store must preserve facts a later read may acquire, even when this
+	 * writer is currently outside RCU. Reuse the exact stock field/type
+	 * predicates used below by read typing; do not duplicate their tables.
+	 */
+	if (field_name && (type_is_trusted(env, dst, field_name, pointee) ||
+			   type_is_rcu(env, dst, field_name, pointee)))
+		nullable = false;
+	if (!value) {
+		/* Immediate stores cannot carry pointer provenance. */
+		const struct bpf_insn *insn = &env->prog->insnsi[env->insn_idx];
+
+		if (BPF_CLASS(insn->code) != BPF_ST || BPF_MODE(insn->code) != BPF_MEM ||
+		    insn->imm || !nullable) {
+			verbose(env, "pointer store: immediate is not a nullable null pointer\n");
+			return -EACCES;
+		}
+		return 0;
+	}
+	if (value->type == SCALAR_VALUE && tnum_is_const(value->var_off) &&
+	    !value->var_off.value) {
+		if (nullable)
+			return 0;
+		verbose(env, "pointer store: NULL violates read-side nonnull field\n");
+		return -EACCES;
+	}
+	if (base_type(value->type) != PTR_TO_BTF_ID) {
+		verbose(env, "pointer store: stored value is not a BTF pointer\n");
+		return -EACCES;
+	}
+	if (!nullable && type_may_be_null(value->type)) {
+		verbose(env, "pointer store: nullable value for nonnull field\n");
+		return -EACCES;
+	}
+	if ((value->type & (MEM_USER | MEM_PERCPU)) != (flags & (MEM_USER | MEM_PERCPU))) {
+		verbose(env, "pointer store: incompatible address space\n");
+		return -EACCES;
+	}
+	if (!tnum_is_const(value->var_off) || !pointee ||
+	    !btf_struct_ids_match(&env->log, value->btf, value->btf_id,
+				 value->var_off.value,
+				 dst->btf, pointee, false)) {
+		verbose(env, "pointer store: incompatible BTF pointee\n");
+		return -EACCES;
+	}
+	/* Do not promote an explicitly untrusted (including expired RCU) value
+	 * into a field from which a later reader may recover trust.
+	 */
+	if (value->type & PTR_UNTRUSTED) {
+		verbose(env, "pointer store: stored value is untrusted or expired\n");
+		return -EACCES;
+	}
+	if (field_name &&
+	    (type_is_trusted(env, dst, field_name, pointee) ||
+	     type_is_trusted_or_null(env, dst, field_name, pointee)) &&
+	    !is_trusted_reg(value)) {
+		verbose(env, "pointer store: stored value violates read-side trust\n");
+		return -EACCES;
+	}
+	if (value->type & MEM_RCU && !in_rcu_cs(env)) {
+		verbose(env, "pointer store: stored value has no live RCU scope\n");
+		return -EACCES;
+	}
+	/* A source NULL test refines the address, not the lifetime. Publication
+	 * into an ordinary field would erase MEM_RCU on the next read and allow
+	 * the pointer to survive the enclosing scope. Require the field's read
+	 * contract to carry the same protection, independent of this writer.
+	 */
+	if (value->type & MEM_RCU && !(flags & MEM_RCU) &&
+	    !(field_name && (type_is_rcu(env, dst, field_name, pointee) ||
+			     type_is_rcu_or_null(env, dst, field_name, pointee)))) {
+		verbose(env, "pointer store: RCU lifetime would escape through ordinary field\n");
+		return -EACCES;
+	}
+	/* Acquired references must not escape into ordinary fields before a
+	 * subsequent release. Only self/interior links in the same owning
+	 * allocation preserve their modeled lifetime without a transfer.
+	 */
+	if (value->ref_obj_id &&
+	    (!find_reference_state(env->cur_state, value->ref_obj_id) ||
+	     !type_is_alloc(dst->type) || !type_is_alloc(value->type) ||
+	     dst->ref_obj_id != value->ref_obj_id)) {
+		verbose(env, "pointer store: acquired reference needs ownership transfer\n");
+		return -EACCES;
+	}
+	if (value->type & NON_OWN_REF) {
+		verbose(env, "pointer store: non-owning reference needs ownership transfer\n");
+		return -EACCES;
+	}
+	/* Ordinary borrowed kernel objects have no verifier-owned reference.
+	 * Their publication preserves Linux's locking/RCU/refcount discipline;
+	 * this rule does not claim a general proof of their object lifetime.
+	 */
+	return 0;
+}
+
+static int check_component_field_authority(struct bpf_verifier_env *env,
+					  const struct bpf_reg_state *dst,
+					  int off, int size)
+{
+	u32 owner = env->cur_state->frame[env->cur_state->curframe]->subprogno;
+	const struct bpf_prog_aux *aux = env->prog->aux;
+
+	if (dst->type & (MEM_RDONLY | PTR_UNTRUSTED | PTR_MAYBE_NULL)) {
+		verbose(env, "pointer store: destination is not writable\n");
+		return -EACCES;
+	}
+	if ((dst->ref_obj_id && !find_reference_state(env->cur_state, dst->ref_obj_id)) ||
+	    (dst->type & MEM_RCU && !in_rcu_cs(env)) || dst->type & NON_OWN_REF) {
+		verbose(env, "pointer store: destination modeled lifetime is not live\n");
+		return -EACCES;
+	}
+	for (u32 i = 0; i < aux->ebpfos_field_access_cnt; i++) {
+		const struct bpf_ebpfos_field_access *f = &aux->ebpfos_field_accesses[i];
+
+		if (f->func_info_idx == owner &&
+		    btf_types_are_same(dst->btf, dst->btf_id, bpf_get_btf_vmlinux(), f->btf_id) &&
+		    f->offset == off && f->size == size)
+			return 0;
+	}
+	verbose(env, "pointer store: field authority missing for func#%u type=%u off=%d size=%d\n",
+		owner, dst->btf_id, off, size);
+	return -EACCES;
 }
 
 static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
@@ -6595,6 +6742,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	const char *field_name = NULL;
 	enum bpf_type_flag flag = 0;
 	u32 btf_id = 0;
+	bool pointer_field = false;
 	int ret;
 
 	if (!env->allow_ptr_leaks) {
@@ -6641,6 +6789,24 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			"R%d is ptr_%s access percpu memory: off=%d\n",
 			regno, tname, off);
 		return -EACCES;
+	}
+
+	if (atype == BPF_WRITE) {
+		if (env->prog->aux->ebpfos_component) {
+			ret = check_component_field_authority(env, reg, off, size);
+			if (ret)
+				return ret;
+		}
+		ret = check_btf_pointer_store(env, reg,
+					    value_regno < 0 ? NULL : regs + value_regno,
+					    off, size, &pointer_field);
+		if (ret)
+			return ret;
+		/* L1 supplies authority; the generic verifier above checks values.
+		 * Allocated special fields still go through the stock checks below.
+		 */
+		if (env->prog->aux->ebpfos_component && !type_is_alloc(reg->type))
+			return 0;
 	}
 
 	if (env->ops->btf_struct_access && !type_is_alloc(reg->type) && atype == BPF_WRITE) {
@@ -6732,6 +6898,36 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	}
 
 	if (atype == BPF_READ && value_regno >= 0) {
+		/* Component pointer fields have no implicit non-NULL invariant.
+		 * Until an image-wide writer fact is checked, every walked pointer
+		 * is nullable. Preserve this even for the deprecated unflagged walk:
+		 * clearing trust must never clear destination-validity information.
+		 * The source program, not the compiler, must test a nullable result.
+		 */
+		if (env->prog->aux->ebpfos_component && ret == PTR_TO_BTF_ID) {
+			enum bpf_type_flag field_flags = 0;
+			u32 pointee;
+			bool nullable;
+			int field_ret;
+
+			/* The legacy walk may clear trust, but it must not erase a
+			 * field's modeled lifetime. Reuse the store-side layout walk
+			 * so protection cannot depend on which writer/reader is used.
+			 */
+			field_ret = btf_struct_store_access(&env->log, reg, off, size,
+						   &pointee, &field_flags, &nullable, NULL);
+			if (field_ret < 0)
+				return field_ret;
+			if (field_flags & MEM_RCU ||
+			    type_is_rcu(env, reg, field_name, btf_id) ||
+			    type_is_rcu_or_null(env, reg, field_name, btf_id)) {
+				if (in_rcu_cs(env))
+					flag |= MEM_RCU;
+				else
+					flag |= PTR_UNTRUSTED;
+			}
+			flag |= PTR_MAYBE_NULL;
+		}
 		ret = mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf, btf_id, flag);
 		if (ret < 0)
 			return ret;

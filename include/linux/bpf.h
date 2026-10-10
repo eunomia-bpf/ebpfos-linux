@@ -3239,10 +3239,10 @@ int btf_struct_access(struct bpf_verifier_log *log,
 		      const struct bpf_reg_state *reg,
 		      int off, int size, enum bpf_access_type atype,
 		      u32 *next_btf_id, enum bpf_type_flag *flag, const char **field_name);
-int ebpfos_btf_struct_access(const struct bpf_prog *prog,
-			     struct bpf_verifier_log *log,
-			     const struct bpf_reg_state *reg,
-			     int off, int size);
+int btf_struct_store_access(struct bpf_verifier_log *log,
+			    const struct bpf_reg_state *reg, int off, int size,
+			    u32 *pointee_id, enum bpf_type_flag *flag, bool *nullable,
+			    const char **field_name);
 bool btf_struct_ids_match(struct bpf_verifier_log *log,
 			  const struct btf *btf, u32 id, int off,
 			  const struct btf *need_btf, u32 need_type_id,

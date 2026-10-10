@@ -3092,7 +3092,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			goto free_prog;
 		}
 		for (u32 i = 0; i < attr->ebpfos_field_access_cnt; i++) {
-			if (!fields[i].btf_id || fields[i].reserved ||
+			if (!fields[i].btf_id || fields[i].func_info_idx >= attr->func_info_cnt ||
 			    !fields[i].size || fields[i].size > 8) {
 				kvfree(fields);
 				err = -EINVAL;
@@ -6685,39 +6685,9 @@ syscall_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	}
 }
 
-int ebpfos_btf_struct_access(const struct bpf_prog *prog,
-			     struct bpf_verifier_log *log,
-			     const struct bpf_reg_state *reg,
-			     int off, int size)
-{
-	const struct bpf_ebpfos_field_access *field;
-	const char *field_name = NULL;
-	enum bpf_type_flag flag = 0;
-	u32 next_btf_id = 0;
-
-	if (!prog->aux->ebpfos_component ||
-	    (reg->type & (MEM_RDONLY | PTR_UNTRUSTED | PTR_MAYBE_NULL)))
-		return -EACCES;
-
-	for (u32 i = 0; i < prog->aux->ebpfos_field_access_cnt; i++) {
-		field = &prog->aux->ebpfos_field_accesses[i];
-		if (field->btf_id != reg->btf_id || field->offset != off ||
-		    field->size != size)
-			continue;
-		/* The normal BTF walker still checks member bounds, size, and that
-		 * the destination is scalar rather than a kernel pointer.
-		 */
-		return btf_struct_access(log, reg, off, size, BPF_WRITE,
-					 &next_btf_id, &flag, &field_name) ==
-			SCALAR_VALUE ? SCALAR_VALUE : -EACCES;
-	}
-	return -EACCES;
-}
-
 const struct bpf_verifier_ops bpf_syscall_verifier_ops = {
 	.get_func_proto  = syscall_prog_func_proto,
 	.is_valid_access = syscall_prog_is_valid_access,
-	.btf_struct_access = ebpfos_btf_struct_access,
 };
 
 int bpf_prog_test_run_syscall(struct bpf_prog *prog,

@@ -1520,14 +1520,16 @@ enum {
 	BPF_STREAM_STDERR = 2,
 };
 
-/* A scalar field write declaration for BPF_F_EBPFOS_COMPONENT programs.
+/* A field write declaration for BPF_F_EBPFOS_COMPONENT programs.
  * BTF IDs refer to the vmlinux BTF of the kernel that loads the program.
+ * func_info_idx identifies exactly one function in the load's func_info;
+ * its authority is checked before verification, never shared with callees.
  */
 struct bpf_ebpfos_field_access {
 	__u32 btf_id;
 	__u32 offset;
 	__u32 size;
-	__u32 reserved;
+	__u32 func_info_idx;
 };
 
 union bpf_attr {
