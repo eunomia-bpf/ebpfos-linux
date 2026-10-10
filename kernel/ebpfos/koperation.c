@@ -387,6 +387,63 @@ __bpf_kfunc u64 bpf_ebpfos_kop_out32(u64 port, u64 value)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
+/* One element per opcode; REP and source index updates are compiled IR.
+ * The ordinary typed-memory kfunc proof checks this element's full span. */
+__bpf_kfunc u64 bpf_ebpfos_x86_ins8(u64 port, u8 *ptr__uninit)
+{
+	asm volatile("insb" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_ins8(u64 port, u8 *ptr__uninit)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_ins16(u64 port, u16 *ptr__uninit)
+{
+	asm volatile("insw" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_ins16(u64 port, u16 *ptr__uninit)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_ins32(u64 port, u32 *ptr__uninit)
+{
+	asm volatile("insl" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_ins32(u64 port, u32 *ptr__uninit)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_outs8(u64 port, const u8 *ptr)
+{
+	asm volatile("outsb" : "+S"(ptr) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_outs8(u64 port, const u8 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_outs16(u64 port, const u16 *ptr)
+{
+	asm volatile("outsw" : "+S"(ptr) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_outs16(u64 port, const u16 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+__bpf_kfunc u64 bpf_ebpfos_x86_outs32(u64 port, const u32 *ptr)
+{
+	asm volatile("outsl" : "+S"(ptr) : "d"((u16)port) : "memory");
+	return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_outs32(u64 port, const u32 *ptr)
+{
+	return 0; /* Only the typed proof or its bound JIT emission executes. */
+}
+
 #endif
 __bpf_kfunc_end_defs();
 
@@ -651,7 +708,8 @@ static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
 
 #ifdef CONFIG_X86
 #define EBPFOS_PORT_IO_ROWS(M) \
- M(in8) M(out8) M(in16) M(out16) M(in32) M(out32)
+ M(in8) M(out8) M(in16) M(out16) M(in32) M(out32) \
+ M(ins8) M(outs8) M(ins16) M(outs16) M(ins32) M(outs32)
 #define EBPFOS_PORT_IO_IDS(name) \
  BTF_KFUNCS_START(ebpfos_kprog_##name##_service_ids) \
  BTF_ID_FLAGS(func, bpf_ebpfos_x86_##name) \
