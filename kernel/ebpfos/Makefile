@@ -7,4 +7,5 @@ obj-$(CONFIG_EBPFOS_KOPERATION) += fault_prefetch.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += rdmsr.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += wrmsr.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_stores.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_arithmetic.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += locked_bits.o
