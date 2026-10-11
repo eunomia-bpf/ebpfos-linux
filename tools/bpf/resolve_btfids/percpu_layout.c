@@ -104,3 +104,84 @@ out:
 	free(fields);
 	return NULL;
 }
+
+/* Type/field obligations strengthen every store; they never create a read
+ * capability. Keep qualifiers intact: this first format supports plain struct
+ * pointees, and refuses qualified pointers rather than hiding an address-space
+ * or RCU tag behind the added obligation.
+ */
+int btf_field_obligations(struct btf *btf, const char *path)
+{
+	char line[2048], *type_name, *field, *property, *why, *cursor;
+	const struct btf_type *type, *pointer, *pointee;
+	struct btf_member *members;
+	unsigned int i, lineno = 0, matches;
+	int id, tag, ptr, err = -EINVAL;
+	FILE *file = fopen(path, "r");
+
+	if (!file)
+		return -errno;
+	while (fgets(line, sizeof(line), file)) {
+		++lineno;
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		if (!strchr(line, '\n'))
+			goto out;
+		cursor = line;
+		type_name = strsep(&cursor, "\t");
+		field = strsep(&cursor, "\t");
+		property = strsep(&cursor, "\t");
+		why = strsep(&cursor, "\n");
+		if (!field || !property || !why || !*why || (cursor && *cursor) ||
+		    strcmp(property, "nonnull"))
+			goto out;
+		id = btf__find_by_name_kind(btf, type_name, BTF_KIND_STRUCT);
+		if (id < 1)
+			goto out;
+		for (i = id + 1; i < btf__type_cnt(btf); ++i) {
+			const struct btf_type *other = btf__type_by_id(btf, i);
+
+			if (btf_is_struct(other) &&
+			    !strcmp(type_name, btf__name_by_offset(btf, other->name_off)))
+				goto out;
+		}
+		type = btf__type_by_id(btf, id);
+		matches = 0;
+		for (i = 0; i < btf_vlen(type); ++i) {
+			const struct btf_member *member = &btf_members(type)[i];
+			unsigned int index = i;
+
+			if (strcmp(field, btf__name_by_offset(btf, member->name_off)))
+				continue;
+			if (++matches != 1 || btf_member_bitfield_size(type, i) ||
+			    btf_member_bit_offset(type, i) % 8)
+				goto out;
+			pointer = btf__type_by_id(btf, member->type);
+			if (!pointer || !btf_is_ptr(pointer))
+				goto out;
+			pointee = btf__type_by_id(btf, pointer->type);
+			if (!pointee || !btf_is_struct(pointee))
+				goto out;
+			tag = btf__add_type_tag(btf, "nonnull", pointer->type);
+			if (tag < 0)
+				goto out;
+			ptr = btf__add_ptr(btf, tag);
+			if (ptr < 0)
+				goto out;
+			/* Appending types can reallocate the BTF buffer. */
+			type = btf__type_by_id(btf, id);
+			members = (struct btf_member *)btf_members(type);
+			members[index].type = ptr;
+		}
+		if (matches != 1)
+			goto out;
+	}
+	if (ferror(file))
+		goto out;
+	err = 0;
+out:
+	if (err)
+		fprintf(stderr, "field obligation refused at %s:%u\n", path, lineno);
+	fclose(file);
+	return err;
+}

@@ -14,8 +14,21 @@ remain, but consumers must use the area's member offsets for per-CPU
 selection. Ordinary symbol-based consumers must therefore migrate together
 with their write-authority metadata before enabling this option.
 
-For the x86 L1 build, ``VMLINUX_PERCPU_LAYOUT=1`` enables the view. The
-default stays off during consumer migration. Stock BPF CPU selection types
+The x86 L1 build enables the view by default; ``VMLINUX_PERCPU_LAYOUT=0``
+retains the original inventory for stock comparison controls. Stock CPU selection types
 the area as a bounded BTF object and the x86 JIT selects it with one GS ADD.
 Writes still require the active function's exact field authority and pass
 the ordinary typed-store checks. Padding does not create writable fields.
+
+``--field-obligations FILE`` accepts justified type/field ``nonnull`` store
+obligations from a separate TSV. It qualifies only that field's pointer type;
+layout, original VAR records and nullable read typing stay unchanged. Every
+typed store, including KOperation proofs, must preserve the obligation. The
+current one is ``__percpu_layout.current_task``, whose stock helper promises a
+non-null task. Qualified pointees are refused so an added tag cannot hide
+address-space or RCU qualifications. Source consumers also check static
+initialization against the same pointee layout before binding the symbol.
+
+Area descriptors use offsets wide enough for the existing section and check
+the original root extent and member authority. Only the inventory's descriptor
+ABI is registered, so the registration count does not double during migration.

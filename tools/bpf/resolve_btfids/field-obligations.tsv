@@ -1,0 +1,2 @@
+# Type	Field	Store obligation	Justification (no read promotion)
+__percpu_layout	current_task	nonnull	get_current_task_btf promises a non-null task; the template initializes to init_task. Every typed store must preserve this obligation, including KOperation proofs. NULL and maybe-NULL reject; construction exceptions remain unmodeled. This adds no nullable-read promotion or lifetime assumption.
