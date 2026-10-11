@@ -25,23 +25,29 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_LFENCE = 20,
 	EBPFOS_KOP_OPCODE_WBINVD = 21,
 	EBPFOS_KOP_OPCODE_WBNOINVD = 22,
-	EBPFOS_KOP_OPCODE_RDFSBASE32 = 23,
-	EBPFOS_KOP_OPCODE_RDFSBASE64 = 24,
-	EBPFOS_KOP_OPCODE_RDRAND64 = 25,
-	EBPFOS_KOP_OPCODE_NTSTORE32 = 26,
-	EBPFOS_KOP_OPCODE_NTSTORE64 = 27,
-	EBPFOS_KOP_OPCODE_IN8rr = 28,
-	EBPFOS_KOP_OPCODE_OUT8rr = 29,
-	EBPFOS_KOP_OPCODE_IN16rr = 30,
-	EBPFOS_KOP_OPCODE_OUT16rr = 31,
-	EBPFOS_KOP_OPCODE_IN32rr = 32,
-	EBPFOS_KOP_OPCODE_OUT32rr = 33,
-	EBPFOS_KOP_OPCODE_INSB = 34,
-	EBPFOS_KOP_OPCODE_INSW = 35,
-	EBPFOS_KOP_OPCODE_INSL = 36,
-	EBPFOS_KOP_OPCODE_OUTSB = 37,
-	EBPFOS_KOP_OPCODE_OUTSW = 38,
-	EBPFOS_KOP_OPCODE_OUTSL = 39,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_CS = 23,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_SS = 24,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_DS = 25,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_ES = 26,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_FS = 27,
+	EBPFOS_KOP_OPCODE_READ_SELECTOR_GS = 28,
+	EBPFOS_KOP_OPCODE_RDFSBASE32 = 29,
+	EBPFOS_KOP_OPCODE_RDFSBASE64 = 30,
+	EBPFOS_KOP_OPCODE_RDRAND64 = 31,
+	EBPFOS_KOP_OPCODE_NTSTORE32 = 32,
+	EBPFOS_KOP_OPCODE_NTSTORE64 = 33,
+	EBPFOS_KOP_OPCODE_IN8rr = 34,
+	EBPFOS_KOP_OPCODE_OUT8rr = 35,
+	EBPFOS_KOP_OPCODE_IN16rr = 36,
+	EBPFOS_KOP_OPCODE_OUT16rr = 37,
+	EBPFOS_KOP_OPCODE_IN32rr = 38,
+	EBPFOS_KOP_OPCODE_OUT32rr = 39,
+	EBPFOS_KOP_OPCODE_INSB = 40,
+	EBPFOS_KOP_OPCODE_INSW = 41,
+	EBPFOS_KOP_OPCODE_INSL = 42,
+	EBPFOS_KOP_OPCODE_OUTSB = 43,
+	EBPFOS_KOP_OPCODE_OUTSW = 44,
+	EBPFOS_KOP_OPCODE_OUTSL = 45,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -265,6 +271,60 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
 	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xc8 },
+		.semantic_sha256 = { 0x5e, 0x73, 0xd1, 0x72, 0xdb, 0x00, 0xe0, 0x8c, 0x14, 0x58, 0xc2, 0x8f, 0x1d, 0xa8, 0xd4, 0x95, 0x6b, 0x06, 0x6a, 0x75, 0xae, 0xa6, 0x51, 0x1d, 0x36, 0x42, 0x0a, 0xbe, 0x7c, 0xe0, 0xc4, 0xf1 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xd0 },
+		.semantic_sha256 = { 0x7c, 0x6a, 0xee, 0x29, 0xf9, 0xb9, 0x7b, 0xc6, 0x49, 0xd4, 0x99, 0x29, 0x09, 0x25, 0x0a, 0xba, 0xc3, 0x5e, 0x78, 0xc2, 0x0d, 0x8d, 0xbf, 0xbb, 0xd4, 0x78, 0x67, 0x5a, 0xf3, 0xfc, 0xa6, 0xf7 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xd8 },
+		.semantic_sha256 = { 0xe6, 0x32, 0xbc, 0x9d, 0xa2, 0xa3, 0xf2, 0x33, 0x8a, 0x9c, 0xec, 0xbc, 0x75, 0x92, 0x6f, 0x94, 0x88, 0xc2, 0x99, 0x7d, 0x74, 0x60, 0x53, 0xfa, 0x9a, 0xcb, 0x60, 0xe8, 0x81, 0x60, 0xa1, 0x12 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xc0 },
+		.semantic_sha256 = { 0xac, 0x98, 0x4e, 0xdd, 0xbd, 0x3b, 0x59, 0x44, 0xb4, 0x0b, 0x1a, 0xa2, 0xde, 0x14, 0x0e, 0x77, 0x09, 0x20, 0xaa, 0xc7, 0x64, 0x81, 0x6a, 0xb5, 0xac, 0x2a, 0xe7, 0x45, 0x0d, 0x7b, 0x52, 0x29 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xe0 },
+		.semantic_sha256 = { 0x72, 0x35, 0xa0, 0x71, 0x32, 0xa5, 0x24, 0x8c, 0xdf, 0x1e, 0x3a, 0xd3, 0xd8, 0xc0, 0x4a, 0x3e, 0x38, 0xb4, 0x06, 0xd1, 0x67, 0xb7, 0x13, 0xd8, 0x01, 0x3c, 0x14, 0xd3, 0xb7, 0x36, 0xae, 0xf3 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "MOV32rs",
+		.native_len = 2,
+		.native = { 0x8c, 0xe8 },
+		.semantic_sha256 = { 0xb9, 0x0f, 0x2a, 0x3e, 0x51, 0x88, 0x5e, 0x8b, 0xf6, 0xb3, 0xdd, 0xf7, 0x9b, 0x86, 0x39, 0x61, 0x83, 0x4e, 0xa9, 0x18, 0x9a, 0xf8, 0x9e, 0x64, 0x5f, 0xc7, 0xe6, 0x32, 0xea, 0xc8, 0xd6, 0x3f },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
 		.opcode = "RDFSBASE",
 		.native_len = 4,
 		.native = { 0xf3, 0x0f, 0xae, 0xc0 },
@@ -451,6 +511,12 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(lfence, LFENCE, boot_cpu_has(X86_FEATURE_XMM2)); \
 	X(wbinvd, WBINVD, true); \
 	X(wbnoinvd, WBNOINVD, boot_cpu_has(X86_FEATURE_WBNOINVD)); \
+	X(read_selector_cs, READ_SELECTOR_CS, true); \
+	X(read_selector_ss, READ_SELECTOR_SS, true); \
+	X(read_selector_ds, READ_SELECTOR_DS, true); \
+	X(read_selector_es, READ_SELECTOR_ES, true); \
+	X(read_selector_fs, READ_SELECTOR_FS, true); \
+	X(read_selector_gs, READ_SELECTOR_GS, true); \
 	X(rdfsbase32, RDFSBASE32, boot_cpu_has(X86_FEATURE_FSGSBASE)); \
 	X(rdfsbase64, RDFSBASE64, boot_cpu_has(X86_FEATURE_FSGSBASE)); \
 	X(rdrand64, RDRAND64, boot_cpu_has(X86_FEATURE_RDRAND)); \
