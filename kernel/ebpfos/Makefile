@@ -9,3 +9,4 @@ obj-$(CONFIG_EBPFOS_KOPERATION) += wrmsr.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_stores.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_arithmetic.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += locked_bits.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += locked_xchg.o
