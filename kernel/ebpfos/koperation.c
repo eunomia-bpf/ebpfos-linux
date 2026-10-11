@@ -74,6 +74,7 @@ __bpf_kfunc u64 bpf_ebpfos_kop_local_btc64(u64 *base, u64 index)
 }
 __bpf_kfunc void bpf_ebpfos_kop_compiler_barrier(void) { }
 #include "koperation_cache_control.h"
+#include "koperation_fsbase_read.h"
 __bpf_kfunc u64 bpf_ebpfos_kop_tzcnt64(u64 value)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
@@ -722,7 +723,7 @@ static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
 #define EBPFOS_X86_FIXED_EFFECT_ROWS(M) \
  M(in8) M(out8) M(in16) M(out16) M(in32) M(out32) \
  M(ins8) M(outs8) M(ins16) M(outs16) M(ins32) M(outs32) \
- M(ntstore32) M(ntstore64) M(wbinvd) M(wbnoinvd)
+ M(ntstore32) M(ntstore64) M(wbinvd) M(wbnoinvd) M(rdfsbase32) M(rdfsbase64)
 #define EBPFOS_PORT_IO_IDS(name) \
  BTF_KFUNCS_START(ebpfos_kprog_##name##_service_ids) \
  BTF_ID_FLAGS(func, bpf_ebpfos_x86_##name) \
