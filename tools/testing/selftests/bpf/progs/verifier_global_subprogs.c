@@ -167,6 +167,20 @@ int arg_tag_nonnull_ptr_good(void *ctx)
 	return subprog_nonnull_ptr_good(&x, &y);
 }
 
+SEC("?raw_tp")
+__failure __msg("arg#0 is expected to be non-NULL")
+int arg_tag_nonnull_ptr_null_first(void *ctx)
+{
+	return subprog_nonnull_ptr_good(NULL, &x);
+}
+
+SEC("?raw_tp")
+__failure __msg("arg#1 is expected to be non-NULL")
+int arg_tag_nonnull_ptr_null_second(void *ctx)
+{
+	return subprog_nonnull_ptr_good(&x, NULL);
+}
+
 /* this global subprog can be now called from many types of entry progs, each
  * with different context type
  */
