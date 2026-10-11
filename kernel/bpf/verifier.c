@@ -32,6 +32,7 @@
 #include <linux/kallsyms.h>
 #include <linux/ebpfos.h>
 #include <crypto/sha2.h>
+#include <asm/sections.h>
 
 #include "disasm.h"
 
@@ -6844,7 +6845,10 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		/* If this is an untrusted pointer, all pointers formed by walking it
 		 * also inherit the untrusted flag.
 		 */
-		flag = PTR_UNTRUSTED;
+		/* Trust and address space are independent. Walking an untrusted
+		 * parent must not turn user or per-CPU memory into ordinary memory.
+		 */
+		flag = (flag & (MEM_USER | MEM_PERCPU)) | PTR_UNTRUSTED;
 
 	} else if (is_trusted_reg(reg) || is_rcu_reg(reg)) {
 		/* By default any pointer obtained from walking a trusted pointer is no
@@ -6890,7 +6894,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * and will be allowed to be passed into helpers for
 			 * compat reasons.
 			 */
-			flag = PTR_UNTRUSTED;
+			flag = (flag & (MEM_USER | MEM_PERCPU)) | PTR_UNTRUSTED;
 		}
 	} else {
 		/* Old compat. Deprecated */
@@ -10145,6 +10149,14 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return -EINVAL;
 			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
+			/* Probe reads do not make address spaces interchangeable.
+			 * The independent global contract must retain this fact.
+			 */
+			if ((reg->type & (MEM_USER | MEM_PERCPU)) !=
+			    (arg->arg_type & (MEM_USER | MEM_PERCPU))) {
+				bpf_log(log, "arg#%d has incompatible address space\n", i);
+				return -EINVAL;
+			}
 			/*
 			 * Anything is allowed for untrusted arguments, as these are
 			 * read-only and probe read instructions would protect against
@@ -18818,6 +18830,16 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 			}
 		}
 	}
+
+#ifdef CONFIG_SMP
+	/* A DATASEC can describe an area through a containing symbol without
+	 * listing every alias. The actual vmlinux template section still
+	 * determines the address space of each original symbol.
+	 */
+	if (btf_is_vmlinux(btf) && addr >= (unsigned long)__per_cpu_start &&
+	    addr < (unsigned long)__per_cpu_end)
+		percpu = true;
+#endif
 
 	type = t->type;
 	t = btf_type_skip_modifiers(btf, type, NULL);
