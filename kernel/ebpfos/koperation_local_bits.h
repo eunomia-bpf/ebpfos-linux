@@ -22,7 +22,8 @@ __bpf_kfunc_end_defs();
 /* Stock memory checking sees both the read and write at the source width.
  * No trusted pointer, fabricated capability or native per-CPU address enters
  * the proof. The emitted AND/OR is indivisible against local interrupts but
- * is not a remote LOCK operation. XOR only defines the scalar return ABI.
+ * is not a remote LOCK operation. MOV clears proof scratch and the return
+ * register without changing the source AND/OR's machine flags.
  */
 #define EBPFOS_LOCAL_BITS_DEFINE(op, upper, width, span, alu, type, mask_type) \
 BTF_KFUNCS_START(ebpfos_kprog_local_##op##width##_ids) \
@@ -37,8 +38,9 @@ static int ebpfos_kop_local_##op##width##_instantiate(u64 payload, struct bpf_in
  insns[0] = BPF_LDX_MEM(span, BPF_REG_3, BPF_REG_1, 0); \
  insns[1] = BPF_ALU##alu##_REG(BPF_##upper, BPF_REG_3, BPF_REG_2); \
  insns[2] = BPF_STX_MEM(span, BPF_REG_1, BPF_REG_3, 0); \
- insns[3] = BPF_MOV32_IMM(BPF_REG_0, 0); \
- return 4; \
+ insns[3] = BPF_MOV32_IMM(BPF_REG_3, 0); \
+ insns[4] = BPF_MOV32_IMM(BPF_REG_0, 0); \
+ return 5; \
 } \
 static int ebpfos_kop_local_##op##width##_requirements(u64 payload, u64 *cap, \
  u64 *effects, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
@@ -56,7 +58,7 @@ static int ebpfos_kop_local_##op##width##_emit_x86(u8 *image, u32 *offset, bool 
  *offset += sizeof(native); return sizeof(native); \
 } \
 static struct bpf_kop ebpfos_kop_local_##op##width = { \
- .max_insn_cnt = 4, .max_emit_bytes = 8, \
+ .max_insn_cnt = 5, .max_emit_bytes = 16, \
  .requirements = ebpfos_kop_local_##op##width##_requirements, \
  .instantiate_insn = ebpfos_kop_local_##op##width##_instantiate, \
  .emit_x86 = ebpfos_kop_local_##op##width##_emit_x86, \
