@@ -7112,13 +7112,14 @@ enum bpf_struct_walk_result {
 	WALK_STRUCT,
 };
 
-static void btf_pointer_store_flags(const struct btf *btf, u32 id,
-				    enum bpf_type_flag *flags, bool *nullable)
+static void btf_pointer_flags(const struct btf *btf, u32 id,
+			      enum bpf_type_flag *flags, bool *nullable)
 {
 	const struct btf_type *t = btf_type_by_id(btf, id);
 	const char *tag;
 
-	*nullable = true;
+	if (nullable)
+		*nullable = true;
 	for (; t && (btf_type_is_modifier(t) || btf_type_is_type_tag(t));
 	     t = btf_type_by_id(btf, t->type)) {
 		if (!btf_type_is_type_tag(t) || btf_type_kflag(t))
@@ -7130,7 +7131,7 @@ static void btf_pointer_store_flags(const struct btf *btf, u32 id,
 			*flags |= MEM_PERCPU;
 		if (!strcmp(tag, "rcu"))
 			*flags |= MEM_RCU;
-		if (!strcmp(tag, "nonnull"))
+		if (nullable && !strcmp(tag, "nonnull"))
 			*nullable = false;
 	}
 }
@@ -7143,7 +7144,7 @@ static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 	u32 i, moff, mtrue_end, msize = 0, total_nelems = 0;
 	const struct btf_type *mtype, *elem_type = NULL;
 	const struct btf_member *member;
-	const char *tname, *mname, *tag_value;
+	const char *tname, *mname;
 	u32 vlen, elem_id, mid;
 
 again:
@@ -7339,7 +7340,7 @@ error:
 		}
 
 		if (btf_type_is_ptr(mtype)) {
-			const struct btf_type *stype, *t;
+			const struct btf_type *stype;
 			enum bpf_type_flag tmp_flag = 0;
 			u32 id;
 
@@ -7351,30 +7352,14 @@ error:
 			}
 
 			/* check type tag */
-			t = btf_type_by_id(btf, mtype->type);
-			if (nullable)
-				btf_pointer_store_flags(btf, mtype->type, &tmp_flag, nullable);
-			if (btf_type_is_type_tag(t) && !btf_type_kflag(t)) {
-				tag_value = __btf_name_by_offset(btf, t->name_off);
-				/* check __user tag */
-				if (strcmp(tag_value, "user") == 0)
-					tmp_flag |= MEM_USER;
-				/* check __percpu tag */
-				if (strcmp(tag_value, "percpu") == 0)
-					tmp_flag |= MEM_PERCPU;
-				/* check __rcu tag */
-				if (strcmp(tag_value, "rcu") == 0)
-					tmp_flag |= MEM_RCU;
-			}
+			btf_pointer_flags(btf, mtype->type, &tmp_flag, nullable);
 
 			stype = btf_type_skip_modifiers(btf, mtype->type, &id);
-			if (nullable) {
+			if (nullable)
 				*next_btf_id = id;
-				*flag |= tmp_flag;
-			}
+			*flag |= tmp_flag;
 			if (btf_type_is_struct(stype)) {
 				*next_btf_id = id;
-				*flag |= tmp_flag;
 				if (field_name)
 					*field_name = mname;
 				return WALK_PTR;
@@ -7454,7 +7439,8 @@ int btf_struct_access(struct bpf_verifier_log *log,
 			*flag = tmp_flag;
 			return PTR_TO_BTF_ID;
 		case WALK_PTR_UNTRUSTED:
-			*flag = MEM_RDONLY | PTR_UNTRUSTED;
+			*flag = (tmp_flag & (MEM_USER | MEM_PERCPU)) |
+				MEM_RDONLY | PTR_UNTRUSTED;
 			return PTR_TO_MEM;
 		case WALK_SCALAR:
 			return SCALAR_VALUE;

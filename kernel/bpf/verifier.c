@@ -7214,6 +7214,13 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		bool rdonly_mem = type_is_rdonly_mem(reg->type);
 		bool rdonly_untrusted = rdonly_mem && (reg->type & PTR_UNTRUSTED);
 
+		/* Probe reads do not select a CPU or authorize a user access. */
+		if (reg->type & (MEM_USER | MEM_PERCPU)) {
+			verbose(env, "R%d access %s memory\n", regno,
+				reg->type & MEM_USER ? "user" : "percpu");
+			return -EACCES;
+		}
+
 		if (type_may_be_null(reg->type)) {
 			verbose(env, "R%d invalid mem access '%s'\n", regno,
 				reg_type_str(env, reg->type));
