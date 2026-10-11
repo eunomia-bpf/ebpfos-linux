@@ -150,14 +150,15 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			    !insn->off && insn->imm == service)
 				continue;
 
-			/* The typed current-task helper is a read-only proof step.
+			/* Typed CPU selection/current-task helpers are read-only proof steps.
 			 * The ordinary verifier still checks its program-type and BTF
 			 * result rules after proof substitution.
 			 */
 			if (operation == BPF_CALL &&
 			    insn->code == (BPF_JMP | BPF_CALL) &&
 			    !insn->dst_reg && !insn->src_reg && !insn->off &&
-			    insn->imm == BPF_FUNC_get_current_task_btf)
+			    (insn->imm == BPF_FUNC_get_current_task_btf ||
+			     insn->imm == BPF_FUNC_this_cpu_ptr))
 				continue;
 			if (operation == BPF_CALL || operation == BPF_EXIT) {
 				if (env)
@@ -2311,6 +2312,22 @@ patch_map_ops_generic:
 		}
 
 #if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
+		/* Select the current CPU's original per-CPU object inline. The
+		 * helper's type and bounds checks have already run; this is the
+		 * same template-plus-this_cpu_off operation as its C body.
+		 */
+		if (insn->imm == BPF_FUNC_this_cpu_ptr &&
+		    bpf_verifier_inlines_helper_call(env, insn->imm)) {
+			insn_buf[0] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_1);
+			cnt = 1;
+			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+			if (!new_prog)
+				return -ENOMEM;
+			env->prog = prog = new_prog;
+			insn = new_prog->insnsi + i + delta;
+			goto next_insn;
+		}
+
 		/* Implement bpf_get_smp_processor_id() inline. */
 		if (insn->imm == BPF_FUNC_get_smp_processor_id &&
 		    bpf_verifier_inlines_helper_call(env, insn->imm)) {

@@ -17827,6 +17827,7 @@ bool bpf_verifier_inlines_helper_call(struct bpf_verifier_env *env, s32 imm)
 	switch (imm) {
 #ifdef CONFIG_X86_64
 	case BPF_FUNC_get_smp_processor_id:
+	case BPF_FUNC_this_cpu_ptr:
 #ifdef CONFIG_SMP
 	case BPF_FUNC_get_current_task_btf:
 	case BPF_FUNC_get_current_task:

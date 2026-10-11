@@ -1595,6 +1595,7 @@ EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
 #include "koperation_local_cmpxchg.h"
 #ifdef CONFIG_X86
 #include "koperation_frame_addresses.h"
+#include "koperation_percpu_reads.h"
 #endif
 #include "koperation_local_bits.h"
 
@@ -1884,6 +1885,12 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_compiler_barrier);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_tzcnt64);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_load32);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_current_task);
+#ifdef CONFIG_X86_64
+#define EBPFOS_PERCPU_READ_COMPONENT(width, size, opcode, second, wide) \
+ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_percpu_read##width);
+EBPFOS_PERCPU_READ_ROWS(EBPFOS_PERCPU_READ_COMPONENT)
+#undef EBPFOS_PERCPU_READ_COMPONENT
+#endif
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_cmp_mask);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
 #ifdef CONFIG_X86
@@ -1935,6 +1942,12 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_tzcnt64_component_set,
 		&ebpfos_kprog_load32_component_set,
 		&ebpfos_kprog_current_task_component_set,
+#ifdef CONFIG_X86_64
+#define EBPFOS_PERCPU_READ_COMPONENT_PTR(width, size, opcode, second, wide) \
+ &ebpfos_kprog_percpu_read##width##_component_set,
+ EBPFOS_PERCPU_READ_ROWS(EBPFOS_PERCPU_READ_COMPONENT_PTR)
+#undef EBPFOS_PERCPU_READ_COMPONENT_PTR
+#endif
 		&ebpfos_kprog_cmp_mask_component_set,
 		&ebpfos_kprog_pushf64_component_set,
 		&ebpfos_kprog_pushf64_component_service_set,
@@ -2292,6 +2305,13 @@ static int __init ebpfos_kprog_register(void)
 					    &ebpfos_kprog_current_task_set);
 	if (err)
 		return err;
+#ifdef CONFIG_X86_64
+#define EBPFOS_PERCPU_READ_REGISTER(width, size, opcode, second, wide) \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_percpu_read##width##_set); \
+ if (err) return err;
+ EBPFOS_PERCPU_READ_ROWS(EBPFOS_PERCPU_READ_REGISTER)
+#undef EBPFOS_PERCPU_READ_REGISTER
+#endif
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					 &ebpfos_kprog_cmp_mask_set);
 	if (err)
