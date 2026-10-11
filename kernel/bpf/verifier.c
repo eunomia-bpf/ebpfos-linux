@@ -10150,20 +10150,25 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		struct bpf_reg_state *reg = &regs[regno];
 		struct bpf_subprog_arg_info *arg = &sub->args[i];
 
+		/* BTF qualifiers restrict every ordinary pointer contract, including
+		 * trusted and bounded memory arguments. NULL has no address space;
+		 * its admissibility is still governed by the argument's nullability.
+		 */
+		if ((base_type(arg->arg_type) == ARG_PTR_TO_MEM ||
+		     base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) &&
+		    !bpf_register_is_null(reg) &&
+		    (reg->type & (MEM_USER | MEM_PERCPU)) !=
+		    (arg->arg_type & (MEM_USER | MEM_PERCPU))) {
+			bpf_log(log, "arg#%d has incompatible address space\n", i);
+			return -EINVAL;
+		}
+
 		if (arg->arg_type == ARG_ANYTHING) {
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
 				return -EINVAL;
 			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
-			/* Probe reads do not make address spaces interchangeable.
-			 * The independent global contract must retain this fact.
-			 */
-			if ((reg->type & (MEM_USER | MEM_PERCPU)) !=
-			    (arg->arg_type & (MEM_USER | MEM_PERCPU))) {
-				bpf_log(log, "arg#%d has incompatible address space\n", i);
-				return -EINVAL;
-			}
 			/*
 			 * Anything is allowed for untrusted arguments, as these are
 			 * read-only and probe read instructions would protect against
@@ -19635,13 +19640,15 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			} else if (base_type(arg->arg_type) == ARG_PTR_TO_MEM) {
 				reg->type = PTR_TO_MEM;
 				reg->type |= arg->arg_type &
-					     (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_RDONLY);
+					     (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_RDONLY |
+					      MEM_USER | MEM_PERCPU);
 				mark_reg_known_zero(env, regs, i);
 				reg->mem_size = arg->mem_size;
 				if (arg->arg_type & PTR_MAYBE_NULL)
 					reg->id = ++env->id_gen;
 			} else if (base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) {
 				reg->type = PTR_TO_BTF_ID;
+				reg->type |= arg->arg_type & (MEM_USER | MEM_PERCPU);
 				if (arg->arg_type & PTR_MAYBE_NULL)
 					reg->type |= PTR_MAYBE_NULL;
 				if (arg->arg_type & PTR_UNTRUSTED)

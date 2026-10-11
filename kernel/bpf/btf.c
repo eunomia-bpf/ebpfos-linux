@@ -8037,6 +8037,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	 */
 	for (i = 0; i < nargs; i++) {
 		u32 tags = 0;
+		enum bpf_type_flag pointer_flags = 0;
 		int id = btf_named_start_id(btf, false) - 1;
 
 		/* 'arg:<tag>' decl_tag takes precedence over derivation of
@@ -8080,6 +8081,23 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (!btf_type_is_ptr(t))
 			goto skip_pointer;
 
+		if (is_global) {
+			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
+			/* An independent global has no caller RCU scope to inherit.
+			 * Do not manufacture a live RCU reference from its prototype.
+			 */
+			if (pointer_flags & MEM_RCU) {
+				bpf_log(log, "arg#%d RCU pointer requires a modeled global lifetime\n", i);
+				return -EOPNOTSUPP;
+			}
+			if (pointer_flags && ((tags & (ARG_TAG_CTX | ARG_TAG_ARENA)) ||
+					      btf_is_prog_ctx_type(log, btf, t, prog_type, i) ||
+					      btf_is_dynptr_ptr(btf, t))) {
+				bpf_log(log, "arg#%d qualified pointer has incompatible argument contract\n", i);
+				return -EINVAL;
+			}
+		}
+
 		if ((tags & ARG_TAG_CTX) || btf_is_prog_ctx_type(log, btf, t, prog_type, i)) {
 			if (tags & ~ARG_TAG_CTX) {
 				bpf_log(log, "arg#%d has invalid combination of tags\n", i);
@@ -8112,7 +8130,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			if (kern_type_id < 0)
 				return kern_type_id;
 
-			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED;
+			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | pointer_flags;
 			if (tags & ARG_TAG_NULLABLE)
 				sub->args[i].arg_type |= PTR_MAYBE_NULL;
 			sub->args[i].btf_id = kern_type_id;
@@ -8129,7 +8147,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 			ref_t = btf_type_skip_modifiers(btf, t->type, NULL);
 			if (btf_type_is_void(ref_t) || btf_type_is_primitive(ref_t)) {
-				sub->args[i].arg_type = ARG_PTR_TO_MEM | MEM_RDONLY | PTR_UNTRUSTED;
+				sub->args[i].arg_type = ARG_PTR_TO_MEM | MEM_RDONLY | PTR_UNTRUSTED | pointer_flags;
 				sub->args[i].mem_size = 0;
 				continue;
 			}
@@ -8146,7 +8164,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 					i, btf_type_str(ref_t), tname);
 				return -EINVAL;
 			}
-			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_UNTRUSTED;
+			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_UNTRUSTED | pointer_flags;
 			sub->args[i].btf_id = kern_type_id;
 			continue;
 		}
@@ -8175,7 +8193,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EINVAL;
 			}
 
-			sub->args[i].arg_type = ARG_PTR_TO_MEM | PTR_MAYBE_NULL;
+			sub->args[i].arg_type = ARG_PTR_TO_MEM | PTR_MAYBE_NULL | pointer_flags;
 			if (tags & ARG_TAG_NONNULL)
 				sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
 			sub->args[i].mem_size = mem_size;
