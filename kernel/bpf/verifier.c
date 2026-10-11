@@ -10150,6 +10150,19 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		struct bpf_reg_state *reg = &regs[regno];
 		struct bpf_subprog_arg_info *arg = &sub->args[i];
 
+		/* Independent globals cannot inherit the caller's reference identity
+		 * or RCU scope. An ordinary writable contract would turn a scoped or
+		 * owned value into a freely publishable trusted pointer. Read-only
+		 * untrusted contracts grant no such store capability.
+		 */
+		if ((base_type(arg->arg_type) == ARG_PTR_TO_MEM ||
+		     base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) &&
+		    !(arg->arg_type & PTR_UNTRUSTED) &&
+		    (reg->ref_obj_id || (reg->type & (MEM_RCU | MEM_ALLOC | NON_OWN_REF)))) {
+			bpf_log(log, "arg#%d modeled lifetime cannot be erased at global call\n", i);
+			return -EINVAL;
+		}
+
 		/* BTF qualifiers restrict every ordinary pointer contract, including
 		 * trusted and bounded memory arguments. NULL has no address space;
 		 * its admissibility is still governed by the argument's nullability.
