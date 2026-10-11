@@ -14,6 +14,14 @@
 
 #ifdef CONFIG_X86_64
 #define ARITHMETIC_ROWS(X) \
+ X(add, 8, BPF_B, BPF_ADD, 0, 0x00) \
+ X(sub, 8, BPF_B, BPF_SUB, 0, 0x28) \
+ X(inc, 8, BPF_B, BPF_ADD, 1, 0x00) \
+ X(dec, 8, BPF_B, BPF_SUB, 1, 0x08) \
+ X(add, 16, BPF_H, BPF_ADD, 0, 0x01) \
+ X(sub, 16, BPF_H, BPF_SUB, 0, 0x29) \
+ X(inc, 16, BPF_H, BPF_ADD, 1, 0x00) \
+ X(dec, 16, BPF_H, BPF_SUB, 1, 0x08) \
  X(add, 32, BPF_W, BPF_ADD, 0, 0x01) \
  X(sub, 32, BPF_W, BPF_SUB, 0, 0x29) \
  X(inc, 32, BPF_W, BPF_ADD, 1, 0x00) \
@@ -124,7 +132,7 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	if (width == 16) native[n++] = 0x66;
 	if (width == 8) native[n++] = 0x40; /* SIL, not legacy DH. */
 	if (width == 64) native[n++] = 0x48;
-	native[n++] = unary ? 0xff : opcode;
+	native[n++] = unary ? (width == 8 ? 0xfe : 0xff) : opcode;
 	native[n++] = unary ? 0x87 | opcode : 0xb7;
 	put_unaligned_le32(payload & (area ? 0xffffff : 0xffff), native + n); n += 4;
 	/* INC/DEC retain their native CF behavior; all bookkeeping preserves flags.
