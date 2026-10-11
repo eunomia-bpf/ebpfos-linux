@@ -114,6 +114,82 @@ static const struct btf_kfunc_id_set percpu_store##width##_component_set = { \
 PERCPU_STORE_ROWS(STORE_DEFINE)
 #undef STORE_DEFINE
 
+/* Register MOVs retain the exact input pointer/scalar state across the helper.
+ * r6 is declared clobbered in the compiler ABI and receives the same value
+ * in native code. No stack spill, extra memory access or type assertion is
+ * introduced by the descriptor. Ordinary stores check destination authority
+ * and the actual value, including pointer nullability/lifetime.
+ */
+__bpf_kfunc_start_defs();
+#define REGSTORE_DECL(width, size) \
+__bpf_kfunc u64 bpf_ebpfos_kop_percpu_regstore##width(void *template, u64 value) { return 0; }
+PERCPU_STORE_ROWS(REGSTORE_DECL)
+#undef REGSTORE_DECL
+__bpf_kfunc_end_defs();
+
+static int regstore_requirements(u64 payload, u64 *cap, u64 *effects,
+                                u8 digest[SHA256_DIGEST_SIZE])
+{
+	/* sha256("percpu-regstore-v1:stock-template-selection;exact-field-write;input-type-preserved-in-r6;r6-clobber;single-GS-MOV;scalar-return") */
+	static const u8 semantics[SHA256_DIGEST_SIZE] = { 0xb6, 0xff, 0x79, 0x33, 0x08, 0xef, 0x5e, 0x2b, 0x2f, 0xca, 0x1c, 0xd6, 0xc1, 0xd1, 0xec, 0x47, 0x7f, 0xdf, 0xf1, 0x80, 0x94, 0x72, 0x18, 0xe6, 0x09, 0xdd, 0x56, 0xf4, 0xa5, 0xbe, 0xe2, 0xa5 };
+	if (!cap || !effects || !digest || payload > S16_MAX)
+		return -EINVAL;
+	*cap = 0; *effects = 0;
+	memcpy(digest, semantics, sizeof(semantics));
+	return 0;
+}
+
+static int regstore_emit(u8 *image, u32 *offset, bool emit, u64 payload,
+                         unsigned width)
+{
+	u8 native[18];
+	unsigned n = 0;
+	if (!offset || (emit && !image) || payload > S16_MAX)
+		return -EINVAL;
+	/* MOV rsi,rbx is the exact r6 scratch result modeled by the proof. */
+	native[n++] = 0x48; native[n++] = 0x89; native[n++] = 0xf3;
+	native[n++] = 0x65;
+	if (width == 16) native[n++] = 0x66;
+	if (width == 8 || width == 64) native[n++] = width == 8 ? 0x40 : 0x48;
+	native[n++] = width == 8 ? 0x88 : 0x89;
+	native[n++] = 0xb7; /* sil/si/esi/rsi, disp32(rdi), GS */
+	put_unaligned_le32(payload, native + n); n += 4;
+	/* MOV, rather than XOR, preserves the source instruction's flags. */
+	native[n++] = 0xb8; put_unaligned_le32(0, native + n); n += 4;
+	if (emit) memcpy(image + *offset, native, n);
+	*offset += n;
+	return n;
+}
+
+#define REGSTORE_DEFINE(width, size) \
+BTF_KFUNCS_START(percpu_regstore##width##_ids) \
+BTF_ID_FLAGS(func, bpf_ebpfos_kop_percpu_regstore##width) \
+BTF_KFUNCS_END(percpu_regstore##width##_ids) \
+static int percpu_regstore##width##_proof(u64 payload, struct bpf_insn *insns) \
+{ \
+ if (!insns || payload > S16_MAX) return -EINVAL; \
+ insns[0] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2); \
+ insns[1] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr); \
+ insns[2] = BPF_STX_MEM(size, BPF_REG_0, BPF_REG_6, payload); \
+ insns[3] = BPF_MOV32_IMM(BPF_REG_0, 0); \
+ return 4; \
+} \
+static int percpu_regstore##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
+ const struct bpf_prog *prog, const u8 *ip) \
+{ return regstore_emit(i, o, emit, p, width); } \
+static const struct bpf_kop percpu_regstore##width##_desc = { \
+ .max_insn_cnt = 4, .max_emit_bytes = 18, \
+ .requirements = regstore_requirements, .instantiate_insn = percpu_regstore##width##_proof, \
+ .emit_x86 = percpu_regstore##width##_emit }; \
+static const struct bpf_kop * const percpu_regstore##width##_descs[] = { &percpu_regstore##width##_desc }; \
+static const struct btf_kfunc_id_set percpu_regstore##width##_set = { \
+ .set = &percpu_regstore##width##_ids, .kop_descs = percpu_regstore##width##_descs }; \
+static const struct btf_kfunc_id_set percpu_regstore##width##_component_set = { \
+ .set = &percpu_regstore##width##_ids, .kop_descs = percpu_regstore##width##_descs, \
+ .filter = store_component_filter };
+PERCPU_STORE_ROWS(REGSTORE_DEFINE)
+#undef REGSTORE_DEFINE
+
 static int __init percpu_stores_init(void)
 {
 	int err;
@@ -124,6 +200,13 @@ static int __init percpu_stores_init(void)
  if (err) return err;
 	PERCPU_STORE_ROWS(STORE_REGISTER)
 #undef STORE_REGISTER
+#define REGSTORE_REGISTER(width, size) \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &percpu_regstore##width##_set); \
+ if (err) return err; \
+ err = register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT, &percpu_regstore##width##_component_set); \
+ if (err) return err;
+	PERCPU_STORE_ROWS(REGSTORE_REGISTER)
+#undef REGSTORE_REGISTER
 	return 0;
 }
 late_initcall(percpu_stores_init);
