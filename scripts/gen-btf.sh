@@ -74,7 +74,12 @@ gen_btf_data()
 		--btf_encode_detached=${btf1}		\
 		"${ELF_FILE}"
 
-	${RESOLVE_BTFIDS} ${RESOLVE_BTFIDS_FLAGS}	\
+	percpu_layout=""
+	if [ "${VMLINUX_PERCPU_LAYOUT:-0}" = 1 ] && [ -z "${BTF_BASE}" ] && is_enabled CONFIG_EBPFOS_BUILD &&
+	   is_enabled CONFIG_X86_64; then
+		percpu_layout="--percpu-layout __percpu_area"
+	fi
+	${RESOLVE_BTFIDS} ${RESOLVE_BTFIDS_FLAGS} ${percpu_layout}	\
 		${BTF_BASE:+--btf_base ${BTF_BASE}}	\
 		--btf ${btf1} "${ELF_FILE}"
 }

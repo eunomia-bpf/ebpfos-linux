@@ -171,6 +171,8 @@ struct btf2btf_context {
 	u32 max_kfuncs;
 };
 
+#include "percpu_layout.h"
+
 static int verbose;
 static int warnings;
 
@@ -612,6 +614,49 @@ out_err:
 	obj->base_btf = NULL;
 	obj->btf = NULL;
 	return err;
+}
+
+/* A DATASEC type view must refer to the actual section start, not a scalar
+ * relocation delta or an alias into an unrelated allocation.
+ */
+static int percpu_alias_check(struct object *obj, const char *alias)
+{
+	GElf_Shdr symbols, area;
+	Elf_Scn *scn;
+	size_t strings;
+	const struct btf_type *section;
+	int id, i, n;
+
+	id = btf__find_by_name_kind(obj->btf, ".data..percpu", BTF_KIND_DATASEC);
+	if (id < 1 || obj->efile.symbols_shndx < 0 ||
+	    elf_getshdrstrndx(obj->efile.elf, &strings))
+		return -EINVAL;
+	section = btf__type_by_id(obj->btf, id);
+	scn = elf_getscn(obj->efile.elf, obj->efile.symbols_shndx);
+	if (!scn || !gelf_getshdr(scn, &symbols) || !symbols.sh_entsize)
+		return -EINVAL;
+	n = symbols.sh_size / symbols.sh_entsize;
+	for (i = 0; i < n; i++) {
+		GElf_Sym symbol;
+		const char *name;
+
+		if (!gelf_getsym(obj->efile.symbols, i, &symbol))
+			return -EINVAL;
+		name = elf_strptr(obj->efile.elf, obj->efile.strtabidx, symbol.st_name);
+		if (!name || strcmp(name, alias))
+			continue;
+		scn = elf_getscn(obj->efile.elf, symbol.st_shndx);
+		if (!scn || !gelf_getshdr(scn, &area))
+			return -EINVAL;
+		name = elf_strptr(obj->efile.elf, strings, area.sh_name);
+		if (name && !strcmp(name, ".data..percpu") &&
+		    symbol.st_value == area.sh_addr && !symbol.st_size &&
+		    section->size == area.sh_size)
+			return 0;
+		break;
+	}
+	pr_err("FAILED: %s is not a zero-storage alias of the per-CPU section\n", alias);
+	return -EINVAL;
 }
 
 static int symbols_resolve(struct object *obj)
@@ -1481,6 +1526,7 @@ int main(int argc, const char **argv)
 		.sets     = RB_ROOT,
 	};
 	const char *btfids_path = NULL;
+	const char *percpu_alias = NULL;
 	bool fatal_warnings = false;
 	bool resolve_btfids = true;
 	char out_path[PATH_MAX];
@@ -1498,6 +1544,8 @@ int main(int argc, const char **argv)
 			    "distill --btf_base and emit .BTF.base section data"),
 		OPT_STRING(0, "patch_btfids", &btfids_path, "file",
 			   "path to .BTF_ids section data blob to patch into ELF file"),
+		OPT_STRING(0, "percpu-layout", &percpu_alias, "symbol",
+			   "describe the existing per-CPU section through this base alias"),
 		OPT_END()
 	};
 	int err = -1;
@@ -1534,6 +1582,18 @@ int main(int argc, const char **argv)
 
 	if (btf2btf(&obj))
 		goto out;
+	if (percpu_alias) {
+		struct btf *view;
+
+		if (percpu_alias_check(&obj, percpu_alias))
+			goto out;
+		view = btf_percpu_layout(obj.btf, percpu_alias);
+
+		if (!view)
+			goto out;
+		btf__free(obj.btf);
+		obj.btf = view;
+	}
 
 	if (finalize_btf(&obj))
 		goto out;

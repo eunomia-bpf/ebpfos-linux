@@ -334,6 +334,10 @@ SECTIONS
 	}
 
 	PERCPU_SECTION(L1_CACHE_BYTES)
+#ifdef CONFIG_EBPFOS_BUILD
+	/* Zero-storage alias: the BTF view retains all original object offsets. */
+	__percpu_area = __per_cpu_start;
+#endif
 	ASSERT(__per_cpu_hot_end - __per_cpu_hot_start <= 64, "percpu cache hot data too large")
 
 	RUNTIME_CONST_VARIABLES
