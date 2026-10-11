@@ -8873,12 +8873,24 @@ static const struct bpf_reg_types *compatible_reg_types[__BPF_ARG_TYPE_MAX] = {
 static int check_reg_type(struct bpf_verifier_env *env, u32 regno,
 			  enum bpf_arg_type arg_type,
 			  const u32 *arg_btf_id,
-			  struct bpf_call_arg_meta *meta)
+			  struct bpf_call_arg_meta *meta, bool global)
 {
 	struct bpf_reg_state *reg = reg_state(env, regno);
 	enum bpf_reg_type expected, type = reg->type;
+	enum bpf_reg_type btf_type = reg->type;
 	const struct bpf_reg_types *compatible;
 	int i, j, err;
+
+	/* Global contracts have already matched the actual and formal address
+	 * spaces. Compare their underlying pointer classes, retaining every
+	 * other restriction and the original register for type/offset checks.
+	 * In particular, qualified globals need the same pointee check as an
+	 * ordinary global, not a helper-specific per-CPU exception.
+	 */
+	if (global) {
+		type &= ~(MEM_USER | MEM_PERCPU);
+		btf_type &= ~(MEM_USER | MEM_PERCPU);
+	}
 
 	compatible = compatible_reg_types[base_type(arg_type)];
 	if (!compatible) {
@@ -8941,7 +8953,7 @@ found:
 		return 0;
 	}
 
-	switch ((int)reg->type) {
+	switch ((int)btf_type) {
 	case PTR_TO_BTF_ID:
 	case PTR_TO_BTF_ID | PTR_TRUSTED:
 	case PTR_TO_BTF_ID | PTR_TRUSTED | PTR_MAYBE_NULL:
@@ -9354,7 +9366,7 @@ static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
 	    base_type(arg_type) == ARG_PTR_TO_SPIN_LOCK)
 		arg_btf_id = fn->arg_btf_id[arg];
 
-	err = check_reg_type(env, regno, arg_type, arg_btf_id, meta);
+	err = check_reg_type(env, regno, arg_type, arg_btf_id, meta, false);
 	if (err)
 		return err;
 
@@ -10237,7 +10249,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				continue;
 
 			memset(&meta, 0, sizeof(meta)); /* leave func_id as zero */
-			err = check_reg_type(env, regno, arg->arg_type, &arg->btf_id, &meta);
+			err = check_reg_type(env, regno, arg->arg_type,
+					     &arg->btf_id, &meta, true);
 			err = err ?: check_func_arg_reg_off(env, reg, regno, arg->arg_type);
 			if (err)
 				return err;
