@@ -152,6 +152,8 @@ struct object {
 	int nr_typedefs;
 };
 
+#include "native_set.h"
+
 #define KF_IMPLICIT_ARGS (1 << 16)
 #define KF_IMPL_SUFFIX "_impl"
 
@@ -1529,6 +1531,7 @@ int main(int argc, const char **argv)
 	const char *percpu_alias = NULL;
 	const char *field_obligations = NULL;
 	bool fatal_warnings = false;
+	bool native_set = false;
 	bool resolve_btfids = true;
 	char out_path[PATH_MAX];
 
@@ -1549,6 +1552,8 @@ int main(int argc, const char **argv)
 			   "describe the existing per-CPU section through this base alias"),
 		OPT_STRING(0, "field-obligations", &field_obligations, "file",
 			   "type/field store obligations with their justifications"),
+		OPT_BOOLEAN(0, "native-set", &native_set,
+			    "preserve original prototypes and contracts for the declared native set"),
 		OPT_END()
 	};
 	int err = -1;
@@ -1581,6 +1586,8 @@ int main(int argc, const char **argv)
 			goto out;
 
 	if (load_btf(&obj))
+		goto out;
+	if (native_set && native_set_btf(&obj))
 		goto out;
 
 	if (btf2btf(&obj))

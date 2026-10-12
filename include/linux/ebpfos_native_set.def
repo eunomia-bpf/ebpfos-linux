@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Original native bodies; this list also drives BTF contracts and compilation. */
+NATIVE_FUNCTION(_copy_from_user, _copy_from_user, KF_SLEEPABLE)
+NATIVE_ARG(_copy_from_user, 0, "arg:sz:2")
+NATIVE_ARG(_copy_from_user, 0, "arg:nullable")
+NATIVE_ARG(_copy_from_user, 0, "arg:nonnull-size")
+NATIVE_ARG(_copy_from_user, 1, "arg:address")
+NATIVE_POINTEE_TAG(_copy_from_user, 1, "user")
+
+NATIVE_FUNCTION(copy_from_kernel_nofault, copy_from_kernel_nofault, 0)
+NATIVE_ARG(copy_from_kernel_nofault, 0, "arg:sz:2")
+NATIVE_ARG(copy_from_kernel_nofault, 0, "arg:nullable")
+NATIVE_ARG(copy_from_kernel_nofault, 0, "arg:nonnull-size")
+NATIVE_ARG(copy_from_kernel_nofault, 1, "arg:address")
+
+/* This verifier checks typed struct arguments as trusted/referenced implicitly. */
+NATIVE_FUNCTION(__mod_zone_page_state, __mod_zone_page_state, 0)
+NATIVE_ENUM_MAX(__mod_zone_page_state, 1, zone_stat_item, NR_VM_ZONE_STAT_ITEMS)
+
+NATIVE_FUNCTION(_prb_read_valid, _prb_read_valid, 0)
+NATIVE_ARG(_prb_read_valid, 2, "arg:nullable")
+NATIVE_ARG(_prb_read_valid, 3, "arg:nullable")
+
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_read, __SCT__apic_call_read, apic, read, 0)
+/* A u32 MMIO access stays in the APIC page; native registers have a 16-byte stride. */
+NATIVE_ARG(__SCT__apic_call_read, 0, "arg:max:4092")
+NATIVE_ARG(__SCT__apic_call_read, 0, "arg:align:16")
+NATIVE_ALIAS(__SCT__apic_call_read, __SCT__apic_call_read)
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_write, __SCT__apic_call_write, apic, write, 0)
+NATIVE_ARG(__SCT__apic_call_write, 0, "arg:max:4092")
+NATIVE_ARG(__SCT__apic_call_write, 0, "arg:align:16")
+NATIVE_ALIAS(__SCT__apic_call_write, __SCT__apic_call_write)

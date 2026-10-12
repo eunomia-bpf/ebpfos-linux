@@ -8068,15 +8068,16 @@ static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg
 }
 
 static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
-				    u32 regno, bool read_only)
+				    u32 regno, u32 pointer_regno, bool read_only)
 {
-	struct bpf_reg_state *mem_reg = &cur_regs(env)[regno - 1];
+	struct bpf_reg_state *mem_reg = &cur_regs(env)[pointer_regno];
 	bool may_be_null = type_may_be_null(mem_reg->type);
 	struct bpf_reg_state saved_reg;
 	struct bpf_call_arg_meta meta;
 	int err;
 
-	WARN_ON_ONCE(regno < BPF_REG_2 || regno > BPF_REG_5);
+	WARN_ON_ONCE(regno < BPF_REG_1 || regno > BPF_REG_5 ||
+		     pointer_regno < BPF_REG_1 || pointer_regno > BPF_REG_5);
 
 	memset(&meta, 0, sizeof(meta));
 
@@ -8085,9 +8086,11 @@ static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg
 		mark_ptr_not_null_reg(mem_reg);
 	}
 
-	err = check_mem_size_reg(env, reg, regno, BPF_READ, true, &meta);
+	err = check_buffer_size_reg(env, reg, regno, pointer_regno,
+				    BPF_READ, true, &meta, false);
 	if (!err && !read_only)
-		err = check_mem_size_reg(env, reg, regno, BPF_WRITE, true, &meta);
+		err = check_buffer_size_reg(env, reg, regno, pointer_regno,
+					    BPF_WRITE, true, &meta, false);
 
 	if (may_be_null)
 		*mem_reg = saved_reg;
@@ -12439,7 +12442,7 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 		       struct bpf_kfunc_call_arg_meta *meta,
 		       const struct btf_type *t, const struct btf_type *ref_t,
 		       const char *ref_tname, const struct btf_param *args,
-		       int argno, int nargs)
+		       int argno, int nargs, bool nullable)
 {
 	u32 regno = argno + 1;
 	struct bpf_reg_state *regs = cur_regs(env);
@@ -12464,7 +12467,7 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	if (btf_is_prog_ctx_type(&env->log, meta->btf, t, resolve_prog_type(env->prog), argno))
 		return KF_ARG_PTR_TO_CTX;
 
-	if (is_kfunc_arg_nullable(meta->btf, &args[argno]) && bpf_register_is_null(reg) &&
+	if (nullable && bpf_register_is_null(reg) &&
 	    !arg_mem_size)
 		return KF_ARG_PTR_TO_NULL;
 
@@ -13123,6 +13126,135 @@ static int kfunc_mem_arg_tag(const struct bpf_kfunc_call_arg_meta *meta,
 	return *value ? -EINVAL : 1;
 }
 
+/* The declaration identifies the count, so original C parameter names and
+ * two buffers sharing one count do not need an artificial adjacent ABI.
+ */
+static int kfunc_arg_size_index(const struct bpf_kfunc_call_arg_meta *meta,
+				u32 arg, u32 nargs)
+{
+	const char *value = btf_find_decl_tag_value(meta->btf,
+			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:sz:");
+	u32 index;
+
+	if (IS_ERR(value))
+		return PTR_ERR(value) == -ENOENT ? -1 : PTR_ERR(value);
+	if (kstrtouint(value, 10, &index) || index >= nargs || index == arg)
+		return -EINVAL;
+	return index;
+}
+
+static int check_kfunc_scalar_max(struct bpf_verifier_env *env,
+				 const struct bpf_kfunc_call_arg_meta *meta,
+				 const struct btf_type *t, u32 arg, u32 regno)
+{
+	const char *value = btf_find_decl_tag_value(meta->btf,
+			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:max:");
+	struct bpf_reg_state *reg = &cur_regs(env)[regno];
+	u64 max;
+
+	if (IS_ERR(value))
+		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
+	if (!btf_type_is_scalar(t) || reg->type != SCALAR_VALUE ||
+	    kstrtou64(value, 10, &max))
+		return -EINVAL;
+	/* C consumes only the declared width; use its actual scalar range. */
+	if ((t->size <= sizeof(u32) ? reg->u32_max_value : reg->umax_value) > max) {
+		verbose(env, "arg#%d scalar exceeds declared maximum %llu\n", arg, max);
+		return -EACCES;
+	}
+	return mark_chain_precision(env, regno);
+}
+
+static int check_kfunc_scalar_alignment(struct bpf_verifier_env *env,
+				       const struct bpf_kfunc_call_arg_meta *meta,
+				       const struct btf_type *t, u32 arg, u32 regno)
+{
+	const char *value = btf_find_decl_tag_value(meta->btf,
+			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:align:");
+	struct bpf_reg_state *reg = &cur_regs(env)[regno];
+	u64 alignment, mask;
+
+	if (IS_ERR(value))
+		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
+	if (!btf_type_is_scalar(t) || reg->type != SCALAR_VALUE ||
+	    !t->size || t->size > sizeof(u64) ||
+	    kstrtou64(value, 10, &alignment) || !alignment ||
+	    (alignment & (alignment - 1)))
+		return -EINVAL;
+	/* Alignment cannot require bits above the scalar's native width. */
+	if (t->size < sizeof(u64) && alignment > (1ULL << (t->size * 8)))
+		return -EINVAL;
+	mask = alignment - 1;
+	if (reg->var_off.mask & mask) {
+		verbose(env, "arg#%d scalar alignment %llu is not known\n", arg, alignment);
+		return -EACCES;
+	}
+	if (reg->var_off.value & mask) {
+		verbose(env, "arg#%d scalar is not aligned to %llu\n", arg, alignment);
+		return -EACCES;
+	}
+	return mark_chain_precision(env, regno);
+}
+
+static enum bpf_type_flag kfunc_pointer_flags(const struct btf *btf,
+					    const struct btf_type *ptr)
+{
+	const struct btf_type *t = btf_type_by_id(btf, ptr->type);
+	enum bpf_type_flag flags = 0;
+	const char *tag;
+
+	for (; t; t = btf_type_by_id(btf, t->type)) {
+		switch (BTF_INFO_KIND(t->info)) {
+		case BTF_KIND_TYPEDEF:
+		case BTF_KIND_VOLATILE:
+		case BTF_KIND_CONST:
+		case BTF_KIND_RESTRICT:
+		case BTF_KIND_TYPE_TAG:
+			break;
+		default:
+			return flags;
+		}
+		if (!btf_type_is_type_tag(t) || btf_type_kflag(t))
+			continue;
+		tag = btf_name_by_offset(btf, t->name_off);
+		if (!strcmp(tag, "user"))
+			flags |= MEM_USER;
+		if (!strcmp(tag, "percpu"))
+			flags |= MEM_PERCPU;
+		if (!strcmp(tag, "rcu"))
+			flags |= MEM_RCU;
+	}
+	return flags;
+}
+
+/* Only a fault-protected native consumer may declare an address input.
+ * This checks representation and address space; it never makes the value
+ * dereferenceable or changes the register's trust, lifetime or null facts.
+ */
+static int check_kfunc_address_arg(struct bpf_verifier_env *env,
+				  const struct bpf_reg_state *reg, u32 arg,
+				  enum bpf_type_flag flags)
+{
+	if (flags & ~MEM_USER)
+		return -EINVAL;
+	if (reg->type == SCALAR_VALUE)
+		return 0;
+	if ((reg->type & (MEM_USER | MEM_PERCPU)) != flags) {
+		verbose(env, "arg#%d address has incompatible address space\n", arg);
+		return -EACCES;
+	}
+	switch (base_type(reg->type)) {
+	case PTR_TO_STACK:
+	case PTR_TO_MAP_VALUE:
+	case PTR_TO_MEM:
+	case PTR_TO_BTF_ID:
+		return 0;
+	default:
+		verbose(env, "arg#%d expects an address value\n", arg);
+		return -EINVAL;
+	}
+}
+
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_arg_meta *meta,
 			    int insn_idx)
 {
@@ -13150,7 +13282,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		enum bpf_arg_type arg_type = ARG_DONTCARE;
 		u32 regno = i + 1, ref_id, type_size;
 		bool is_ret_buf_sz = false;
-		int kf_arg_type;
+		int kf_arg_type, size_arg, nullable, address;
 
 		if (is_kfunc_arg_prog_aux(btf, &args[i])) {
 			/* Reject repeated use bpf_prog_aux */
@@ -13167,6 +13299,20 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			continue;
 
 		t = btf_type_skip_modifiers(btf, args[i].type, NULL);
+		size_arg = kfunc_arg_size_index(meta, i, nargs);
+		nullable = kfunc_mem_arg_tag(meta, i, "arg:nullable");
+		address = kfunc_mem_arg_tag(meta, i, "arg:address");
+		if (size_arg < -1 || nullable < 0 || address < 0)
+			return size_arg < -1 ? size_arg : nullable < 0 ? nullable : address;
+		nullable |= is_kfunc_arg_nullable(btf, &args[i]);
+		if ((size_arg >= 0 || nullable || address) && !btf_type_is_ptr(t))
+			return -EINVAL;
+		ret = check_kfunc_scalar_max(env, meta, t, i, regno);
+		if (ret)
+			return ret;
+		ret = check_kfunc_scalar_alignment(env, meta, t, i, regno);
+		if (ret)
+			return ret;
 
 		if (btf_type_is_scalar(t)) {
 			if (reg->type != SCALAR_VALUE) {
@@ -13218,9 +13364,19 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			verbose(env, "Unrecognized arg#%d type %s\n", i, btf_type_str(t));
 			return -EINVAL;
 		}
+		if (address) {
+			if (size_arg >= 0 || nullable ||
+			    kfunc_mem_arg_tag(meta, i, "arg:readonly") ||
+			    kfunc_mem_arg_tag(meta, i, "arg:nonnull-size"))
+				return -EINVAL;
+			ret = check_kfunc_address_arg(env, reg, i, kfunc_pointer_flags(btf, t));
+			if (ret)
+				return ret;
+			continue;
+		}
 
 		if ((bpf_register_is_null(reg) || type_may_be_null(reg->type)) &&
-		    !is_kfunc_arg_nullable(meta->btf, &args[i])) {
+		    !nullable) {
 			verbose(env, "Possibly NULL pointer passed to trusted arg%d\n", i);
 			return -EACCES;
 		}
@@ -13239,8 +13395,43 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
+		if (size_arg >= 0) {
+			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
+							args[size_arg].type, NULL);
+			struct bpf_reg_state *count = &regs[size_arg + 1];
+			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
+			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
 
-		kf_arg_type = get_kfunc_ptr_arg_type(env, meta, t, ref_t, ref_tname, args, i, nargs);
+			if (read_only < 0 || nonnull_size < 0)
+				return read_only < 0 ? read_only : nonnull_size;
+			if (kfunc_pointer_flags(btf, t) || !btf_type_is_int(size_t) ||
+			    size_t->size != sizeof(u64) ||
+			    (btf_int_encoding(size_t) & BTF_INT_SIGNED) ||
+			    count->type != SCALAR_VALUE ||
+			    (!btf_type_is_void(ref_t) && !btf_type_is_scalar(ref_t) &&
+			     !__btf_type_is_scalar_struct(env, btf, ref_t, 0)))
+				return -EINVAL;
+			if (reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+			    (!read_only && base_type(reg->type) == PTR_TO_BTF_ID)) {
+				verbose(env, "arg#%d byte buffer cannot erase provenance or typed write authority\n", i);
+				return -EACCES;
+			}
+			if (count->umax_value &&
+			    (bpf_register_is_null(reg) ||
+			     (type_may_be_null(reg->type) && !reg->mem_size_id))) {
+				verbose(env, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
+				return -EACCES;
+			}
+			/* NULL does not skip scalar bounds/precision validation. */
+			ret = check_kfunc_mem_size_reg(env, count, size_arg + 1,
+						    regno, read_only);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		kf_arg_type = get_kfunc_ptr_arg_type(env, meta, t, ref_t, ref_tname, args, i, nargs,
+					     nullable);
 		if (kf_arg_type < 0)
 			return kf_arg_type;
 
@@ -13556,7 +13747,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				return -EACCES;
 			}
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
-				ret = check_kfunc_mem_size_reg(env, size_reg, regno + 1, read_only);
+				ret = check_kfunc_mem_size_reg(env, size_reg, regno + 1,
+							    regno, read_only);
 
 				if (ret < 0) {
 					verbose(env, "arg#%d arg#%d memory, len pair leads to invalid memory access\n", i, i + 1);
