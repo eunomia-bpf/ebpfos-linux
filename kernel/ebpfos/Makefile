@@ -12,3 +12,4 @@ obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_xadd.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += locked_bits.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += locked_xchg.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += user_access_window.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += irq_restore_if.o
