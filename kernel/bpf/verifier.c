@@ -10338,10 +10338,52 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return -EINVAL;
 			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
+			if (arg->nonnull) {
+				struct bpf_call_arg_meta meta = {};
+
+				/* A nonzero scalar is not a pointer. Probe reads retain
+				 * their fault protection, but cannot establish a pointer
+				 * precondition for an independently verified global.
+				 */
+				if (bpf_register_is_null(reg) || type_may_be_null(reg->type) ||
+				    reg->type == SCALAR_VALUE) {
+					bpf_log(log, "arg#%d untrusted nonnull requires a non-NULL pointer\n", i);
+					return -EINVAL;
+				}
+				/* Historical probe-only producers (untrusted formals and
+				 * rdonly_cast) may represent NULL without MAYBE_NULL.
+				 * Their pointer class alone cannot discharge this new
+				 * precondition. Do not infer trust or a new null fact.
+				 */
+				if (reg->type & PTR_UNTRUSTED) {
+					bpf_log(log, "arg#%d probe-only provenance cannot establish nonnull\n", i);
+					return -EACCES;
+				}
+				if (base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) {
+					/* Retain read-only, untrusted semantics. A matching
+					 * pointee is not a promise of live or writable memory.
+					 * Interior pointers need a separately modeled contract.
+					 */
+					if (base_type(reg->type) != PTR_TO_BTF_ID || !reg->btf ||
+					    !tnum_is_const(reg->var_off) ||
+					    reg->var_off.value ||
+					    !btf_struct_ids_match(log, reg->btf, reg->btf_id, 0,
+							  btf_vmlinux, arg->btf_id, true)) {
+						bpf_log(log, "arg#%d untrusted nonnull requires the matching BTF pointee at offset zero\n", i);
+						return -EINVAL;
+					}
+				} else {
+					ret = check_reg_type(env, regno, ARG_PTR_TO_MEM | MEM_RDONLY,
+							     NULL, &meta, true);
+					ret = ret ?: check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
+					if (ret)
+						return ret;
+				}
+			}
 			/*
-			 * Anything is allowed for untrusted arguments, as these are
-			 * read-only and probe read instructions would protect against
-			 * invalid memory access.
+			 * Without the explicit nonnull precondition, anything is
+			 * allowed: these arguments are read-only and probe reads
+			 * protect against invalid memory access.
 			 */
 		} else if (arg->arg_type == ARG_PTR_TO_CTX) {
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_PTR_TO_CTX);

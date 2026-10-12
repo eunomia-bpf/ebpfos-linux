@@ -8198,10 +8198,16 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			struct btf *vmlinux_btf;
 			int kern_type_id;
 
-			if (tags & ~ARG_TAG_UNTRUSTED) {
-				bpf_log(log, "arg#%d untrusted cannot be combined with any other tags\n", i);
+			if (tags & ~(ARG_TAG_UNTRUSTED | ARG_TAG_NONNULL)) {
+				bpf_log(log, "arg#%d untrusted can only be combined with nonnull\n", i);
 				return -EINVAL;
 			}
+			/* freplace's BTF type match does not check this precondition. */
+			if ((tags & ARG_TAG_NONNULL) && prog->type == BPF_PROG_TYPE_EXT) {
+				bpf_log(log, "arg#%d untrusted nonnull is unsupported for freplace\n", i);
+				return -EOPNOTSUPP;
+			}
+			sub->args[i].nonnull = !!(tags & ARG_TAG_NONNULL);
 
 			ref_t = btf_type_skip_modifiers(btf, t->type, NULL);
 			if (btf_type_is_void(ref_t) || btf_type_is_primitive(ref_t)) {
@@ -8304,7 +8310,8 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 	if (error)
 		return error;
 	for (i = 0; i < info.arg_cnt; i++)
-		if (info.args[i].arg_type & PTR_MAYBE_NULL)
+		if ((info.args[i].arg_type & PTR_MAYBE_NULL) ||
+		    ((info.args[i].arg_type & PTR_UNTRUSTED) && !info.args[i].nonnull))
 			*mask |= BIT_ULL(i);
 	return 0;
 }

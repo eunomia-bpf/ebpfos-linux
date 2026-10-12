@@ -714,6 +714,8 @@ struct bpf_subprog_arg_info {
 	/* One-based physical register containing this buffer's byte count. */
 	u8 mem_size_reg;
 	bool user_address;
+	/* Explicit non-NULL obligation on an otherwise probe-safe argument. */
+	bool nonnull;
 	union {
 		u32 mem_size;
 		u32 btf_id;
