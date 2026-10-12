@@ -7907,7 +7907,7 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 				zero_size_allowed, access_type, meta);
 	case PTR_TO_BTF_ID:
 		return check_ptr_to_btf_access(env, regs, regno, 0,
-					       access_size, BPF_READ, -1);
+					       access_size, access_type, -1);
 	case PTR_TO_CTX:
 		/* Only permit reading or writing syscall context using helper calls. */
 		if (is_var_ctx_off_allowed(env->prog)) {
@@ -10355,6 +10355,14 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return -EINVAL;
 			}
 		} else if (base_type(arg->arg_type) == ARG_PTR_TO_MEM) {
+			/* Independent byte-memory verification loses the destination's
+			 * BTF field identity and the callee's field authority. Fixed
+			 * extents must not erase those checks either.
+			 */
+			if (!(arg->arg_type & MEM_RDONLY) && base_type(reg->type) == PTR_TO_BTF_ID) {
+				bpf_log(log, "arg#%d fixed memory cannot erase typed write authority\n", i);
+				return -EINVAL;
+			}
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
 			if (ret < 0)
 				return ret;
