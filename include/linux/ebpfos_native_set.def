@@ -38,6 +38,13 @@ NATIVE_FUNCTION(__const_udelay, __const_udelay, 0)
 NATIVE_FUNCTION(ktime_get_with_offset, ktime_get_with_offset, 0)
 NATIVE_ENUM_MAX(ktime_get_with_offset, 0, tk_offsets, TK_OFFS_MAX)
 
+/* Original configured CR4 read and pinned write/repair/retry algorithm.
+ * Writes retain stock destructive-call permission checks; callers still owe
+ * their native CPU, IRQ, preemption and TLB-shadow execution protocol.
+ */
+NATIVE_INLINE_FUNCTION(native_read_cr4, native_read_cr4, 0)
+NATIVE_FUNCTION(native_write_cr4, native_write_cr4, KF_DESTRUCTIVE)
+
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
 NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")

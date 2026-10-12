@@ -7,6 +7,7 @@ struct native_set_entry {
 };
 
 #define NATIVE_FUNCTION(source, native, flags) { #native, NULL, NULL },
+#define NATIVE_INLINE_FUNCTION(source, native, flags) { #native, NULL, NULL },
 #define NATIVE_STATIC_CALL(source, native, record, field, flags) { #native, #record, #field },
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
@@ -16,6 +17,7 @@ static const struct native_set_entry native_set_entries[] = {
 #include "../../../include/linux/ebpfos_native_set.def"
 };
 #undef NATIVE_FUNCTION
+#undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
@@ -38,6 +40,7 @@ struct native_set_contract {
 };
 
 #define NATIVE_FUNCTION(source, native, flags)
+#define NATIVE_INLINE_FUNCTION(source, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag) { #native, index, NATIVE_CONTRACT_ARG, tag, NULL, NULL },
@@ -49,6 +52,7 @@ static const struct native_set_contract native_set_contracts[] = {
 #include "../../../include/linux/ebpfos_native_set.def"
 };
 #undef NATIVE_FUNCTION
+#undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG

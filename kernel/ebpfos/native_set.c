@@ -6,6 +6,7 @@
 
 BTF_KFUNCS_START(ebpfos_native_ids)
 #define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
+#define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
@@ -13,6 +14,7 @@ BTF_KFUNCS_START(ebpfos_native_ids)
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_FUNCTION
+#undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
