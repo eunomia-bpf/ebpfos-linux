@@ -1075,6 +1075,10 @@ struct bpf_kop_exception {
 
 struct bpf_kop {
 	struct module *owner; /* NULL for built-in/vmlinux descriptors */
+	/* Decorate an adjacent verifier-visible MAY_GOTO / direct BPF CALL.
+	 * Native emission binds the CALL's exception to that branch's target.
+	 */
+	bool call_exception_annotation;
 	u16 max_insn_cnt;
 	u16 max_emit_bytes;
 	u16 num_exentries;
@@ -3283,6 +3287,9 @@ int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
 			    const struct bpf_insn *insn,
 			    const struct bpf_kop **kop,
 			    u64 *payload);
+int bpf_jit_get_call_exception(const struct bpf_prog *prog,
+			       const struct bpf_insn *call,
+			       u32 *recovery, u32 *data);
 int bpf_get_kfunc_addr(const struct bpf_prog *prog, u32 func_id,
 		       u16 btf_fd_idx, u8 **func_addr);
 
@@ -3601,6 +3608,14 @@ bpf_get_kfunc_addr(const struct bpf_prog *prog, u32 func_id,
 		   u16 btf_fd_idx, u8 **func_addr)
 {
 	return -ENOTSUPP;
+}
+
+static inline int
+bpf_jit_get_call_exception(const struct bpf_prog *prog,
+			   const struct bpf_insn *call,
+			   u32 *recovery, u32 *data)
+{
+	return -ENOENT;
 }
 
 static inline bool unprivileged_ebpf_enabled(void)

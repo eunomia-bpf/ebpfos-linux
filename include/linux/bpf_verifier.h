@@ -642,6 +642,8 @@ struct bpf_insn_aux_data {
 	 */
 	u32 calls_callback:1;
 	u32 indirect_target:1; /* if it is an indirect jump target */
+	/* Validated exception branch; copied with its instruction by patch/remove. */
+	u32 kop_call_fault_branch:1;
 	/*
 	 * CFG strongly connected component this instruction belongs to,
 	 * zero if it is a singleton SCC.

@@ -191,6 +191,45 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 	return 0;
 }
 
+/* A branch offset remains ordinary bytecode so all existing patch/remove
+ * helpers relocate its recovery target. The direct CALL is never hidden in a
+ * descriptor proof and retains stock target discovery and argument checking.
+ */
+int bpf_jit_get_call_exception(const struct bpf_prog *prog,
+			       const struct bpf_insn *call,
+			       u32 *recovery, u32 *data)
+{
+	ptrdiff_t index = call - prog->insnsi;
+	const struct bpf_kop *kop;
+	const struct bpf_insn *branch;
+	u64 payload;
+	s64 target;
+	int err;
+
+	if (index < 3 || index >= prog->len || !bpf_pseudo_call(call) ||
+	    !bpf_pseudo_kop_call(call - 2))
+		return -ENOENT;
+	err = bpf_jit_get_kop_payload(prog, call - 2, &kop, &payload);
+	if (err)
+		return err;
+	if (!kop->call_exception_annotation)
+		return -ENOENT;
+	branch = call - 1;
+	if (branch->code != (BPF_JMP | BPF_JCOND) ||
+	    branch->dst_reg || branch->src_reg != BPF_MAY_GOTO ||
+	    branch->imm || branch->off <= 0 ||
+	    kop->num_exentries != 1 || (payload & 0xff) != 3)
+		return -EINVAL;
+	target = index + branch->off;
+	if (target <= index || target >= prog->len)
+		return -EINVAL;
+	if (recovery)
+		*recovery = target;
+	if (data)
+		*data = payload & 0xff;
+	return 0;
+}
+
 int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
 				  const struct bpf_insn *insns, u32 count)
 {
@@ -1673,6 +1712,19 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 	}
 
 	for (i = 0; i < insn_cnt;) {
+		/* This branch was validated before proofs were expanded. Its
+		 * exception continuation is consumed by the native CALL emitter;
+		 * it must not acquire timed-loop counter code or stack slots.
+		 */
+		if (env->insn_aux_data[i + delta].kop_call_fault_branch) {
+			if (i + 1 >= insn_cnt)
+				return -EINVAL;
+			ret = bpf_jit_get_call_exception(env->prog, insn + 1,
+						  NULL, NULL);
+			if (ret)
+				return ret;
+			goto next_insn;
+		}
 		if (bpf_kop_is_sidecar_insn(insn)) {
 			const struct bpf_insn *call = insn + 1;
 			const struct bpf_kop *kop;

@@ -3268,6 +3268,70 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 	return 0;
 }
 
+static int validate_call_exception_annotation(struct bpf_verifier_env *env,
+					     u32 index)
+{
+	struct bpf_insn *insns = env->prog->insnsi;
+	struct bpf_insn *branch;
+	u32 recovery, j, end = 0;
+	int err;
+
+	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux)) {
+		verbose(env, "direct-CALL exception annotations require native JIT emission\n");
+		return -EOPNOTSUPP;
+	}
+	if (index + 2 >= env->prog->len)
+		return -EINVAL;
+	branch = &insns[index + 1];
+	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
+	 * analysis. No register refinement or call-state analysis is added.
+	 */
+	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg || branch->imm)
+		return -EINVAL;
+	err = bpf_jit_get_call_exception(env->prog, &insns[index + 2],
+					 &recovery, NULL);
+	if (err)
+		return err;
+	for (j = 0; j < env->subprog_cnt; j++) {
+		u32 start = env->subprog_info[j].start;
+		u32 next = env->subprog_info[j + 1].start;
+
+		if (start >= index && start <= index + 2)
+			return -EINVAL;
+		if (start <= index - 1 && index + 2 < next)
+			end = next;
+	}
+	if (!end || recovery >= end)
+		return -EINVAL;
+	for (j = 0; j < env->prog->len; j++) {
+		const struct bpf_insn *insn = &insns[j];
+		u8 class = BPF_CLASS(insn->code);
+		u8 op = BPF_OP(insn->code);
+		s64 target;
+
+		if (class != BPF_JMP && class != BPF_JMP32)
+			continue;
+		if (op == BPF_EXIT)
+			continue;
+		if (op == BPF_CALL) {
+			if (!bpf_pseudo_call(insn))
+				continue;
+			target = (s64)j + 1 + insn->imm;
+		} else {
+			target = (s64)j + 1 +
+				(insn->code == (BPF_JMP32 | BPF_JA) ?
+				 insn->imm : insn->off);
+		}
+		if (target >= index && target <= index + 2) {
+			verbose(env, "branch bypasses direct-CALL exception annotation at insn %u\n",
+				index - 1);
+			return -EINVAL;
+		}
+	}
+	env->insn_aux_data[index + 1].kop_call_fault_branch = true;
+	return 0;
+}
+
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
@@ -3350,6 +3414,11 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		desc = find_kfunc_desc(env->prog, call->imm, call->off);
 		if (!desc || !desc->kop)
 			return -ENOENT;
+		if (desc->kop->call_exception_annotation) {
+			err = validate_call_exception_annotation(env, i);
+			if (err)
+				return err;
+		}
 		native_backedge = desc->kop->noreturn_native_backedge;
 		if (native_backedge) {
 			const struct bpf_insn *backedge;
@@ -20989,6 +21058,18 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	ret = bpf_compute_scc(env);
 	if (ret < 0)
 		goto skip_full_check;
+	/* Annotated fault branches emit no stock MAY_GOTO timeout machinery.
+	 * Use the existing CFG result to exclude every cycle containing one;
+	 * a forward fault edge can still return through a backward JA.
+	 */
+	for (i = 0; i < env->prog->len; i++) {
+		if (env->insn_aux_data[i].kop_call_fault_branch &&
+		    env->insn_aux_data[i].scc) {
+			verbose(env, "direct-CALL exception branch at insn %d participates in a CFG cycle\n", i);
+			ret = -EINVAL;
+			goto skip_full_check;
+		}
+	}
 
 	ret = bpf_compute_live_registers(env);
 	if (ret < 0)

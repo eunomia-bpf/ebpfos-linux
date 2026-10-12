@@ -603,6 +603,14 @@ static int emit_kop_desc_call(u8 **pprog,
 		return ret;
 	if (ret != off || ret > kop->max_emit_bytes)
 		return -EFAULT;
+	if (kop->call_exception_annotation) {
+		/* Metadata only. The ordinary adjacent CALL owns its opcode and
+		 * exception entry, whose recovery is an ordinary BPF branch target.
+		 */
+		if (off || kop->num_exentries != 1)
+			return -EINVAL;
+		return 0;
+	}
 	if (kop->num_exentries && !kop->exception_entry)
 		return -EINVAL;
 	if (image && bpf_prog->aux->extable) {
@@ -2559,6 +2567,9 @@ populate_extable:
 
 		/* call */
 		case BPF_JMP | BPF_CALL: {
+			u32 recovery = 0, exception_data = 0;
+			bool fault_call = false;
+
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
 				err = emit_kop_desc_call(&prog, bpf_prog,
@@ -2568,6 +2579,19 @@ populate_extable:
 				if (err)
 					return err;
 				break;
+			}
+			err = bpf_jit_get_call_exception(bpf_prog, insn,
+						 &recovery, &exception_data);
+			if (err != -ENOENT) {
+				if (err)
+					return err;
+				fault_call = true;
+				/* These modes add pre-CALL bookkeeping whose exception
+				 * cleanup or register changes are not yet modeled.
+				 */
+				if (priv_frame_ptr || tail_call_reachable ||
+				    IS_ENABLED(CONFIG_CALL_THUNKS))
+					return -EOPNOTSUPP;
 			}
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
 				LOAD_TAIL_CALL_CNT_PTR(stack_depth);
@@ -2582,10 +2606,39 @@ populate_extable:
 			ip += x86_call_depth_emit_accounting(&prog, func, ip);
 			if (emit_call(&prog, func, ip))
 				return -EINVAL;
+			if (fault_call && image && bpf_prog->aux->extable) {
+				struct exception_table_entry *ex, *rw_ex;
+				s64 insn_delta, fixup_delta;
+
+				if (excnt >= bpf_prog->aux->num_exentries)
+					return -EFAULT;
+				ex = &bpf_prog->aux->extable[excnt++];
+				insn_delta = ip - (u8 *)&ex->insn;
+				fixup_delta = image + addrs[recovery] - (u8 *)&ex->fixup;
+				if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
+					return -ERANGE;
+				rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
+				rw_ex->insn = insn_delta;
+				rw_ex->fixup = fixup_delta;
+				rw_ex->data = exception_data;
+			}
 			if (priv_frame_ptr)
 				pop_r9(&prog);
 			break;
 		}
+
+		case BPF_JMP | BPF_JCOND:
+			/* A validated exception branch describes a possible native
+			 * CALL fault; it emits neither a condition nor a loop counter.
+			 */
+			err = bpf_jit_get_call_exception(bpf_prog, insn + 1,
+						 NULL, NULL);
+			if (err)
+				return err;
+			if (priv_frame_ptr || tail_call_reachable ||
+			    IS_ENABLED(CONFIG_CALL_THUNKS))
+				return -EOPNOTSUPP;
+			break;
 
 		case BPF_JMP | BPF_TAIL_CALL:
 			if (imm32)
