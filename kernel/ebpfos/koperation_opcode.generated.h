@@ -53,6 +53,7 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_LOAD_IDTR = 48,
 	EBPFOS_KOP_OPCODE_STORE_IDTR = 49,
 	EBPFOS_KOP_OPCODE_STORE_GDTR = 50,
+	EBPFOS_KOP_OPCODE_LOAD_GDTR = 51,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -527,6 +528,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
+	{
+		.opcode = "LGDT64m",
+		.native_len = 8,
+		.native = { 0x0f, 0x01, 0x17, 0xb8, 0x00, 0x00, 0x00, 0x00 },
+		.semantic_sha256 = { 0x8e, 0x39, 0xba, 0xa1, 0xa8, 0xc5, 0x58, 0x5e, 0xc2, 0xb3, 0xe9, 0x2e, 0xaf, 0x23, 0xc1, 0x17, 0x09, 0xad, 0xc5, 0x9c, 0xd7, 0xc8, 0x3b, 0x7d, 0x20, 0x31, 0xb9, 0xe8, 0x8e, 0x0a, 0xde, 0x3d },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 11,
+		.proof = { BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 0), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 1), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 2), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 3), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 4), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 5), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 6), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 7), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 8), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 9), BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
 };
 #define EBPFOS_KOP_PROOF_LEN_PAUSE 1
 #define EBPFOS_KOP_PROOF_LEN_PUSHF64 1
@@ -579,6 +589,7 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 #define EBPFOS_KOP_PROOF_LEN_LOAD_IDTR 11
 #define EBPFOS_KOP_PROOF_LEN_STORE_IDTR 1
 #define EBPFOS_KOP_PROOF_LEN_STORE_GDTR 1
+#define EBPFOS_KOP_PROOF_LEN_LOAD_GDTR 11
 #ifdef CONFIG_X86
 #define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
 #define EBPFOS_KOP_HOST_RDSEED boot_cpu_has(X86_FEATURE_RDSEED)
@@ -639,4 +650,5 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(write_cr4, WRITE_CR4, IS_ENABLED(CONFIG_X86_64)); \
 	X(lidt64, LOAD_IDTR, IS_ENABLED(CONFIG_X86_64)); \
 	X(sidt64, STORE_IDTR, IS_ENABLED(CONFIG_X86_64)); \
-	X(sgdt64, STORE_GDTR, IS_ENABLED(CONFIG_X86_64));
+	X(sgdt64, STORE_GDTR, IS_ENABLED(CONFIG_X86_64)); \
+	X(lgdt64, LOAD_GDTR, IS_ENABLED(CONFIG_X86_64));
