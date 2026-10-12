@@ -50,6 +50,8 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_OUTSL = 45,
 	EBPFOS_KOP_OPCODE_WRITE_CR0 = 46,
 	EBPFOS_KOP_OPCODE_WRITE_CR4 = 47,
+	EBPFOS_KOP_OPCODE_LOAD_IDTR = 48,
+	EBPFOS_KOP_OPCODE_STORE_IDTR = 49,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -62,7 +64,7 @@ struct ebpfos_kop_opcode_spec {
 	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 	u8 proof_kind;
 	u8 proof_len;
-	struct bpf_insn proof[8];
+	struct bpf_insn proof[16];
 };
 static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	{
@@ -497,7 +499,75 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
+	{
+		.opcode = "LIDT64m",
+		.native_len = 8,
+		.native = { 0x0f, 0x01, 0x1f, 0xb8, 0x00, 0x00, 0x00, 0x00 },
+		.semantic_sha256 = { 0x1d, 0x43, 0xab, 0xf0, 0x14, 0x27, 0xf2, 0x62, 0xee, 0xcd, 0x42, 0x65, 0x9c, 0x76, 0x01, 0x5b, 0x1a, 0x9c, 0x15, 0x46, 0x67, 0x80, 0x46, 0xaf, 0x9d, 0xdc, 0x20, 0xc5, 0x4f, 0xa1, 0x17, 0x89 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 11,
+		.proof = { BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 0), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 1), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 2), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 3), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 4), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 5), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 6), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 7), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 8), BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_1, 9), BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
+	{
+		.opcode = "SIDT64m",
+		.native_len = 8,
+		.native = { 0x0f, 0x01, 0x0f, 0xb8, 0x00, 0x00, 0x00, 0x00 },
+		.semantic_sha256 = { 0xd1, 0x3b, 0x07, 0x45, 0x85, 0x1c, 0x84, 0x95, 0x45, 0x1c, 0x62, 0xcf, 0x10, 0x82, 0x2e, 0xaa, 0xbb, 0x92, 0x08, 0xf8, 0x44, 0x12, 0xa9, 0xf4, 0x73, 0x68, 0xa4, 0x5e, 0xc7, 0xf5, 0x07, 0xd4 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
 };
+#define EBPFOS_KOP_PROOF_LEN_PAUSE 1
+#define EBPFOS_KOP_PROOF_LEN_PUSHF64 1
+#define EBPFOS_KOP_PROOF_LEN_CLI 1
+#define EBPFOS_KOP_PROOF_LEN_POPF64 1
+#define EBPFOS_KOP_PROOF_LEN_STI 1
+#define EBPFOS_KOP_PROOF_LEN_MOV64rc 1
+#define EBPFOS_KOP_PROOF_LEN_READ_CR0 1
+#define EBPFOS_KOP_PROOF_LEN_READ_CR2 1
+#define EBPFOS_KOP_PROOF_LEN_READ_CR4 1
+#define EBPFOS_KOP_PROOF_LEN_RELOAD_CR3 1
+#define EBPFOS_KOP_PROOF_LEN_RDTSC 1
+#define EBPFOS_KOP_PROOF_LEN_RDTSCP 1
+#define EBPFOS_KOP_PROOF_LEN_RDSEED64 1
+#define EBPFOS_KOP_PROOF_LEN_CPUID 1
+#define EBPFOS_KOP_PROOF_LEN_CLFLUSH 1
+#define EBPFOS_KOP_PROOF_LEN_CLFLUSHOPT 1
+#define EBPFOS_KOP_PROOF_LEN_CLWB 1
+#define EBPFOS_KOP_PROOF_LEN_INVLPG 1
+#define EBPFOS_KOP_PROOF_LEN_PREFETCHT0 1
+#define EBPFOS_KOP_PROOF_LEN_PREFETCHW 1
+#define EBPFOS_KOP_PROOF_LEN_LFENCE 1
+#define EBPFOS_KOP_PROOF_LEN_WBINVD 1
+#define EBPFOS_KOP_PROOF_LEN_WBNOINVD 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_CS 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_SS 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_DS 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_ES 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_FS 1
+#define EBPFOS_KOP_PROOF_LEN_READ_SELECTOR_GS 1
+#define EBPFOS_KOP_PROOF_LEN_RDFSBASE32 1
+#define EBPFOS_KOP_PROOF_LEN_RDFSBASE64 1
+#define EBPFOS_KOP_PROOF_LEN_RDRAND64 1
+#define EBPFOS_KOP_PROOF_LEN_NTSTORE32 1
+#define EBPFOS_KOP_PROOF_LEN_NTSTORE64 1
+#define EBPFOS_KOP_PROOF_LEN_IN8rr 1
+#define EBPFOS_KOP_PROOF_LEN_OUT8rr 1
+#define EBPFOS_KOP_PROOF_LEN_IN16rr 1
+#define EBPFOS_KOP_PROOF_LEN_OUT16rr 1
+#define EBPFOS_KOP_PROOF_LEN_IN32rr 1
+#define EBPFOS_KOP_PROOF_LEN_OUT32rr 1
+#define EBPFOS_KOP_PROOF_LEN_INSB 1
+#define EBPFOS_KOP_PROOF_LEN_INSW 1
+#define EBPFOS_KOP_PROOF_LEN_INSL 1
+#define EBPFOS_KOP_PROOF_LEN_OUTSB 1
+#define EBPFOS_KOP_PROOF_LEN_OUTSW 1
+#define EBPFOS_KOP_PROOF_LEN_OUTSL 1
+#define EBPFOS_KOP_PROOF_LEN_WRITE_CR0 1
+#define EBPFOS_KOP_PROOF_LEN_WRITE_CR4 1
+#define EBPFOS_KOP_PROOF_LEN_LOAD_IDTR 11
+#define EBPFOS_KOP_PROOF_LEN_STORE_IDTR 1
 #ifdef CONFIG_X86
 #define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
 #define EBPFOS_KOP_HOST_RDSEED boot_cpu_has(X86_FEATURE_RDSEED)
@@ -555,4 +625,6 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(outs16, OUTSW, true); \
 	X(outs32, OUTSL, true); \
 	X(write_cr0, WRITE_CR0, IS_ENABLED(CONFIG_X86_64)); \
-	X(write_cr4, WRITE_CR4, IS_ENABLED(CONFIG_X86_64));
+	X(write_cr4, WRITE_CR4, IS_ENABLED(CONFIG_X86_64)); \
+	X(lidt64, LOAD_IDTR, IS_ENABLED(CONFIG_X86_64)); \
+	X(sidt64, STORE_IDTR, IS_ENABLED(CONFIG_X86_64));
