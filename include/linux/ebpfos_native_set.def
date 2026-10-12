@@ -30,3 +30,22 @@ NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_write, __SCT__apic_call_write, apic,
 NATIVE_ARG(__SCT__apic_call_write, 0, "arg:max:4092")
 NATIVE_ARG(__SCT__apic_call_write, 0, "arg:align:16")
 NATIVE_ALIAS(__SCT__apic_call_write, __SCT__apic_call_write)
+
+/* Calibrated original hardware-delay body; system callers remain compiled. */
+NATIVE_FUNCTION(__const_udelay, __const_udelay, 0)
+
+/* Keep the original user-access/fault windows and length/error semantics. */
+NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
+NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")
+NATIVE_ARG(strncpy_from_user, 0, "arg:nullable")
+NATIVE_ARG(strncpy_from_user, 0, "arg:nonnull-size")
+NATIVE_ARG(strncpy_from_user, 1, "arg:address")
+NATIVE_POINTEE_TAG(strncpy_from_user, 1, "user")
+
+NATIVE_FUNCTION(strnlen_user, strnlen_user, KF_SLEEPABLE)
+NATIVE_ARG(strnlen_user, 0, "arg:address")
+NATIVE_POINTEE_TAG(strnlen_user, 0, "user")
+
+NATIVE_FUNCTION(check_zeroed_user, check_zeroed_user, KF_SLEEPABLE)
+NATIVE_ARG(check_zeroed_user, 0, "arg:address")
+NATIVE_POINTEE_TAG(check_zeroed_user, 0, "user")

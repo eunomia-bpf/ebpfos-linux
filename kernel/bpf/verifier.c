@@ -13406,7 +13406,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				return read_only < 0 ? read_only : nonnull_size;
 			if (kfunc_pointer_flags(btf, t) || !btf_type_is_int(size_t) ||
 			    size_t->size != sizeof(u64) ||
-			    (btf_int_encoding(size_t) & BTF_INT_SIGNED) ||
 			    count->type != SCALAR_VALUE ||
 			    (!btf_type_is_void(ref_t) && !btf_type_is_scalar(ref_t) &&
 			     !__btf_type_is_scalar_struct(env, btf, ref_t, 0)))
@@ -13422,7 +13421,11 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				verbose(env, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
 				return -EACCES;
 			}
-			/* NULL does not skip scalar bounds/precision validation. */
+			/* Signed C counts retain their declared ABI. The shared size
+			 * checker requires a nonnegative signed range before using the
+			 * unsigned maximum for span checks, and marks precision. NULL
+			 * does not skip those scalar checks either.
+			 */
 			ret = check_kfunc_mem_size_reg(env, count, size_arg + 1,
 						    regno, read_only);
 			if (ret)
@@ -14044,6 +14047,7 @@ s64 bpf_kfunc_stack_access_bytes(struct bpf_verifier_env *env, struct bpf_insn *
 	const struct btf_type *t, *ref_t;
 	const struct btf *btf;
 	u32 nargs, type_size;
+	int size_arg;
 	s64 size;
 
 	if (bpf_fetch_kfunc_arg_meta(env, insn->imm, insn->off, &meta) < 0)
@@ -14058,6 +14062,22 @@ s64 bpf_kfunc_stack_access_bytes(struct bpf_verifier_env *env, struct bpf_insn *
 	t = btf_type_skip_modifiers(btf, args[arg].type, NULL);
 	if (!btf_type_is_ptr(t))
 		return 0;
+
+	/* Declared byte counts take precedence over the pointee's fixed size.
+	 * Reuse the same index as admission, including nonadjacent counts.
+	 */
+	size_arg = kfunc_arg_size_index(&meta, arg, nargs);
+	if (size_arg < -1)
+		return S64_MIN;
+	if (size_arg >= 0) {
+		int size_reg = BPF_REG_1 + size_arg;
+
+		if (!(aux->const_reg_mask & BIT(size_reg)) ||
+		    aux->const_reg_vals[size_reg] > MAX_BPF_STACK)
+			return MAX_BPF_STACK;
+		size = aux->const_reg_vals[size_reg];
+		goto out;
+	}
 
 	/* dynptr: fixed 16-byte on-stack representation */
 	if (is_kfunc_arg_dynptr(btf, &args[arg])) {
