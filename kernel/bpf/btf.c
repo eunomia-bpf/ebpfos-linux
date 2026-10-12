@@ -8040,6 +8040,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		u32 tags = 0;
 		int size_arg = -1;
 		bool read_only = false, user_address = false;
+		bool has_btf_offset = false;
+		u32 btf_offset = 0;
 		enum bpf_type_flag pointer_flags = 0;
 		int id = btf_named_start_id(btf, false) - 1;
 
@@ -8065,6 +8067,11 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 					return -EINVAL;
 				}
 				size_arg = index;
+			} else if (strncmp(tag, "offset:", 7) == 0) {
+				if (has_btf_offset || kstrtou32(tag + 7, 10, &btf_offset) ||
+				    btf_offset > S32_MAX)
+					return -EINVAL;
+				has_btf_offset = true;
 			} else if (strcmp(tag, "readonly") == 0) {
 				read_only = true;
 			} else if (strcmp(tag, "address") == 0) {
@@ -8099,6 +8106,18 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 		if (is_global) {
 			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
+			/* An interior argument retains its complete enclosing BTF object.
+			 * Ordinary call checking must establish that object and this exact
+			 * offset; a member type or scalar address alone cannot satisfy it.
+			 */
+			if (has_btf_offset) {
+				if (prog->type == BPF_PROG_TYPE_EXT || pointer_flags ||
+				    tags != ARG_TAG_TRUSTED || size_arg >= 0 ||
+				    read_only || user_address)
+					return -EOPNOTSUPP;
+				sub->args[i].has_btf_offset = true;
+				sub->args[i].btf_offset = btf_offset;
+			}
 			/* freplace matches BTF types, not argument preconditions. */
 			if ((size_arg >= 0 || user_address) && prog->type == BPF_PROG_TYPE_EXT) {
 				bpf_log(log, "arg#%d byte-count/address contract is unsupported for freplace\n", i);
@@ -8187,6 +8206,11 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			kern_type_id = btf_get_ptr_to_btf_id(log, i, btf, t);
 			if (kern_type_id < 0)
 				return kern_type_id;
+			if (has_btf_offset) {
+				ref_t = btf_type_by_id(bpf_get_btf_vmlinux(), kern_type_id);
+				if (!btf_type_is_struct(ref_t) || btf_offset >= ref_t->size)
+					return -EINVAL;
+			}
 
 			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | pointer_flags;
 			if (tags & ARG_TAG_NULLABLE)
@@ -8265,7 +8289,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		}
 
 skip_pointer:
-		if (tags || size_arg >= 0 || read_only || user_address) {
+		if (tags || size_arg >= 0 || read_only || user_address || has_btf_offset) {
 			bpf_log(log, "arg#%d has pointer tag, but is not a pointer type\n", i);
 			return -EINVAL;
 		}

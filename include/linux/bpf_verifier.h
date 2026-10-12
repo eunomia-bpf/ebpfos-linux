@@ -716,6 +716,9 @@ struct bpf_subprog_arg_info {
 	bool user_address;
 	/* Explicit non-NULL obligation on an otherwise probe-safe argument. */
 	bool nonnull;
+	/* Fixed interior address within the independently checked BTF object. */
+	bool has_btf_offset;
+	u32 btf_offset;
 	union {
 		u32 mem_size;
 		u32 btf_id;

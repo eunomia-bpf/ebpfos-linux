@@ -307,4 +307,72 @@ int anything_to_untrusted_mem(void *ctx)
 	return 0;
 }
 
+/* The physical pointer is eight bytes into a complete task object. Every
+ * global call must establish that same enclosing type and exact offset.
+ */
+__weak int subprog_trusted_task_offset8(
+	struct task_struct *task __arg_trusted
+	__attribute__((btf_decl_tag("arg:offset:8"))))
+{
+	struct task_struct *base = (void *)((char *)task - 8);
+
+	return base->pid;
+}
+
+SEC("?syscall")
+__success
+int trusted_task_offset_correct(void *ctx)
+{
+	return subprog_trusted_task_offset8((void *)((char *)bpf_get_current_task_btf() + 8));
+}
+
+SEC("?syscall")
+__failure __msg("requires BTF object offset 8")
+int trusted_task_offset_wrong(void *ctx)
+{
+	return subprog_trusted_task_offset8(bpf_get_current_task_btf());
+}
+
+SEC("?syscall")
+__failure __msg("requires BTF object offset 8")
+int trusted_task_offset_scalar(void *ctx)
+{
+	return subprog_trusted_task_offset8((void *)8);
+}
+
+SEC("?syscall")
+__failure __msg("requires BTF object offset 8")
+int trusted_task_offset_map(void *ctx)
+{
+	return subprog_trusted_task_offset8((void *)(mem + 8));
+}
+
+__weak int subprog_trusted_task_offset_before(
+	struct task_struct *task __arg_trusted
+	__attribute__((btf_decl_tag("arg:offset:8"))))
+{
+	return *(unsigned char *)((char *)task - 9);
+}
+
+SEC("?syscall")
+__failure __msg("invalid negative access: off=-1")
+int trusted_task_offset_before_object(void *ctx)
+{
+	return subprog_trusted_task_offset_before((void *)((char *)bpf_get_current_task_btf() + 8));
+}
+
+__weak int subprog_trusted_task_offset_after(
+	struct task_struct *task __arg_trusted
+	__attribute__((btf_decl_tag("arg:offset:8"))))
+{
+	return *((unsigned char *)task - 8 + bpf_core_type_size(struct task_struct));
+}
+
+SEC("?syscall")
+__failure __msg("access beyond struct task_struct")
+int trusted_task_offset_after_object(void *ctx)
+{
+	return subprog_trusted_task_offset_after((void *)((char *)bpf_get_current_task_btf() + 8));
+}
+
 char _license[] SEC("license") = "GPL";

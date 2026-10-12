@@ -8982,12 +8982,12 @@ static const struct bpf_reg_types *compatible_reg_types[__BPF_ARG_TYPE_MAX] = {
 	[ARG_PTR_TO_DYNPTR]		= &dynptr_types,
 };
 
-static int check_reg_type(struct bpf_verifier_env *env, u32 regno,
+static int check_reg_type_with_state(struct bpf_verifier_env *env,
+			  struct bpf_reg_state *reg, u32 regno,
 			  enum bpf_arg_type arg_type,
 			  const u32 *arg_btf_id,
 			  struct bpf_call_arg_meta *meta, bool global)
 {
-	struct bpf_reg_state *reg = reg_state(env, regno);
 	enum bpf_reg_type expected, type = reg->type;
 	enum bpf_reg_type btf_type = reg->type;
 	const struct bpf_reg_types *compatible;
@@ -9145,6 +9145,15 @@ found:
 		return -EFAULT;
 	}
 	return 0;
+}
+
+static int check_reg_type(struct bpf_verifier_env *env, u32 regno,
+			  enum bpf_arg_type arg_type,
+			  const u32 *arg_btf_id,
+			  struct bpf_call_arg_meta *meta, bool global)
+{
+	return check_reg_type_with_state(env, reg_state(env, regno), regno,
+					 arg_type, arg_btf_id, meta, global);
 }
 
 static struct btf_field *
@@ -10274,6 +10283,14 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		struct bpf_reg_state *reg = &regs[regno];
 		struct bpf_subprog_arg_info *arg = &sub->args[i];
 
+		if (arg->has_btf_offset &&
+		    (base_type(reg->type) != PTR_TO_BTF_ID ||
+		     !tnum_is_const(reg->var_off) ||
+		     reg->var_off.value != arg->btf_offset)) {
+			bpf_log(log, "arg#%d requires BTF object offset %u\n", i, arg->btf_offset);
+			return -EACCES;
+		}
+
 		/* Independent globals cannot inherit the caller's reference identity
 		 * or RCU scope. An ordinary writable contract would turn a scoped or
 		 * owned value into a freely publishable trusted pointer. Read-only
@@ -10440,15 +10457,26 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return ret;
 		} else if (base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) {
 			struct bpf_call_arg_meta meta;
+			struct bpf_reg_state object;
+			struct bpf_reg_state *checked = reg;
 			int err;
 
 			if (bpf_register_is_null(reg) && type_may_be_null(arg->arg_type))
 				continue;
 
 			memset(&meta, 0, sizeof(meta)); /* leave func_id as zero */
-			err = check_reg_type(env, regno, arg->arg_type,
+			if (arg->has_btf_offset) {
+				/* The exact interior offset was checked above. Reuse the
+				 * ordinary type/offset checker on its unchanged BTF base;
+				 * never retag or modify the actual caller register.
+				 */
+				object = *reg;
+				___mark_reg_known(&object, 0);
+				checked = &object;
+			}
+			err = check_reg_type_with_state(env, checked, regno, arg->arg_type,
 					     &arg->btf_id, &meta, true);
-			err = err ?: check_func_arg_reg_off(env, reg, regno, arg->arg_type);
+			err = err ?: check_func_arg_reg_off(env, checked, regno, arg->arg_type);
 			if (err)
 				return err;
 		} else {
@@ -20073,6 +20101,11 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		 */
 		if (sub->is_cb) {
 			for (i = 0; i < sub->arg_cnt; i++) {
+				if (sub->args[i].has_btf_offset) {
+					verbose(env, "interior pointer contracts are unsupported for callbacks\n");
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
 				if (sub->args[i].mem_size_reg || sub->args[i].user_address) {
 					verbose(env, "byte-count/address contracts are unsupported for callbacks\n");
 					ret = -EOPNOTSUPP;
@@ -20135,6 +20168,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				mark_reg_known_zero(env, regs, i);
 				reg->btf = bpf_get_btf_vmlinux(); /* can't fail at this point */
 				reg->btf_id = arg->btf_id;
+				if (arg->has_btf_offset)
+					___mark_reg_known(reg, arg->btf_offset);
 				reg->id = ++env->id_gen;
 			} else if (base_type(arg->arg_type) == ARG_PTR_TO_ARENA) {
 				/* caller can pass either PTR_TO_ARENA or SCALAR */
