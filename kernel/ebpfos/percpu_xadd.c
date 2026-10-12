@@ -12,7 +12,7 @@
 #include <linux/unaligned.h>
 
 #ifdef CONFIG_X86_64
-#define XADD_ROWS(X) X(32, BPF_W) X(64, BPF_DW)
+#define XADD_ROWS(X) X(8, BPF_B) X(16, BPF_H) X(32, BPF_W) X(64, BPF_DW)
 __bpf_kfunc_start_defs();
 #define DECL(width, size) \
 __bpf_kfunc u64 bpf_ebpfos_kop_percpu_xadd##width(void *template, u64 value) { return 0; } \
@@ -63,12 +63,31 @@ static int xadd_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	unsigned n = 0;
 	if (!offset || (emit && !image) || !xadd_payload(payload, area))
 		return -EINVAL;
-	if (width == 64) native[n++] = 0x48;
-	native[n++] = 0x89; native[n++] = 0xf0; /* r0 = r2, exact source width. */
+	if (width <= 16) {
+		if (width == 8) native[n++] = 0x40; /* SIL needs REX. */
+		native[n++] = 0x0f;
+		native[n++] = width == 8 ? 0xb6 : 0xb7;
+		native[n++] = 0xc6; /* movzx eax, sil/si */
+	} else {
+		if (width == 64) native[n++] = 0x48;
+		native[n++] = 0x89; native[n++] = 0xf0;
+	}
 	native[n++] = 0x65;
+	if (width == 16) native[n++] = 0x66;
 	if (width == 64) native[n++] = 0x48;
-	native[n++] = 0x0f; native[n++] = 0xc1; native[n++] = 0x87;
+	native[n++] = 0x0f;
+	native[n++] = width == 8 ? 0xc0 : 0xc1;
+	native[n++] = 0x87;
 	put_unaligned_le32(payload, native + n); n += 4;
+	/* Byte/halfword XADD changes only AL/AX. The proof's load zero-extends
+	 * the old value, so clear the remaining result bits without changing
+	 * the flags from the source XADD.
+	 */
+	if (width <= 16) {
+		native[n++] = 0x0f;
+		native[n++] = width == 8 ? 0xb6 : 0xb7;
+		native[n++] = 0xc0; /* movzx eax, al/ax */
+	}
 	/* LEA models the proof's r6 sum without disturbing XADD's flags.
 	 * Both paths return the old field and leave r3 zero. No CPU selection
 	 * helper or second memory access intervenes at native execution.
