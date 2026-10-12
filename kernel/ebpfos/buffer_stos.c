@@ -19,6 +19,8 @@ __bpf_kfunc u64 bpf_ebpfos_x86_buffer_stosb(
   return ~0ULL;
  if (!count)
   return 0;
+ /* The scalar window is untrusted until both bounds checks have completed. */
+ asm volatile("lfence" : : : "memory");
  selected = (u8 *)destination__nullable + offset;
  asm volatile("pushfq\ncld\nrep stosb\npopfq"
               : "+D"(selected), "+c"(count) : "a"(value) : "memory");
