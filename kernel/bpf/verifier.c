@@ -1783,6 +1783,7 @@ static void __mark_reg_known(struct bpf_reg_state *reg, u64 imm)
 	       offsetof(struct bpf_reg_state, var_off) - sizeof(reg->type));
 	reg->id = 0;
 	reg->ref_obj_id = 0;
+	reg->mem_size_id = 0;
 	___mark_reg_known(reg, imm);
 }
 
@@ -2473,6 +2474,7 @@ void bpf_mark_reg_unknown_imprecise(struct bpf_reg_state *reg)
 	reg->var_off = tnum_unknown;
 	reg->frameno = 0;
 	reg->precise = false;
+	reg->mem_size_id = 0;
 	__mark_reg_unbounded(reg);
 }
 
@@ -7948,11 +7950,12 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
  * @regno is the register containing the access size. regno-1 is the register
  * containing the pointer.
  */
-static int check_mem_size_reg(struct bpf_verifier_env *env,
+static int check_buffer_size_reg(struct bpf_verifier_env *env,
 			      struct bpf_reg_state *reg, u32 regno,
+			      u32 pointer_regno,
 			      enum bpf_access_type access_type,
 			      bool zero_size_allowed,
-			      struct bpf_call_arg_meta *meta)
+			      struct bpf_call_arg_meta *meta, bool global_call)
 {
 	int err;
 
@@ -7991,11 +7994,47 @@ static int check_mem_size_reg(struct bpf_verifier_env *env,
 			regno);
 		return -EACCES;
 	}
-	err = check_helper_mem_access(env, regno - 1, reg->umax_value,
+	/* Reuse the ordinary scalar identity, not a pointer/count analysis.
+	 * Only an unchanged size and the original buffer base can forward
+	 * the caller-checked span to another size-contract consumer.
+	 */
+	if (base_type(cur_regs(env)[pointer_regno].type) == PTR_TO_MEM &&
+	    cur_regs(env)[pointer_regno].mem_size_id && reg->umax_value) {
+		struct bpf_reg_state *ptr = &cur_regs(env)[pointer_regno];
+
+		if (!reg->id || (reg->id & BPF_ADD_CONST) || reg->delta ||
+		    ptr->mem_size_id != reg->id ||
+		    !tnum_is_const(ptr->var_off) || ptr->var_off.value ||
+		    ptr->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+		    (access_type == BPF_WRITE && type_is_rdonly_mem(ptr->type))) {
+			verbose(env, "R%d does not preserve buffer R%d byte-count contract\n",
+				regno, pointer_regno);
+			return -EACCES;
+		}
+		err = 0;
+	} else {
+		/* Preserve the existing global-argument STACK_POISON policy:
+		 * liveness separately proves which actual bytes the callee reads.
+		 * This does not initialize a faulting copy's unwritten bytes.
+		 */
+		int size = global_call && base_type(cur_regs(env)[pointer_regno].type) == PTR_TO_STACK ?
+			   -(int)reg->umax_value : reg->umax_value;
+
+		err = check_helper_mem_access(env, pointer_regno, size,
 				      access_type, zero_size_allowed, meta);
+	}
 	if (!err)
 		err = mark_chain_precision(env, regno);
 	return err;
+}
+
+static int check_mem_size_reg(struct bpf_verifier_env *env,
+			     struct bpf_reg_state *reg, u32 regno,
+			     enum bpf_access_type access_type,
+			     bool zero_size_allowed, struct bpf_call_arg_meta *meta)
+{
+	return check_buffer_size_reg(env, reg, regno, regno - 1,
+				     access_type, zero_size_allowed, meta, false);
 }
 
 static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
@@ -8029,7 +8068,7 @@ static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg
 }
 
 static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
-				    u32 regno)
+				    u32 regno, bool read_only)
 {
 	struct bpf_reg_state *mem_reg = &cur_regs(env)[regno - 1];
 	bool may_be_null = type_may_be_null(mem_reg->type);
@@ -8047,7 +8086,8 @@ static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg
 	}
 
 	err = check_mem_size_reg(env, reg, regno, BPF_READ, true, &meta);
-	err = err ?: check_mem_size_reg(env, reg, regno, BPF_WRITE, true, &meta);
+	if (!err && !read_only)
+		err = check_mem_size_reg(env, reg, regno, BPF_WRITE, true, &meta);
 
 	if (may_be_null)
 		*mem_reg = saved_reg;
@@ -10257,7 +10297,42 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			return -EINVAL;
 		}
 
-		if (arg->arg_type == ARG_ANYTHING) {
+		if (arg->user_address) {
+			/* Address bits are never a dereferenceable global input. */
+			if (reg->type != SCALAR_VALUE && !(reg->type & MEM_USER)) {
+				bpf_log(log, "arg#%d expects a user address value\n", i);
+				return -EINVAL;
+			}
+		} else if (arg->mem_size_reg) {
+			struct bpf_reg_state *count = &regs[arg->mem_size_reg];
+			struct bpf_call_arg_meta meta = {};
+
+			if (reg->type & PTR_UNTRUSTED) {
+				bpf_log(log, "arg#%d byte buffer cannot erase untrusted provenance\n", i);
+				return -EACCES;
+			}
+
+			if (count->type != SCALAR_VALUE ||
+			    (count->umax_value && (bpf_register_is_null(reg) ||
+						 (type_may_be_null(reg->type) && !reg->mem_size_id))) ||
+			    (!(arg->arg_type & PTR_MAYBE_NULL) &&
+			     (bpf_register_is_null(reg) || type_may_be_null(reg->type)))) {
+				bpf_log(log, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
+				return -EINVAL;
+			}
+			/* A byte contract cannot erase BTF field write authority. */
+			if (!(arg->arg_type & MEM_RDONLY) && base_type(reg->type) == PTR_TO_BTF_ID) {
+				bpf_log(log, "arg#%d byte buffer cannot erase typed write authority\n", i);
+				return -EINVAL;
+			}
+			ret = check_buffer_size_reg(env, count, arg->mem_size_reg,
+						    regno, BPF_READ, true, &meta, true);
+			if (!ret && !(arg->arg_type & MEM_RDONLY))
+				ret = check_buffer_size_reg(env, count, arg->mem_size_reg,
+							    regno, BPF_WRITE, true, &meta, true);
+			if (ret)
+				return ret;
+		} else if (arg->arg_type == ARG_ANYTHING) {
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
 				return -EINVAL;
@@ -12984,6 +13059,20 @@ static bool check_css_task_iter_allowlist(struct bpf_verifier_env *env)
 	}
 }
 
+/* Optional argument promises use the same BTF declaration vocabulary as
+ * compiled globals. Absence is not a pointer; duplicates are invalid.
+ */
+static int kfunc_mem_arg_tag(const struct bpf_kfunc_call_arg_meta *meta,
+			     u32 arg, const char *name)
+{
+	const char *value = btf_find_decl_tag_value(meta->btf,
+			btf_type_by_id(meta->btf, meta->func_id), arg, name);
+
+	if (IS_ERR(value))
+		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
+	return *value ? -EINVAL : 1;
+}
+
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_arg_meta *meta,
 			    int insn_idx)
 {
@@ -13400,8 +13489,25 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			struct bpf_reg_state *size_reg = &regs[regno + 1];
 			const struct btf_param *size_arg = &args[i + 1];
 
+			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
+			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
+
+			if (read_only < 0 || nonnull_size < 0)
+				return read_only < 0 ? read_only : nonnull_size;
+			/* Nullable size contracts can require a valid pointer whenever
+			 * the requested span is nonempty. An opaque global pair already
+			 * carries that checked precondition; the size check below also
+			 * requires its unchanged count and base.
+			 */
+			if (nonnull_size && size_reg->umax_value &&
+			    (bpf_register_is_null(buff_reg) ||
+			     (type_may_be_null(buff_reg->type) && !buff_reg->mem_size_id))) {
+				verbose(env, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
+				return -EACCES;
+			}
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
-				ret = check_kfunc_mem_size_reg(env, size_reg, regno + 1);
+				ret = check_kfunc_mem_size_reg(env, size_reg, regno + 1, read_only);
+
 				if (ret < 0) {
 					verbose(env, "arg#%d arg#%d memory, len pair leads to invalid memory access\n", i, i + 1);
 					return ret;
@@ -18251,6 +18357,8 @@ void bpf_clear_singular_ids(struct bpf_verifier_env *env,
 	idset->num_ids = 0;
 
 	bpf_for_each_reg_in_vstate(st, func, reg, ({
+		if (base_type(reg->type) == PTR_TO_MEM && reg->mem_size_id)
+			idset_cnt_inc(idset, reg->mem_size_id);
 		if (reg->type != SCALAR_VALUE)
 			continue;
 		if (!reg->id)
@@ -19698,6 +19806,18 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		ret = btf_prepare_func_args(env, subprog);
 		if (ret)
 			goto out;
+		/* Callback entry registers are supplied by helper-specific ABIs,
+		 * which do not establish this ordinary global-call precondition.
+		 */
+		if (sub->is_cb) {
+			for (i = 0; i < sub->arg_cnt; i++) {
+				if (sub->args[i].mem_size_reg || sub->args[i].user_address) {
+					verbose(env, "byte-count/address contracts are unsupported for callbacks\n");
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
+			}
+		}
 
 		if (subprog_is_exc_cb(env, subprog)) {
 			state->frame[0]->in_exception_callback_fn = true;
@@ -19763,6 +19883,30 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				ret = -EFAULT;
 				goto out;
 			}
+		}
+		/* All arguments exist before a pointer is related to its count. */
+		for (i = BPF_REG_1; i <= sub->arg_cnt; i++) {
+			struct bpf_reg_state *count;
+
+			arg = &sub->args[i - BPF_REG_1];
+			if (!arg->mem_size_reg)
+				continue;
+			count = &regs[arg->mem_size_reg];
+			if (count->type != SCALAR_VALUE) {
+				ret = -EINVAL;
+				goto out;
+			}
+			if (!count->id) {
+				count->id = ++env->id_gen;
+				/* Every caller enforces the existing variable-size limit. */
+				count->var_off = tnum_range(0, BPF_MAX_VAR_SIZ - 1);
+				count->smin_value = count->s32_min_value = 0;
+				count->umin_value = count->u32_min_value = 0;
+				count->smax_value = count->s32_max_value = BPF_MAX_VAR_SIZ - 1;
+				count->umax_value = count->u32_max_value = BPF_MAX_VAR_SIZ - 1;
+				count->precise = true;
+			}
+			regs[i].mem_size_id = count->id;
 		}
 	} else {
 		/* if main BPF program has associated BTF info, validate that

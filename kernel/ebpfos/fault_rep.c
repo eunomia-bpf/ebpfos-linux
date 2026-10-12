@@ -11,14 +11,14 @@
 
 __bpf_kfunc_start_defs();
 #define REP_SERVICE(name, type, instruction, shift) \
-__bpf_kfunc u64 name(void *destination, u64 destination__sz, \
-                    void *source, u64 source__sz) \
+__bpf_kfunc u64 name(void *destination__nullable __attribute__((btf_decl_tag("arg:nonnull-size"))), u64 destination__sz, \
+                    const void *source__nullable __attribute__((btf_decl_tag("arg:readonly"), btf_decl_tag("arg:nonnull-size"))), u64 source__sz) \
 { \
  u64 remaining = destination__sz >> (shift); \
  /* Direct proof-service calls must not copy beyond either checked range. */ \
  if (destination__sz != source__sz) return remaining; \
  asm volatile("1: " instruction "\n2:\n" _ASM_EXTABLE_TYPE(1b, 2b, type) \
-              : "+D"(destination), "+S"(source), "+c"(remaining) : : "memory"); \
+              : "+D"(destination__nullable), "+S"(source__nullable), "+c"(remaining) : : "memory"); \
  return remaining; \
 }
 REP_SERVICE(bpf_ebpfos_x86_fault_rep_movsb, EX_TYPE_UACCESS, "rep movsb", 0)

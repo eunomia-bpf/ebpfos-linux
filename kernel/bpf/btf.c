@@ -8038,6 +8038,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	 */
 	for (i = 0; i < nargs; i++) {
 		u32 tags = 0;
+		int size_arg = -1;
+		bool read_only = false, user_address = false;
 		enum bpf_type_flag pointer_flags = 0;
 		int id = btf_named_start_id(btf, false) - 1;
 
@@ -8054,7 +8056,20 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EOPNOTSUPP;
 			}
 
-			if (strcmp(tag, "ctx") == 0) {
+			if (strncmp(tag, "sz:", 3) == 0) {
+				unsigned int index;
+
+				if (size_arg >= 0 || kstrtouint(tag + 3, 10, &index) ||
+				    index >= nargs || index == i) {
+					bpf_log(log, "arg#%d has invalid byte-count argument\n", i);
+					return -EINVAL;
+				}
+				size_arg = index;
+			} else if (strcmp(tag, "readonly") == 0) {
+				read_only = true;
+			} else if (strcmp(tag, "address") == 0) {
+				user_address = true;
+			} else if (strcmp(tag, "ctx") == 0) {
 				tags |= ARG_TAG_CTX;
 			} else if (strcmp(tag, "trusted") == 0) {
 				tags |= ARG_TAG_TRUSTED;
@@ -8084,6 +8099,48 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 		if (is_global) {
 			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
+			/* freplace matches BTF types, not argument preconditions. */
+			if ((size_arg >= 0 || user_address) && prog->type == BPF_PROG_TYPE_EXT) {
+				bpf_log(log, "arg#%d byte-count/address contract is unsupported for freplace\n", i);
+				return -EOPNOTSUPP;
+			}
+			if (user_address) {
+				if (tags || size_arg >= 0 || read_only || pointer_flags != MEM_USER) {
+					bpf_log(log, "arg#%d address requires an otherwise unqualified user pointer\n", i);
+					return -EINVAL;
+				}
+				sub->args[i].arg_type = ARG_ANYTHING;
+				sub->args[i].user_address = true;
+				continue;
+			}
+			if (size_arg >= 0) {
+				const struct btf_type *size_t;
+
+				/* Byte buffers cannot erase typed spaces or lifetime tags. */
+				if (pointer_flags || (tags & ~(ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) ||
+				    (tags & (ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) ==
+					     (ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) {
+					bpf_log(log, "arg#%d byte buffer has incompatible qualifiers\n", i);
+					return -EINVAL;
+				}
+				size_t = btf_type_skip_modifiers(btf, args[size_arg].type, NULL);
+				if (!btf_type_is_int(size_t) || size_t->size != sizeof(u64) ||
+				    (btf_int_encoding(size_t) & BTF_INT_SIGNED)) {
+					bpf_log(log, "arg#%d byte count must be an unsigned 64-bit integer\n", i);
+					return -EINVAL;
+				}
+				sub->args[i].arg_type = ARG_PTR_TO_MEM | PTR_MAYBE_NULL;
+				if (tags & ARG_TAG_NONNULL)
+					sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
+				if (read_only)
+					sub->args[i].arg_type |= MEM_RDONLY;
+				sub->args[i].mem_size_reg = size_arg + BPF_REG_1;
+				continue;
+			}
+			if (read_only) {
+				bpf_log(log, "arg#%d readonly requires a byte-count pairing\n", i);
+				return -EINVAL;
+			}
 			/* An independent global has no caller RCU scope to inherit.
 			 * Do not manufacture a live RCU reference from its prototype.
 			 */
@@ -8202,7 +8259,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		}
 
 skip_pointer:
-		if (tags) {
+		if (tags || size_arg >= 0 || read_only || user_address) {
 			bpf_log(log, "arg#%d has pointer tag, but is not a pointer type\n", i);
 			return -EINVAL;
 		}

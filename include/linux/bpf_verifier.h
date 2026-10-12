@@ -207,6 +207,10 @@ struct bpf_reg_state {
 	s32 subreg_def;
 	/* if (!precise && SCALAR_VALUE) min/max/tnum don't affect safety */
 	bool precise;
+	/* Opaque global buffer paired with an unchanged scalar count ID.
+	 * Direct memory accesses get no extent from this call contract.
+	 */
+	u32 mem_size_id;
 };
 
 enum bpf_stack_slot_type {
@@ -707,6 +711,9 @@ static inline bool bpf_verifier_log_needed(const struct bpf_verifier_log *log)
 
 struct bpf_subprog_arg_info {
 	enum bpf_arg_type arg_type;
+	/* One-based physical register containing this buffer's byte count. */
+	u8 mem_size_reg;
+	bool user_address;
 	union {
 		u32 mem_size;
 		u32 btf_id;

@@ -494,6 +494,7 @@ static bool regs_exact(const struct bpf_reg_state *rold,
 		       struct bpf_idmap *idmap)
 {
 	return memcmp(rold, rcur, offsetof(struct bpf_reg_state, id)) == 0 &&
+	       check_ids(rold->mem_size_id, rcur->mem_size_id, idmap) &&
 	       check_ids(rold->id, rcur->id, idmap) &&
 	       check_ids(rold->ref_obj_id, rcur->ref_obj_id, idmap);
 }
@@ -538,6 +539,8 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
 	 * non-MAYBE_NULL registers as well.
 	 */
 	if (rold->type != rcur->type)
+		return false;
+	if (!check_ids(rold->mem_size_id, rcur->mem_size_id, idmap))
 		return false;
 
 	switch (base_type(rold->type)) {
