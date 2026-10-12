@@ -34,6 +34,10 @@ NATIVE_ALIAS(__SCT__apic_call_write, __SCT__apic_call_write)
 /* Calibrated original hardware-delay body; system callers remain compiled. */
 NATIVE_FUNCTION(__const_udelay, __const_udelay, 0)
 
+/* Original regular clock snapshot; the enum selects a three-entry table. */
+NATIVE_FUNCTION(ktime_get_with_offset, ktime_get_with_offset, 0)
+NATIVE_ENUM_MAX(ktime_get_with_offset, 0, tk_offsets, TK_OFFS_MAX)
+
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
 NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")
