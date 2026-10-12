@@ -69,3 +69,8 @@ NATIVE_POINTEE_TAG(strnlen_user, 0, "user")
 NATIVE_FUNCTION(check_zeroed_user, check_zeroed_user, KF_SLEEPABLE)
 NATIVE_ARG(check_zeroed_user, 0, "arg:address")
 NATIVE_POINTEE_TAG(check_zeroed_user, 0, "user")
+
+/* Original seqcount-consistent regular monotonic and realtime readers. */
+NATIVE_FUNCTION(ktime_get, ktime_get, 0)
+NATIVE_FUNCTION(ktime_get_ts64, ktime_get_ts64, 0)
+NATIVE_FUNCTION(ktime_get_real_ts64, ktime_get_real_ts64, 0)
