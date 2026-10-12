@@ -731,7 +731,7 @@ static int ebpfos_kop_bind_typed_proof(enum ebpfos_kop_opcode_index opcode,
  M(ntstore32) M(ntstore64) M(wbinvd) M(wbnoinvd) M(rdfsbase32) M(rdfsbase64) \
  M(read_selector_cs) M(read_selector_ss) M(read_selector_ds) \
  M(read_selector_es) M(read_selector_fs) M(read_selector_gs) \
- M(write_cr0) M(write_cr4) M(lidt64) M(sidt64)
+ M(write_cr0) M(write_cr4) M(lidt64) M(sidt64) M(sgdt64)
 #define EBPFOS_PORT_IO_IDS(name) \
  BTF_KFUNCS_START(ebpfos_kprog_##name##_service_ids) \
  BTF_ID_FLAGS(func, bpf_ebpfos_x86_##name) \

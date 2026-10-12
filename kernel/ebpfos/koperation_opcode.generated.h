@@ -52,6 +52,7 @@ enum ebpfos_kop_opcode_index {
 	EBPFOS_KOP_OPCODE_WRITE_CR4 = 47,
 	EBPFOS_KOP_OPCODE_LOAD_IDTR = 48,
 	EBPFOS_KOP_OPCODE_STORE_IDTR = 49,
+	EBPFOS_KOP_OPCODE_STORE_GDTR = 50,
 };
 enum ebpfos_kop_opcode_proof_kind {
 	EBPFOS_KOP_PROOF_RETURN_ZERO = 1,
@@ -517,6 +518,15 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 		.proof_len = 1,
 		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
 	},
+	{
+		.opcode = "SGDT64m",
+		.native_len = 8,
+		.native = { 0x0f, 0x01, 0x07, 0xb8, 0x00, 0x00, 0x00, 0x00 },
+		.semantic_sha256 = { 0x64, 0x8c, 0x65, 0xe9, 0x91, 0xe8, 0x27, 0x5c, 0xc4, 0xd5, 0xbf, 0xf0, 0xd4, 0xa5, 0xf2, 0x6c, 0x54, 0x56, 0x52, 0x61, 0xef, 0x06, 0xb9, 0x61, 0x7c, 0xcc, 0x2c, 0xa8, 0x32, 0x97, 0x42, 0xb2 },
+		.proof_kind = EBPFOS_KOP_PROOF_TYPED_EFFECT,
+		.proof_len = 1,
+		.proof = { BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0) },
+	},
 };
 #define EBPFOS_KOP_PROOF_LEN_PAUSE 1
 #define EBPFOS_KOP_PROOF_LEN_PUSHF64 1
@@ -568,6 +578,7 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 #define EBPFOS_KOP_PROOF_LEN_WRITE_CR4 1
 #define EBPFOS_KOP_PROOF_LEN_LOAD_IDTR 11
 #define EBPFOS_KOP_PROOF_LEN_STORE_IDTR 1
+#define EBPFOS_KOP_PROOF_LEN_STORE_GDTR 1
 #ifdef CONFIG_X86
 #define EBPFOS_KOP_HOST_RDTSCP boot_cpu_has(X86_FEATURE_RDTSCP)
 #define EBPFOS_KOP_HOST_RDSEED boot_cpu_has(X86_FEATURE_RDSEED)
@@ -627,4 +638,5 @@ static const struct ebpfos_kop_opcode_spec ebpfos_kop_opcode_specs[] = {
 	X(write_cr0, WRITE_CR0, IS_ENABLED(CONFIG_X86_64)); \
 	X(write_cr4, WRITE_CR4, IS_ENABLED(CONFIG_X86_64)); \
 	X(lidt64, LOAD_IDTR, IS_ENABLED(CONFIG_X86_64)); \
-	X(sidt64, STORE_IDTR, IS_ENABLED(CONFIG_X86_64));
+	X(sidt64, STORE_IDTR, IS_ENABLED(CONFIG_X86_64)); \
+	X(sgdt64, STORE_GDTR, IS_ENABLED(CONFIG_X86_64));

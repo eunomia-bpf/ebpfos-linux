@@ -18,4 +18,12 @@ __bpf_kfunc u64 bpf_ebpfos_x86_sidt64(struct desc_ptr *table)
 }
 __bpf_kfunc u64 bpf_ebpfos_kop_sidt64(struct desc_ptr *table)
 { return 0; /* Only the typed proof or bound instruction executes. */ }
+__bpf_kfunc u64 bpf_ebpfos_x86_sgdt64(struct desc_ptr *table)
+{
+ if (!IS_ENABLED(CONFIG_X86_64)) return -EOPNOTSUPP;
+ asm volatile("sgdt %0" : "=m"(*table) : : "memory");
+ return 0;
+}
+__bpf_kfunc u64 bpf_ebpfos_kop_sgdt64(struct desc_ptr *table)
+{ return 0; /* Only the typed proof or bound instruction executes. */ }
 #endif
