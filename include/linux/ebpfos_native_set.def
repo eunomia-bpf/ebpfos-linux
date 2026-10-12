@@ -51,6 +51,9 @@ NATIVE_FUNCTION(native_save_fl, native_save_fl, 0)
 /* Original safe RDMSR body, trace branch, eight-byte output and fixup status. */
 NATIVE_INLINE_FUNCTION(native_read_msr_safe, native_read_msr_safe, 0)
 
+/* APIC's original unchecked RDMSR warning/zero recovery, not safe-read status. */
+NATIVE_INLINE_FUNCTION(__rdmsr, __rdmsr, 0)
+
 /* Original CLI boundary; callers retain their CPU/IRQ execution protocol. */
 NATIVE_INLINE_FUNCTION(native_irq_disable, native_irq_disable, KF_DESTRUCTIVE)
 
