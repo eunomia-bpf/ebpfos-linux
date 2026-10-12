@@ -48,6 +48,9 @@ NATIVE_FUNCTION(native_write_cr4, native_write_cr4, KF_DESTRUCTIVE)
 /* Existing .noinstr.text IRQ-flags body and its original C prototype. */
 NATIVE_FUNCTION(native_save_fl, native_save_fl, 0)
 
+/* Original CLI boundary; callers retain their CPU/IRQ execution protocol. */
+NATIVE_INLINE_FUNCTION(native_irq_disable, native_irq_disable, KF_DESTRUCTIVE)
+
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
 NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")
