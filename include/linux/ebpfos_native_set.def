@@ -90,3 +90,14 @@ NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_icr_write, __SCT__apic_call_icr_writ
 NATIVE_ALIAS(__SCT__apic_call_icr_write, __SCT__apic_call_icr_write)
 NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_wait_icr_idle, __SCT__apic_call_wait_icr_idle, apic, wait_icr_idle, 0)
 NATIVE_ALIAS(__SCT__apic_call_wait_icr_idle, __SCT__apic_call_wait_icr_idle)
+
+/* Original selected-driver IPI hardware dispatch; vector occupies eight bits. */
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_self, __SCT__apic_call_send_IPI_self, apic, send_IPI_self, KF_DESTRUCTIVE)
+NATIVE_ARG(__SCT__apic_call_send_IPI_self, 0, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI_self, __SCT__apic_call_send_IPI_self)
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_all, __SCT__apic_call_send_IPI_all, apic, send_IPI_all, KF_DESTRUCTIVE)
+NATIVE_ARG(__SCT__apic_call_send_IPI_all, 0, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI_all, __SCT__apic_call_send_IPI_all)
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_allbutself, __SCT__apic_call_send_IPI_allbutself, apic, send_IPI_allbutself, KF_DESTRUCTIVE)
+NATIVE_ARG(__SCT__apic_call_send_IPI_allbutself, 0, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI_allbutself, __SCT__apic_call_send_IPI_allbutself)
