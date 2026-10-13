@@ -58,6 +58,9 @@ NATIVE_INLINE_FUNCTION(__rdmsr, __rdmsr, 0)
 NATIVE_INLINE_FUNCTION(native_irq_disable, native_irq_disable, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(native_irq_enable, native_irq_enable, KF_DESTRUCTIVE)
 
+/* Original idle envelope keeps buffer clearing and adjacent STI/HLT together. */
+NATIVE_FUNCTION(default_idle, default_idle, KF_DESTRUCTIVE)
+
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
 NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")
