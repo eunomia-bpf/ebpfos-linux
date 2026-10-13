@@ -324,3 +324,6 @@ NATIVE_INLINE_FUNCTION(wrfsbase, wrfsbase, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(native_set_debugreg, native_set_debugreg, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(xgetbv, xgetbv, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(xsetbv, xsetbv, KF_DESTRUCTIVE)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(cr4_update_irqsoff, cr4_update_irqsoff, KF_DESTRUCTIVE)
