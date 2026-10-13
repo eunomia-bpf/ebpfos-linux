@@ -8,8 +8,10 @@
 #include <asm/asm.h>
 #include <asm/extable.h>
 #include "koperation_buffer_mov.generated.h"
+#include "syscall_kfuncs.h"
 
 #define WIDTHS(X) X(8, b, b, 1) X(16, w, w, 2) X(32, l, k, 4) X(64, q, q, 8)
+static int buffer_context_filter(const struct bpf_prog *prog, u32 id);
 __bpf_kfunc_start_defs();
 #define LOAD_SERVICE(bits, suffix, part, bytes, seed, tail) \
 __bpf_kfunc u64 bpf_ebpfos_x86_buffer_fault_load##bits##tail( \
@@ -94,8 +96,8 @@ __bpf_kfunc_end_defs();
   .semantic_sha256 = EBPFOS_##name##_SHA256, \
  }; \
  static const struct bpf_kop * const name##_descs[] = { &name##_kop }; \
- static const struct btf_kfunc_id_set name##_service_set = { .set = &name##_services }; \
- static const struct btf_kfunc_id_set name##_set = { .set = &name##_ids, .kop_descs = name##_descs };
+ static const struct btf_kfunc_id_set name##_service_set = { .set = &name##_services, .filter = buffer_context_filter }; \
+ static const struct btf_kfunc_id_set name##_set = { .set = &name##_ids, .kop_descs = name##_descs, .filter = buffer_context_filter };
 #define DESCRIPTORS(bits, suffix, part, bytes) \
  DESCRIPTOR(buffer_fault_load##bits, 1, EBPFOS_buffer_fault_load##bits##_INSN, EBPFOS_buffer_fault_load##bits##_FIXUP) \
  DESCRIPTOR(buffer_fault_load##bits##_address_seed, 1, EBPFOS_buffer_fault_load##bits##_address_seed_INSN, EBPFOS_buffer_fault_load##bits##_address_seed_FIXUP) \
@@ -104,21 +106,23 @@ WIDTHS(DESCRIPTORS)
 #undef DESCRIPTORS
 #undef DESCRIPTOR
 
+static const struct btf_kfunc_id_set * const buffer_sets[] = {
+#define SETS(name) &name##_service_set, &name##_set,
+#define WIDTH_SETS(bits, suffix, part, bytes) \
+ SETS(buffer_fault_load##bits) \
+ SETS(buffer_fault_load##bits##_address_seed) \
+ SETS(buffer_store##bits)
+ WIDTHS(WIDTH_SETS)
+#undef WIDTH_SETS
+#undef SETS
+};
+static int buffer_context_filter(const struct bpf_prog *prog, u32 id)
+{
+ return ebpfos_syscall_kfunc_filter(prog, id, buffer_sets,
+                                    ARRAY_SIZE(buffer_sets));
+}
 static int __init buffer_mov_register(void)
 {
- int error;
-#define REGISTER(name) \
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &name##_service_set); \
- if (error) return error; \
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &name##_set); \
- if (error) return error;
-#define REGISTER_WIDTH(bits, suffix, part, bytes) \
- REGISTER(buffer_fault_load##bits) \
- REGISTER(buffer_fault_load##bits##_address_seed) \
- REGISTER(buffer_store##bits)
- WIDTHS(REGISTER_WIDTH)
-#undef REGISTER_WIDTH
-#undef REGISTER
- return 0;
+ return ebpfos_register_syscall_kfuncs(buffer_sets, ARRAY_SIZE(buffer_sets));
 }
 late_initcall(buffer_mov_register);
