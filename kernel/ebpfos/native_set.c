@@ -4,6 +4,7 @@
 #include <linux/btf_ids.h>
 #include <linux/init.h>
 #include <linux/threads.h>
+#include <asm/apicdef.h>
 
 /* Carry configured scalar counts into the same BTF used for registration.
  * The resolver consumes these actual C values, rather than guessing a build

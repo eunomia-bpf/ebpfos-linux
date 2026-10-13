@@ -289,3 +289,14 @@ NATIVE_ARG(__default_send_IPI_shortcut, 0, "arg:align:262144")
 NATIVE_ARG(__default_send_IPI_shortcut, 1, "arg:max:255")
 NATIVE_ARG(native_apic_mem_write, 0, "arg:max:4092")
 NATIVE_ARG(native_apic_mem_write, 0, "arg:align:16")
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(native_apic_mem_eoi, native_apic_mem_eoi, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(native_apic_mem_read, native_apic_mem_read, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(native_io_apic_read, native_io_apic_read, KF_DESTRUCTIVE)
+
+/* Original APIC register interfaces; counts come from this configured image. */
+NATIVE_ARG(native_apic_mem_read, 0, "arg:max:4092")
+NATIVE_ARG(native_apic_mem_read, 0, "arg:align:16")
+NATIVE_COUNT_MAX(native_io_apic_read, 0, MAX_IO_APICS)
+NATIVE_ARG(native_io_apic_read, 1, "arg:max:255")
