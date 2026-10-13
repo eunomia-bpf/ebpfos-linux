@@ -3,14 +3,21 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/init.h>
+#include <linux/threads.h>
 
-BTF_KFUNCS_START(ebpfos_native_ids)
-#define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
-#define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
-#define NATIVE_STATIC_CALL(source, native, record, field, flags) BTF_ID_FLAGS(func, native, flags)
+/* Carry configured scalar counts into the same BTF used for registration.
+ * The resolver consumes these actual C values, rather than guessing a build
+ * configuration or substituting a count from another image.
+ */
+enum ebpfos_native_scalar_counts {
+	__native_count_none = 0,
+#define NATIVE_FUNCTION(source, native, flags)
+#define NATIVE_INLINE_FUNCTION(source, native, flags)
+#define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
+#define NATIVE_COUNT_MAX(native, index, count) __native_count_##native##_##index = (count),
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_FUNCTION
@@ -19,6 +26,28 @@ BTF_KFUNCS_START(ebpfos_native_ids)
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
+#undef NATIVE_COUNT_MAX
+#undef NATIVE_POINTEE_TAG
+};
+static enum ebpfos_native_scalar_counts __used native_scalar_count_btf;
+
+BTF_KFUNCS_START(ebpfos_native_ids)
+#define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
+#define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
+#define NATIVE_STATIC_CALL(source, native, record, field, flags) BTF_ID_FLAGS(func, native, flags)
+#define NATIVE_ALIAS(source, native)
+#define NATIVE_ARG(native, index, tag)
+#define NATIVE_ENUM_MAX(native, index, record, sentinel)
+#define NATIVE_COUNT_MAX(native, index, count)
+#define NATIVE_POINTEE_TAG(native, index, tag)
+#include <linux/ebpfos_native_set.def>
+#undef NATIVE_FUNCTION
+#undef NATIVE_INLINE_FUNCTION
+#undef NATIVE_STATIC_CALL
+#undef NATIVE_ALIAS
+#undef NATIVE_ARG
+#undef NATIVE_ENUM_MAX
+#undef NATIVE_COUNT_MAX
 #undef NATIVE_POINTEE_TAG
 BTF_KFUNCS_END(ebpfos_native_ids)
 

@@ -12,6 +12,7 @@ struct native_set_entry {
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
+#define NATIVE_COUNT_MAX(native, index, count)
 #define NATIVE_POINTEE_TAG(native, index, tag)
 static const struct native_set_entry native_set_entries[] = {
 #include "../../../include/linux/ebpfos_native_set.def"
@@ -22,11 +23,13 @@ static const struct native_set_entry native_set_entries[] = {
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
+#undef NATIVE_COUNT_MAX
 #undef NATIVE_POINTEE_TAG
 
 enum native_contract_kind {
 	NATIVE_CONTRACT_ARG,
 	NATIVE_CONTRACT_ENUM_MAX,
+	NATIVE_CONTRACT_COUNT_MAX,
 	NATIVE_CONTRACT_POINTEE_TAG,
 };
 
@@ -46,6 +49,8 @@ struct native_set_contract {
 #define NATIVE_ARG(native, index, tag) { #native, index, NATIVE_CONTRACT_ARG, tag, NULL, NULL },
 #define NATIVE_ENUM_MAX(native, index, record, sentinel) \
 	{ #native, index, NATIVE_CONTRACT_ENUM_MAX, NULL, #record, #sentinel },
+#define NATIVE_COUNT_MAX(native, index, count) \
+	{ #native, index, NATIVE_CONTRACT_COUNT_MAX, NULL, "ebpfos_native_scalar_counts", "__native_count_" #native "_" #index },
 #define NATIVE_POINTEE_TAG(native, index, tag) \
 	{ #native, index, NATIVE_CONTRACT_POINTEE_TAG, tag, NULL, NULL },
 static const struct native_set_contract native_set_contracts[] = {
@@ -57,6 +62,7 @@ static const struct native_set_contract native_set_contracts[] = {
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
+#undef NATIVE_COUNT_MAX
 #undef NATIVE_POINTEE_TAG
 
 static int native_unique_type(const struct btf *btf, const char *name, u32 kind)
@@ -166,6 +172,17 @@ static int native_enum_max(const struct btf *btf, const struct native_set_contra
 
 	id = btf__resolve_type(btf, arg_type);
 	t = btf__type_by_id(btf, id);
+	if (c->kind == NATIVE_CONTRACT_COUNT_MAX) {
+		if (!t || (!btf_is_int(t) && !btf_is_enum(t) && !btf_is_enum64(t)) ||
+		    (t->size != sizeof(u32) && t->size != sizeof(u64)))
+			return -EINVAL;
+		id = native_unique_type(btf, c->record, BTF_KIND_ENUM);
+		if (id == -ENOENT)
+			id = native_unique_type(btf, c->record, BTF_KIND_ENUM64);
+		if (id < 0)
+			return id;
+		t = btf__type_by_id(btf, id);
+	}
 	if (!t || (!btf_is_enum(t) && !btf_is_enum64(t)) ||
 	    strcmp(btf__name_by_offset(btf, t->name_off), c->record))
 		return -EINVAL;
@@ -187,7 +204,8 @@ static int native_enum_max(const struct btf *btf, const struct native_set_contra
 		}
 		found = true;
 	}
-	if (!found || snprintf(tag, size, "arg:max:%llu", value - 1) >= (int)size)
+	if (!found || (c->kind == NATIVE_CONTRACT_COUNT_MAX && value - 1 > UINT_MAX) ||
+	    snprintf(tag, size, "arg:max:%llu", value - 1) >= (int)size)
 		return -EINVAL;
 	return 0;
 }
@@ -297,7 +315,7 @@ static int native_set_btf(struct object *obj)
 			return -EINVAL;
 		if (c->kind == NATIVE_CONTRACT_POINTEE_TAG) {
 			err = native_pointee_tag(btf, func, c->index, c->tag);
-		} else if (c->kind == NATIVE_CONTRACT_ENUM_MAX) {
+		} else if (c->kind == NATIVE_CONTRACT_ENUM_MAX || c->kind == NATIVE_CONTRACT_COUNT_MAX) {
 			err = native_enum_max(btf, c, btf_params(proto)[c->index].type, tag, sizeof(tag));
 			if (!err)
 				err = native_decl_tag(btf, func, c->index, tag);

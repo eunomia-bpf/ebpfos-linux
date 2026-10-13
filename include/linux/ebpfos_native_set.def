@@ -31,6 +31,14 @@ NATIVE_ARG(__SCT__apic_call_write, 0, "arg:max:4092")
 NATIVE_ARG(__SCT__apic_call_write, 0, "arg:align:16")
 NATIVE_ALIAS(__SCT__apic_call_write, __SCT__apic_call_write)
 
+/* Original selected-driver CPU IPI; its CPU index stays within the configured
+ * per-CPU offset table. Online/destination and IRQ protocol remain the caller's.
+ */
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI, __SCT__apic_call_send_IPI, apic, send_IPI, KF_DESTRUCTIVE)
+NATIVE_COUNT_MAX(__SCT__apic_call_send_IPI, 0, NR_CPUS)
+NATIVE_ARG(__SCT__apic_call_send_IPI, 1, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI, __SCT__apic_call_send_IPI)
+
 /* Calibrated original hardware-delay body; system callers remain compiled. */
 NATIVE_FUNCTION(__const_udelay, __const_udelay, 0)
 

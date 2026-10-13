@@ -28,6 +28,7 @@
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
+#define NATIVE_COUNT_MAX(native, index, count)
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_INLINE_FUNCTION
@@ -36,4 +37,5 @@
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
+#undef NATIVE_COUNT_MAX
 #undef NATIVE_POINTEE_TAG
