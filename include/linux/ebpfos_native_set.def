@@ -272,3 +272,20 @@ NATIVE_POINTEE_TAG(ebpfos_native_put_user_4, 1, "user")
 NATIVE_FUNCTION(ebpfos_native_put_user_8, ebpfos_native_put_user_8, KF_SLEEPABLE)
 NATIVE_ARG(ebpfos_native_put_user_8, 1, "arg:address")
 NATIVE_POINTEE_TAG(ebpfos_native_put_user_8, 1, "user")
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(__default_send_IPI_dest_field, __default_send_IPI_dest_field, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(__default_send_IPI_shortcut, __default_send_IPI_shortcut, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(apic_mem_wait_icr_idle, apic_mem_wait_icr_idle, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(apic_mem_wait_icr_idle_timeout, apic_mem_wait_icr_idle_timeout, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(native_apic_mem_write, native_apic_mem_write, KF_DESTRUCTIVE)
+
+/* Original xAPIC command fields; use the existing checked scalar contracts. */
+NATIVE_ARG(__default_send_IPI_dest_field, 1, "arg:max:255")
+NATIVE_ARG(__default_send_IPI_dest_field, 2, "arg:max:2048")
+NATIVE_ARG(__default_send_IPI_dest_field, 2, "arg:align:2048")
+NATIVE_ARG(__default_send_IPI_shortcut, 0, "arg:max:786432")
+NATIVE_ARG(__default_send_IPI_shortcut, 0, "arg:align:262144")
+NATIVE_ARG(__default_send_IPI_shortcut, 1, "arg:max:255")
+NATIVE_ARG(native_apic_mem_write, 0, "arg:max:4092")
+NATIVE_ARG(native_apic_mem_write, 0, "arg:align:16")
