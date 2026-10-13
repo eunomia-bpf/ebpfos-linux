@@ -18,6 +18,7 @@
 #include <asm/debugreg.h>
 #include <asm/preempt.h>
 #include <asm/fsgsbase.h>
+#include <asm/fpu/xcr.h>
 #include <asm/gsseg.h>
 #include <asm/io.h>
 #include <asm/irqflags.h>

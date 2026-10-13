@@ -319,3 +319,8 @@ NATIVE_PROTOTYPE(preempt_schedule_thunk)
 NATIVE_INLINE_FUNCTION(get_current, get_current, KF_DESTRUCTIVE | KF_RET_NULL)
 NATIVE_INLINE_FUNCTION(rdfsbase, rdfsbase, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(wrfsbase, wrfsbase, KF_DESTRUCTIVE)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_INLINE_FUNCTION(native_set_debugreg, native_set_debugreg, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(xgetbv, xgetbv, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(xsetbv, xsetbv, KF_DESTRUCTIVE)
