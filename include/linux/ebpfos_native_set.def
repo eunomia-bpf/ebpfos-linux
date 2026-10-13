@@ -258,3 +258,17 @@ NATIVE_FUNCTION(xsaves, xsaves, KF_DESTRUCTIVE)
 
 /* Remaining declared entries, selected from actual original BTF. */
 NATIVE_INLINE_FUNCTION(iret_to_self, iret_to_self, KF_DESTRUCTIVE)
+
+/* Original checked user-store macros; user addresses stay opaque to BPF. */
+NATIVE_FUNCTION(ebpfos_native_put_user_1, ebpfos_native_put_user_1, KF_SLEEPABLE)
+NATIVE_ARG(ebpfos_native_put_user_1, 1, "arg:address")
+NATIVE_POINTEE_TAG(ebpfos_native_put_user_1, 1, "user")
+NATIVE_FUNCTION(ebpfos_native_put_user_2, ebpfos_native_put_user_2, KF_SLEEPABLE)
+NATIVE_ARG(ebpfos_native_put_user_2, 1, "arg:address")
+NATIVE_POINTEE_TAG(ebpfos_native_put_user_2, 1, "user")
+NATIVE_FUNCTION(ebpfos_native_put_user_4, ebpfos_native_put_user_4, KF_SLEEPABLE)
+NATIVE_ARG(ebpfos_native_put_user_4, 1, "arg:address")
+NATIVE_POINTEE_TAG(ebpfos_native_put_user_4, 1, "user")
+NATIVE_FUNCTION(ebpfos_native_put_user_8, ebpfos_native_put_user_8, KF_SLEEPABLE)
+NATIVE_ARG(ebpfos_native_put_user_8, 1, "arg:address")
+NATIVE_POINTEE_TAG(ebpfos_native_put_user_8, 1, "user")
