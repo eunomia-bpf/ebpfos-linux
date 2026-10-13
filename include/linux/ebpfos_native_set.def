@@ -56,6 +56,7 @@ NATIVE_INLINE_FUNCTION(__rdmsr, __rdmsr, 0)
 
 /* Original CLI boundary; callers retain their CPU/IRQ execution protocol. */
 NATIVE_INLINE_FUNCTION(native_irq_disable, native_irq_disable, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(native_irq_enable, native_irq_enable, KF_DESTRUCTIVE)
 
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
