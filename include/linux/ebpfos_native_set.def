@@ -7,6 +7,15 @@ NATIVE_ARG(_copy_from_user, 0, "arg:nonnull-size")
 NATIVE_ARG(_copy_from_user, 1, "arg:address")
 NATIVE_POINTEE_TAG(_copy_from_user, 1, "user")
 
+/* The original checked copy keeps access_ok and REP recovery together. */
+NATIVE_FUNCTION(_copy_to_user, _copy_to_user, KF_SLEEPABLE)
+NATIVE_ARG(_copy_to_user, 0, "arg:address")
+NATIVE_POINTEE_TAG(_copy_to_user, 0, "user")
+NATIVE_ARG(_copy_to_user, 1, "arg:sz:2")
+NATIVE_ARG(_copy_to_user, 1, "arg:readonly")
+NATIVE_ARG(_copy_to_user, 1, "arg:nullable")
+NATIVE_ARG(_copy_to_user, 1, "arg:nonnull-size")
+
 NATIVE_FUNCTION(copy_from_kernel_nofault, copy_from_kernel_nofault, 0)
 NATIVE_ARG(copy_from_kernel_nofault, 0, "arg:sz:2")
 NATIVE_ARG(copy_from_kernel_nofault, 0, "arg:nullable")
