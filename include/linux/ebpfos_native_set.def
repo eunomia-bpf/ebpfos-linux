@@ -101,3 +101,11 @@ NATIVE_ALIAS(__SCT__apic_call_send_IPI_all, __SCT__apic_call_send_IPI_all)
 NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_allbutself, __SCT__apic_call_send_IPI_allbutself, apic, send_IPI_allbutself, KF_DESTRUCTIVE)
 NATIVE_ARG(__SCT__apic_call_send_IPI_allbutself, 0, "arg:max:255")
 NATIVE_ALIAS(__SCT__apic_call_send_IPI_allbutself, __SCT__apic_call_send_IPI_allbutself)
+
+/* Original selected-driver mask IPI dispatch; preserve the cpumask prototype. */
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_mask, __SCT__apic_call_send_IPI_mask, apic, send_IPI_mask, KF_DESTRUCTIVE)
+NATIVE_ARG(__SCT__apic_call_send_IPI_mask, 1, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI_mask, __SCT__apic_call_send_IPI_mask)
+NATIVE_STATIC_CALL(__ebpfos_bound_apic_call_send_IPI_mask_allbutself, __SCT__apic_call_send_IPI_mask_allbutself, apic, send_IPI_mask_allbutself, KF_DESTRUCTIVE)
+NATIVE_ARG(__SCT__apic_call_send_IPI_mask_allbutself, 1, "arg:max:255")
+NATIVE_ALIAS(__SCT__apic_call_send_IPI_mask_allbutself, __SCT__apic_call_send_IPI_mask_allbutself)
