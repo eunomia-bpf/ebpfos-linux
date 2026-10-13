@@ -7,6 +7,7 @@ struct native_set_entry {
 };
 
 #define NATIVE_FUNCTION(source, native, flags) { #native, NULL, NULL },
+#define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags) { #native, NULL, NULL },
 #define NATIVE_STATIC_CALL(source, native, record, field, flags) { #native, #record, #field },
 #define NATIVE_ALIAS(source, native)
@@ -18,6 +19,7 @@ static const struct native_set_entry native_set_entries[] = {
 #include "../../../include/linux/ebpfos_native_set.def"
 };
 #undef NATIVE_FUNCTION
+#undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
@@ -43,6 +45,7 @@ struct native_set_contract {
 };
 
 #define NATIVE_FUNCTION(source, native, flags)
+#define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
@@ -57,6 +60,7 @@ static const struct native_set_contract native_set_contracts[] = {
 #include "../../../include/linux/ebpfos_native_set.def"
 };
 #undef NATIVE_FUNCTION
+#undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
@@ -293,6 +297,20 @@ static int native_set_btf(struct object *obj)
 				func = btf__add_func(btf, e->native, BTF_FUNC_GLOBAL, proto);
 			else if (func >= 0 && btf__type_by_id(btf, func)->type != proto)
 				return -EINVAL;
+		}
+		/* Assembly has no DWARF function body. Borrow only the original C
+		 * declaration retained by NATIVE_PROTOTYPE, never a guessed ABI.
+		 * An ambiguous existing FUNC is still an error.
+		 */
+		if (func == -ENOENT && !e->record) {
+			char record[256];
+			int length = snprintf(record, sizeof(record),
+					      "ebpfos_native_proto_%s", e->native);
+			if (length < 0 || (size_t)length >= sizeof(record))
+				return -EINVAL;
+			proto = native_member_proto(btf, record, "fn");
+			if (proto >= 0)
+				func = btf__add_func(btf, e->native, BTF_FUNC_GLOBAL, proto);
 		}
 		if (func < 0) {
 			fprintf(stderr, "native set: missing unique FUNC prototype %s\n", e->native);

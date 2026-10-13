@@ -12,6 +12,7 @@
 enum ebpfos_native_scalar_counts {
 	__native_count_none = 0,
 #define NATIVE_FUNCTION(source, native, flags)
+#define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
@@ -21,6 +22,7 @@ enum ebpfos_native_scalar_counts {
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_FUNCTION
+#undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
@@ -33,6 +35,7 @@ static enum ebpfos_native_scalar_counts __used native_scalar_count_btf;
 
 BTF_KFUNCS_START(ebpfos_native_ids)
 #define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
+#define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_ALIAS(source, native)
@@ -42,6 +45,7 @@ BTF_KFUNCS_START(ebpfos_native_ids)
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_FUNCTION
+#undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS

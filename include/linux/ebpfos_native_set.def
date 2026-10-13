@@ -217,3 +217,11 @@ NATIVE_FUNCTION(__wrgsbase_inactive, __wrgsbase_inactive, KF_DESTRUCTIVE)
 /* The original private writer requires its caller's IRQ-disabled CPU context.
  * Keep the existing public writer's low-canonical scalar contract. */
 NATIVE_ARG(__wrgsbase_inactive, 0, "arg:max:140737488355327")
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(clear_bhb_loop, clear_bhb_loop, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(clear_bhb_loop)
+NATIVE_FUNCTION(nop_func, nop_func, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(nop_func)
+NATIVE_FUNCTION(write_ibpb, write_ibpb, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(write_ibpb)

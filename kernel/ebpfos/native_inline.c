@@ -7,7 +7,10 @@
 #include <linux/bitops.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <asm/alternative.h>
 #include <asm/archrandom.h>
+#include <asm/page.h>
+#include <asm/paravirt.h>
 #include <asm/checksum.h>
 #include <asm/cpuid/api.h>
 #include <asm/desc.h>
@@ -23,6 +26,11 @@
 
 #define NATIVE_INLINE_FUNCTION(source, native, flags) \
 	static __typeof__(&source) const __used ebpfos_native_inline_##native = &source;
+/* Retain a source-only assembly declaration as a typed record member. */
+#define NATIVE_PROTOTYPE(source) \
+	struct ebpfos_native_proto_##source { __typeof__(&source) fn; }; \
+	static const struct ebpfos_native_proto_##source __used \
+		ebpfos_native_proto_capture_##source = { .fn = &source };
 #define NATIVE_FUNCTION(source, native, flags)
 #define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
@@ -32,6 +40,7 @@
 #define NATIVE_POINTEE_TAG(native, index, tag)
 #include <linux/ebpfos_native_set.def>
 #undef NATIVE_INLINE_FUNCTION
+#undef NATIVE_PROTOTYPE
 #undef NATIVE_FUNCTION
 #undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
