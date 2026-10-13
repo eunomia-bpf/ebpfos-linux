@@ -13,6 +13,7 @@
 #include <asm/paravirt.h>
 #include <asm/checksum.h>
 #include <asm/cpuid/api.h>
+#include <asm/current.h>
 #include <asm/desc.h>
 #include <asm/debugreg.h>
 #include <asm/preempt.h>

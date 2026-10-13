@@ -314,3 +314,8 @@ NATIVE_FUNCTION(preempt_schedule_notrace_thunk, preempt_schedule_notrace_thunk, 
 NATIVE_PROTOTYPE(preempt_schedule_notrace_thunk)
 NATIVE_FUNCTION(preempt_schedule_thunk, preempt_schedule_thunk, KF_DESTRUCTIVE)
 NATIVE_PROTOTYPE(preempt_schedule_thunk)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_INLINE_FUNCTION(get_current, get_current, KF_DESTRUCTIVE | KF_RET_NULL)
+NATIVE_INLINE_FUNCTION(rdfsbase, rdfsbase, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(wrfsbase, wrfsbase, KF_DESTRUCTIVE)
