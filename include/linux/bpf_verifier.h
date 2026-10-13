@@ -717,8 +717,13 @@ struct bpf_subprog_arg_info {
 	/* Explicit non-NULL obligation on an otherwise probe-safe argument. */
 	bool nonnull;
 	/* Fixed interior address within the independently checked BTF object. */
-	bool has_btf_offset;
-	u32 btf_offset;
+	bool has_btf_offset : 1;
+	bool has_scalar_max : 1;
+	union {
+		u32 btf_offset;
+		/* Bound on the complete physical scalar register at every call. */
+		u32 scalar_max;
+	};
 	union {
 		u32 mem_size;
 		u32 btf_id;

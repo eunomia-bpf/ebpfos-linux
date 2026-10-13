@@ -10357,6 +10357,16 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				bpf_log(log, "R%d is not a scalar\n", regno);
 				return -EINVAL;
 			}
+			if (arg->has_scalar_max) {
+				if (reg->umax_value > arg->scalar_max) {
+					bpf_log(log, "arg#%d scalar exceeds declared global maximum %u\n",
+						i, arg->scalar_max);
+					return -EACCES;
+				}
+				ret = mark_chain_precision(env, regno);
+				if (ret)
+					return ret;
+			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
 			if (arg->nonnull) {
 				struct bpf_call_arg_meta meta = {};
@@ -20099,8 +20109,13 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		/* Callback entry registers are supplied by helper-specific ABIs,
 		 * which do not establish this ordinary global-call precondition.
 		 */
-		if (sub->is_cb) {
+		if (sub->is_cb || subprog_is_exc_cb(env, subprog)) {
 			for (i = 0; i < sub->arg_cnt; i++) {
+				if (sub->args[i].has_scalar_max) {
+					verbose(env, "scalar maximum contracts are unsupported for callbacks\n");
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
 				if (sub->args[i].has_btf_offset) {
 					verbose(env, "interior pointer contracts are unsupported for callbacks\n");
 					ret = -EOPNOTSUPP;
@@ -20144,6 +20159,20 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			} else if (arg->arg_type == ARG_ANYTHING) {
 				reg->type = SCALAR_VALUE;
 				mark_reg_unknown(env, regs, i);
+				if (arg->has_scalar_max) {
+					/* Every ordinary caller checked this full-register
+					 * range. Keep its identity for byte-count pairings.
+					 */
+					reg->var_off = tnum_range(0, arg->scalar_max);
+					reg->umin_value = reg->u32_min_value = 0;
+					reg->umax_value = reg->u32_max_value = arg->scalar_max;
+					reg->smin_value = 0;
+					reg->smax_value = arg->scalar_max;
+					reg->s32_min_value = arg->scalar_max <= S32_MAX ? 0 : S32_MIN;
+					reg->s32_max_value = arg->scalar_max <= S32_MAX ? arg->scalar_max : S32_MAX;
+					reg->id = ++env->id_gen;
+					reg->precise = true;
+				}
 			} else if (arg->arg_type == (ARG_PTR_TO_DYNPTR | MEM_RDONLY)) {
 				/* assume unspecial LOCAL dynptr type */
 				__mark_dynptr_reg(reg, BPF_DYNPTR_TYPE_LOCAL, true, ++env->id_gen);

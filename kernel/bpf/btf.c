@@ -8042,6 +8042,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		bool read_only = false, user_address = false;
 		bool has_btf_offset = false;
 		u32 btf_offset = 0;
+		bool has_scalar_max = false;
+		u32 scalar_max = 0;
 		enum bpf_type_flag pointer_flags = 0;
 		int id = btf_named_start_id(btf, false) - 1;
 
@@ -8058,7 +8060,13 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EOPNOTSUPP;
 			}
 
-			if (strncmp(tag, "sz:", 3) == 0) {
+			if (strncmp(tag, "max:", 4) == 0) {
+				if (has_scalar_max || kstrtou32(tag + 4, 10, &scalar_max)) {
+					bpf_log(log, "arg#%d has invalid scalar maximum\n", i);
+					return -EINVAL;
+				}
+				has_scalar_max = true;
+			} else if (strncmp(tag, "sz:", 3) == 0) {
 				unsigned int index;
 
 				if (size_arg >= 0 || kstrtouint(tag + 3, 10, &index) ||
@@ -8101,6 +8109,10 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		t = btf_type_by_id(btf, args[i].type);
 		while (btf_type_is_modifier(t))
 			t = btf_type_by_id(btf, t->type);
+		if (has_scalar_max && btf_type_is_ptr(t)) {
+			bpf_log(log, "arg#%d scalar maximum requires an integer\n", i);
+			return -EINVAL;
+		}
 		if (!btf_type_is_ptr(t))
 			goto skip_pointer;
 
@@ -8294,6 +8306,20 @@ skip_pointer:
 			return -EINVAL;
 		}
 		if (btf_type_is_int(t) || btf_is_any_enum(t)) {
+			if (has_scalar_max) {
+				/* The ordinary call checks the entire register. Do not
+				 * invent cleared upper bits from a narrow C declaration.
+				 */
+				if (t->size != sizeof(u32) && t->size != sizeof(u64))
+					return -EINVAL;
+				/* freplace matches types, not entry preconditions. */
+				if (prog->type == BPF_PROG_TYPE_EXT) {
+					bpf_log(log, "arg#%d scalar maximum is unsupported for freplace\n", i);
+					return -EOPNOTSUPP;
+				}
+				sub->args[i].has_scalar_max = true;
+				sub->args[i].scalar_max = scalar_max;
+			}
 			sub->args[i].arg_type = ARG_ANYTHING;
 			continue;
 		}
