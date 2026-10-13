@@ -22,6 +22,7 @@
 #include <asm/mwait.h>
 #include <asm/nospec-branch.h>
 #include <asm/special_insns.h>
+#include <asm/sync_core.h>
 #include <asm/tsc.h>
 
 /* C-callable boundaries for Linux's original checked dual-result macro.

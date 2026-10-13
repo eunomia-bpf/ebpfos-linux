@@ -255,3 +255,6 @@ NATIVE_FUNCTION(restore_fpregs_from_fpstate, restore_fpregs_from_fpstate, KF_DES
 NATIVE_FUNCTION(save_fpregs_to_fpstate, save_fpregs_to_fpstate, KF_DESTRUCTIVE)
 NATIVE_FUNCTION(xrstors, xrstors, KF_DESTRUCTIVE)
 NATIVE_FUNCTION(xsaves, xsaves, KF_DESTRUCTIVE)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_INLINE_FUNCTION(iret_to_self, iret_to_self, KF_DESTRUCTIVE)
