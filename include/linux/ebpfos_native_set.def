@@ -76,6 +76,9 @@ NATIVE_FUNCTION(x86_gsbase_write_cpu_inactive, x86_gsbase_write_cpu_inactive, KF
 NATIVE_ARG(x86_gsbase_write_cpu_inactive, 0, "arg:max:140737488355327")
 NATIVE_FUNCTION(current_save_fsgs, current_save_fsgs, KF_DESTRUCTIVE)
 
+/* Keep the original boot-selected port/udelay strategy and its C ABI. */
+NATIVE_FUNCTION(native_io_delay, native_io_delay, KF_DESTRUCTIVE)
+
 /* Keep the original user-access/fault windows and length/error semantics. */
 NATIVE_FUNCTION(strncpy_from_user, strncpy_from_user, KF_SLEEPABLE)
 NATIVE_ARG(strncpy_from_user, 0, "arg:sz:2")
