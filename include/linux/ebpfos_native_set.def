@@ -304,3 +304,13 @@ NATIVE_ARG(native_io_apic_read, 1, "arg:max:255")
 /* Remaining declared entries, selected from actual original BTF. */
 NATIVE_FUNCTION(asm_load_gs_index, asm_load_gs_index, KF_DESTRUCTIVE)
 NATIVE_PROTOTYPE(asm_load_gs_index)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_INLINE_FUNCTION(__preempt_count_add, __preempt_count_add, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(__preempt_count_dec_and_test, __preempt_count_dec_and_test, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(__preempt_count_sub, __preempt_count_sub, KF_DESTRUCTIVE)
+NATIVE_INLINE_FUNCTION(native_get_debugreg, native_get_debugreg, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(preempt_schedule_notrace_thunk, preempt_schedule_notrace_thunk, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(preempt_schedule_notrace_thunk)
+NATIVE_FUNCTION(preempt_schedule_thunk, preempt_schedule_thunk, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(preempt_schedule_thunk)

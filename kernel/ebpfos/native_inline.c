@@ -14,6 +14,8 @@
 #include <asm/checksum.h>
 #include <asm/cpuid/api.h>
 #include <asm/desc.h>
+#include <asm/debugreg.h>
+#include <asm/preempt.h>
 #include <asm/fsgsbase.h>
 #include <asm/gsseg.h>
 #include <asm/io.h>
