@@ -5,6 +5,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "syscall_kfuncs.h"
 #include <asm/asm.h>
 #include <asm/extable.h>
 #include "koperation_rdmsr.generated.h"
@@ -91,8 +92,9 @@ static struct bpf_kop rdmsr_kop = { .max_insn_cnt = 1,
  .emit_x86 = rdmsr_emit, .requirements = rdmsr_requirements,
  .proof_kfunc_id_for_payload = rdmsr_service, .semantic_sha256 = EBPFOS_RDMSR_SHA256 };
 static const struct bpf_kop * const rdmsr_descs[] = { &rdmsr_kop };
-static const struct btf_kfunc_id_set rdmsr_service_set = { .set = &rdmsr_services };
-static const struct btf_kfunc_id_set rdmsr_set = { .set = &rdmsr_ids, .kop_descs = rdmsr_descs };
+static int rdmsr_context_filter(const struct bpf_prog *prog, u32 id);
+static const struct btf_kfunc_id_set rdmsr_service_set = { .set = &rdmsr_services, .filter = rdmsr_context_filter };
+static const struct btf_kfunc_id_set rdmsr_set = { .set = &rdmsr_ids, .kop_descs = rdmsr_descs, .filter = rdmsr_context_filter };
 static const u8 rdmsr_unchecked_native[] = EBPFOS_RDMSR_UNCHECKED_NATIVE;
 static bool rdmsr_unchecked_valid(u64 payload)
 { return payload == rdmsr_unchecked_ids.pairs[0].id; }
@@ -136,17 +138,23 @@ static struct bpf_kop rdmsr_unchecked_kop = { .max_insn_cnt = 1,
  .semantic_sha256 = EBPFOS_RDMSR_UNCHECKED_SHA256 };
 static const struct bpf_kop * const rdmsr_unchecked_descs[] = { &rdmsr_unchecked_kop };
 static const struct btf_kfunc_id_set rdmsr_unchecked_service_set = {
- .set = &rdmsr_unchecked_services };
+ .set = &rdmsr_unchecked_services, .filter = rdmsr_context_filter };
 static const struct btf_kfunc_id_set rdmsr_unchecked_set = {
- .set = &rdmsr_unchecked_ids, .kop_descs = rdmsr_unchecked_descs };
+ .set = &rdmsr_unchecked_ids, .kop_descs = rdmsr_unchecked_descs, .filter = rdmsr_context_filter };
+static const struct btf_kfunc_id_set * const rdmsr_sets[] = {
+ &rdmsr_service_set,
+ &rdmsr_set,
+ &rdmsr_unchecked_service_set,
+ &rdmsr_unchecked_set,
+};
+static int rdmsr_context_filter(const struct bpf_prog *prog, u32 id)
+{
+ return ebpfos_syscall_kfunc_filter(prog, id, rdmsr_sets,
+                                    ARRAY_SIZE(rdmsr_sets));
+}
 static int __init rdmsr_register(void)
 {
- int error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &rdmsr_service_set);
- if (error) return error;
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &rdmsr_set);
- if (error) return error;
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &rdmsr_unchecked_service_set);
- if (error) return error;
- return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &rdmsr_unchecked_set);
+ return ebpfos_register_syscall_kfuncs(rdmsr_sets, ARRAY_SIZE(rdmsr_sets));
 }
+
 late_initcall(rdmsr_register);

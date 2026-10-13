@@ -5,6 +5,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "syscall_kfuncs.h"
 #include <asm/cpufeature.h>
 #include "koperation_user_window.generated.h"
 
@@ -106,31 +107,35 @@ static struct bpf_kop window_close_kop = {
 /* Each singleton owns its exact semantic descriptor; BTF sets are sorted. */
 static const struct bpf_kop * const window_open_descriptors[] = { &window_open_kop };
 static const struct bpf_kop * const window_close_descriptors[] = { &window_close_kop };
-static const struct btf_kfunc_id_set window_open_service_set = { .set = &window_open_services };
-static const struct btf_kfunc_id_set window_close_service_set = { .set = &window_close_services };
+static int window_context_filter(const struct bpf_prog *prog, u32 id);
+static const struct btf_kfunc_id_set window_open_service_set = { .set = &window_open_services, .filter = window_context_filter };
+static const struct btf_kfunc_id_set window_close_service_set = { .set = &window_close_services, .filter = window_context_filter };
 static const struct btf_kfunc_id_set window_open_set = {
 	.set = &window_open_ids, .kop_descs = window_open_descriptors,
+ .filter = window_context_filter,
 };
 static const struct btf_kfunc_id_set window_close_set = {
 	.set = &window_close_ids, .kop_descs = window_close_descriptors,
+ .filter = window_context_filter,
 };
+static const struct btf_kfunc_id_set * const window_sets[] = {
+ &window_open_service_set,
+ &window_close_service_set,
+ &window_open_set,
+ &window_close_set,
+};
+static int window_context_filter(const struct bpf_prog *prog, u32 id)
+{
+ return ebpfos_syscall_kfunc_filter(prog, id, window_sets,
+                                    ARRAY_SIZE(window_sets));
+}
 static int __init window_register(void)
 {
-	int error;
-	/* An absent configured source alternative is not a requested opcode. */
-	if (!boot_cpu_has(X86_FEATURE_SMAP))
-		return 0;
-	window_open_kop.proof_kfunc_id = window_open_services.pairs[0].id;
-	window_close_kop.proof_kfunc_id = window_close_services.pairs[0].id;
-	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &window_open_service_set);
-	if (error)
-		return error;
-	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &window_close_service_set);
-	if (error)
-		return error;
-	error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &window_open_set);
-	if (error)
-		return error;
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &window_close_set);
+ /* An absent configured source alternative is not a requested opcode. */
+ if (!boot_cpu_has(X86_FEATURE_SMAP)) return 0;
+ window_open_kop.proof_kfunc_id = window_open_services.pairs[0].id;
+ window_close_kop.proof_kfunc_id = window_close_services.pairs[0].id;
+ return ebpfos_register_syscall_kfuncs(window_sets, ARRAY_SIZE(window_sets));
 }
+
 late_initcall(window_register);

@@ -5,6 +5,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "syscall_kfuncs.h"
 #include <asm/asm.h>
 #include <asm/extable.h>
 #include "koperation_wrmsr.generated.h"
@@ -86,8 +87,9 @@ static struct bpf_kop wrmsr_kop = { .max_insn_cnt = 1,
  .emit_x86 = wrmsr_emit, .requirements = wrmsr_requirements,
  .proof_kfunc_id_for_payload = wrmsr_service, .semantic_sha256 = EBPFOS_WRMSR_SHA256 };
 static const struct bpf_kop * const wrmsr_descs[] = { &wrmsr_kop };
-static const struct btf_kfunc_id_set wrmsr_service_set = { .set = &wrmsr_services };
-static const struct btf_kfunc_id_set wrmsr_set = { .set = &wrmsr_ids, .kop_descs = wrmsr_descs };
+static int wrmsr_context_filter(const struct bpf_prog *prog, u32 id);
+static const struct btf_kfunc_id_set wrmsr_service_set = { .set = &wrmsr_services, .filter = wrmsr_context_filter };
+static const struct btf_kfunc_id_set wrmsr_set = { .set = &wrmsr_ids, .kop_descs = wrmsr_descs, .filter = wrmsr_context_filter };
 static const u8 wrmsr_unchecked_native[] = EBPFOS_WRMSR_UNCHECKED_NATIVE;
 static bool wrmsr_unchecked_valid(u64 payload)
 { return payload == wrmsr_unchecked_ids.pairs[0].id; }
@@ -131,17 +133,23 @@ static struct bpf_kop wrmsr_unchecked_kop = { .max_insn_cnt = 1,
  .semantic_sha256 = EBPFOS_WRMSR_UNCHECKED_SHA256 };
 static const struct bpf_kop * const wrmsr_unchecked_descs[] = { &wrmsr_unchecked_kop };
 static const struct btf_kfunc_id_set wrmsr_unchecked_service_set = {
- .set = &wrmsr_unchecked_services };
+ .set = &wrmsr_unchecked_services, .filter = wrmsr_context_filter };
 static const struct btf_kfunc_id_set wrmsr_unchecked_set = {
- .set = &wrmsr_unchecked_ids, .kop_descs = wrmsr_unchecked_descs };
+ .set = &wrmsr_unchecked_ids, .kop_descs = wrmsr_unchecked_descs, .filter = wrmsr_context_filter };
+static const struct btf_kfunc_id_set * const wrmsr_sets[] = {
+ &wrmsr_service_set,
+ &wrmsr_set,
+ &wrmsr_unchecked_service_set,
+ &wrmsr_unchecked_set,
+};
+static int wrmsr_context_filter(const struct bpf_prog *prog, u32 id)
+{
+ return ebpfos_syscall_kfunc_filter(prog, id, wrmsr_sets,
+                                    ARRAY_SIZE(wrmsr_sets));
+}
 static int __init wrmsr_register(void)
 {
- int error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &wrmsr_service_set);
- if (error) return error;
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &wrmsr_set);
- if (error) return error;
- error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &wrmsr_unchecked_service_set);
- if (error) return error;
- return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &wrmsr_unchecked_set);
+ return ebpfos_register_syscall_kfuncs(wrmsr_sets, ARRAY_SIZE(wrmsr_sets));
 }
+
 late_initcall(wrmsr_register);
