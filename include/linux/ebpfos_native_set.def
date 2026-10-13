@@ -300,3 +300,7 @@ NATIVE_ARG(native_apic_mem_read, 0, "arg:max:4092")
 NATIVE_ARG(native_apic_mem_read, 0, "arg:align:16")
 NATIVE_COUNT_MAX(native_io_apic_read, 0, MAX_IO_APICS)
 NATIVE_ARG(native_io_apic_read, 1, "arg:max:255")
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(asm_load_gs_index, asm_load_gs_index, KF_DESTRUCTIVE)
+NATIVE_PROTOTYPE(asm_load_gs_index)
