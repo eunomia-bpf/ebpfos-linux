@@ -248,3 +248,10 @@ NATIVE_POINTEE_TAG(ebpfos_native_get_user_4, 0, "user")
 NATIVE_FUNCTION(ebpfos_native_get_user_8, ebpfos_native_get_user_8, KF_SLEEPABLE)
 NATIVE_ARG(ebpfos_native_get_user_8, 0, "arg:address")
 NATIVE_POINTEE_TAG(ebpfos_native_get_user_8, 0, "user")
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(bpf_selem_unlink_storage_nolock_misc, bpf_selem_unlink_storage_nolock_misc, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(restore_fpregs_from_fpstate, restore_fpregs_from_fpstate, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(save_fpregs_to_fpstate, save_fpregs_to_fpstate, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(xrstors, xrstors, KF_DESTRUCTIVE)
+NATIVE_FUNCTION(xsaves, xsaves, KF_DESTRUCTIVE)
