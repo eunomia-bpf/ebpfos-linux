@@ -211,3 +211,9 @@ NATIVE_INLINE_FUNCTION(wrpkru, wrpkru, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(x86_fsbase_read_cpu, x86_fsbase_read_cpu, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(x86_fsbase_write_cpu, x86_fsbase_write_cpu, KF_DESTRUCTIVE)
 NATIVE_INLINE_FUNCTION(x86_idle_clear_cpu_buffers, x86_idle_clear_cpu_buffers, KF_DESTRUCTIVE)
+
+/* Remaining declared entries, selected from actual original BTF. */
+NATIVE_FUNCTION(__wrgsbase_inactive, __wrgsbase_inactive, KF_DESTRUCTIVE)
+/* The original private writer requires its caller's IRQ-disabled CPU context.
+ * Keep the existing public writer's low-canonical scalar contract. */
+NATIVE_ARG(__wrgsbase_inactive, 0, "arg:max:140737488355327")
