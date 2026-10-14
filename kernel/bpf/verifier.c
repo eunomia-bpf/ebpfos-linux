@@ -18159,6 +18159,7 @@ static bool return_retval_range(struct bpf_verifier_env *env, struct bpf_retval_
 		case BPF_TRACE_FSESSION:
 			*range = retval_range(0, 0);
 			break;
+		case BPF_TRACE_REPLACE:
 		case BPF_TRACE_RAW_TP:
 		case BPF_MODIFY_RETURN:
 			return false;
@@ -20825,6 +20826,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 		if (!prog_extension)
 			return -EINVAL;
 		fallthrough;
+	case BPF_TRACE_REPLACE:
 	case BPF_MODIFY_RETURN:
 	case BPF_LSM_MAC:
 	case BPF_LSM_CGROUP:
@@ -20860,6 +20862,23 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 		if (ret < 0)
 			return ret;
 
+		if (prog->expected_attach_type == BPF_TRACE_REPLACE) {
+			const struct btf_type *result;
+
+			/* This interface returns a scalar or void in the ordinary
+			 * native ABI. Pointer/aggregate results need distinct contracts.
+			 * Existing tracing/error-injection policy is unchanged.
+			 */
+			if (tgt_prog || prog->sleepable ||
+			    !prog->aux->ebpfos_component ||
+			    !IS_ENABLED(CONFIG_X86_64))
+				return -EINVAL;
+			result = btf_type_skip_modifiers(btf, t->type, NULL);
+			if (t->type && (!btf_is_int(result) || result->size > 8)) {
+				bpf_log(log, "replacement requires a scalar or void result\n");
+				return -EINVAL;
+			}
+		}
 		if (tgt_prog) {
 			if (subprog == 0)
 				addr = (long) tgt_prog->bpf_func;
@@ -21084,7 +21103,8 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 		return -EINVAL;
 	} else if ((prog->expected_attach_type == BPF_TRACE_FEXIT ||
 		   prog->expected_attach_type == BPF_TRACE_FSESSION ||
-		   prog->expected_attach_type == BPF_MODIFY_RETURN) &&
+		   prog->expected_attach_type == BPF_MODIFY_RETURN ||
+		   prog->expected_attach_type == BPF_TRACE_REPLACE) &&
 		   btf_id_set_contains(&noreturn_deny, btf_id)) {
 		verbose(env, "Attaching fexit/fsession/fmod_ret to __noreturn function '%s' is rejected.\n",
 			tgt_info.tgt_name);

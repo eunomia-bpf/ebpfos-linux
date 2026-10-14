@@ -2934,7 +2934,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	     (type != BPF_PROG_TYPE_SYSCALL &&
 	      type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
 	      (type != BPF_PROG_TYPE_TRACING ||
-	       attr->expected_attach_type != BPF_TRACE_FENTRY)) ||
+	       (attr->expected_attach_type != BPF_TRACE_FENTRY &&
+		attr->expected_attach_type != BPF_TRACE_REPLACE))) ||
 	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
 	if (attr->ebpfos_field_access_cnt >
@@ -2958,12 +2959,18 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	      (type == BPF_PROG_TYPE_RAW_TRACEPOINT &&
 	       !(attr->prog_flags & BPF_F_SLEEPABLE)) ||
 	      (type == BPF_PROG_TYPE_TRACING &&
-	       attr->expected_attach_type == BPF_TRACE_FENTRY &&
+	       (attr->expected_attach_type == BPF_TRACE_FENTRY ||
+	       attr->expected_attach_type == BPF_TRACE_REPLACE) &&
 	       !(attr->prog_flags & BPF_F_SLEEPABLE))))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))
 		return -EOPNOTSUPP;
+	if (type == BPF_PROG_TYPE_TRACING &&
+	    attr->expected_attach_type == BPF_TRACE_REPLACE &&
+	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
+	     (attr->prog_flags & BPF_F_SLEEPABLE) || !capable(CAP_SYS_ADMIN)))
+		return -EPERM;
 	bpf_prog_load_fixup_attach_type(attr);
 
 	if (attr->prog_flags & BPF_F_TOKEN_FD) {
@@ -3713,7 +3720,8 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 		if (prog->expected_attach_type != BPF_TRACE_FENTRY &&
 		    prog->expected_attach_type != BPF_TRACE_FEXIT &&
 		    prog->expected_attach_type != BPF_TRACE_FSESSION &&
-		    prog->expected_attach_type != BPF_MODIFY_RETURN) {
+		    prog->expected_attach_type != BPF_MODIFY_RETURN &&
+		    prog->expected_attach_type != BPF_TRACE_REPLACE) {
 			err = -EINVAL;
 			goto out_put_prog;
 		}
@@ -4523,6 +4531,7 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
 	case BPF_TRACE_FENTRY:
 	case BPF_TRACE_FEXIT:
 	case BPF_TRACE_FSESSION:
+	case BPF_TRACE_REPLACE:
 	case BPF_MODIFY_RETURN:
 		return BPF_PROG_TYPE_TRACING;
 	case BPF_LSM_MAC:

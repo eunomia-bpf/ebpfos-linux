@@ -72,6 +72,8 @@ static int bpf_tramp_ftrace_ops_func(struct ftrace_ops *ops, unsigned long ip,
 		 * tr->mutex is already locked.
 		 */
 		lockdep_assert_held_once(&tr->mutex);
+		if (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE)
+			return -EBUSY;
 
 		/* Instead of updating the trampoline here, we propagate
 		 * -EAGAIN to register_ftrace_direct(). Then we can
@@ -112,6 +114,10 @@ static int bpf_tramp_ftrace_ops_func(struct ftrace_ops *ops, unsigned long ip,
 
 	switch (cmd) {
 	case FTRACE_OPS_CMD_ENABLE_SHARE_IPMODIFY_PEER:
+		if (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE) {
+			ret = -EBUSY;
+			break;
+		}
 		tr->flags |= BPF_TRAMP_F_SHARE_IPMODIFY;
 
 		if ((tr->flags & BPF_TRAMP_F_CALL_ORIG) &&
@@ -142,7 +148,8 @@ bool bpf_prog_has_trampoline(const struct bpf_prog *prog)
 	switch (ptype) {
 	case BPF_PROG_TYPE_TRACING:
 		if (eatype == BPF_TRACE_FENTRY || eatype == BPF_TRACE_FEXIT ||
-		    eatype == BPF_MODIFY_RETURN || eatype == BPF_TRACE_FSESSION)
+		    eatype == BPF_MODIFY_RETURN || eatype == BPF_TRACE_FSESSION ||
+		    eatype == BPF_TRACE_REPLACE)
 			return true;
 		return false;
 	case BPF_PROG_TYPE_LSM:
@@ -628,8 +635,13 @@ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mut
 	/* clear all bits except SHARE_IPMODIFY and TAIL_CALL_CTX */
 	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX);
 
-	if (tlinks[BPF_TRAMP_FEXIT].nr_links ||
-	    tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links) {
+	if (tlinks[BPF_TRAMP_FENTRY].nr_links == 1 &&
+	    tlinks[BPF_TRAMP_FENTRY].links[0]->link.prog->expected_attach_type ==
+		BPF_TRACE_REPLACE) {
+		tr->flags |= BPF_TRAMP_F_RET_FENTRY_RET | BPF_TRAMP_F_SKIP_FRAME |
+			     BPF_TRAMP_F_NATIVE_REPLACE;
+	} else if (tlinks[BPF_TRAMP_FEXIT].nr_links ||
+		   tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links) {
 		/* NOTE: BPF_TRAMP_F_RESTORE_REGS and BPF_TRAMP_F_SKIP_FRAME
 		 * should not be set together.
 		 */
@@ -728,6 +740,7 @@ static enum bpf_tramp_prog_type bpf_attach_type_to_tramp(struct bpf_prog *prog)
 {
 	switch (prog->expected_attach_type) {
 	case BPF_TRACE_FENTRY:
+	case BPF_TRACE_REPLACE:
 		return BPF_TRAMP_FENTRY;
 	case BPF_MODIFY_RETURN:
 		return BPF_TRAMP_MODIFY_RETURN;
@@ -786,6 +799,14 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 
 	for (i = 0; i < BPF_TRAMP_MAX; i++)
 		cnt += tr->progs_cnt[i];
+
+	/* An exclusive body entry cannot be composed with observational or
+	 * return-modification callbacks. Their ordering would change its result.
+	 */
+	if ((link->link.prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	     (cnt || (tr->flags & BPF_TRAMP_F_SHARE_IPMODIFY))) ||
+	    (cnt && (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE)))
+		return -EBUSY;
 
 	if (kind == BPF_TRAMP_REPLACE) {
 		/* Cannot attach extension if fentry/fexit are in use. */
@@ -919,7 +940,8 @@ int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
 	    prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
 	    (prog->expected_attach_type != BPF_TRACE_FENTRY &&
 	     prog->expected_attach_type != BPF_TRACE_FEXIT &&
-	     prog->expected_attach_type != BPF_MODIFY_RETURN))
+	     prog->expected_attach_type != BPF_MODIFY_RETURN &&
+	     prog->expected_attach_type != BPF_TRACE_REPLACE))
 		goto out;
 	if (hlist_unhashed(&link->tramp_hlist)) {
 		err = 0;
@@ -985,7 +1007,8 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 	    new_prog->sleepable ||
 	    (old_prog->expected_attach_type != BPF_TRACE_FENTRY &&
 	     old_prog->expected_attach_type != BPF_TRACE_FEXIT &&
-	     old_prog->expected_attach_type != BPF_MODIFY_RETURN) ||
+	     old_prog->expected_attach_type != BPF_MODIFY_RETURN &&
+	     old_prog->expected_attach_type != BPF_TRACE_REPLACE) ||
 	    new_prog->expected_attach_type != old_prog->expected_attach_type ||
 	    new_prog->aux->attach_btf != old_prog->aux->attach_btf ||
 	    new_prog->aux->attach_btf_id != old_prog->aux->attach_btf_id)

@@ -1411,6 +1411,8 @@ struct btf_func_model {
 
 /* Ordinary C call, without a preceding instrumentation call frame. */
 #define BPF_TRAMP_F_NATIVE_CALL		BIT(9)
+/* Exclusive native body replacement; incompatible with IPMODIFY sharing. */
+#define BPF_TRAMP_F_NATIVE_REPLACE	BIT(10)
 
 /* Each call __bpf_prog_enter + call bpf_func + call __bpf_prog_exit is ~50
  * bytes on x86.

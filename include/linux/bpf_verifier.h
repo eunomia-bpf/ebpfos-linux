@@ -1235,7 +1235,11 @@ static inline bool bpf_prog_check_recur(const struct bpf_prog *prog)
 {
 	switch (resolve_prog_type(prog)) {
 	case BPF_PROG_TYPE_TRACING:
-		return prog->expected_attach_type != BPF_TRACE_ITER;
+		/* Replacements execute the body, including valid nested calls.
+		 * They use ordinary kernel stacks, like non-private struct_ops.
+		 */
+		return prog->expected_attach_type != BPF_TRACE_ITER &&
+		       prog->expected_attach_type != BPF_TRACE_REPLACE;
 	case BPF_PROG_TYPE_STRUCT_OPS:
 		return prog->aux->jits_use_priv_stack;
 	case BPF_PROG_TYPE_LSM:

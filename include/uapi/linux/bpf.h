@@ -1154,6 +1154,8 @@ enum bpf_attach_type {
 	BPF_TRACE_KPROBE_SESSION,
 	BPF_TRACE_UPROBE_SESSION,
 	BPF_TRACE_FSESSION,
+	/* Exclusive, typed non-sleepable function-body replacement. */
+	BPF_TRACE_REPLACE,
 	__MAX_BPF_ATTACH_TYPE
 };
 

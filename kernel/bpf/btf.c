@@ -6301,6 +6301,7 @@ static int btf_validate_prog_ctx_type(struct bpf_verifier_log *log, const struct
 			    strncmp(tname, "bpf_iter__", sizeof("bpf_iter__") - 1) == 0)
 				return 0;
 			break;
+		case BPF_TRACE_REPLACE:
 		case BPF_TRACE_FENTRY:
 		case BPF_TRACE_FEXIT:
 		case BPF_MODIFY_RETURN:
