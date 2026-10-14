@@ -1678,6 +1678,8 @@ int bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 			       struct bpf_trampoline *tr,
 			       struct bpf_prog *tgt_prog);
+int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
+			       struct bpf_trampoline *tr);
 int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 			       struct bpf_trampoline *tr,
 			       struct bpf_prog *new_prog, struct bpf_prog *expected);
@@ -1775,6 +1777,11 @@ static inline int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 					     struct bpf_prog *tgt_prog)
 {
 	return -ENOTSUPP;
+}
+static inline int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
+				       struct bpf_trampoline *tr)
+{
+	return -EOPNOTSUPP;
 }
 static inline int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 					      struct bpf_trampoline *tr,

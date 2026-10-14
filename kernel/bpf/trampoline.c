@@ -618,6 +618,8 @@ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mut
 
 	if (total == 0) {
 		err = unregister_fentry(tr, orig_flags, tr->cur_image->image);
+		if (err)
+			goto out;
 		bpf_tramp_image_put(tr->cur_image);
 		tr->cur_image = NULL;
 		goto out;
@@ -888,7 +890,63 @@ int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 	int err;
 
 	mutex_lock(&tr->mutex);
-	err = __bpf_trampoline_unlink_prog(link, tr, tgt_prog);
+	/* Explicit detach keeps the link object alive. Its later release must
+	 * not remove another registration or decrement the count twice.
+	 */
+	if (bpf_attach_type_to_tramp(link->link.prog) != BPF_TRAMP_REPLACE &&
+	    hlist_unhashed(&link->tramp_hlist))
+		err = 0;
+	else
+		err = __bpf_trampoline_unlink_prog(link, tr, tgt_prog);
+	mutex_unlock(&tr->mutex);
+	return err;
+}
+
+/* Explicit removal is independent of descriptor lifetime. A retained link
+ * descriptor can neither call the removed program nor update that binding.
+ */
+int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
+			       struct bpf_trampoline *tr)
+{
+	struct hlist_node *next, *prev = NULL;
+	enum bpf_tramp_prog_type kind;
+	struct bpf_prog *prog;
+	int err = -EOPNOTSUPP;
+
+	mutex_lock(&tr->mutex);
+	prog = link->link.prog;
+	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
+	    prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
+	    (prog->expected_attach_type != BPF_TRACE_FENTRY &&
+	     prog->expected_attach_type != BPF_TRACE_FEXIT &&
+	     prog->expected_attach_type != BPF_MODIFY_RETURN))
+		goto out;
+	if (hlist_unhashed(&link->tramp_hlist)) {
+		err = 0;
+		goto out;
+	}
+	kind = bpf_attach_type_to_tramp(prog);
+	next = link->tramp_hlist.next;
+	if (link->tramp_hlist.pprev != &tr->progs_hlist[kind].first)
+		prev = container_of(link->tramp_hlist.pprev, struct hlist_node, next);
+	hlist_del_init(&link->tramp_hlist);
+	tr->progs_cnt[kind]--;
+	err = bpf_trampoline_update(tr, true);
+	if (err) {
+		/* Preserve exact callback order if image preparation refuses. */
+		if (next)
+			hlist_add_before(&link->tramp_hlist, next);
+		else if (prev)
+			hlist_add_behind(&link->tramp_hlist, prev);
+		else
+			hlist_add_head(&link->tramp_hlist, &tr->progs_hlist[kind]);
+		tr->progs_cnt[kind]++;
+		goto out;
+	}
+	synchronize_rcu_tasks();
+	synchronize_rcu();
+	synchronize_rcu_tasks();
+out:
 	mutex_unlock(&tr->mutex);
 	return err;
 }
@@ -909,6 +967,10 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 
 	mutex_lock(&tr->mutex);
 	old_prog = link->link.prog;
+	if (hlist_unhashed(&link->tramp_hlist)) {
+		err = -ENOENT;
+		goto out;
+	}
 	if (expected && expected != old_prog) {
 		err = -EPERM;
 		goto out;

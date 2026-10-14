@@ -3663,6 +3663,16 @@ static int bpf_tracing_link_fill_link_info(const struct bpf_link *link,
 	return 0;
 }
 
+static int bpf_tracing_link_detach(struct bpf_link *link)
+{
+	struct bpf_tracing_link *tr_link =
+		container_of(link, struct bpf_tracing_link, link.link);
+
+	if (tr_link->tgt_prog)
+		return -EOPNOTSUPP;
+	return bpf_trampoline_detach_link(&tr_link->link, tr_link->trampoline);
+}
+
 static int bpf_tracing_link_update(struct bpf_link *link,
 				   struct bpf_prog *new_prog,
 				   struct bpf_prog *expected)
@@ -3682,6 +3692,7 @@ static const struct bpf_link_ops bpf_tracing_link_lops = {
 	.show_fdinfo = bpf_tracing_link_show_fdinfo,
 	.fill_link_info = bpf_tracing_link_fill_link_info,
 	.update_prog = bpf_tracing_link_update,
+	.detach = bpf_tracing_link_detach,
 };
 
 static int bpf_tracing_prog_attach(struct bpf_prog *prog,
@@ -6055,7 +6066,7 @@ out_put_link:
 
 #define BPF_LINK_DETACH_LAST_FIELD link_detach.link_fd
 
-static int link_detach(union bpf_attr *attr)
+static int link_detach(union bpf_attr *attr, bool from_kernel)
 {
 	struct bpf_link *link;
 	int ret;
@@ -6067,7 +6078,10 @@ static int link_detach(union bpf_attr *attr)
 	if (IS_ERR(link))
 		return PTR_ERR(link);
 
-	if (link->ops->detach)
+	/* Other link operations can wait for the helper's own Tasks Trace reader. */
+	if (from_kernel && link->ops != &bpf_tracing_link_lops)
+		ret = -EOPNOTSUPP;
+	else if (link->ops->detach)
 		ret = link->ops->detach(link);
 	else
 		ret = -EOPNOTSUPP;
@@ -6503,7 +6517,7 @@ static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
 		err = bpf_iter_create(&attr);
 		break;
 	case BPF_LINK_DETACH:
-		err = link_detach(&attr);
+		err = link_detach(&attr, bpfptr_is_kernel(uattr));
 		break;
 	case BPF_PROG_BIND_MAP:
 		err = bpf_prog_bind_map(&attr);
@@ -6570,6 +6584,7 @@ BPF_CALL_3(bpf_sys_bpf, int, cmd, union bpf_attr *, attr, u32, attr_size)
 	case BPF_LINK_CREATE:
 	case BPF_RAW_TRACEPOINT_OPEN:
 	case BPF_LINK_UPDATE:
+	case BPF_LINK_DETACH:
 		break;
 	default:
 		return -EINVAL;
