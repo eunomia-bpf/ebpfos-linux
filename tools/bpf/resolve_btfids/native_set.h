@@ -118,6 +118,41 @@ static int native_code_symbol(struct object *obj, const char *name)
 	return found ? 0 : -ENOENT;
 }
 
+/* Original C FUNC can provide the declaration used by DECLARE_STATIC_CALL.
+ * Check the original key against the image symbol before borrowing its ABI.
+ */
+static int native_static_target(struct object *obj, const char *native, const char *target)
+{
+ char key[256];GElf_Sym target_sym = {}, key_sym = {};unsigned int targets = 0, keys = 0;
+ Elf_Data *symbols = obj->efile.symbols, *data;Elf_Scn *scn;GElf_Shdr section;
+ size_t i, count, offset;unsigned long long value = 0;const unsigned char *bytes;
+ if (strncmp(native, "__SCT__", 7) || gelf_getclass(obj->efile.elf) != ELFCLASS64 ||
+     snprintf(key, sizeof(key), "__SCK__%s", native + 7) >= (int)sizeof(key) || !symbols)
+  return -EINVAL;
+ count = symbols->d_size / gelf_fsize(obj->efile.elf, ELF_T_SYM, 1, EV_CURRENT);
+ for (i = 0; i < count; i++) {
+  GElf_Sym sym;const char *name;
+  if (!gelf_getsym(symbols, i, &sym))return -EINVAL;
+  if (sym.st_shndx == SHN_UNDEF)continue;
+  name = elf_strptr(obj->efile.elf, obj->efile.strtabidx, sym.st_name);
+  if (!name)continue;
+  if (!strcmp(name, target)){target_sym = sym;targets++;}
+  if (!strcmp(name, key)){key_sym = sym;keys++;}
+ }
+ if (targets != 1 || keys != 1 || native_code_symbol(obj, target) || key_sym.st_size < 8)
+  return -EINVAL;
+ scn = elf_getscn(obj->efile.elf, key_sym.st_shndx);
+ if (!scn || !gelf_getshdr(scn, &section) || section.sh_flags & SHF_EXECINSTR ||
+     key_sym.st_value < section.sh_addr)return -EINVAL;
+ offset = key_sym.st_value - section.sh_addr;data = elf_getdata(scn, NULL);
+ if (!data || !data->d_buf || offset > data->d_size || data->d_size - offset < 8)
+  return -EINVAL;
+ bytes = (const unsigned char *)data->d_buf + offset;
+ for (i = 0; i < 8; i++)value |= (unsigned long long)bytes[i] <<
+     (8 * (obj->efile.encoding == ELFDATA2LSB ? i : 7 - i));
+ return value == target_sym.st_value ? 0 : -EINVAL;
+}
+
 static int native_member_proto(const struct btf *btf, const char *record, const char *field)
 {
 	const struct btf_type *t;
@@ -125,6 +160,12 @@ static int native_member_proto(const struct btf *btf, const char *record, const 
 	int id, proto = -ENOENT;
 	u32 i;
 
+ if (!strcmp(record, "BTF_FUNC")) {
+  id = native_unique_type(btf, field, BTF_KIND_FUNC);
+  if (id < 0)return id;
+  t = btf__type_by_id(btf, id);id = t->type;t = btf__type_by_id(btf, id);
+  return t && btf_is_func_proto(t) ? id : -EINVAL;
+ }
 	id = native_unique_type(btf, record, BTF_KIND_STRUCT);
 	if (id < 0)
 		return id;
@@ -290,6 +331,8 @@ static int native_set_btf(struct object *obj)
 		}
 		func = native_unique_type(btf, e->native, BTF_KIND_FUNC);
 		if (e->record) {
+   if (!strcmp(e->record, "BTF_FUNC") && native_static_target(obj, e->native, e->field))
+    return -EINVAL;
 			proto = native_member_proto(btf, e->record, e->field);
 			if (proto < 0)
 				return proto;
