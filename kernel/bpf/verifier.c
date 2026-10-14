@@ -10471,8 +10471,27 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			struct bpf_reg_state *checked = reg;
 			int err;
 
-			if (bpf_register_is_null(reg) && type_may_be_null(arg->arg_type))
+			if (bpf_register_is_null(reg) && type_may_be_null(arg->arg_type)) {
+				/* This scalar value, not just its register type, satisfies
+				 * the nullable contract. Keep it precise so a different
+				 * scalar branch cannot reuse the accepted NULL state.
+				 */
+				err = mark_chain_precision(env, regno);
+				if (err)
+					return err;
 				continue;
+			}
+
+			/* The nullable register-type set includes SCALAR_VALUE for
+			 * literal NULL. A global call must not accept any other scalar
+			 * as a trusted BTF pointer. Keep probe-only untrusted arguments
+			 * on their separate address-value path above.
+			 */
+			if (reg->type == SCALAR_VALUE &&
+			    !(arg->arg_type & PTR_UNTRUSTED)) {
+				bpf_log(log, "arg#%d typed pointer requires a pointer or literal NULL\n", i);
+				return -EINVAL;
+			}
 
 			memset(&meta, 0, sizeof(meta)); /* leave func_id as zero */
 			if (arg->has_btf_offset) {
