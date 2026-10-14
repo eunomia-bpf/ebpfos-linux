@@ -71,6 +71,9 @@ static const struct btf_kfunc_id_set ebpfos_native_set = {
 
 static int __init ebpfos_native_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_native_set);
+	int ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_native_set);
+
+	pr_info("native kfunc set: count=%u registration=%d\n", ebpfos_native_ids.cnt, ret);
+	return ret;
 }
 late_initcall(ebpfos_native_init);

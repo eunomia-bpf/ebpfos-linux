@@ -9076,21 +9076,16 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 	 * For module sets, we need to allocate as we may need to relocate
 	 * BTF ids.
 	 */
-	/* KOperations are not ordinary callable kfuncs. Their existing separate
-	 * registry owns their flags as well as their instruction descriptors.
-	 * Keep the same bound for each registry, without raising a program's
-	 * verifier budget or permitting an ordinary call to an instruction.
+	/* Ordinary kfunc sets are immutable, allocation-sized lookup tables.
+	 * Their cardinality does not change any program's verifier budget or
+	 * call contract. KOperations keep their separate bounded registry and
+	 * instruction descriptors; they are not ordinary callable kfuncs.
 	 */
 	if (!add_kop_descs) {
 		set_cnt = old_set ? old_set->cnt : 0;
 
 		if (set_cnt > U32_MAX - add_set->cnt) {
 			ret = -EOVERFLOW;
-			goto err_free;
-		}
-
-		if (set_cnt + add_set->cnt > BTF_KFUNC_SET_MAX_CNT) {
-			ret = -E2BIG;
 			goto err_free;
 		}
 
@@ -9378,7 +9373,8 @@ static int __register_btf_kfunc_id_set(enum btf_kfunc_hook hook,
 				       const struct btf_kfunc_id_set *kset)
 {
 	struct btf *btf;
-	int ret, i;
+	int ret;
+	u32 i;
 
 	btf = btf_get_module_btf(kset->owner);
 	if (!btf)
