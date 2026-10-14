@@ -893,6 +893,66 @@ int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 	return err;
 }
 
+/* A cold, synchronous update. The incoming reference transfers to the link
+ * on success. The old program and all old direct calls stay live until their
+ * entry prelude, non-sleepable execution and return epilogue have drained.
+ */
+int bpf_trampoline_update_link(struct bpf_tramp_link *link,
+			       struct bpf_trampoline *tr,
+			       struct bpf_prog *new_prog,
+			       struct bpf_prog *expected)
+{
+	struct bpf_tramp_link *other;
+	struct bpf_prog *old_prog;
+	enum bpf_tramp_prog_type kind;
+	int err = -EINVAL;
+
+	mutex_lock(&tr->mutex);
+	old_prog = link->link.prog;
+	if (expected && expected != old_prog) {
+		err = -EPERM;
+		goto out;
+	}
+	/* A syscall BPF caller holds Tasks Trace RCU. Waiting for a sleepable
+	 * callback's Tasks Trace grace period would wait for that caller itself.
+	 * Session and extension links also have additional bindings to update.
+	 */
+	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
+	    old_prog->type != BPF_PROG_TYPE_TRACING ||
+	    new_prog->type != old_prog->type || old_prog->sleepable ||
+	    new_prog->sleepable ||
+	    (old_prog->expected_attach_type != BPF_TRACE_FENTRY &&
+	     old_prog->expected_attach_type != BPF_TRACE_FEXIT &&
+	     old_prog->expected_attach_type != BPF_MODIFY_RETURN) ||
+	    new_prog->expected_attach_type != old_prog->expected_attach_type ||
+	    new_prog->aux->attach_btf != old_prog->aux->attach_btf ||
+	    new_prog->aux->attach_btf_id != old_prog->aux->attach_btf_id)
+		goto out;
+	kind = bpf_attach_type_to_tramp(old_prog);
+	hlist_for_each_entry(other, &tr->progs_hlist[kind], tramp_hlist)
+		if (other != link && other->link.prog == new_prog) {
+			err = -EBUSY;
+			goto out;
+		}
+	WRITE_ONCE(link->link.prog, new_prog);
+	err = bpf_trampoline_update(tr, true);
+	if (err) {
+		WRITE_ONCE(link->link.prog, old_prog);
+		goto out;
+	}
+	/* New entries already use the new image. Keep update serialization
+	 * through the grace periods; ordinary callbacks take no such mutex.
+	 * Trampoline image storage retains its existing separate retirement.
+	 */
+	synchronize_rcu_tasks();
+	synchronize_rcu();
+	synchronize_rcu_tasks();
+	bpf_prog_put(old_prog);
+out:
+	mutex_unlock(&tr->mutex);
+	return err;
+}
+
 #if defined(CONFIG_CGROUP_BPF) && defined(CONFIG_BPF_LSM)
 static void bpf_shim_tramp_link_release(struct bpf_link *link)
 {

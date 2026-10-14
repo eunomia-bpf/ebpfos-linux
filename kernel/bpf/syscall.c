@@ -3663,11 +3663,25 @@ static int bpf_tracing_link_fill_link_info(const struct bpf_link *link,
 	return 0;
 }
 
+static int bpf_tracing_link_update(struct bpf_link *link,
+				   struct bpf_prog *new_prog,
+				   struct bpf_prog *expected)
+{
+	struct bpf_tracing_link *tr_link =
+		container_of(link, struct bpf_tracing_link, link.link);
+
+	if (tr_link->tgt_prog)
+		return -EOPNOTSUPP;
+	return bpf_trampoline_update_link(&tr_link->link,
+					 tr_link->trampoline, new_prog, expected);
+}
+
 static const struct bpf_link_ops bpf_tracing_link_lops = {
 	.release = bpf_tracing_link_release,
 	.dealloc = bpf_tracing_link_dealloc,
 	.show_fdinfo = bpf_tracing_link_show_fdinfo,
 	.fill_link_info = bpf_tracing_link_fill_link_info,
+	.update_prog = bpf_tracing_link_update,
 };
 
 static int bpf_tracing_prog_attach(struct bpf_prog *prog,
@@ -5975,7 +5989,7 @@ out_put:
 
 #define BPF_LINK_UPDATE_LAST_FIELD link_update.old_prog_fd
 
-static int link_update(union bpf_attr *attr)
+static int link_update(union bpf_attr *attr, bool from_kernel)
 {
 	struct bpf_prog *old_prog = NULL, *new_prog;
 	struct bpf_link *link;
@@ -5992,6 +6006,14 @@ static int link_update(union bpf_attr *attr)
 	link = bpf_link_get_from_fd(attr->link_update.link_fd);
 	if (IS_ERR(link))
 		return PTR_ERR(link);
+	/* The syscall-program helper is inside Tasks Trace RCU. Its synchronous
+	 * update is restricted to the non-sleepable tracing operation above.
+	 * Keep this check on the retained link, not on a reusable descriptor.
+	 */
+	if (from_kernel && link->ops != &bpf_tracing_link_lops) {
+		ret = -EOPNOTSUPP;
+		goto out_put_link;
+	}
 
 	if (link->ops->update_map) {
 		ret = link_update_map(link, attr);
@@ -6465,7 +6487,7 @@ static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size)
 		err = link_create(&attr, uattr);
 		break;
 	case BPF_LINK_UPDATE:
-		err = link_update(&attr);
+		err = link_update(&attr, bpfptr_is_kernel(uattr));
 		break;
 	case BPF_LINK_GET_FD_BY_ID:
 		err = bpf_link_get_fd_by_id(&attr);
@@ -6547,6 +6569,7 @@ BPF_CALL_3(bpf_sys_bpf, int, cmd, union bpf_attr *, attr, u32, attr_size)
 	case BPF_BTF_LOAD:
 	case BPF_LINK_CREATE:
 	case BPF_RAW_TRACEPOINT_OPEN:
+	case BPF_LINK_UPDATE:
 		break;
 	default:
 		return -EINVAL;
