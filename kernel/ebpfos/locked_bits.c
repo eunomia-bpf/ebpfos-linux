@@ -86,8 +86,16 @@ static int locked_context_filter(const struct bpf_prog *prog, u32 id)
  if (!ours) return 0;
  if (!prog) return 1;
  if (prog->type == BPF_PROG_TYPE_SYSCALL) return 0;
- return !prog->aux || !prog->aux->ebpfos_component ||
-        prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+ if (!prog->aux || !prog->aux->ebpfos_component || prog->sleepable)
+  return 1;
+ /* Replacement entries inherit the original caller's context. These exact
+  * memory instructions need no CPU, interrupt or scheduling capability;
+  * their proof still checks the destination, value and writer authority.
+  * Ordinary tracing observers do not acquire component write permission.
+  */
+ return prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
+        !(prog->type == BPF_PROG_TYPE_TRACING &&
+          prog->expected_attach_type == BPF_TRACE_REPLACE);
 }
 
 static int __init locked_bits_init(void)
