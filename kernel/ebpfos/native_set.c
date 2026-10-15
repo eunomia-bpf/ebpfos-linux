@@ -88,3 +88,16 @@ static int __init ebpfos_native_init(void)
 	return ret ? ret : tracing;
 }
 late_initcall(ebpfos_native_init);
+
+/* A checked indirect entry has no acquire/release/iterator/context contract.
+ * Do not use it to bypass a declared native entry's stronger effects. Pointer
+ * return dispatchers are conservatively registered KF_RET_NULL themselves.
+ */
+bool ebpfos_native_plain_call(u32 id);
+bool ebpfos_native_plain_call(u32 id)
+{
+	const typeof(ebpfos_native_ids.pairs[0]) *entry;
+
+	entry = btf_id_set8_contains(&ebpfos_native_ids, id);
+	return !entry || !(entry->flags & ~KF_RET_NULL);
+}
