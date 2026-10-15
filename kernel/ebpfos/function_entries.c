@@ -87,6 +87,14 @@ static bool cell_layout(struct btf *a, u32 ai, struct btf *b, u32 bi,
   return cell_layout(a, x->type, b, y->type, depth + 1, nominal);
  case BTF_KIND_PTR:
   return cell_layout(a, x->type, b, y->type, depth + 1, true);
+ case BTF_KIND_FUNC_PROTO: {
+  const struct btf_param *xp = (const void *)(x + 1), *yp = (const void *)(y + 1);
+  if (btf_type_vlen(x) != btf_type_vlen(y) ||
+      !cell_layout(a, x->type, b, y->type, depth + 1, false)) return false;
+  for (i = 0; i < btf_type_vlen(x); ++i)
+   if (!cell_layout(a, xp[i].type, b, yp[i].type, depth + 1, false)) return false;
+  return true;
+ }
  case BTF_KIND_STRUCT: case BTF_KIND_UNION: {
   const struct btf_member *xm = btf_members(x), *ym = btf_members(y);
   if (x->size != y->size) return false;
