@@ -2922,6 +2922,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	struct btf *attach_btf = NULL;
 	struct bpf_token *token = NULL;
 	bool bpf_cap;
+	size_t field_access_bytes;
 	int err;
 	char license[128];
 
@@ -2938,8 +2939,13 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		attr->expected_attach_type != BPF_TRACE_REPLACE))) ||
 	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
-	if (attr->ebpfos_field_access_cnt >
-	    PAGE_SIZE / sizeof(struct bpf_ebpfos_field_access))
+	/* This is load metadata, copied with kvmalloc rather than into a page.
+	 * Retain the complete per-function declarations; an incomplete prefix
+	 * cannot describe a component's source write authority.
+	 */
+	if (check_mul_overflow((size_t)attr->ebpfos_field_access_cnt,
+			       sizeof(struct bpf_ebpfos_field_access),
+			       &field_access_bytes))
 		return -E2BIG;
 
 	if (attr->prog_flags & ~(BPF_F_STRICT_ALIGNMENT |
@@ -3088,12 +3094,11 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->aux->attach_btf_id = attr->attach_btf_id;
 	prog->aux->dst_prog = dst_prog;
 	if (attr->ebpfos_field_access_cnt) {
-		size_t bytes = attr->ebpfos_field_access_cnt *
-			       sizeof(struct bpf_ebpfos_field_access);
 		struct bpf_ebpfos_field_access *fields;
 
 		fields = kvmemdup_bpfptr(make_bpfptr(attr->ebpfos_field_accesses,
-						  uattr.is_kernel), bytes);
+						  uattr.is_kernel),
+					 field_access_bytes);
 		if (IS_ERR(fields)) {
 			err = PTR_ERR(fields);
 			goto free_prog;
