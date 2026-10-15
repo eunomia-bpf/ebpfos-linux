@@ -1532,6 +1532,7 @@ int main(int argc, const char **argv)
 	const char *field_obligations = NULL;
 	bool fatal_warnings = false;
 	bool native_set = false;
+	bool preserve_ids = false;
 	bool resolve_btfids = true;
 	char out_path[PATH_MAX];
 
@@ -1554,6 +1555,8 @@ int main(int argc, const char **argv)
 			   "type/field store obligations with their justifications"),
 		OPT_BOOLEAN(0, "native-set", &native_set,
 			    "preserve original prototypes and contracts for the declared native set"),
+		OPT_BOOLEAN(0, "preserve-ids", &preserve_ids,
+			    "resolve IDs using finalized input BTF without transforming or sorting its types"),
 		OPT_END()
 	};
 	int err = -1;
@@ -1563,6 +1566,16 @@ int main(int argc, const char **argv)
 	if (argc != 1)
 		usage_with_options(resolve_btfids_usage, btfid_options);
 
+	/* Finalized BTF can already be referenced by compiled objects. Sorting
+	 * it again renumbers those references even when no function changed.
+	 * This mode performs symbol resolution/patching only; kernel validation
+	 * and all program-load checks remain the same.
+	 */
+	if (preserve_ids && (native_set || percpu_alias || field_obligations ||
+			     obj.distill_base || btfids_path)) {
+		pr_err("--preserve-ids cannot transform BTF or patch a raw ID blob\n");
+		return -1;
+	}
 	obj.path = argv[0];
 
 	if (btfids_path)
@@ -1590,7 +1603,7 @@ int main(int argc, const char **argv)
 	if (native_set && native_set_btf(&obj))
 		goto out;
 
-	if (btf2btf(&obj))
+	if (!preserve_ids && btf2btf(&obj))
 		goto out;
 	if (percpu_alias) {
 		struct btf *view;
@@ -1607,7 +1620,7 @@ int main(int argc, const char **argv)
 	if (field_obligations && btf_field_obligations(obj.btf, field_obligations))
 		goto out;
 
-	if (finalize_btf(&obj))
+	if (!preserve_ids && finalize_btf(&obj))
 		goto out;
 
 	if (!resolve_btfids)
