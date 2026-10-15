@@ -8,6 +8,7 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
+#include "component_context.h"
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -192,8 +193,7 @@ static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id)
 	 */
 	if (!ours)
 		return 0;
-	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+	return !ebpfos_non_sleepable_component(prog);
 }
 
 static int __init arithmetic_register(void)

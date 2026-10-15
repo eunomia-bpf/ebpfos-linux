@@ -29,6 +29,7 @@
 #include "koperation_cmp_mask.generated.h"
 #include "koperation_opcode.generated.h"
 #include "fault_prefetch.h"
+#include "component_context.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -1977,9 +1978,7 @@ static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
 	 */
 	for (i = 0; i < ARRAY_SIZE(component_sets); i++)
 		if (btf_id_set8_contains(component_sets[i]->set, id))
-			return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-			       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT ||
-			       prog->sleepable;
+			return !ebpfos_non_sleepable_component(prog);
 	return 0;
 }
 
