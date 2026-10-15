@@ -149,11 +149,7 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
-}
+static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id);
 
 #define DEFINE(prefix, area, op, width, size, alu, unary, opcode) \
 BTF_KFUNCS_START(prefix##op##width##_ids) \
@@ -182,6 +178,23 @@ ARITHMETIC_ROWS(AREA_DEFINE)
 #undef OLD_DEFINE
 #undef AREA_DEFINE
 #undef DEFINE
+
+static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id)
+{
+	bool ours = false;
+#define ARITHMETIC_MATCH(op, width, size, alu, unary, opcode) \
+	ours |= btf_id_set8_contains(&percpu_##op##width##_ids, id) || \
+		btf_id_set8_contains(&percpu_area_##op##width##_ids, id);
+	ARITHMETIC_ROWS(ARITHMETIC_MATCH)
+#undef ARITHMETIC_MATCH
+	/* This hook is shared with tracing. Restrict only these arithmetic
+	 * descriptors; unrelated services retain their own context filters.
+	 */
+	if (!ours)
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+}
 
 static int __init arithmetic_register(void)
 {

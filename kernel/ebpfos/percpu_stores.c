@@ -84,11 +84,7 @@ static int store_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int store_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
-}
+static int store_component_filter(const struct bpf_prog *prog, u32 id);
 
 #define STORE_DEFINE(prefix, area, width, size) \
 BTF_KFUNCS_START(prefix##width##_ids) \
@@ -216,6 +212,25 @@ PERCPU_STORE_ROWS(AREA_REGSTORE_DEFINE)
 #undef OLD_REGSTORE_DEFINE
 #undef AREA_REGSTORE_DEFINE
 #undef REGSTORE_DEFINE
+
+static int store_component_filter(const struct bpf_prog *prog, u32 id)
+{
+	bool ours = false;
+#define STORE_MATCH(width, size) \
+	ours |= btf_id_set8_contains(&percpu_store##width##_ids, id) || \
+		btf_id_set8_contains(&percpu_area_store##width##_ids, id) || \
+		btf_id_set8_contains(&percpu_regstore##width##_ids, id) || \
+		btf_id_set8_contains(&percpu_area_regstore##width##_ids, id);
+	PERCPU_STORE_ROWS(STORE_MATCH)
+#undef STORE_MATCH
+	/* Raw tracepoints and tracing share a hook. Preserve other services'
+	 * context checks without giving these stores another allowed context.
+	 */
+	if (!ours)
+		return 0;
+	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
+	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+}
 
 static int __init percpu_stores_init(void)
 {

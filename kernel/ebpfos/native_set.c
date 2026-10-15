@@ -60,8 +60,16 @@ static int ebpfos_native_filter(const struct bpf_prog *prog, u32 id)
 {
 	if (!btf_id_set8_contains(&ebpfos_native_ids, id))
 		return 0;
-	return !prog || prog->type != BPF_PROG_TYPE_SYSCALL ||
-	       !prog->aux || !prog->aux->ebpfos_component;
+	if (!prog || !prog->aux || !prog->aux->ebpfos_component)
+		return 1;
+	if (prog->type == BPF_PROG_TYPE_SYSCALL)
+		return 0;
+	/* Replacement keeps the original Linux call context. Ordinary tracing
+	 * observers cannot acquire the component's native dependency boundary.
+	 * The kfunc's argument, reference and sleepability checks still apply.
+	 */
+	return prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
+	       prog->expected_attach_type != BPF_TRACE_REPLACE;
 }
 
 static const struct btf_kfunc_id_set ebpfos_native_set = {
@@ -72,8 +80,11 @@ static const struct btf_kfunc_id_set ebpfos_native_set = {
 static int __init ebpfos_native_init(void)
 {
 	int ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_native_set);
+	int tracing = ret ? ret :
+		register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &ebpfos_native_set);
 
-	pr_info("native kfunc set: count=%u registration=%d\n", ebpfos_native_ids.cnt, ret);
-	return ret;
+	pr_info("native kfunc set: count=%u registration=%d replacement=%d\n",
+		ebpfos_native_ids.cnt, ret, tracing);
+	return ret ? ret : tracing;
 }
 late_initcall(ebpfos_native_init);
