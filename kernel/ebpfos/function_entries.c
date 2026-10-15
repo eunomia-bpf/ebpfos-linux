@@ -48,6 +48,9 @@ static bool entry_context(struct bpf_prog *parent)
    unsigned long target;
    if (insn->code != (BPF_JMP | BPF_CALL) || insn->src_reg) continue;
    target = (unsigned long)__bpf_call_base + insn->imm;
+   /* Stock may_goto fixups use initialized slots in this function's frame,
+    * not bpf_run_ctx. Keep their original timeout and escape semantics. */
+   if (target == (unsigned long)arch_bpf_timed_may_goto) continue;
    for (k = 0; k < ARRAY_SIZE(helpers); ++k) {
     const struct bpf_func_proto *prototype = bpf_base_func_proto(helpers[k], parent);
     if (prototype && target == (unsigned long)prototype->func) break;
