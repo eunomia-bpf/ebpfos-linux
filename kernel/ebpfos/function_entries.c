@@ -69,6 +69,30 @@ static bool entry_context(struct bpf_prog *parent)
 
 #include "function_contract.h"
 
+/* Independent graphs have independent BTF ordinals. Resolve the second
+ * generation by its exported symbol, then apply the same complete native
+ * callable contract. Only loaded functions count; duplicate exports refuse.
+ * The retained graph owns the resolved address for the journal's lifetime.
+ */
+static bool entry_export(struct btf *native, const struct btf_type *function,
+ struct bpf_prog *program, unsigned long *address)
+{
+ struct bpf_prog_aux *aux = program->aux;
+ const char *name = btf_name_by_offset(native, function->name_off);
+ unsigned int i;
+ bool found = false;
+ if (!aux->btf || !aux->func_info || !aux->func) return false;
+ for (i = 1; i < aux->func_cnt && i < aux->func_info_cnt; ++i) {
+  u32 id = aux->func_info[i].type_id;
+  const struct btf_type *candidate = btf_type_by_id(aux->btf, id);
+  if (!candidate || !btf_type_is_func(candidate) ||
+      strcmp(name, btf_name_by_offset(aux->btf, candidate->name_off))) continue;
+  if (found || !cell_callable(native, function, program, id, address)) return false;
+  found = true;
+ }
+ return found;
+}
+
 static int entry_publication_point(void *unused) { return 0; }
 static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
 {
@@ -154,7 +178,8 @@ static int entry_open(const struct ebpfos_function_link *entries,
    set->programs[i * 2 + j] = program;
    if (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE ||
        !program->aux->ebpfos_component || !entry_context(program)) {error = -EOPNOTSUPP;goto fail;}
-   if (!cell_callable(btf, function, program, entry->compiled_function, &target)) {error = -EPROTOTYPE;goto fail;}
+   if (!(j ? entry_export(btf, function, program, &target) :
+       cell_callable(btf, function, program, entry->compiled_function, &target))) {error = -EPROTOTYPE;goto fail;}
    if (target & 1) goto fail;
    if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
