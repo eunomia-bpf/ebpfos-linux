@@ -111,7 +111,7 @@ static int __init checked_dispatch_init(void)
 }
 late_initcall(checked_dispatch_init);
 
-static bool checked_function(u64 target, u64 witness, bool destructive)
+static __always_inline bool checked_function(u64 target, u64 witness, bool destructive)
 {
 	struct ebpfos_checked_index_entry *entries = smp_load_acquire(&checked_index);
 	struct btf *btf;
