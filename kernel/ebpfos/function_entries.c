@@ -41,19 +41,50 @@ static const struct file_operations entry_operations;
 /* Bare native ABI calls have no bpf_run_ctx. These standard helpers depend
  * only on explicit operands or the native CPU/task, not on such a frame.
  * Keep this cold eligibility check outside the call path. */
-static bool entry_context(struct bpf_prog *parent)
+static bool entry_context(struct bpf_prog *parent, unsigned long entry)
 {
  const enum bpf_func_id helpers[] = { BPF_FUNC_per_cpu_ptr, BPF_FUNC_this_cpu_ptr,
   BPF_FUNC_get_current_task_btf, BPF_FUNC_loop };
- unsigned int i, j, k;
- if (!parent->aux->func || !parent->aux->func_cnt) return false;
- for (i = 0; i < parent->aux->func_cnt; ++i) {
-  struct bpf_prog *function = parent->aux->func[i];
-  if (!function || !function->jited || function->aux->priv_stack_ptr) return false;
+ struct bpf_prog_aux *aux = parent->aux;
+ unsigned int count = aux->func_cnt, head = 0, tail = 0, i, j, k;
+ unsigned int *queue;
+ bool *seen, allowed = false;
+ if (!aux->func || !count || aux->real_func_cnt != count ||
+     aux->exception_boundary) return false;
+ queue = kvmalloc_array(count, sizeof(*queue), GFP_KERNEL);
+ seen = kvcalloc(count, sizeof(*seen), GFP_KERNEL);
+ if (!queue || !seen) goto out;
+ for (i = 1; i < count; ++i)
+  if (aux->func[i] && (unsigned long)aux->func[i]->bpf_func == entry) break;
+ if (i == count) goto out;
+ seen[i] = true;queue[tail++] = i;
+ /* jit_subprogs retains the stock-resolved subprogram index in off for
+  * both pseudo calls and function addresses. Walk those immutable edges,
+  * including every address-taken callback, starting at the callable export.
+  * The diagnostic loader entry is irrelevant unless reachable from it.
+  * This is a native-context restriction after verification, not a verifier.
+  */
+ while (head < tail) {
+  struct bpf_prog *function = aux->func[queue[head++]];
+  if (!function || !function->jited || function->aux->priv_stack_ptr ||
+      function->aux->tail_call_reachable || function->aux->exception_cb) goto out;
   for (j = 0; j < function->len; ++j) {
    const struct bpf_insn *insn = &function->insnsi[j];
    unsigned long target;
-   if (insn->code != (BPF_JMP | BPF_CALL) || insn->src_reg) continue;
+   if (bpf_pseudo_func(insn) ||
+       (insn->code == (BPF_JMP | BPF_CALL) && insn->src_reg == BPF_PSEUDO_CALL)) {
+    int callee = insn->off;
+    if (callee < 0 || callee >= count) goto out;
+    if (!seen[callee]) {seen[callee] = true;queue[tail++] = callee;}
+    continue;
+   }
+   /* Tail calls and register calls do not name an immutable local closure. */
+   if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||
+       insn->code == (BPF_JMP | BPF_CALL | BPF_X)) goto out;
+   if (insn->code != (BPF_JMP | BPF_CALL)) continue;
+   if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
+       insn->src_reg == BPF_PSEUDO_KOP_CALL) continue;
+   if (insn->src_reg) goto out;
    target = (unsigned long)__bpf_call_base + insn->imm;
    /* Stock may_goto fixups use initialized slots in this function's frame,
     * not bpf_run_ctx. Keep their original timeout and escape semantics. */
@@ -62,10 +93,12 @@ static bool entry_context(struct bpf_prog *parent)
     const struct bpf_func_proto *prototype = bpf_base_func_proto(helpers[k], parent);
     if (prototype && target == (unsigned long)prototype->func) break;
    }
-   if (k == ARRAY_SIZE(helpers)) return false;
+   if (k == ARRAY_SIZE(helpers)) goto out;
   }
  }
- return true;
+ allowed = true;
+out:
+ kvfree(seen);kvfree(queue);return allowed;
 }
 
 #include "function_contract.h"
@@ -179,9 +212,10 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
    if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
    set->programs[i * 2 + j] = program;
    if (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE ||
-       !program->aux->ebpfos_component || !entry_context(program)) {error = -EOPNOTSUPP;goto fail;}
+       !program->aux->ebpfos_component) {error = -EOPNOTSUPP;goto fail;}
    if (!(j ? entry_export(btf, function, program, &target) :
        cell_callable(btf, function, program, entry->compiled_function, &target))) {error = -EPROTOTYPE;goto fail;}
+   if (!entry_context(program, target)) {error = -EOPNOTSUPP;goto fail;}
    if (target & 1) goto fail;
    if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
