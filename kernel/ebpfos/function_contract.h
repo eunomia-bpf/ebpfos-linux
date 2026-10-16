@@ -117,10 +117,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  * This first common form admits context-free functions: no helper, kfunc,
  * tail call, timed-loop helper or private JIT stack can require bpf_run_ctx.
  */
-struct ebpfos_function_binding {
- struct bpf_prog *program;
- unsigned long address;
-};
+#include "function_binding.h"
 static inline int ebpfos_function_binding_open_pure(
  struct ebpfos_function_binding *out, u32 fd, enum bpf_prog_type type,
  struct btf *native, const struct btf_type *function, u32 compiled_id)
