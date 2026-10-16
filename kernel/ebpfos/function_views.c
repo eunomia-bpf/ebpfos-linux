@@ -5,8 +5,10 @@
 #include <linux/module.h>
 #include <linux/filter.h>
 #include <linux/btf.h>
+#include <linux/capability.h>
 #include "function_contract.h"
 #include "function_views.h"
+#include "syscall_kfuncs.h"
 static int ebpfos_function_view_release(struct inode *inode, struct file *file)
 {
  struct ebpfos_function_view *view = file->private_data;
@@ -70,3 +72,44 @@ fail:
 EXPORT_SYMBOL_GPL(ebpfos_function_view_publish);
 EXPORT_SYMBOL_GPL(ebpfos_function_view_get);
 EXPORT_SYMBOL_GPL(ebpfos_function_view_open_pure);
+
+/* A verified runtime may prepare a view in the calling process. Snapshot the
+ * complete request before acquiring graphs; the ordinary file descriptor is
+ * the only published result. Invocation never enters this service.
+ */
+__bpf_kfunc_start_defs();
+__bpf_kfunc int bpf_ebpfos_function_view_open_pure(
+ const struct ebpfos_function_view_source *sources, u32 sources__sz,
+ u64 generation, u32 program_type)
+{
+ struct ebpfos_function_view_source *snapshot;
+ struct btf *native;
+ int result;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!sources__sz || sources__sz % sizeof(*sources)) return -EINVAL;
+ native = bpf_get_btf_vmlinux();
+ if (IS_ERR_OR_NULL(native)) return -EINVAL;
+ snapshot = kmemdup(sources, sources__sz, GFP_KERNEL);
+ if (!snapshot) return -ENOMEM;
+ result = ebpfos_function_view_open_pure(snapshot, sources__sz / sizeof(*sources),
+   generation, program_type, native);
+ kfree(snapshot);return result;
+}
+__bpf_kfunc_end_defs();
+BTF_KFUNCS_START(view_ids)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_pure, KF_SLEEPABLE)
+BTF_KFUNCS_END(view_ids)
+static const struct btf_kfunc_id_set view_kfuncs;
+static int view_filter(const struct bpf_prog *prog, u32 id)
+{
+ const struct btf_kfunc_id_set *sets[] = { &view_kfuncs };
+ return ebpfos_syscall_kfunc_filter(prog, id, sets, ARRAY_SIZE(sets));
+}
+static const struct btf_kfunc_id_set view_kfuncs = {
+ .owner = THIS_MODULE, .set = &view_ids, .filter = view_filter,
+};
+static int __init view_init(void)
+{return register_btf_kfunc_id_set(BPF_PROG_TYPE_UNSPEC, &view_kfuncs);}
+#ifndef MODULE
+late_initcall(view_init);
+#endif
