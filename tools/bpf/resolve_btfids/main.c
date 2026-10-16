@@ -1369,6 +1369,17 @@ static int finalize_btf(struct object *obj)
 		obj->btf = btf;
 	}
 
+	/* Native contracts and generated storage views are added after DWARF
+	 * deduplication. Canonicalize their exact duplicate recursive graphs
+	 * before sorting or resolving IDs; nominal argument lookup requires one
+	 * record identity. libbpf retains conflicting layouts and qualifiers.
+	 */
+	err = btf__dedup(obj->btf, NULL);
+	if (err) {
+		pr_err("FAILED to deduplicate BTF: %s\n", strerror(-err));
+		goto out_err;
+	}
+
 	err = sort_btf_by_name(obj->btf);
 	if (err) {
 		pr_err("FAILED to sort BTF: %s\n", strerror(errno));
