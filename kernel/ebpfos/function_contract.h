@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
+#include "function_arguments.h"
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -142,6 +143,7 @@ static inline int ebpfos_function_binding_open_pure(
   }
  }
  if (!cell_callable(native, function, program, compiled_id, &address)) goto invalid;
+ if (!cell_argument_requirements(native, function, program->aux->btf, compiled_id)) goto invalid;
  out->program = program;out->address = address;
  return 0;
 invalid:
