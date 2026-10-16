@@ -11,6 +11,8 @@
 #include <linux/file.h>
 #include <linux/slab.h>
 #include <linux/bpf.h>
+#include <linux/err.h>
+#include <linux/errno.h>
 #include "function_binding.h"
 struct ebpfos_function_view_member {
  u32 native_function;
@@ -24,6 +26,22 @@ struct ebpfos_function_view {
 struct ebpfos_function_view_source {
  u32 program, native_function, compiled_function;
 };
+/* Resolve an export once while preparing an object's operations. The table
+ * has no ordinal ABI: reordered exports retain their native identities.
+ * An absent or ambiguous export cannot supply a unique binding. The caller
+ * holds the view's file reference for every use of the returned member. */
+static inline const struct ebpfos_function_view_member *
+ebpfos_function_view_find(const struct ebpfos_function_view *view, u32 native_function)
+{
+ const struct ebpfos_function_view_member *found = NULL;
+ u32 i;
+ for (i = 0; i < view->count; ++i) {
+  if (view->members[i].native_function != native_function) continue;
+  if (found) return ERR_PTR(-ENOTUNIQ);
+  found = &view->members[i];
+ }
+ return found ? found : ERR_PTR(-ENOENT);
+}
 /* Prepared kernel-owned bindings transfer only on successful publication. */
 int ebpfos_function_view_publish(struct ebpfos_function_view *view);
 struct file *ebpfos_function_view_get(u32 descriptor);
