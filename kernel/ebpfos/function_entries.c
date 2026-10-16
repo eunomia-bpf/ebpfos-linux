@@ -28,6 +28,7 @@ struct entry_set {
  struct bpf_prog **programs;
  struct ftrace_ops operations;
  struct ftrace_hash *hash[2];
+ /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations;
  unsigned int count, active;
  bool published;
@@ -141,23 +142,23 @@ static int entry_release(struct inode *inode, struct file *file)
  return error;
 }
 static const struct file_operations entry_operations = { .release = entry_release, .llseek = noop_llseek };
-static int entry_open(const struct ebpfos_function_link *entries,
+static struct entry_set *entry_prepare(const struct ebpfos_function_link *entries,
  unsigned int count)
 {
  struct entry_set *set;
  struct btf *btf = bpf_get_btf_vmlinux();
  unsigned int i,j;
  int error = -EINVAL;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
  if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
-     !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return -EOPNOTSUPP;
- if (!count || IS_ERR_OR_NULL(btf)) return -EINVAL;
+     !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return ERR_PTR(-EOPNOTSUPP);
+ if (!count || IS_ERR_OR_NULL(btf)) return ERR_PTR(-EINVAL);
  set = kzalloc(sizeof(*set), GFP_KERNEL);
- if (!set) return -ENOMEM;
+ if (!set) return ERR_PTR(-ENOMEM);
  set->count = count;
  set->programs = kvcalloc(count, 2 * sizeof(*set->programs), GFP_KERNEL);
  if (!set->programs) {error = -ENOMEM;goto fail;}
- set->locations = kvcalloc(set->count, sizeof(*set->locations), GFP_KERNEL);
+ set->locations = kvcalloc(set->count, 2 * sizeof(*set->locations), GFP_KERNEL);
  if (!set->locations) {error = -ENOMEM;goto fail;}
  set->hash[0] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
  set->hash[1] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
@@ -171,6 +172,7 @@ static int entry_open(const struct ebpfos_function_link *entries,
   if (!address || !core_kernel_text(address) || !(ip = ftrace_location(address))) {error = -ENOENT;goto fail;}
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
   set->locations[i] = ip;
+  set->locations[set->count + i] = entry->native_function;
   for (j = 0; j < 2; ++j) {
    struct bpf_prog *program = bpf_prog_get_type_dev(j ? entry->second : entry->first,
       BPF_PROG_TYPE_TRACING, false);
@@ -184,10 +186,19 @@ static int entry_open(const struct ebpfos_function_link *entries,
    if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
  }
- error = anon_inode_getfd("ebpfos-function-entries", &entry_operations, set, O_CLOEXEC | O_RDWR);
- if (error >= 0) return error;
+ return set;
 fail:
- entry_free(set);return error;
+ entry_free(set);return ERR_PTR(error);
+}
+static int entry_open(const struct ebpfos_function_link *entries,
+ unsigned int count)
+{
+ struct entry_set *set = entry_prepare(entries, count);
+ int descriptor;
+ if (IS_ERR(set)) return PTR_ERR(set);
+ descriptor = anon_inode_getfd("ebpfos-function-entries", &entry_operations, set, O_CLOEXEC | O_RDWR);
+ if (descriptor < 0) entry_free(set);
+ return descriptor;
 }
 __bpf_kfunc_start_defs();
 __bpf_kfunc int bpf_ebpfos_function_entries_open_many(
@@ -238,12 +249,65 @@ __bpf_kfunc int bpf_ebpfos_function_entries_state(u32 fd)
  mutex_lock(&entry_lock);active = ((struct entry_set *)fd_file(file)->private_data)->active;
  mutex_unlock(&entry_lock);fdput(file);return active;
 }
+/* Rebind the inactive generation of an existing journal. All native callable
+ * checks finish before changing its targets; ordinary calls still use the
+ * active immutable graph. Retain displaced published graphs for old frames.
+ */
+__bpf_kfunc int bpf_ebpfos_function_entries_prepare(u32 fd, u32 from,
+ const struct ebpfos_function_link *entries, u32 entries__sz)
+{
+ struct ebpfos_function_link *snapshot;
+ struct entry_set *set, *prepared;
+ struct fd file;
+ unsigned int i, j, slot;
+ int error;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (from != 1 && from != 2) return -EINVAL;
+ if (!entries__sz || entries__sz % sizeof(*entries)) return -EINVAL;
+ file = fdget(fd);
+ if (fd_empty(file)) return -EBADF;
+ if (fd_file(file)->f_op != &entry_operations) { error = -EINVAL;goto out_file; }
+ snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
+ if (!snapshot) { error = -ENOMEM;goto out_file; }
+ prepared = entry_prepare(snapshot, entries__sz / sizeof(*entries));
+ kfree(snapshot);
+ if (IS_ERR(prepared)) { error = PTR_ERR(prepared);goto out_file; }
+ set = fd_file(file)->private_data;
+ mutex_lock(&entry_lock);
+ error = -ESTALE;
+ if (set->active != from) goto out_unlock;
+ error = -EINVAL;
+ if (set->count != prepared->count) goto out_unlock;
+ for (i = 0; i < set->count; ++i) {
+  for (j = 0; j < prepared->count; ++j)
+   if (set->locations[i] == prepared->locations[j]) break;
+  if (j == prepared->count) goto out_unlock;
+  /* An address alias must not exchange the original caller's ABI/contract. */
+  if (set->locations[set->count + i] != prepared->locations[prepared->count + j]) goto out_unlock;
+ }
+ slot = from == 1 ? 1 : 0;
+ swap(set->hash[slot], prepared->hash[slot]);
+ for (i = 0; i < set->count; ++i)
+  swap(set->programs[i * 2 + slot], prepared->programs[i * 2 + slot]);
+ /* The detached preparation has never owned a text patch. It now retains
+  * the displaced slot; that code may still have suspended old frames. */
+ list_add_tail(&prepared->retained, &entry_retained);
+ prepared = NULL;
+ error = 0;
+out_unlock:
+ mutex_unlock(&entry_lock);
+ if (prepared) entry_free(prepared);
+out_file:
+ fdput(file);
+ return error;
+}
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(entry_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open_many, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_switch, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_state, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_prepare, KF_SLEEPABLE)
 BTF_KFUNCS_END(entry_ids)
 static const struct btf_kfunc_id_set entry_kfuncs;
 static int entry_filter(const struct bpf_prog *prog, u32 id)
