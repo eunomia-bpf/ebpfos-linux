@@ -4,12 +4,15 @@
 
 /* Metadata only. During preparation state is the FUNC ID, preserving the BTF
  * iteration order for duplicate names. After compaction it is the callable
- * native-ABI bit. Neither code nor verifier results are stored here.
+ * native-ABI bit. The destructive requirement is unioned across aliases and
+ * checked separately by the plain/privileged guards. Neither code nor verifier
+ * results are stored here.
  */
 struct ebpfos_checked_index_entry {
 	unsigned long address;
 	unsigned int prototype;
 	unsigned int state;
+	unsigned int destructive;
 };
 
 static inline int ebpfos_checked_index_compare(const void *left, const void *right)
@@ -54,6 +57,8 @@ static inline unsigned int ebpfos_checked_index_compact(
 		struct ebpfos_checked_index_entry *previous = written ? entries + written - 1 : 0;
 
 		if (previous && previous->address == value.address) {
+			/* Every same-address declaration contributes its requirements. */
+			previous->destructive |= value.destructive;
 			if (!previous->prototype || !value.prototype ||
 			    !ebpfos_checked_type_equal(types, previous->prototype, value.prototype, 0))
 				previous->prototype = 0;

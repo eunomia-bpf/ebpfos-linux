@@ -89,7 +89,7 @@ static int __init ebpfos_native_init(void)
 }
 late_initcall(ebpfos_native_init);
 
-/* A checked indirect entry has no acquire/release/iterator/context contract.
+/* A plain checked indirect entry has no acquire/release/iterator/context contract.
  * Do not use it to bypass a declared native entry's stronger effects. Pointer
  * return dispatchers are conservatively registered KF_RET_NULL themselves.
  */
@@ -100,4 +100,18 @@ bool ebpfos_native_plain_call(u32 id)
 
 	entry = btf_id_set8_contains(&ebpfos_native_ids, id);
 	return !entry || !(entry->flags & ~KF_RET_NULL);
+}
+
+/* A separately registered KF_DESTRUCTIVE dispatcher can carry this existing
+ * privilege requirement. Reference, context and argument effects still need
+ * their own typed contracts and cannot use either dispatch interface.
+ */
+bool ebpfos_native_destructive_call(u32 id);
+bool ebpfos_native_destructive_call(u32 id)
+{
+	const typeof(ebpfos_native_ids.pairs[0]) *entry;
+
+	entry = btf_id_set8_contains(&ebpfos_native_ids, id);
+	return entry && (entry->flags & KF_DESTRUCTIVE) &&
+		!(entry->flags & ~(KF_RET_NULL | KF_DESTRUCTIVE));
 }

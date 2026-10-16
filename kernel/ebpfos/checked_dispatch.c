@@ -18,6 +18,7 @@ static struct btf *checked_btf __ro_after_init;
 static struct ebpfos_checked_index_entry *checked_index __ro_after_init;
 static unsigned int checked_index_count __ro_after_init;
 bool ebpfos_native_plain_call(u32 id);
+bool ebpfos_native_destructive_call(u32 id);
 
 /* P's native-IR producer replaces these together, after checking each real
  * definition's C calling convention and full physical ABI against its BTF.
@@ -68,6 +69,7 @@ static int __init checked_dispatch_init(void)
 		const struct btf_type *p;
 		const char *name, *canonical;
 		unsigned long address;
+		bool plain, destructive;
 
 		if (!f || !btf_type_is_func(f))
 			continue;
@@ -80,11 +82,14 @@ static int __init checked_dispatch_init(void)
 		if (!canonical || module || offset || !size || strcmp(canonical, name))
 			continue;
 		p = btf_type_by_id(btf, f->type);
+		plain = ebpfos_native_plain_call(id);
+		destructive = ebpfos_native_destructive_call(id);
 		entries[count++] = (struct ebpfos_checked_index_entry) {
 			.address = address,
 			.prototype = p && btf_type_is_func_proto(p) &&
-				ebpfos_native_plain_call(id) ? f->type : 0,
+				(plain || destructive) ? f->type : 0,
 			.state = id,
+			.destructive = destructive,
 		};
 	}
 	sort(entries, count, sizeof(*entries), ebpfos_checked_index_compare, NULL);
@@ -106,8 +111,7 @@ static int __init checked_dispatch_init(void)
 }
 late_initcall(checked_dispatch_init);
 
-bool ebpfos_checked_function(u64 target, u64 witness);
-bool ebpfos_checked_function(u64 target, u64 witness)
+static bool checked_function(u64 target, u64 witness, bool destructive)
 {
 	struct ebpfos_checked_index_entry *entries = smp_load_acquire(&checked_index);
 	struct btf *btf;
@@ -123,8 +127,26 @@ bool ebpfos_checked_function(u64 target, u64 witness)
 	btf = checked_btf;
 	actual = ebpfos_checked_index_find(entries, checked_index_count, target);
 	expected = ebpfos_checked_index_find(entries, checked_index_count, witness);
-	if (!actual || !actual->state || !actual->prototype || !expected || !expected->prototype)
+	if (!actual || !actual->state || !actual->prototype || !expected || !expected->prototype ||
+	    (!destructive && (actual->destructive || expected->destructive)))
 		return false;
 	types = (struct ebpfos_checked_types) { btf, checked_type, checked_name };
 	return ebpfos_checked_type_equal(&types, actual->prototype, expected->prototype, 0);
+}
+
+bool ebpfos_checked_function(u64 target, u64 witness);
+bool ebpfos_checked_function(u64 target, u64 witness)
+{
+	return checked_function(target, witness, false);
+}
+
+/* Internal only, like the plain guard. Compiler-generated typed callers of
+ * this guard must themselves be registered KF_DESTRUCTIVE, so the ordinary
+ * verifier checks CAP_SYS_BOOT before admitting the program. A scalar guard
+ * is never registered as a kfunc and provides no pointer argument authority.
+ */
+bool ebpfos_checked_function_destructive(u64 target, u64 witness);
+bool ebpfos_checked_function_destructive(u64 target, u64 witness)
+{
+	return checked_function(target, witness, true);
 }
