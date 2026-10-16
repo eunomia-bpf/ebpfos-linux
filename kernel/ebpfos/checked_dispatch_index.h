@@ -11,8 +11,9 @@
 struct ebpfos_checked_index_entry {
 	unsigned long address;
 	unsigned int prototype;
-	unsigned int state;
-	unsigned int destructive;
+	/* FUNC IDs are bounded by BTF_MAX_TYPE (20 bits); compacted state is 0/1. */
+	unsigned int state:31;
+	unsigned int destructive:1;
 };
 
 static inline int ebpfos_checked_index_compare(const void *left, const void *right)
