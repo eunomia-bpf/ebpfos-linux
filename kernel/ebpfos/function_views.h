@@ -26,6 +26,8 @@ struct ebpfos_function_view {
 struct ebpfos_function_view_source {
  u32 program, native_function, compiled_function;
 };
+/* Import an already checked export, retaining its existing code graph. */
+struct ebpfos_function_view_import { u32 view, native_function; };
 /* Resolve an export once while preparing an object's operations. The table
  * has no ordinal ABI: reordered exports retain their native identities.
  * An absent or ambiguous export cannot supply a unique binding. The caller
@@ -56,4 +58,6 @@ ebpfos_function_view_data(const struct file *file)
 int ebpfos_function_view_open_pure(
  const struct ebpfos_function_view_source *sources, u32 count, u64 generation,
  enum bpf_prog_type type, struct btf *native);
+int ebpfos_function_view_compose(u32 base,
+ const struct ebpfos_function_view_import *imports, u32 count, u64 generation);
 #endif
