@@ -17,9 +17,15 @@
 #include <linux/stop_machine.h>
 #include "syscall_kfuncs.h"
 struct ebpfos_function_entry { u32 native_function, compiled_function; };
+/* Each symbol may come from a separately admitted object. Program references
+ * and all symbol/ABI/context checks belong to cold linking, never invocation.
+ */
+struct ebpfos_function_link {
+ u32 native_function, compiled_function, first, second;
+};
 struct entry_set {
  struct list_head retained;
- struct bpf_prog *program[2];
+ struct bpf_prog **programs;
  struct ftrace_ops operations;
  struct ftrace_hash *hash[2];
  unsigned long *locations;
@@ -197,8 +203,11 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
 }
 static void entry_free(struct entry_set *set)
 {
- if (set->program[0]) bpf_prog_put(set->program[0]);
- if (set->program[1]) bpf_prog_put(set->program[1]);
+ unsigned int i;
+ if (set->programs)
+  for (i = 0; i < set->count * 2; ++i)
+   if (set->programs[i]) bpf_prog_put(set->programs[i]);
+ kvfree(set->programs);
  free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->locations);kfree(set);
 }
 static int entry_release(struct inode *inode, struct file *file)
@@ -212,38 +221,29 @@ static int entry_release(struct inode *inode, struct file *file)
  return error;
 }
 static const struct file_operations entry_operations = { .release = entry_release, .llseek = noop_llseek };
-__bpf_kfunc_start_defs();
-__bpf_kfunc int bpf_ebpfos_function_entries_open(u32 first, u32 second,
- const struct ebpfos_function_entry *entries, u32 entries__sz)
+static int entry_open(const struct ebpfos_function_link *entries,
+ unsigned int count)
 {
  struct entry_set *set;
- struct ebpfos_function_entry *snapshot;
  struct btf *btf = bpf_get_btf_vmlinux();
  unsigned int i,j;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
      !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return -EOPNOTSUPP;
- if (!entries__sz || entries__sz % sizeof(*entries) || IS_ERR_OR_NULL(btf)) return -EINVAL;
- snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
- if (!snapshot) return -ENOMEM;
+ if (!count || IS_ERR_OR_NULL(btf)) return -EINVAL;
  set = kzalloc(sizeof(*set), GFP_KERNEL);
- if (!set) { kfree(snapshot);return -ENOMEM; }
- set->count = entries__sz / sizeof(*entries);
+ if (!set) return -ENOMEM;
+ set->count = count;
+ set->programs = kvcalloc(count, 2 * sizeof(*set->programs), GFP_KERNEL);
+ if (!set->programs) {error = -ENOMEM;goto fail;}
  set->locations = kvcalloc(set->count, sizeof(*set->locations), GFP_KERNEL);
  if (!set->locations) {error = -ENOMEM;goto fail;}
  set->hash[0] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
  set->hash[1] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
  if (!set->hash[0] || !set->hash[1]) { error = -ENOMEM;goto fail; }
- set->program[0] = bpf_prog_get_type_dev(first, BPF_PROG_TYPE_TRACING, false);
- if (IS_ERR(set->program[0])) {error = PTR_ERR(set->program[0]);set->program[0] = NULL;goto fail;}
- set->program[1] = bpf_prog_get_type_dev(second, BPF_PROG_TYPE_TRACING, false);
- if (IS_ERR(set->program[1])) {error = PTR_ERR(set->program[1]);set->program[1] = NULL;goto fail;}
- for (j = 0; j < 2; ++j)
-  if (set->program[j]->sleepable || set->program[j]->expected_attach_type != BPF_TRACE_REPLACE ||
-      !set->program[j]->aux->ebpfos_component || !entry_context(set->program[j])) {error = -EOPNOTSUPP;goto fail;}
  for (i = 0; i < set->count; ++i) {
-  const struct ebpfos_function_entry *entry = &snapshot[i];
+  const struct ebpfos_function_link *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
   if (!function || !btf_type_is_func(function)) goto fail;
@@ -252,15 +252,54 @@ __bpf_kfunc int bpf_ebpfos_function_entries_open(u32 first, u32 second,
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
   set->locations[i] = ip;
   for (j = 0; j < 2; ++j) {
-   if (!cell_callable(btf, function, set->program[j], entry->compiled_function, &target)) {error = -EPROTOTYPE;goto fail;}
+   struct bpf_prog *program = bpf_prog_get_type_dev(j ? entry->second : entry->first,
+      BPF_PROG_TYPE_TRACING, false);
+   if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
+   set->programs[i * 2 + j] = program;
+   if (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE ||
+       !program->aux->ebpfos_component || !entry_context(program)) {error = -EOPNOTSUPP;goto fail;}
+   if (!cell_callable(btf, function, program, entry->compiled_function, &target)) {error = -EPROTOTYPE;goto fail;}
    if (target & 1) goto fail;
    if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
  }
  error = anon_inode_getfd("ebpfos-function-entries", &entry_operations, set, O_CLOEXEC | O_RDWR);
- if (error >= 0) {kfree(snapshot);return error;}
+ if (error >= 0) return error;
 fail:
- kfree(snapshot);entry_free(set);return error;
+ entry_free(set);return error;
+}
+__bpf_kfunc_start_defs();
+__bpf_kfunc int bpf_ebpfos_function_entries_open_many(
+ const struct ebpfos_function_link *entries, u32 entries__sz)
+{
+ struct ebpfos_function_link *snapshot;
+ int error;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!entries__sz || entries__sz % sizeof(*entries)) return -EINVAL;
+ snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
+ if (!snapshot) return -ENOMEM;
+ error = entry_open(snapshot, entries__sz / sizeof(*entries));
+ kfree(snapshot);return error;
+}
+__bpf_kfunc int bpf_ebpfos_function_entries_open(u32 first, u32 second,
+ const struct ebpfos_function_entry *entries, u32 entries__sz)
+{
+ struct ebpfos_function_entry *snapshot;
+ struct ebpfos_function_link *links;
+ unsigned int i, count;
+ int error;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!entries__sz || entries__sz % sizeof(*entries)) return -EINVAL;
+ count = entries__sz / sizeof(*entries);
+ snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
+ if (!snapshot) return -ENOMEM;
+ links = kvmalloc_array(count, sizeof(*links), GFP_KERNEL);
+ if (!links) {kfree(snapshot);return -ENOMEM;}
+ for (i = 0; i < count; ++i)
+  links[i] = (struct ebpfos_function_link){snapshot[i].native_function,
+    snapshot[i].compiled_function, first, second};
+ error = entry_open(links, count);
+ kvfree(links);kfree(snapshot);return error;
 }
 __bpf_kfunc int bpf_ebpfos_function_entries_switch(u32 fd, u32 from, u32 to)
 {
@@ -281,6 +320,7 @@ __bpf_kfunc int bpf_ebpfos_function_entries_state(u32 fd)
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(entry_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open_many, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_switch, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_state, KF_SLEEPABLE)
 BTF_KFUNCS_END(entry_ids)
