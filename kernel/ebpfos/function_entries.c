@@ -13,6 +13,8 @@
 #include <linux/ftrace.h>
 #include <linux/kallsyms.h>
 #include <linux/mutex.h>
+#include <linux/memory.h>
+#include <asm/text-patching.h>
 #include <linux/slab.h>
 #include <linux/stop_machine.h>
 #include "syscall_kfuncs.h"
@@ -28,6 +30,9 @@ struct entry_set {
  struct bpf_prog **programs;
  struct ftrace_ops operations;
  struct ftrace_hash *hash[2];
+ struct entry_native_slot *slots;
+ unsigned int slot_count;
+ bool has_ftrace, poisoned;
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations;
  unsigned int count, active;
@@ -127,16 +132,49 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
  return found;
 }
 
+#include "function_entry_slots.h"
+
 static int entry_publication_point(void *unused) { return 0; }
-static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
+static int entry_ftrace_apply(struct entry_set *set, unsigned int from, unsigned int to)
 {
+ if (!set->has_ftrace) return 0;
  if (!from) return update_ftrace_direct_add(&set->operations, set->hash[to - 1]);
  if (!to) return update_ftrace_direct_del(&set->operations, set->hash[from - 1]);
  return update_ftrace_direct_mod(&set->operations, set->hash[to - 1], true);
 }
+static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
+{
+ struct entry_set *owner;
+ unsigned int i, j;
+ int error;
+ if (set->poisoned) return -EUCLEAN;
+ /* Each reserved instruction has one active journal. Retained generations
+  * keep executable ownership even if an exceptional rollback cannot finish. */
+ list_for_each_entry(owner, &entry_retained, retained) {
+  if (owner == set || (!owner->active && !owner->poisoned)) continue;
+  for (i = 0; i < set->slot_count; ++i)
+   for (j = 0; j < owner->slot_count; ++j)
+    if (set->slots[i].ip == owner->slots[j].ip) return -EBUSY;
+ }
+ error = entry_native_apply(set->slots, set->slot_count, from, to);
+ if (error) return error;
+ /* A successful patch can already have entered either generation. Retain
+  * both graphs before an ensuing ftrace/publication failure is recoverable. */
+ if (to && !set->published) {
+  set->published = true;
+  list_add_tail(&set->retained, &entry_retained);
+ }
+ error = entry_ftrace_apply(set, from, to);
+ if (error && entry_native_apply(set->slots, set->slot_count, to, from)) {
+  set->poisoned = true;
+  return -EUCLEAN;
+ }
+ return error;
+}
 static int entry_switch(struct entry_set *set, unsigned int from, unsigned int to)
 {
  int error, recovery;
+ if (set->poisoned) return -EUCLEAN;
  if (from > 2 || to > 2 || from != set->active) return -ESTALE;
  if (from == to) return 0;
  /* The stock x86 text-poke batch performs its own CPU synchronization and
@@ -147,11 +185,12 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
   */
  error = entry_apply(set, from, to);
  if (error) return error;
- set->active = to;set->published |= to != 0;
+ set->active = to;
  error = stop_machine(entry_publication_point, NULL, NULL);
  if (error) {
   recovery = entry_apply(set, to, from);
   if (!recovery) set->active = from;
+  else {set->poisoned = true;error = -EUCLEAN;}
  }
  return error;
 }
@@ -162,14 +201,14 @@ static void entry_free(struct entry_set *set)
   for (i = 0; i < set->count * 2; ++i)
    if (set->programs[i]) bpf_prog_put(set->programs[i]);
  kvfree(set->programs);
- free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->locations);kfree(set);
+ free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->slots);kvfree(set->locations);kfree(set);
 }
 static int entry_release(struct inode *inode, struct file *file)
 {
  struct entry_set *set = file->private_data;
  int error;
  mutex_lock(&entry_lock);error = entry_switch(set, set->active, 0);
- if (set->published || error) list_add_tail(&set->retained, &entry_retained);
+ if (!set->published && error) list_add_tail(&set->retained, &entry_retained);
  mutex_unlock(&entry_lock);
  if (!set->published && !error) entry_free(set);
  return error;
@@ -193,6 +232,8 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
  if (!set->programs) {error = -ENOMEM;goto fail;}
  set->locations = kvcalloc(set->count, 2 * sizeof(*set->locations), GFP_KERNEL);
  if (!set->locations) {error = -ENOMEM;goto fail;}
+ set->slots = kvcalloc(count, sizeof(*set->slots), GFP_KERNEL);
+ if (!set->slots) {error = -ENOMEM;goto fail;}
  set->hash[0] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
  set->hash[1] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
  if (!set->hash[0] || !set->hash[1]) { error = -ENOMEM;goto fail; }
@@ -200,9 +241,16 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   const struct ebpfos_function_link *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
+  struct entry_native_slot *slot = NULL;
   if (!function || !btf_type_is_func(function)) goto fail;
   address = kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
-  if (!address || !core_kernel_text(address) || !(ip = ftrace_location(address))) {error = -ENOENT;goto fail;}
+  if (!address || !core_kernel_text(address)) {error = -ENOENT;goto fail;}
+  ip = ftrace_location(address);
+  if (!ip) {
+   ip = entry_native_location(address);
+   if (!ip) {error = -ENOENT;goto fail;}
+   slot = &set->slots[set->slot_count++];slot->ip = ip;
+  } else set->has_ftrace = true;
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
   set->locations[i] = ip;
   set->locations[set->count + i] = entry->native_function;
@@ -217,7 +265,11 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
        cell_callable(btf, function, program, entry->compiled_function, &target))) {error = -EPROTOTYPE;goto fail;}
    if (!entry_context(program, target)) {error = -EOPNOTSUPP;goto fail;}
    if (target & 1) goto fail;
-   if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
+   if (slot) {
+    u8 instruction[5];
+    if (!entry_native_jump(ip, target, instruction)) {error = -ERANGE;goto fail;}
+    slot->target[j] = target;
+   } else if (!add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
  }
  return set;
@@ -280,7 +332,9 @@ __bpf_kfunc int bpf_ebpfos_function_entries_state(u32 fd)
  struct fd file = fdget(fd);int active;
  if (fd_empty(file)) return -EBADF;
  if (fd_file(file)->f_op != &entry_operations) {fdput(file);return -EINVAL;}
- mutex_lock(&entry_lock);active = ((struct entry_set *)fd_file(file)->private_data)->active;
+ mutex_lock(&entry_lock);
+ active = ((struct entry_set *)fd_file(file)->private_data)->poisoned ? -EUCLEAN :
+  ((struct entry_set *)fd_file(file)->private_data)->active;
  mutex_unlock(&entry_lock);fdput(file);return active;
 }
 /* Rebind the inactive generation of an existing journal. All native callable
@@ -309,9 +363,10 @@ __bpf_kfunc int bpf_ebpfos_function_entries_prepare(u32 fd, u32 from,
  set = fd_file(file)->private_data;
  mutex_lock(&entry_lock);
  error = -ESTALE;
- if (set->active != from) goto out_unlock;
+ if (set->poisoned || set->active != from) goto out_unlock;
  error = -EINVAL;
- if (set->count != prepared->count) goto out_unlock;
+ if (set->count != prepared->count || set->slot_count != prepared->slot_count ||
+     set->has_ftrace != prepared->has_ftrace) goto out_unlock;
  for (i = 0; i < set->count; ++i) {
   for (j = 0; j < prepared->count; ++j)
    if (set->locations[i] == prepared->locations[j]) break;
@@ -320,9 +375,24 @@ __bpf_kfunc int bpf_ebpfos_function_entries_prepare(u32 fd, u32 from,
   if (set->locations[set->count + i] != prepared->locations[prepared->count + j]) goto out_unlock;
  }
  slot = from == 1 ? 1 : 0;
+ /* Native slots and program references must follow their symbol when a
+  * caller reorders the complete set. Validate the entire join before swaps. */
+ for (i = 0; i < set->slot_count; ++i) {
+  for (j = 0; j < prepared->slot_count; ++j)
+   if (set->slots[i].ip == prepared->slots[j].ip) break;
+  if (j == prepared->slot_count) goto out_unlock;
+ }
+ for (i = 0; i < set->slot_count; ++i) {
+  for (j = 0; j < prepared->slot_count; ++j)
+   if (set->slots[i].ip == prepared->slots[j].ip) break;
+  swap(set->slots[i].target[slot], prepared->slots[j].target[slot]);
+ }
  swap(set->hash[slot], prepared->hash[slot]);
- for (i = 0; i < set->count; ++i)
-  swap(set->programs[i * 2 + slot], prepared->programs[i * 2 + slot]);
+ for (i = 0; i < set->count; ++i) {
+  for (j = 0; j < prepared->count; ++j)
+   if (set->locations[i] == prepared->locations[j]) break;
+  swap(set->programs[i * 2 + slot], prepared->programs[j * 2 + slot]);
+ }
  /* The detached preparation has never owned a text patch. It now retains
   * the displaced slot; that code may still have suspended old frames. */
  list_add_tail(&prepared->retained, &entry_retained);
