@@ -90,11 +90,21 @@ static int task_view_open(const struct ebpfos_function_view_source *sources,
   /* An aliased syscall is ambiguous unless all aliases agree. */
   for (j = nr + 1; j < NR_syscalls; ++j)
    if ((unsigned long)sys_call_table[j] == address) {error = -ENOTUNIQ;goto fail;}
-  program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_TRACING, false);
+  /* A syscall entered from userspace is a sleepable task context. A graph
+   * verified there need not pretend to be a non-sleepable tracing hook.
+   * Keep the actual program domain; native callable/context checks below
+   * still cover the export and every reachable callee and callback. */
+  program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_SYSCALL, false);
+  if (IS_ERR(program) && PTR_ERR(program) == -EINVAL)
+   program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_TRACING, false);
   if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
   view->bindings[i].program = program;
-  if (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE ||
-      !program->aux->ebpfos_component) {error = -EOPNOTSUPP;goto fail;}
+  if (!program->aux->ebpfos_component ||
+      (program->type == BPF_PROG_TYPE_SYSCALL ?
+       (!program->sleepable || program->expected_attach_type != 0) :
+       (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE))) {
+   error = -EOPNOTSUPP;goto fail;
+  }
   if (!cell_callable(native, function, program, sources[i].compiled_function, &target)) {
    error = -EPROTOTYPE;goto fail;
   }
