@@ -1575,6 +1575,11 @@ static void detect_insn_reg_usage(const struct bpf_insn *insn, int insn_cnt,
 	int i;
 
 	for (i = 1; i <= insn_cnt; i++, insn++) {
+		/* Sidecar operand bits encode a payload, not register uses. The
+		 * instantiated proof is scanned separately by detect_reg_usage().
+		 */
+		if (bpf_kop_is_sidecar_insn(insn))
+			continue;
 		if (insn->dst_reg == BPF_REG_6 || insn->src_reg == BPF_REG_6)
 			regs_used[0] = true;
 		if (insn->dst_reg == BPF_REG_7 || insn->src_reg == BPF_REG_7)
