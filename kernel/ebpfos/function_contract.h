@@ -107,6 +107,10 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  a = (const void *)(n + 1); b = (const void *)(prototype + 1);
  for (i = 0; i < btf_type_vlen(n); ++i)
   if (!a[i].type || !b[i].type || !cell_register_type(native, a[i].type, aux->btf, b[i].type, true)) return false;
+ /* Native callers bypass BPF's call-site argument checker. Keep bounds,
+  * address spaces and context requirements in the common callable contract,
+  * including exports resolved by name in a replacement generation. */
+ if (!cell_argument_requirements(native, native_function, aux->btf, id)) return false;
  *address = (unsigned long)aux->func[index]->bpf_func;
  return true;
 }
@@ -143,7 +147,6 @@ static inline int ebpfos_function_binding_open_pure(
   }
  }
  if (!cell_callable(native, function, program, compiled_id, &address)) goto invalid;
- if (!cell_argument_requirements(native, function, program->aux->btf, compiled_id)) goto invalid;
  out->program = program;out->address = address;
  return 0;
 invalid:

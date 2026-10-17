@@ -95,8 +95,7 @@ static int task_view_open(const struct ebpfos_function_view_source *sources,
   view->bindings[i].program = program;
   if (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE ||
       !program->aux->ebpfos_component) {error = -EOPNOTSUPP;goto fail;}
-  if (!cell_callable(native, function, program, sources[i].compiled_function, &target) ||
-      !cell_argument_requirements(native, function, program->aux->btf, sources[i].compiled_function)) {
+  if (!cell_callable(native, function, program, sources[i].compiled_function, &target)) {
    error = -EPROTOTYPE;goto fail;
   }
   if (!entry_context(program, target)) {error = -EOPNOTSUPP;goto fail;}
