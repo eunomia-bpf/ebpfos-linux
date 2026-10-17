@@ -27,7 +27,8 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
  while (head < tail) {
   struct bpf_prog *function = aux->func[queue[head++]];
   if (!function || !function->jited || function->aux->priv_stack_ptr ||
-      function->aux->tail_call_reachable || function->aux->exception_cb) goto out;
+      function->aux->tail_call_reachable || function->aux->exception_cb ||
+      function->aux->requires_rcu) goto out;
   for (j = 0; j < function->len; ++j) {
    const struct bpf_insn *insn = &function->insnsi[j];
    unsigned long target;

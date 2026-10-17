@@ -1935,6 +1935,8 @@ struct bpf_prog_aux {
 	bool might_sleep;
 	bool kprobe_write_ctx;
 	bool ebpfos_component;
+	/* Cold native bindings must supply any context assumed by verification. */
+	bool requires_rcu;
 	u32 ebpfos_load_insn_cnt;
 	struct bpf_ebpfos_field_access *ebpfos_field_accesses;
 	u32 ebpfos_field_access_cnt;

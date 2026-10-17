@@ -134,7 +134,7 @@ static inline int ebpfos_function_binding_open_pure(
  if (program->sleepable || !program->aux->func || !program->aux->func_cnt) goto invalid;
  for (i = 0; i < program->aux->func_cnt; ++i) {
   struct bpf_prog *f = program->aux->func[i];
-  if (!f || !f->jited || f->aux->priv_stack_ptr) goto invalid;
+  if (!f || !f->jited || f->aux->priv_stack_ptr || f->aux->requires_rcu) goto invalid;
   for (j = 0; j < f->len; ++j) {
    const struct bpf_insn *insn = &f->insnsi[j];
    if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||

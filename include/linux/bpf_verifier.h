@@ -761,6 +761,8 @@ struct bpf_subprog_info {
 	bool changes_pkt_data: 1;
 	bool might_sleep: 1;
 	u8 arg_cnt:3;
+	/* Verification used the runner's implicit RCU critical section. */
+	bool requires_rcu: 1;
 
 	enum priv_stack_mode priv_stack_mode;
 	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_REG_ARGS];

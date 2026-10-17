@@ -5249,9 +5249,17 @@ static bool in_sleepable(struct bpf_verifier_env *env)
  */
 static bool in_rcu_cs(struct bpf_verifier_env *env)
 {
-	return env->cur_state->active_rcu_locks ||
-	       env->cur_state->active_locks ||
-	       !in_sleepable(env);
+	if (env->cur_state->active_rcu_locks || env->cur_state->active_locks)
+		return true;
+	if (in_sleepable(env))
+		return false;
+	/* A BPF runner supplies this scope; a bare native ABI entry does not.
+	 * Retain the assumption without changing the stock answer or analysis.
+	 * Queries can conservatively retain a duty even if no pointer promotion
+	 * follows. A cold binding must not silently discard that duty.
+	 */
+	env->subprog_info[cur_func(env)->subprogno].requires_rcu = true;
+	return true;
 }
 
 /* Once GCC supports btf_type_tag the following mechanism will be replaced with tag check */
