@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/init_task.h>
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#include <asm/syscall.h>
+#endif
 #include <linux/export.h>
 #include <linux/mqueue.h>
 #include <linux/sched.h>
@@ -249,6 +252,9 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 #endif
 #ifdef CONFIG_SCHED_MM_CID
 	.mm_cid		= { .cid = MM_CID_UNSET, },
+#endif
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	.ebpfos_syscalls = sys_call_table,
 #endif
 };
 EXPORT_SYMBOL(init_task);

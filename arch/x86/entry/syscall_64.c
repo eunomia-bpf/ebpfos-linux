@@ -21,9 +21,8 @@
 #define __SYSCALL_NORETURN __SYSCALL
 
 /*
- * The sys_call_table[] is no longer used for system calls, but
- * kernel/trace/trace_syscalls.c still wants to know the system
- * call address.
+ * Task views use sys_call_table[] as their default binding. Otherwise only
+ * kernel/trace/trace_syscalls.c uses it to identify system call addresses.
  */
 #define __SYSCALL(nr, sym) __x64_##sym,
 const sys_call_ptr_t sys_call_table[] = {
@@ -60,7 +59,12 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
 
 	if (likely(unr < NR_syscalls)) {
 		unr = array_index_nospec(unr, NR_syscalls);
+#ifdef CONFIG_EBPFOS
+		/* Resolve components at publication; no selection inside their calls. */
+		regs->ax = current->ebpfos_syscalls[unr](regs);
+#else
 		regs->ax = x64_sys_call(regs, unr);
+#endif
 		return true;
 	}
 	return false;

@@ -1648,6 +1648,12 @@ struct task_struct {
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
 	 */
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	/* The initial x64 substrate uses existing tail padding, preserving old
+	 * field offsets and sizeof(task_struct) in its retained image. */
+	long (* const *ebpfos_syscalls)(const struct pt_regs *);
+	struct file *ebpfos_task_view;
+#endif
 	randomized_struct_fields_end
 } __attribute__ ((aligned (64)));
 
