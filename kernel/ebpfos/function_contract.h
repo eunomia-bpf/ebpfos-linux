@@ -3,6 +3,7 @@
 #define EBPFOS_FUNCTION_CONTRACT_H
 #include "function_arguments.h"
 #include "function_scalar_span.h"
+#include "function_scalar_record_abi.h"
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -94,6 +95,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  const struct btf_param *a, *b;
  struct bpf_prog_aux *aux = parent->aux;
  unsigned int i, index;
+ bool scalar_records;
  if (!aux->btf || !aux->func || !aux->func_info_aux || !aux->func_info) return false;
  for (index = 1; index < aux->func_cnt && index < aux->func_info_cnt; ++index)
   if (aux->func_info[index].type_id == id) break;
@@ -104,8 +106,13 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      !aux->func[index]->jited || strcmp(btf_name_by_offset(native, native_function->name_off),
        btf_name_by_offset(aux->btf, function->name_off))) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
- if (!prototype || !btf_type_is_func_proto(prototype) || btf_type_vlen(prototype) != btf_type_vlen(n) ||
+ if (!prototype || !btf_type_is_func_proto(prototype) ||
      !cell_register_type(native, n->type, aux->btf, prototype->type, false)) return false;
+ scalar_records = IS_ENABLED(CONFIG_X86_64) &&
+                  cell_scalar_record_inputs(native, native_function, aux->btf, function);
+ /* This form carries scalar bits only and rejects every parameter contract. */
+ if (scalar_records) goto compatible;
+ if (btf_type_vlen(prototype) != btf_type_vlen(n)) return false;
  a = (const void *)(n + 1); b = (const void *)(prototype + 1);
  for (i = 0; i < btf_type_vlen(n); ++i)
   if (!a[i].type || !b[i].type || !cell_register_type(native, a[i].type, aux->btf, b[i].type, true)) return false;
@@ -113,6 +120,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
   * address spaces and context requirements in the common callable contract,
   * including exports resolved by name in a replacement generation. */
  if (!cell_argument_requirements(native, native_function, aux->btf, id)) return false;
+compatible:
  *address = (unsigned long)aux->func[index]->bpf_func;
  return true;
 }
