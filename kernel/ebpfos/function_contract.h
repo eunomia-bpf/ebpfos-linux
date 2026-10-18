@@ -78,8 +78,8 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  const struct btf_type *x = btf_type_skip_modifiers(native, a, NULL);
  const struct btf_type *y = btf_type_skip_modifiers(compiled, b, NULL);
  if (!a || !b) return a == b;
- if (input && IS_ENABLED(CONFIG_X86_64) &&
-     cell_single_scalar_record_input(native, a, compiled, b)) return true;
+ if (IS_ENABLED(CONFIG_X86_64) &&
+     cell_single_scalar_record_register(native, a, compiled, b)) return true;
  if (!x || !y) return false;
  if (btf_type_is_ptr(x)) {
   if (input && btf_type_is_int(y) && y->size == sizeof(void *)) return true;

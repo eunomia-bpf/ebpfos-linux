@@ -47,7 +47,7 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
-/* One scalar field occupies the same indexed x86 argument register. This
+/* One scalar field occupies the same x86 argument/result register. This
  * supplies no pointer capability and does not bypass argument requirements.
  */
 static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id,
@@ -72,7 +72,7 @@ static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id
  return BTF_INT_BITS(value) == leaf->size * 8 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL) ? leaf->size * 8 : 0;
 }
-static bool cell_single_scalar_record_input(const struct btf *native, u32 id,
+static bool cell_single_scalar_record_register(const struct btf *native, u32 id,
  const struct btf *compiled, u32 actual)
 {
  const struct btf_type *type;
