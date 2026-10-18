@@ -4,8 +4,9 @@
 /* A register-compatible entry is not necessarily context-compatible. Retain
  * the native interface's declared requirements and transfers at every cold
  * binding, including name-resolved later generations and record transports.
- * A replacement may weaken preconditions, but must retain state transfers.
- * Matching supplies no held lock, RCU scope or reference to the verifier.
+ * A replacement may weaken preconditions. Source state transfers have no
+ * verified implementation summary yet: even matching declarations cannot
+ * authorize them. Matching supplies no held lock, RCU scope or reference.
  */
 static inline bool cell_context_precondition(const char *name)
 {
@@ -27,6 +28,7 @@ static inline bool cell_context_direction(const struct btf *from,
   name = btf_name_by_offset(from, tag->name_off);
   if (strncmp(name, "context_", 8)) continue;
   if (btf_decl_tag(tag)->component_idx != -1) return false;
+  if (!cell_context_precondition(name)) return false;
   if (native_requirements && cell_context_precondition(name)) continue;
   if (!cell_argument_tag(to, other, -1, name)) return false;
  }
