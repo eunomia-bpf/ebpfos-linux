@@ -1914,6 +1914,17 @@ EBPFOS_X86_FIXED_EFFECT_ROWS(EBPFOS_PORT_IO_COMPONENT)
 #undef EBPFOS_PORT_IO_COMPONENT
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_lfence);
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_rdrand64);
+/* Existing instruction descriptors need their proof services in the same
+ * checked component context; native entry admission supplies the caller ABI. */
+#define EBPFOS_X86_COMPONENT_STATE_ROWS(X) \
+ X(cpuid) X(rdseed64) X(rdtscp) X(reload_cr3) X(invlpg)
+#define EBPFOS_X86_COMPONENT_STATE(name) \
+ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
+ static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
+ .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+EBPFOS_X86_COMPONENT_STATE_ROWS(EBPFOS_X86_COMPONENT_STATE)
+#undef EBPFOS_X86_COMPONENT_STATE
+
 static const struct btf_kfunc_id_set ebpfos_kprog_rdrand64_component_service_set = {
 	.set = &ebpfos_kprog_rdrand64_service_ids,
 	.filter = ebpfos_kprog_component_filter,
@@ -1962,6 +1973,10 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
  &ebpfos_kprog_##name##_component_set, &ebpfos_kprog_##name##_component_service_set,
  EBPFOS_X86_FIXED_EFFECT_ROWS(EBPFOS_PORT_IO_COMPONENT_PTR)
 #undef EBPFOS_PORT_IO_COMPONENT_PTR
+#define EBPFOS_X86_COMPONENT_STATE_PTR(name) \
+ &ebpfos_kprog_##name##_component_set, &ebpfos_kprog_##name##_component_service_set,
+ EBPFOS_X86_COMPONENT_STATE_ROWS(EBPFOS_X86_COMPONENT_STATE_PTR)
+#undef EBPFOS_X86_COMPONENT_STATE_PTR
 		&ebpfos_kprog_lfence_component_set,
 		&ebpfos_kprog_lfence_component_service_set,
 		&ebpfos_kprog_rdrand64_component_set,
