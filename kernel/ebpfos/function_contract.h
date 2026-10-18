@@ -4,6 +4,7 @@
 #include "function_arguments.h"
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
+#include "function_register_prefix.h"
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -112,9 +113,11 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
                   cell_scalar_record_inputs(native, native_function, aux->btf, function);
  /* This form carries scalar bits only and rejects every parameter contract. */
  if (scalar_records) goto compatible;
- if (btf_type_vlen(prototype) != btf_type_vlen(n)) return false;
+ if (btf_type_vlen(prototype) != btf_type_vlen(n)) {
+  if (!IS_ENABLED(CONFIG_X86_64) || !cell_native_prefix(native,n,prototype)) return false;
+ }
  a = (const void *)(n + 1); b = (const void *)(prototype + 1);
- for (i = 0; i < btf_type_vlen(n); ++i)
+ for (i = 0; i < btf_type_vlen(prototype); ++i)
   if (!a[i].type || !b[i].type || !cell_register_type(native, a[i].type, aux->btf, b[i].type, true)) return false;
  /* Native callers bypass BPF's call-site argument checker. Keep bounds,
   * address spaces and context requirements in the common callable contract,
