@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
 #include "function_arguments.h"
+#include "function_context_requirements.h"
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
 #include "function_register_prefix.h"
@@ -111,6 +112,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype) ||
      !cell_register_type(native, n->type, aux->btf, prototype->type, false)) return false;
+ if (!cell_context_requirements(native, native_function, aux->btf, function)) return false;
  scalar_records = IS_ENABLED(CONFIG_X86_64) &&
                   cell_scalar_record_inputs(native, native_function, aux->btf, function);
  /* This form carries scalar bits only and rejects every parameter contract. */

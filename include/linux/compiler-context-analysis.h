@@ -14,12 +14,18 @@
 # define __ctx_btf_acquires(...) __attribute__((btf_decl_tag("context_acquire:" #__VA_ARGS__)))
 # define __ctx_btf_releases(...) __attribute__((btf_decl_tag("context_release:" #__VA_ARGS__)))
 # define __ctx_btf_try_acquires(ret, var) __attribute__((btf_decl_tag("context_try_acquire:" #ret ":" #var)))
+# define __ctx_btf_requires(...) __attribute__((btf_decl_tag("context_require:" #__VA_ARGS__)))
+# define __ctx_btf_requires_shared(...) __attribute__((btf_decl_tag("context_require_shared:" #__VA_ARGS__)))
+# define __ctx_btf_excludes(...) __attribute__((btf_decl_tag("context_exclude:" #__VA_ARGS__)))
 # endif
 #endif
 #ifndef __ctx_btf_acquires
 # define __ctx_btf_acquires(...)
 # define __ctx_btf_releases(...)
 # define __ctx_btf_try_acquires(ret, var)
+# define __ctx_btf_requires(...)
+# define __ctx_btf_requires_shared(...)
+# define __ctx_btf_excludes(...)
 #endif
 
 #if defined(WARN_CONTEXT_ANALYSIS) && !defined(__CHECKER__) && !defined(__GENKSYMS__)
@@ -41,9 +47,9 @@
 /*
  * The below are used to annotate code being checked. Internal only.
  */
-# define __excludes_ctx_lock(...)		__attribute__((locks_excluded(__VA_ARGS__)))
-# define __requires_ctx_lock(...)		__attribute__((requires_capability(__VA_ARGS__)))
-# define __requires_shared_ctx_lock(...)	__attribute__((requires_shared_capability(__VA_ARGS__)))
+# define __excludes_ctx_lock(...)		__attribute__((locks_excluded(__VA_ARGS__))) __ctx_btf_excludes(__VA_ARGS__)
+# define __requires_ctx_lock(...)		__attribute__((requires_capability(__VA_ARGS__))) __ctx_btf_requires(__VA_ARGS__)
+# define __requires_shared_ctx_lock(...)	__attribute__((requires_shared_capability(__VA_ARGS__))) __ctx_btf_requires_shared(__VA_ARGS__)
 
 /*
  * The "assert_capability" attribute is a bit confusingly named. It does not
@@ -176,9 +182,9 @@
 # define __returns_ctx_lock(var)
 # define __guarded_by(...)
 # define __pt_guarded_by(...)
-# define __excludes_ctx_lock(...)
-# define __requires_ctx_lock(...)
-# define __requires_shared_ctx_lock(...)
+# define __excludes_ctx_lock(...) __ctx_btf_excludes(__VA_ARGS__)
+# define __requires_ctx_lock(...) __ctx_btf_requires(__VA_ARGS__)
+# define __requires_shared_ctx_lock(...) __ctx_btf_requires_shared(__VA_ARGS__)
 # define __acquire_ctx_lock(var)			do { } while (0)
 # define __acquire_shared_ctx_lock(var)		do { } while (0)
 # define __try_acquire_ctx_lock(var, ret)		(ret)
