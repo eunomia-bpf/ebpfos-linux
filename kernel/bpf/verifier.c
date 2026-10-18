@@ -20885,7 +20885,9 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    !IS_ENABLED(CONFIG_X86_64))
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
-			if (t->type && (!btf_is_int(result) || result->size > 8)) {
+			if (t->type &&
+			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||
+			     !result->size || result->size > 8)) {
 				bpf_log(log, "replacement requires a scalar or void result\n");
 				return -EINVAL;
 			}
