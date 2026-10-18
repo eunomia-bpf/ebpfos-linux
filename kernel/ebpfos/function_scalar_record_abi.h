@@ -47,6 +47,44 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
+/* One scalar field occupies the same indexed x86 argument register. This
+ * supplies no pointer capability and does not bypass argument requirements.
+ */
+static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id,
+ unsigned int depth)
+{
+ const struct btf_type *record, *leaf;
+ const struct btf_member *member;
+ u32 value;
+ if (depth > 16 || cell_record_type_tags(btf, id)) return 0;
+ record = cell_record_type(btf, id);
+ if (!record || BTF_INFO_KIND(record->info) != BTF_KIND_STRUCT ||
+     (record->size != 4 && record->size != 8) || BTF_INFO_VLEN(record->info) != 1 ||
+     btf_member_bit_offset(record, 0) || btf_member_bitfield_size(record, 0)) return 0;
+ member = (const struct btf_member *)(record + 1);
+ if (cell_record_type_tags(btf, member->type)) return 0;
+ leaf = cell_record_type(btf, member->type);
+ if (!leaf || leaf->size != record->size) return 0;
+ if (BTF_INFO_KIND(leaf->info) == BTF_KIND_STRUCT)
+  return cell_single_scalar_record_bits(btf, member->type, depth + 1);
+ if (BTF_INFO_KIND(leaf->info) != BTF_KIND_INT) return 0;
+ value = *(const u32 *)(leaf + 1);
+ return BTF_INT_BITS(value) == leaf->size * 8 && !BTF_INT_OFFSET(value) &&
+        !(BTF_INT_ENCODING(value) & BTF_INT_BOOL) ? leaf->size * 8 : 0;
+}
+static bool cell_single_scalar_record_input(const struct btf *native, u32 id,
+ const struct btf *compiled, u32 actual)
+{
+ const struct btf_type *type;
+ unsigned int bits = cell_single_scalar_record_bits(native, id, 0);
+ u32 value;
+ if (!bits || cell_record_type_tags(compiled, actual)) return false;
+ type = cell_record_type(compiled, actual);
+ if (!type || BTF_INFO_KIND(type->info) != BTF_KIND_INT) return false;
+ value = *(const u32 *)(type + 1);
+ return type->size * 8 == bits && BTF_INT_BITS(value) == bits &&
+        !BTF_INT_OFFSET(value) && !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
+}
 static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type *nf,
  struct btf *compiled, const struct btf_type *cf)
 {
