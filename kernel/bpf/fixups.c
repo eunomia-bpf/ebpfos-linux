@@ -1220,6 +1220,8 @@ void bpf_restore_insn_aux_data(struct bpf_verifier_env *env,
 	env->insn_aux_data = orig_insn_aux;
 }
 
+#include "native_rcu_requirements.h"
+
 static int jit_subprogs(struct bpf_verifier_env *env)
 {
 	struct bpf_prog *prog = env->prog, **func, *tmp;
@@ -1266,6 +1268,7 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		}
 	}
 
+	bpf_native_rcu_requirements(env);
 	err = bpf_prog_alloc_jited_linfo(prog);
 	if (err)
 		goto out_undo_insn;

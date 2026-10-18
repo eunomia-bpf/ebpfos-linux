@@ -17,6 +17,12 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
  for (i = 1; i < count; ++i)
   if (aux->func[i] && (unsigned long)aux->func[i]->bpf_func == entry) break;
  if (i == count) goto out;
+ /* requires_rcu is closed over unprotected direct calls and all function
+  * addresses before JIT. A protected direct callee may have its own duty,
+  * discharged by its actual caller; only the selected entry needs an
+  * independently supplied native scope, which this interface cannot prove.
+  */
+ if (aux->func[i]->aux->requires_rcu) goto out;
  seen[i] = true;queue[tail++] = i;
  /* jit_subprogs retains the stock-resolved subprogram index in off for
   * both pseudo calls and function addresses. Walk those immutable edges,
@@ -27,8 +33,7 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
  while (head < tail) {
   struct bpf_prog *function = aux->func[queue[head++]];
   if (!function || !function->jited || function->aux->priv_stack_ptr ||
-      function->aux->tail_call_reachable || function->aux->exception_cb ||
-      function->aux->requires_rcu) goto out;
+      function->aux->tail_call_reachable || function->aux->exception_cb) goto out;
   for (j = 0; j < function->len; ++j) {
    const struct bpf_insn *insn = &function->insnsi[j];
    unsigned long target;

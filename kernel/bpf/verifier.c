@@ -10647,6 +10647,9 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return -EFAULT;
 
 	caller = state->frame[state->curframe];
+	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
+	if (!state->active_rcu_locks && !state->active_locks)
+		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
 	err = btf_check_subprog_call(env, subprog, caller->regs);
 	if (err == -EFAULT)
 		return err;
