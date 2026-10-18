@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
 #include "function_arguments.h"
+#include "function_scalar_span.h"
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -78,7 +79,8 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  if (btf_type_is_ptr(x)) {
   if (input && btf_type_is_int(y) && y->size == sizeof(void *)) return true;
   if (!btf_type_is_ptr(y)) return false;
-  return cell_layout(native, x->type, compiled, y->type, 0, false);
+  return cell_layout(native, x->type, compiled, y->type, 0, false) ||
+   (input && cell_scalar_span(native,x->type,compiled,y->type));
  }
  if (!btf_type_is_int(x) && !btf_is_any_enum(x)) return false;
  if (!btf_type_is_int(y) && !btf_is_any_enum(y)) return false;
