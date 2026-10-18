@@ -35,6 +35,7 @@
 #include <asm/sections.h>
 
 #include "disasm.h"
+#include "../ebpfos/function_scalar_record_abi.h"
 
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type) \
@@ -20877,7 +20878,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			const struct btf_type *result;
 
 			/* This interface returns a scalar or void in the ordinary
-			 * native ABI. Pointer/aggregate results need distinct contracts.
+			 * native ABI. A padding-free single INTEGER record has the
+			 * same result register;pointer/other aggregates stay refused.
 			 * Existing tracing/error-injection policy is unchanged.
 			 */
 			if (tgt_prog || prog->sleepable ||
@@ -20886,6 +20888,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
 			if (t->type &&
+			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||
 			     !result->size || result->size > 8)) {
 				bpf_log(log, "replacement requires a scalar or void result\n");
