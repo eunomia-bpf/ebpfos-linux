@@ -4,11 +4,18 @@
 /* A register-compatible entry is not necessarily context-compatible. Retain
  * the native interface's declared requirements and transfers at every cold
  * binding, including name-resolved later generations and record transports.
- * Equality supplies no held lock, RCU scope or reference to the verifier.
+ * A replacement may weaken preconditions, but must retain state transfers.
+ * Matching supplies no held lock, RCU scope or reference to the verifier.
  */
+static inline bool cell_context_precondition(const char *name)
+{
+ return !strncmp(name, "context_require:", sizeof("context_require:") - 1) ||
+        !strncmp(name, "context_require_shared:", sizeof("context_require_shared:") - 1) ||
+        !strncmp(name, "context_exclude:", sizeof("context_exclude:") - 1);
+}
 static inline bool cell_context_direction(const struct btf *from,
  const struct btf_type *function, const struct btf *to,
- const struct btf_type *other)
+ const struct btf_type *other, bool native_requirements)
 {
  u32 id;
  for (id = 1; ; id++) {
@@ -19,8 +26,9 @@ static inline bool cell_context_direction(const struct btf *from,
       btf_type_by_id(from, tag->type) != function) continue;
   name = btf_name_by_offset(from, tag->name_off);
   if (strncmp(name, "context_", 8)) continue;
-  if (btf_decl_tag(tag)->component_idx != -1 ||
-      !cell_argument_tag(to, other, -1, name)) return false;
+  if (btf_decl_tag(tag)->component_idx != -1) return false;
+  if (native_requirements && cell_context_precondition(name)) continue;
+  if (!cell_argument_tag(to, other, -1, name)) return false;
  }
  return true;
 }
@@ -28,7 +36,7 @@ static inline bool cell_context_requirements(const struct btf *native,
  const struct btf_type *nf, const struct btf *compiled,
  const struct btf_type *cf)
 {
- return cell_context_direction(native, nf, compiled, cf) &&
-        cell_context_direction(compiled, cf, native, nf);
+ return cell_context_direction(native, nf, compiled, cf, true) &&
+        cell_context_direction(compiled, cf, native, nf, false);
 }
 #endif
