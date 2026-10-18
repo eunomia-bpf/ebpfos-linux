@@ -10,6 +10,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "component_context.h"
 #include <linux/string.h>
 #include "koperation_locked_xchg.generated.h"
 
@@ -66,7 +67,7 @@ XCHG_ROWS(XCHG_DEFINE)
 static int xchg_context_filter(const struct bpf_prog *prog, u32 id)
 {
 	/* COMMON filters also see unrelated kfuncs: constrain only our IDs.
-	 * One registration serves both declared contexts, without consuming a
+	 * One registration serves the declared contexts, without consuming a
 	 * second entry or increasing either stock per-hook capacity.
 	 */
 	if (!xchg8_payload(id) && !xchg16_payload(id))
@@ -75,8 +76,7 @@ static int xchg_context_filter(const struct bpf_prog *prog, u32 id)
 		return 1;
 	if (prog->type == BPF_PROG_TYPE_SYSCALL)
 		return 0;
-	return !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+	return !ebpfos_non_sleepable_component(prog);
 }
 
 static int __init locked_xchg_init(void)

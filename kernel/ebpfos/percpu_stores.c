@@ -8,6 +8,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "component_context.h"
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -223,13 +224,12 @@ static int store_component_filter(const struct bpf_prog *prog, u32 id)
 		btf_id_set8_contains(&percpu_area_regstore##width##_ids, id);
 	PERCPU_STORE_ROWS(STORE_MATCH)
 #undef STORE_MATCH
-	/* Raw tracepoints and tracing share a hook. Preserve other services'
-	 * context checks without giving these stores another allowed context.
+	/* Use the same checked component domain as per-CPU reads/arithmetic.
+	 * Shared-hook filters must leave unrelated services alone.
 	 */
 	if (!ours)
 		return 0;
-	return !prog || !prog->aux || !prog->aux->ebpfos_component ||
-	       prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+	return !ebpfos_non_sleepable_component(prog);
 }
 
 static int __init percpu_stores_init(void)

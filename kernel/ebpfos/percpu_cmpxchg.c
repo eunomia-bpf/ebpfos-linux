@@ -8,6 +8,7 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
+#include "component_context.h"
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -131,8 +132,7 @@ static int compare_context_filter(const struct bpf_prog *prog, u32 id)
 	if (!ours) return 0;
 	if (!prog) return 1;
 	if (prog->type == BPF_PROG_TYPE_SYSCALL) return 0;
-	return !prog->aux || !prog->aux->ebpfos_component ||
-		prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT || prog->sleepable;
+	return !ebpfos_non_sleepable_component(prog);
 }
 
 static int __init compare_register(void)
