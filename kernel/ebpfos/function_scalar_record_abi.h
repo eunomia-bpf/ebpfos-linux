@@ -73,7 +73,8 @@ static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
   const struct btf_array *a = btf_array(t);
   unsigned int size = 0;
   alignment = cell_integer_record_alignment(btf, a->type, &size, depth + 1);
-  if (!alignment || !a->nelems || size > 8 / a->nelems) return 0;
+  if (!alignment || !a->nelems || size > 8 / a->nelems ||
+      (a->nelems > 1 && size % alignment)) return 0;
   *bytes = size * a->nelems;
   return alignment;
  }
