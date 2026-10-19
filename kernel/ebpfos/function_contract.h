@@ -71,7 +71,8 @@ static bool cell_layout(struct btf *a, u32 ai, struct btf *b, u32 bi,
  }
 }
 /* Scalar-input globals acquire no pointer capability from a native address.
- * Pointer consumers and pointer returns retain the complete root layout.
+ * Stock global-subprogram verification proves scalar returns only. A pointer
+ * spelling in BTF is not a proven pointer result for a native caller.
  */
 static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  u32 b, bool input)
@@ -83,6 +84,7 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
      cell_single_scalar_record_register(native, a, compiled, b)) return true;
  if (!x || !y) return false;
  if (btf_type_is_ptr(x)) {
+  if (!input) return false;
   if (input && btf_type_is_int(y) && y->size == sizeof(void *)) return true;
   if (!btf_type_is_ptr(y)) return false;
   return cell_layout(native, x->type, compiled, y->type, 0, false) ||
