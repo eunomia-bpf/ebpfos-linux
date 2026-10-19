@@ -56,7 +56,7 @@ static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
 {
  const struct btf_type *t;
  unsigned int i, alignment = 1, end = 0;
- if (depth > 16 || cell_record_type_tags(btf, id)) return 0;
+ if (cell_record_type_tags(btf, id)) return 0;
  t = cell_record_type(btf, id);
  if (!t) return 0;
  if (BTF_INFO_KIND(t->info) == BTF_KIND_INT ||
@@ -68,6 +68,7 @@ static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
   value = *(const u32 *)(t + 1);
   return BTF_INT_BITS(value) == *bytes * 8 && !BTF_INT_OFFSET(value) ? *bytes : 0;
  }
+ if (depth > 16) return 0;
  if (BTF_INFO_KIND(t->info) == BTF_KIND_ARRAY) {
   const struct btf_array *a = btf_array(t);
   unsigned int size = 0;
