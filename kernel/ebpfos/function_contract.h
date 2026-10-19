@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
 #include "function_arguments.h"
+#include "function_untrusted_address.h"
 #include "function_context_requirements.h"
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
@@ -122,7 +123,9 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  }
  a = (const void *)(n + 1); b = (const void *)(prototype + 1);
  for (i = 0; i < btf_type_vlen(prototype); ++i)
-  if (!a[i].type || !b[i].type || !cell_register_type(native, a[i].type, aux->btf, b[i].type, true)) return false;
+  if (!a[i].type || !b[i].type ||
+      (!cell_register_type(native, a[i].type, aux->btf, b[i].type, true) &&
+       !cell_untrusted_address_input(native, a[i].type, aux->btf, b[i].type, id, i))) return false;
  /* Native callers bypass BPF's call-site argument checker. Keep bounds,
   * address spaces and context requirements in the common callable contract,
   * including exports resolved by name in a replacement generation. */
