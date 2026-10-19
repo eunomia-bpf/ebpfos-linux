@@ -47,30 +47,59 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
-/* One scalar field occupies the same x86 argument/result register. This
- * supplies no pointer capability and does not bypass argument requirements.
+/* Naturally aligned integer leaves fit one x86 INTEGER eightbyte. Padding
+ * carries no field authority; pointer/floating/qualified/bitfield layouts and
+ * every field contract remain excluded. This is only native ABI matching.
  */
+static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
+ unsigned int *bytes, unsigned int depth)
+{
+ const struct btf_type *t;
+ unsigned int i, alignment = 1, end = 0;
+ if (depth > 16 || cell_record_type_tags(btf, id)) return 0;
+ t = cell_record_type(btf, id);
+ if (!t) return 0;
+ if (BTF_INFO_KIND(t->info) == BTF_KIND_INT ||
+     BTF_INFO_KIND(t->info) == BTF_KIND_ENUM || BTF_INFO_KIND(t->info) == BTF_KIND_ENUM64) {
+  u32 value;
+  *bytes = t->size;
+  if (*bytes != 1 && *bytes != 2 && *bytes != 4 && *bytes != 8) return 0;
+  if (BTF_INFO_KIND(t->info) != BTF_KIND_INT) return *bytes;
+  value = *(const u32 *)(t + 1);
+  return BTF_INT_BITS(value) == *bytes * 8 && !BTF_INT_OFFSET(value) ? *bytes : 0;
+ }
+ if (BTF_INFO_KIND(t->info) == BTF_KIND_ARRAY) {
+  const struct btf_array *a = btf_array(t);
+  unsigned int size = 0;
+  alignment = cell_integer_record_alignment(btf, a->type, &size, depth + 1);
+  if (!alignment || !a->nelems || size > 8 / a->nelems) return 0;
+  *bytes = size * a->nelems;
+  return alignment;
+ }
+ if ((BTF_INFO_KIND(t->info) != BTF_KIND_STRUCT && BTF_INFO_KIND(t->info) != BTF_KIND_UNION) ||
+     !t->size || t->size > 8 || !BTF_INFO_VLEN(t->info)) return 0;
+ for (i = 0; i < BTF_INFO_VLEN(t->info); i++) {
+  const struct btf_member *m = (const struct btf_member *)(t + 1);
+  unsigned int size = 0, offset = btf_member_bit_offset(t, i), member;
+  if (btf_member_bitfield_size(t, i)) return 0;
+  member = cell_integer_record_alignment(btf, m[i].type, &size, depth + 1);
+  if (!member || offset % (member * 8) || offset > t->size * 8 ||
+      size * 8 > t->size * 8 - offset ||
+      (BTF_INFO_KIND(t->info) == BTF_KIND_UNION ? offset != 0 : offset < end)) return 0;
+  end = offset + size * 8;
+  if (member > alignment) alignment = member;
+ }
+ *bytes = t->size;
+ return alignment;
+}
 static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id,
  unsigned int depth)
 {
- const struct btf_type *record, *leaf;
- const struct btf_member *member;
- u32 value;
- if (depth > 16 || cell_record_type_tags(btf, id)) return 0;
- record = cell_record_type(btf, id);
- if (!record || BTF_INFO_KIND(record->info) != BTF_KIND_STRUCT ||
-     (record->size != 4 && record->size != 8) || BTF_INFO_VLEN(record->info) != 1 ||
-     btf_member_bit_offset(record, 0) || btf_member_bitfield_size(record, 0)) return 0;
- member = (const struct btf_member *)(record + 1);
- if (cell_record_type_tags(btf, member->type)) return 0;
- leaf = cell_record_type(btf, member->type);
- if (!leaf || leaf->size != record->size) return 0;
- if (BTF_INFO_KIND(leaf->info) == BTF_KIND_STRUCT)
-  return cell_single_scalar_record_bits(btf, member->type, depth + 1);
- if (BTF_INFO_KIND(leaf->info) != BTF_KIND_INT) return 0;
- value = *(const u32 *)(leaf + 1);
- return BTF_INT_BITS(value) == leaf->size * 8 && !BTF_INT_OFFSET(value) &&
-        !(BTF_INT_ENCODING(value) & BTF_INT_BOOL) ? leaf->size * 8 : 0;
+ const struct btf_type *t = cell_record_type(btf, id);
+ unsigned int bytes = 0;
+ if (!t || (BTF_INFO_KIND(t->info) != BTF_KIND_STRUCT && BTF_INFO_KIND(t->info) != BTF_KIND_UNION) ||
+     (t->size != 4 && t->size != 8)) return 0;
+ return cell_integer_record_alignment(btf, id, &bytes, depth) ? bytes * 8 : 0;
 }
 static bool cell_single_scalar_record_register(const struct btf *native, u32 id,
  const struct btf *compiled, u32 actual)
