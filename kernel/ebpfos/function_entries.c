@@ -188,6 +188,13 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   address = kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
   if (!address || !core_kernel_text(address)) {error = -ENOENT;goto fail;}
   ip = ftrace_location(address);
+#ifdef FTRACE_MCOUNT_MAX_OFFSET
+  /* ftrace_location() includes disabled records. Mirror stock ftrace's
+   * validity bound before choosing it over an immutable native reservation.
+   * Entry padding can move __fentry__ beyond that bound.
+   */
+  if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) ip = 0;
+#endif
   if (!ip) {
    ip = entry_native_location(address);
    if (!ip) {error = -ENOENT;goto fail;}
