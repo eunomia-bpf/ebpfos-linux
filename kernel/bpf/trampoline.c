@@ -815,10 +815,14 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 		err = bpf_freplace_check_tgt_prog(tgt_prog);
 		if (err)
 			return err;
-		tr->extension_prog = link->link.prog;
-		return bpf_arch_text_poke(tr->func.addr, BPF_MOD_NOP,
+		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_NOP,
 					  BPF_MOD_JUMP, NULL,
 					  link->link.prog->bpf_func);
+		if (!err) {
+			tr->extension_prog = link->link.prog;
+			tr->extension_link = link;
+		}
+		return err;
 	}
 	if (kind == BPF_TRAMP_FSESSION) {
 		prog_list = &tr->progs_hlist[BPF_TRAMP_FENTRY];
@@ -886,7 +890,10 @@ static int __bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_JUMP,
 					 BPF_MOD_NOP,
 					 tr->extension_prog->bpf_func, NULL);
+		if (err)
+			return err;
 		tr->extension_prog = NULL;
+		tr->extension_link = NULL;
 		guard(mutex)(&tgt_prog->aux->ext_mutex);
 		tgt_prog->aux->is_extended = false;
 		return err;
@@ -914,8 +921,10 @@ int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 	/* Explicit detach keeps the link object alive. Its later release must
 	 * not remove another registration or decrement the count twice.
 	 */
-	if (bpf_attach_type_to_tramp(link->link.prog) != BPF_TRAMP_REPLACE &&
-	    hlist_unhashed(&link->tramp_hlist))
+	if ((bpf_attach_type_to_tramp(link->link.prog) == BPF_TRAMP_REPLACE &&
+	     tr->extension_link != link) ||
+	    (bpf_attach_type_to_tramp(link->link.prog) != BPF_TRAMP_REPLACE &&
+	     hlist_unhashed(&link->tramp_hlist)))
 		err = 0;
 	else
 		err = __bpf_trampoline_unlink_prog(link, tr, tgt_prog);
@@ -927,7 +936,8 @@ int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
  * descriptor can neither call the removed program nor update that binding.
  */
 int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
-			       struct bpf_trampoline *tr)
+			       struct bpf_trampoline *tr,
+			       struct bpf_prog *tgt_prog)
 {
 	struct hlist_node *next, *prev = NULL;
 	enum bpf_tramp_prog_type kind;
@@ -936,6 +946,16 @@ int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
 
 	mutex_lock(&tr->mutex);
 	prog = link->link.prog;
+	if (prog->type == BPF_PROG_TYPE_EXT && tgt_prog) {
+		/* Publish removal independently of final fput. The descriptor still
+		 * retains both programs; the entry owner handles whole-call drain.
+		 * A later release of this detached link must not remove a new link,
+		 * even when it registers the same resident program again.
+		 */
+		err = tr->extension_link == link ?
+			__bpf_trampoline_unlink_prog(link, tr, tgt_prog) : 0;
+		goto out;
+	}
 	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
 	    prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
 	    (prog->expected_attach_type != BPF_TRACE_FENTRY &&

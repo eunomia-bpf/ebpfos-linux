@@ -3680,9 +3680,10 @@ static int bpf_tracing_link_detach(struct bpf_link *link)
 	struct bpf_tracing_link *tr_link =
 		container_of(link, struct bpf_tracing_link, link.link);
 
-	if (tr_link->tgt_prog)
+	if (tr_link->tgt_prog && link->prog->type != BPF_PROG_TYPE_EXT)
 		return -EOPNOTSUPP;
-	return bpf_trampoline_detach_link(&tr_link->link, tr_link->trampoline);
+	return bpf_trampoline_detach_link(&tr_link->link, tr_link->trampoline,
+					tr_link->tgt_prog);
 }
 
 static int bpf_tracing_link_update(struct bpf_link *link,

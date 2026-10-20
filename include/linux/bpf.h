@@ -1570,6 +1570,7 @@ struct bpf_trampoline {
 	 * of the function it replaced.
 	 */
 	struct bpf_prog *extension_prog;
+	struct bpf_tramp_link *extension_link;
 	/* list of BPF programs using this trampoline */
 	struct hlist_head progs_hlist[BPF_TRAMP_MAX];
 	/* Number of attached programs. A counter per kind. */
@@ -1681,7 +1682,8 @@ int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 			       struct bpf_trampoline *tr,
 			       struct bpf_prog *tgt_prog);
 int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
-			       struct bpf_trampoline *tr);
+			       struct bpf_trampoline *tr,
+			       struct bpf_prog *tgt_prog);
 int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 			       struct bpf_trampoline *tr,
 			       struct bpf_prog *new_prog, struct bpf_prog *expected);
@@ -1781,7 +1783,8 @@ static inline int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 	return -ENOTSUPP;
 }
 static inline int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
-				       struct bpf_trampoline *tr)
+				       struct bpf_trampoline *tr,
+				       struct bpf_prog *tgt_prog)
 {
 	return -EOPNOTSUPP;
 }
