@@ -6426,6 +6426,19 @@ static struct btf *btf_parse_base(struct btf_verifier_env *env, const char *name
 	if (err)
 		goto errout;
 
+	/* An empty distilled base still owns the implicit VOID id. Nonempty
+	 * bases initialize it lazily in btf_add_type(); without it a module's
+	 * first split id becomes zero and relocation maps kfunc ids to VOID. */
+	if (!btf->nr_types) {
+		btf->types = kvzalloc_obj(*btf->types, GFP_KERNEL | __GFP_NOWARN);
+		if (!btf->types) {
+			err = -ENOMEM;
+			goto errout;
+		}
+		btf->types[0] = &btf_void;
+		btf->types_size = btf->nr_types = 1;
+	}
+
 	err = btf_check_type_tags(env, btf, 1);
 	if (err)
 		goto errout;

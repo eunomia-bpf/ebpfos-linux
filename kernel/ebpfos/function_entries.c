@@ -190,120 +190,31 @@ static void entry_free(struct entry_set *set)
  kvfree(set->programs);
  free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->slots);kvfree(set->locations);kfree(set);
 }
-/* An RCU-tasks grace period drains entry selection, but a sleeping frame can
- * cross that period. Use Linux's reliable stack walker as well. Refuse an
- * unreliable or running task; never infer safety from a guessed stack. */
-struct entry_running_stack { struct task_struct *task; int error; };
-struct entry_stack_check {
- struct entry_set *generation;
- unsigned int slot;
- struct entry_running_stack *running;
- bool found;
-};
-static bool entry_stack_address(void *opaque, unsigned long ip)
+#include "function_lifetime.h"
+struct entry_lifetime { struct entry_set *generation; unsigned int slot; };
+static bool entry_code_contains(void *opaque, unsigned long ip)
 {
- struct entry_stack_check *check = opaque;
- struct entry_set *set = check->generation;
- unsigned int i, j;
+ struct entry_lifetime *lifetime = opaque;
+ struct entry_set *set = lifetime->generation;
+ unsigned int i;
  for (i = 0; i < set->count; ++i) {
-  struct module *module = set->modules[i * 2 + check->slot];
-  struct bpf_prog *program = set->programs[i * 2 + check->slot];
-  if (module && within_module_mem_type(ip, module, MOD_TEXT)) {check->found = true;return false;}
-  if (!program) continue;
-  if (ip >= (unsigned long)program->bpf_func &&
-      ip < (unsigned long)program->bpf_func + program->jited_len) {check->found = true;return false;}
-  for (j = 0; program->aux->func && j < program->aux->func_cnt; ++j) {
-   struct bpf_prog *subprogram = program->aux->func[j];
-   if (subprogram && ip >= (unsigned long)subprogram->bpf_func &&
-       ip < (unsigned long)subprogram->bpf_func + subprogram->jited_len) {check->found = true;return false;}
-  }
- }
- return true;
-}
-static int entry_stack_walk(struct task_struct *task, struct entry_stack_check *check)
-{
- int error;
- if (!try_get_task_stack(task)) return 0;
- check->found = false;
- error = arch_stack_walk_reliable(entry_stack_address, check, task);
- put_task_stack(task);
- return check->found ? -EADDRINUSE : error ? -EBUSY : 0;
-}
-static void entry_stack_running(void *opaque)
-{
- struct entry_stack_check check = *(struct entry_stack_check *)opaque;
- struct entry_running_stack *running = &check.running[smp_processor_id()];
- get_task_struct(current);
- running->task = current;
- running->error = entry_stack_walk(current, &check);
-}
-static int entry_stack_task(struct task_struct *task, void *opaque)
-{
- struct entry_stack_check *check = opaque;
- int cpu;
- if (task_curr(task)) {
-  /* After disconnection and grace periods, a task with a clear stack
-   * cannot re-enter this generation through the removed entry. A task
-   * that woke after the CPU snapshot still needs its own reliable check. */
-  for_each_online_cpu(cpu)
-   if (check->running[cpu].task == task) return check->running[cpu].error;
-  return -EBUSY;
- }
- return entry_stack_walk(task, check);
-}
-/* A bare function pointer can outlive the caller's stack. Until an owner
- * holds a separate graph lease, address-taken BPF closures cannot be retired
- * by a stack scan. Synchronous callbacks are conservatively retained too. */
-static bool entry_program_addresses(struct bpf_prog *program)
-{
- unsigned int i, j;
- if (!program) return false;
- for (j = 0; j < program->len; ++j)
-  if (bpf_pseudo_func(&program->insnsi[j])) return true;
- for (i = 0; program->aux->func && i < program->aux->func_cnt; ++i) {
-  struct bpf_prog *function = program->aux->func[i];
-  if (!function) continue;
-  for (j = 0; j < function->len; ++j)
-   if (bpf_pseudo_func(&function->insnsi[j])) return true;
+  struct module *module = set->modules[i * 2 + lifetime->slot];
+  if ((module && within_module_mem_type(ip, module, MOD_TEXT)) ||
+      ebpfos_program_contains(set->programs[i * 2 + lifetime->slot], ip)) return true;
  }
  return false;
 }
 static int entry_quiescent(struct entry_set *set, unsigned int slot)
 {
- struct entry_stack_check check = { .generation = set, .slot = slot };
- struct task_struct *group, *task;
- int error = 0;
+ struct entry_lifetime lifetime = { .generation = set, .slot = slot };
  unsigned int i;
- int cpu;
  bool executable = false;
  for (i = 0; i < set->count; ++i) {
-  if (entry_program_addresses(set->programs[i * 2 + slot])) return -EOPNOTSUPP;
+  if (ebpfos_program_addresses(set->programs[i * 2 + slot])) return -EOPNOTSUPP;
   executable |= set->programs[i * 2 + slot] || set->modules[i * 2 + slot];
  }
  if (!executable) {synchronize_rcu_tasks();return 0;}
- if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) ||
-     !IS_ENABLED(CONFIG_TASKS_RCU)) return -EOPNOTSUPP;
- /* Drain non-task interrupt readers as well, including interrupts from idle. */
- synchronize_rcu();
- synchronize_rcu_tasks();
- check.running = kcalloc(nr_cpu_ids, sizeof(*check.running), GFP_KERNEL);
- if (!check.running) return -ENOMEM;
- cpus_read_lock();
- /* Inspect running tasks on their own CPU, including interrupted frames.
-  * This avoids indefinitely refusing a still-running grace-period worker. */
- on_each_cpu(entry_stack_running, &check, 1);
- for_each_online_cpu(cpu)
-  if (check.running[cpu].error == -EADDRINUSE || !error) error = check.running[cpu].error;
- rcu_read_lock();
- for_each_process_thread(group, task) {
-  int verdict = task_call_func(task, entry_stack_task, &check);
-  if (verdict == -EADDRINUSE || !error) error = verdict;
- }
- rcu_read_unlock();
- for_each_online_cpu(cpu) put_task_struct(check.running[cpu].task);
- cpus_read_unlock();
- kfree(check.running);
- return error;
+ return ebpfos_code_quiescent(entry_code_contains, &lifetime);
 }
 static int entry_all_quiescent(struct entry_set *set)
 {

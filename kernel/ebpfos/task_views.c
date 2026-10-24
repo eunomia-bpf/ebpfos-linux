@@ -18,21 +18,46 @@
 #include "function_contract.h"
 #include "function_native_context.h"
 #include "syscall_kfuncs.h"
+#include <linux/workqueue.h>
+#include "function_lifetime.h"
 
 struct task_view {
  u64 generation;
  u32 count;
+ bool revocable;
+ struct delayed_work release_work;
  sys_call_ptr_t table[NR_syscalls];
  struct ebpfos_function_binding bindings[];
 };
 
-static int task_view_release(struct inode *inode, struct file *file)
+static void task_view_free(struct task_view *view)
 {
- struct task_view *view = file->private_data;
  u32 i;
  for (i = 0; i < view->count; ++i)
   ebpfos_function_binding_put(&view->bindings[i]);
  kvfree(view);
+}
+static bool task_view_code_contains(void *opaque, unsigned long ip)
+{
+ struct task_view *view = opaque;
+ u32 i;
+ for (i = 0; i < view->count; ++i)
+  if (ebpfos_program_contains(view->bindings[i].program, ip)) return true;
+ return false;
+}
+static void task_view_release_work(struct work_struct *work)
+{
+ struct task_view *view = container_of(to_delayed_work(work), struct task_view, release_work);
+ if (!ebpfos_code_quiescent(task_view_code_contains, view)) task_view_free(view);
+ else schedule_delayed_work(&view->release_work, HZ / 10);
+}
+static int task_view_release(struct inode *inode, struct file *file)
+{
+ struct task_view *view = file->private_data;
+ /* Revocation may have removed the last file lease inside its own body.
+  * Keep the graph through grace periods and every outstanding old frame. */
+ if (view->revocable) schedule_delayed_work(&view->release_work, 0);
+ else task_view_free(view);
  return 0;
 }
 static void task_view_fdinfo(struct seq_file *out, struct file *file)
@@ -65,17 +90,20 @@ void ebpfos_task_view_free(struct task_struct *task)
  * A native bpf control entry guarantees self-selection has no old-view frame
  * beneath it. Each other task retains its own lease through sleeping calls. */
 static int task_view_open(const struct ebpfos_function_view_source *sources,
- u32 count, u64 generation)
+ u32 count, u64 generation, bool revocable)
 {
  struct btf *native = bpf_get_btf_vmlinux();
  struct task_view *view;
  u32 i, j, nr;
  int error = -EINVAL;
+ if (revocable && (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) ||
+     !IS_ENABLED(CONFIG_TASKS_RCU))) return -EOPNOTSUPP;
  if (IS_ERR_OR_NULL(native) || !count || count > NR_syscalls) return -EINVAL;
  if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
  view = kvzalloc(struct_size(view, bindings, count), GFP_KERNEL);
  if (!view) return -ENOMEM;
- view->count = count;view->generation = generation;
+ view->count = count;view->generation = generation;view->revocable = revocable;
+ INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
  memcpy(view->table, sys_call_table, sizeof(view->table));
  for (i = 0; i < count; ++i) {
   const struct btf_type *function = btf_type_by_id(native, sources[i].native_function);
@@ -101,6 +129,9 @@ static int task_view_open(const struct ebpfos_function_view_source *sources,
    program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_TRACING, false);
   if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
   view->bindings[i].program = program;
+  /* Escaped callback addresses need a separate owner lease. Do not promise
+   * fault revocation for a graph whose lifetime a stack scan cannot close. */
+  if (revocable && ebpfos_program_addresses(program)) {error = -EOPNOTSUPP;goto fail;}
   if (!program->aux->ebpfos_component ||
       (program->type == BPF_PROG_TYPE_SYSCALL ?
        (!program->sleepable || program->expected_attach_type != 0) :
@@ -122,8 +153,8 @@ fail:
 }
 
 __bpf_kfunc_start_defs();
-__bpf_kfunc int bpf_ebpfos_task_view_open(
- const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
+static int task_view_open_snapshot(
+ const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation, bool revocable)
 {
  struct ebpfos_function_view_source *snapshot;
  int result;
@@ -132,8 +163,27 @@ __bpf_kfunc int bpf_ebpfos_task_view_open(
      sources__sz / sizeof(*sources) > NR_syscalls) return -EINVAL;
  snapshot = kmemdup(sources, sources__sz, GFP_KERNEL);
  if (!snapshot) return -ENOMEM;
- result = task_view_open(snapshot, sources__sz / sizeof(*sources), generation);
+ result = task_view_open(snapshot, sources__sz / sizeof(*sources), generation, revocable);
  kfree(snapshot);return result;
+}
+__bpf_kfunc int bpf_ebpfos_task_view_open(
+ const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
+{return task_view_open_snapshot(sources, sources__sz, generation, false);}
+__bpf_kfunc int bpf_ebpfos_task_view_open_revocable(
+ const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
+{return task_view_open_snapshot(sources, sources__sz, generation, true);}
+/* Only the calling task loses its binding. This is a failure-path operation,
+ * not a runner or a check on successful calls. Retirement owns the old graph
+ * until every frame is clear, including the frame making this request. */
+__bpf_kfunc int bpf_ebpfos_task_view_revoke(void)
+{
+ struct file *old = current->ebpfos_task_view;
+ if (!old) return -ENOENT;
+ if (!((struct task_view *)old->private_data)->revocable) return -EOPNOTSUPP;
+ current->ebpfos_syscalls = sys_call_table;
+ current->ebpfos_task_view = NULL;
+ fput(old);
+ return 0;
 }
 __bpf_kfunc int bpf_ebpfos_task_view_select(int descriptor)
 {
@@ -161,6 +211,8 @@ __bpf_kfunc int bpf_ebpfos_task_view_select(int descriptor)
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(task_view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open_revocable, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_revoke, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_select, KF_SLEEPABLE)
 BTF_KFUNCS_END(task_view_ids)
 static const struct btf_kfunc_id_set task_view_kfuncs;
