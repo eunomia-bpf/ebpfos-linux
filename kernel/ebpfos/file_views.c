@@ -114,6 +114,10 @@ int ebpfos_file_view_open(struct file *file)
    bound->operations.read_iter = (void *)member->binding.address;
    changed++;
   }
+  if (address && address == (unsigned long)file->f_op->fsync) {
+   bound->operations.fsync = (void *)member->binding.address;
+   changed++;
+  }
  }
  if (!changed) goto free;
  bound->view = get_file(lease);
