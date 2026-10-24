@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_ENTRY_SLOTS_H
 #define EBPFOS_FUNCTION_ENTRY_SLOTS_H
 #include <linux/kprobes.h>
+#include <linux/sort.h>
 #include "entry_slot_instruction.h"
 
 /* Optional immutable compiler output. An absent table leaves the existing
@@ -33,28 +34,31 @@ static unsigned long entry_native_location(unsigned long address)
  * mutation. Preflight every byte and displacement before queuing any update.
  * No verifier, JIT, invocation gate or runtime code allocation lives here.
  */
+static int entry_native_pair_order(const void *a, const void *b)
+{
+ const struct text_poke_pair *first = a, *second = b;
+ return first->addr < second->addr ? -1 : first->addr > second->addr;
+}
 static int entry_native_apply(struct entry_native_slot *slots, unsigned int count,
  unsigned int from, unsigned int to)
 {
+ struct text_poke_pair *pairs;
  unsigned int i;
- int error = 0;
- u8 expected[5], replacement[5], actual[5];
+ int error = -ERANGE;
  if (!count) return 0;
+ pairs = kvmalloc_array(count, sizeof(*pairs), GFP_KERNEL);
+ if (!pairs) return -ENOMEM;
+ for (i = 0; i < count; ++i) {
+  pairs[i].addr = (void *)slots[i].ip;
+  if (!entry_native_instruction(&slots[i], from, pairs[i].before) ||
+      !entry_native_instruction(&slots[i], to, pairs[i].after)) goto out;
+ }
+ sort(pairs, count, sizeof(*pairs), entry_native_pair_order, NULL);
  mutex_lock(&text_mutex);
- for (i = 0; i < count; ++i) {
-  if (!entry_native_instruction(&slots[i], from, expected) ||
-      !entry_native_instruction(&slots[i], to, replacement)) {error = -ERANGE;goto out;}
-  if (copy_from_kernel_nofault(actual, (void *)slots[i].ip, sizeof(actual)) ||
-      memcmp(actual, expected, sizeof(actual))) {error = -ESTALE;goto out;}
- }
- for (i = 0; i < count; ++i) {
-  entry_native_instruction(&slots[i], to, replacement);
-  smp_text_poke_batch_add((void *)slots[i].ip, replacement, sizeof(replacement),
-    to ? NULL : entry_native_emulation);
- }
- smp_text_poke_batch_finish();
-out:
+ error = smp_text_poke_transaction(pairs, count);
  mutex_unlock(&text_mutex);
+out:
+ kvfree(pairs);
  return error;
 }
 #endif

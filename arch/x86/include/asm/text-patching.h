@@ -44,6 +44,15 @@ extern void smp_text_poke_single(void *addr, const void *opcode, size_t len, con
 extern void smp_text_poke_batch_add(void *addr, const void *opcode, size_t len, const void *emulate);
 extern void smp_text_poke_batch_finish(void);
 
+/* An all-or-nothing change of five-byte direct branches/NOPs. Callers hold
+ * text_mutex and retain both destinations for calls already in progress.
+ */
+struct text_poke_pair {
+	void *addr;
+	u8 before[5], after[5];
+};
+extern int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int count);
+
 #define INT3_INSN_SIZE		1
 #define INT3_INSN_OPCODE	0xCC
 

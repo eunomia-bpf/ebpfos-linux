@@ -2787,14 +2787,18 @@ struct smp_text_poke_loc {
 	const u8 text[TEXT_POKE_MAX_OPCODE_SIZE];
 	/* see smp_text_poke_batch_finish() */
 	u8 old;
+	s32 previous_disp;
+	u8 previous_opcode;
 };
 
 #define TEXT_POKE_ARRAY_MAX (PAGE_SIZE / sizeof(struct smp_text_poke_loc))
 
+static struct smp_text_poke_loc text_poke_default_vec[TEXT_POKE_ARRAY_MAX];
 static struct smp_text_poke_array {
-	struct smp_text_poke_loc vec[TEXT_POKE_ARRAY_MAX];
+	struct smp_text_poke_loc *vec;
 	int nr_entries;
-} text_poke_array;
+	bool previous;
+} text_poke_array = { .vec = text_poke_default_vec };
 
 static DEFINE_PER_CPU(atomic_t, text_poke_array_refs);
 
@@ -2839,6 +2843,8 @@ noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 {
 	struct smp_text_poke_loc *tpl;
 	int ret = 0;
+	u8 opcode;
+	s32 displacement;
 	void *ip;
 
 	if (user_mode(regs))
@@ -2878,8 +2884,19 @@ noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 	}
 
 	ip += tpl->len;
+	/* A transaction first traps every site while emulating the old set.
+	 * One publication changes all trapped entries to the new set. Ordinary
+	 * calls execute direct instructions once patching has finished.
+	 */
+	if (smp_load_acquire(&text_poke_array.previous)) {
+		opcode = tpl->previous_opcode;
+		displacement = tpl->previous_disp;
+	} else {
+		opcode = tpl->opcode;
+		displacement = tpl->disp;
+	}
 
-	switch (tpl->opcode) {
+	switch (opcode) {
 	case INT3_INSN_OPCODE:
 		/*
 		 * Someone poked an explicit INT3, they'll want to handle it,
@@ -2892,16 +2909,16 @@ noinstr int smp_text_poke_int3_handler(struct pt_regs *regs)
 		break;
 
 	case CALL_INSN_OPCODE:
-		int3_emulate_call(regs, (long)ip + tpl->disp);
+		int3_emulate_call(regs, (long)ip + displacement);
 		break;
 
 	case JMP32_INSN_OPCODE:
 	case JMP8_INSN_OPCODE:
-		int3_emulate_jmp(regs, (long)ip + tpl->disp);
+		int3_emulate_jmp(regs, (long)ip + displacement);
 		break;
 
 	case 0x70 ... 0x7f: /* Jcc */
-		int3_emulate_jcc(regs, tpl->opcode & 0xf, (long)ip, tpl->disp);
+		int3_emulate_jcc(regs, opcode & 0xf, (long)ip, displacement);
 		break;
 
 	default:
@@ -3044,6 +3061,12 @@ void smp_text_poke_batch_finish(void)
 		 */
 		smp_text_poke_sync_each_cpu();
 	}
+	/* Every site now traps, with its replacement tail installed. A handler
+	 * that selected the previous instruction before this store is an old
+	 * in-flight call; every later selection uses the new set. This occurs
+	 * before any new first byte becomes executable.
+	 */
+	smp_store_release(&text_poke_array.previous, false);
 
 	/*
 	 * Third step: replace the first byte (INT3) by the first byte of the
@@ -3222,4 +3245,71 @@ void __ref smp_text_poke_single(void *addr, const void *opcode, size_t len, cons
 {
 	smp_text_poke_batch_add(addr, opcode, len, emulate);
 	smp_text_poke_batch_finish();
+}
+
+/* Decode the restricted, frame-independent instruction set also used by
+ * direct ftrace and static branches. Compare actual bytes separately: a NOP
+ * may have a nonzero, architecturally ignored displacement.
+ */
+static bool text_poke_branch(const u8 *bytes, u8 *opcode, s32 *disp)
+{
+	if (bytes[0] == JMP32_INSN_OPCODE || bytes[0] == CALL_INSN_OPCODE) {
+		*opcode = bytes[0];
+		memcpy(disp, bytes + 1, sizeof(*disp));
+		return true;
+	}
+	if (bytes[0] == 0x0f && bytes[1] == 0x1f && bytes[2] == 0x44 && bytes[3] == 0) {
+		*opcode = JMP32_INSN_OPCODE;
+		*disp = 0;
+		return true;
+	}
+	return false;
+}
+
+int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int count)
+{
+	struct smp_text_poke_loc *vector;
+	unsigned int i;
+	int error = -EINVAL;
+
+	lockdep_assert_held(&text_mutex);
+	if (!count)
+		return 0;
+	if (text_poke_array.nr_entries)
+		return -EBUSY;
+	if (count > INT_MAX)
+		return -E2BIG;
+	vector = kvmalloc_array(count, sizeof(*vector), GFP_KERNEL);
+	if (!vector)
+		return -ENOMEM;
+	/* No fallible operation remains once the first instruction is changed. */
+	for (i = 0; i < count; ++i) {
+		struct smp_text_poke_loc *slot = &vector[i];
+		unsigned long address = (unsigned long)pairs[i].addr;
+		long offset = address - (unsigned long)_stext;
+		u8 actual[5];
+
+		if ((i && address < (unsigned long)pairs[i - 1].addr + 5) ||
+		    offset != (s32)offset ||
+		    !text_poke_branch(pairs[i].before, &slot->previous_opcode, &slot->previous_disp) ||
+		    !text_poke_branch(pairs[i].after, &slot->opcode, &slot->disp))
+			goto out;
+		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual)) ||
+		    memcmp(actual, pairs[i].before, sizeof(actual))) {
+			error = -ESTALE;
+			goto out;
+		}
+		slot->rel_addr = offset;
+		slot->len = 5;
+		memcpy((void *)slot->text, pairs[i].after, 5);
+	}
+	text_poke_array.vec = vector;
+	text_poke_array.nr_entries = count;
+	text_poke_array.previous = true;
+	smp_text_poke_batch_finish();
+	text_poke_array.vec = text_poke_default_vec;
+	error = 0;
+out:
+	kvfree(vector);
+	return error;
 }
