@@ -47,6 +47,17 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
+static unsigned int cell_record_scalar_bits(const struct btf_type *t)
+{
+ u32 value;
+ if (!t || (t->size != 1 && t->size != 2 && t->size != 4 && t->size != 8)) return 0;
+ if (BTF_INFO_KIND(t->info) == BTF_KIND_ENUM || BTF_INFO_KIND(t->info) == BTF_KIND_ENUM64)
+  return t->size * 8;
+ if (BTF_INFO_KIND(t->info) != BTF_KIND_INT) return 0;
+ value = *(const u32 *)(t + 1);
+ return BTF_INT_BITS(value) == t->size * 8 && !BTF_INT_OFFSET(value) &&
+        !(BTF_INT_ENCODING(value) & BTF_INT_BOOL) ? t->size * 8 : 0;
+}
 static bool cell_native_result2_type(const struct btf *btf, u32 id)
 {
  const struct btf_type *t = cell_record_type(btf, id);
@@ -149,9 +160,9 @@ static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type 
  args = (const struct btf_param *)(np + 1);actual = (const struct btf_param *)(cp + 1);
  for (i = 0; i < BTF_INFO_VLEN(np->info); i++) {
   const struct btf_type *t = cell_record_type(native, args[i].type);
-  unsigned int words;
+  unsigned int words, bits = cell_record_scalar_bits(t);
   if (cell_record_type_tags(native, args[i].type)) return false;
-  if (cell_record_word(t)) words = 1;
+  if (bits) words = 1;
   else {
    const struct btf_member *members;
    if (!t || BTF_INFO_KIND(t->info) != BTF_KIND_STRUCT || (t->size != 8 && t->size != 16) ||
@@ -161,12 +172,12 @@ static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type 
     if (btf_member_bit_offset(t, j) != j * 64 || btf_member_bitfield_size(t, j) ||
         cell_record_type_tags(native, members[j].type) ||
         !cell_record_word(cell_record_type(native, members[j].type))) return false;
-   record = true;
+   record = true;bits = 64;
   }
   for (j = 0; j < words; j++, word++)
    if (word >= BTF_INFO_VLEN(cp->info) ||
        cell_record_type_tags(compiled, actual[word].type) ||
-       !cell_record_word(cell_record_type(compiled, actual[word].type))) return false;
+       cell_record_scalar_bits(cell_record_type(compiled, actual[word].type)) != bits) return false;
  }
  return record && word == BTF_INFO_VLEN(cp->info);
 }
