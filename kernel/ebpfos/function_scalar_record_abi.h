@@ -62,14 +62,18 @@ static bool cell_native_result2_type(const struct btf *btf, u32 id)
 {
  const struct btf_type *t = cell_record_type(btf, id);
  const struct btf_member *m;
- unsigned int i;
+ unsigned int i, offset = 0;
  if (cell_record_type_tags(btf, id) || !t || BTF_INFO_KIND(t->info) != BTF_KIND_STRUCT ||
-     t->size != 16 || BTF_INFO_VLEN(t->info) != 2) return false;
+     t->size != 16 || !BTF_INFO_VLEN(t->info)) return false;
  m = (const struct btf_member *)(t + 1);
- for (i = 0; i < 2; i++)
-  if (btf_member_bit_offset(t, i) != i * 64 || btf_member_bitfield_size(t, i) ||
-      cell_record_type_tags(btf, m[i].type) || !cell_record_word(cell_record_type(btf, m[i].type))) return false;
- return true;
+ for (i = 0; i < BTF_INFO_VLEN(t->info); i++) {
+  unsigned int bits = cell_record_scalar_bits(cell_record_type(btf, m[i].type));
+  if (!bits || offset % bits || btf_member_bit_offset(t, i) != offset ||
+      btf_member_bitfield_size(t, i) || cell_record_type_tags(btf, m[i].type) ||
+      bits > 128 - offset) return false;
+  offset += bits;
+ }
+ return offset == 128;
 }
 /* Naturally aligned integer leaves fit one x86 INTEGER eightbyte. Padding
  * carries no field authority; pointer/floating/qualified/bitfield layouts and
