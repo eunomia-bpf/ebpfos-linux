@@ -88,6 +88,7 @@ static int object_view_revoke(u32 descriptor)
   if (bound->view != lease) continue;
   WRITE_ONCE(bound->operations.llseek, bound->original->llseek);
   WRITE_ONCE(bound->operations.read, bound->original->read);
+  WRITE_ONCE(bound->operations.write, bound->original->write);
   WRITE_ONCE(bound->operations.read_iter, bound->original->read_iter);
   WRITE_ONCE(bound->operations.fsync, bound->original->fsync);
  }
@@ -139,6 +140,10 @@ int ebpfos_file_view_open(struct file *file)
   }
   if (address && address == (unsigned long)file->f_op->read) {
    bound->operations.read = (void *)member->binding.address;
+   changed++;
+  }
+  if (address && address == (unsigned long)file->f_op->write) {
+   bound->operations.write = (void *)member->binding.address;
    changed++;
   }
   if (address && address == (unsigned long)file->f_op->read_iter) {

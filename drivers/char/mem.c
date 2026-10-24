@@ -658,7 +658,13 @@ static const struct file_operations __maybe_unused mem_fops = {
 	.fop_flags	= FOP_UNSIGNED_OFFSET,
 };
 
+static int open_null(struct inode *inode, struct file *file)
+{
+ return ebpfos_file_view_open(file);
+}
+
 static const struct file_operations null_fops = {
+ .open          = open_null,
 	.llseek		= null_lseek,
 	.read		= read_null,
 	.write		= write_null,
