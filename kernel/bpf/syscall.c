@@ -2936,6 +2936,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	      type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
 	      (type != BPF_PROG_TYPE_TRACING ||
 	       (attr->expected_attach_type != BPF_TRACE_FENTRY &&
+		attr->expected_attach_type != BPF_TRACE_ITER &&
 		attr->expected_attach_type != BPF_TRACE_REPLACE))) ||
 	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
@@ -2966,6 +2967,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	       !(attr->prog_flags & BPF_F_SLEEPABLE)) ||
 	      (type == BPF_PROG_TYPE_TRACING &&
 	       (attr->expected_attach_type == BPF_TRACE_FENTRY ||
+		attr->expected_attach_type == BPF_TRACE_ITER ||
 	       attr->expected_attach_type == BPF_TRACE_REPLACE) &&
 	       !(attr->prog_flags & BPF_F_SLEEPABLE))))
 		return -EINVAL;
