@@ -112,7 +112,6 @@ int ebpfos_file_view_open(struct file *file)
  struct ebpfos_function_view *view;
  struct bound_file_operations *bound;
  struct file *lease;
- struct btf *native;
  unsigned int i, changed = 0;
  unsigned long flags;
  int error = 0;
@@ -133,21 +132,16 @@ int ebpfos_file_view_open(struct file *file)
    goto unlock;
   }
  }
- native = bpf_get_btf_vmlinux();
- if (IS_ERR_OR_NULL(native)) { error = -EOPNOTSUPP;goto unlock; }
  bound = kzalloc(sizeof(*bound), GFP_KERNEL);
  if (!bound) { error = -ENOMEM;goto unlock; }
  bound->operations = *file->f_op;
  bound->original = file->f_op;
  for (i = 0; i < view->count; ++i) {
   const struct ebpfos_function_view_member *member = &view->members[i];
-  const struct btf_type *function = btf_type_by_id(native, member->native_function);
-  unsigned long address;
+  unsigned long address = member->native_address;
   if (IS_ERR(ebpfos_function_view_find(view, member->native_function))) {
    error = -ENOTUNIQ;goto free;
   }
-  if (!function || !btf_type_is_func(function)) { error = -EINVAL;goto free; }
-  address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
   if (address && address == (unsigned long)file->f_op->llseek) {
    bound->operations.llseek = (void *)member->binding.address;
    changed++;

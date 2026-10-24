@@ -18,6 +18,8 @@
 #include "function_binding.h"
 struct ebpfos_function_view_member {
  u32 native_function;
+ /* Stable native entry identity, resolved before publishing this view. */
+ unsigned long native_address;
  struct ebpfos_function_binding binding;
 };
 struct ebpfos_function_view {

@@ -43,6 +43,17 @@ static const struct file_operations ebpfos_function_view_operations = {
  */
 int ebpfos_function_view_publish(struct ebpfos_function_view *view)
 {
+ struct btf *native = bpf_get_btf_vmlinux();
+ u32 i;
+ if (IS_ERR_OR_NULL(native)) return -EOPNOTSUPP;
+ for (i = 0; i < view->count; ++i) {
+  struct ebpfos_function_view_member *member = &view->members[i];
+  const struct btf_type *function = btf_type_by_id(native, member->native_function);
+  if (!function || !btf_type_is_func(function)) return -EINVAL;
+  /* A missing entry cannot match an object's operations. Keep this case
+   * unchanged; constructors retain their existing callable checks. */
+  member->native_address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
+ }
  raw_spin_lock_init(&view->object_lock);
  INIT_LIST_HEAD(&view->object_files);
  return anon_inode_getfd("ebpfos-function-view", &ebpfos_function_view_operations,
