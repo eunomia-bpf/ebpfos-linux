@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Resolve an object's operations once. Ordinary file references protect the
- * selected view through duplicated descriptors and asynchronous I/O. */
+/* Owners opt in where operations-table identity is not a type protocol and
+ * the table stays fixed through release. Resolve once; ordinary file
+ * references retain the selected code through asynchronous I/O. */
 #include <linux/btf.h>
 #include <linux/capability.h>
 #include <linux/interrupt.h>
@@ -114,6 +115,7 @@ int ebpfos_file_view_open(struct file *file)
  struct file *lease;
  unsigned int i, changed = 0;
  unsigned long flags;
+ bool matches = false;
  int error = 0;
  /* Object work never resolves a task's selection after creation. A new
   * object created in an interrupt or a kernel thread starts globally. */
@@ -132,6 +134,21 @@ int ebpfos_file_view_open(struct file *file)
    goto unlock;
   }
  }
+ /* Unrelated files keep their original operations without allocating a
+  * private table. The immutable view was already resolved at publication. */
+ for (i = 0; i < view->count; ++i) {
+  const struct ebpfos_function_view_member *member = &view->members[i];
+  unsigned long address = member->native_address;
+  if (IS_ERR(ebpfos_function_view_find(view, member->native_function))) {
+   error = -ENOTUNIQ;goto unlock;
+  }
+  matches |= address && (address == (unsigned long)file->f_op->llseek ||
+    address == (unsigned long)file->f_op->read ||
+    address == (unsigned long)file->f_op->write ||
+    address == (unsigned long)file->f_op->read_iter ||
+    address == (unsigned long)file->f_op->fsync);
+ }
+ if (!matches) goto unlock;
  bound = kzalloc(sizeof(*bound), GFP_KERNEL);
  if (!bound) { error = -ENOMEM;goto unlock; }
  bound->operations = *file->f_op;
@@ -139,9 +156,6 @@ int ebpfos_file_view_open(struct file *file)
  for (i = 0; i < view->count; ++i) {
   const struct ebpfos_function_view_member *member = &view->members[i];
   unsigned long address = member->native_address;
-  if (IS_ERR(ebpfos_function_view_find(view, member->native_function))) {
-   error = -ENOTUNIQ;goto free;
-  }
   if (address && address == (unsigned long)file->f_op->llseek) {
    bound->operations.llseek = (void *)member->binding.address;
    changed++;

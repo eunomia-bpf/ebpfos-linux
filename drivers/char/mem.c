@@ -658,13 +658,7 @@ static const struct file_operations __maybe_unused mem_fops = {
 	.fop_flags	= FOP_UNSIGNED_OFFSET,
 };
 
-static int open_null(struct inode *inode, struct file *file)
-{
- return ebpfos_file_view_open(file);
-}
-
 static const struct file_operations null_fops = {
- .open          = open_null,
 	.llseek		= null_lseek,
 	.read		= read_null,
 	.write		= write_null,
@@ -685,7 +679,7 @@ static const struct file_operations port_fops = {
 
 static int open_zero(struct inode *inode, struct file *file)
 {
-	return ebpfos_file_view_open(file);
+	return 0;
 }
 
 static const struct file_operations zero_fops = {
@@ -735,7 +729,7 @@ static const struct memdev {
 
 static int memory_open(struct inode *inode, struct file *filp)
 {
-	int minor;
+	int minor, error;
 	const struct memdev *dev;
 
 	minor = iminor(inode);
@@ -749,10 +743,18 @@ static int memory_open(struct inode *inode, struct file *filp)
 	filp->f_op = dev->fops;
 	filp->f_mode |= dev->fmode;
 
-	if (dev->fops->open)
-		return dev->fops->open(inode, filp);
+	if (dev->fops->open) {
+		error = dev->fops->open(inode, filp);
+		if (error)
+			return error;
+	}
 
-	return 0;
+	/* This owner installs the final device operations. Other file classes
+	 * retain their own table identities and open protocols. */
+	error = ebpfos_file_view_open(filp);
+	if (error && filp->f_op->release)
+		filp->f_op->release(inode, filp);
+	return error;
 }
 
 static const struct file_operations memory_fops = {
