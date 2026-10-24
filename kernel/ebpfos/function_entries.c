@@ -573,7 +573,7 @@ __bpf_kfunc int bpf_ebpfos_function_entries_switch_atomic(u32 fd, u32 from, u32 
  mutex_unlock(&entry_lock);fdput(file);return error;
 }
 struct ebpfos_native_function_link { u32 native_function, first_function, second_function; };
-__bpf_kfunc int bpf_ebpfos_function_entries_open_native(
+static int entry_open_native(u32 btf_fd,
  const struct ebpfos_native_function_link *entries, u32 entries__sz)
 {
  struct ebpfos_native_function_link *snapshot;
@@ -588,11 +588,19 @@ __bpf_kfunc int bpf_ebpfos_function_entries_open_native(
  links = kvmalloc_array(count, sizeof(*links), GFP_KERNEL);
  if (!links) {kfree(snapshot);return -ENOMEM;}
  for (i = 0; i < count; ++i)
-  links[i] = (struct ebpfos_function_link){snapshot[i].native_function, 0,
+  links[i] = (struct ebpfos_function_link){snapshot[i].native_function, btf_fd + 1,
     snapshot[i].first_function, snapshot[i].second_function};
  error = entry_open(links, count, true);
  kvfree(links);kfree(snapshot);return error;
 }
+__bpf_kfunc int bpf_ebpfos_function_entries_open_native(
+ const struct ebpfos_native_function_link *entries, u32 entries__sz)
+{return entry_open_native(U32_MAX, entries, entries__sz);}
+/* Module versions start in exactly the same journal as image-native and
+ * verified versions. References and structural ABI checks stay in prepare. */
+__bpf_kfunc int bpf_ebpfos_function_entries_open_native_btf(u32 btf_fd,
+ const struct ebpfos_native_function_link *entries, u32 entries__sz)
+{return entry_open_native(btf_fd, entries, entries__sz);}
 __bpf_kfunc int bpf_ebpfos_function_entries_state(u32 fd)
 {
  struct fd file = fdget(fd);int active;
@@ -761,6 +769,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open_many, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_switch, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_switch_atomic, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open_native, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_open_native_btf, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_state, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_prepare, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_entries_append_many, KF_SLEEPABLE)
