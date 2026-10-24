@@ -75,6 +75,10 @@ int ebpfos_file_view_open(struct file *file)
   }
   if (!function || !btf_type_is_func(function)) { kfree(bound);return -EINVAL; }
   address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
+  if (address && address == (unsigned long)file->f_op->llseek) {
+   bound->operations.llseek = (void *)member->binding.address;
+   changed++;
+  }
   if (address && address == (unsigned long)file->f_op->read) {
    bound->operations.read = (void *)member->binding.address;
    changed++;
