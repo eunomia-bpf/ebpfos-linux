@@ -3,6 +3,7 @@
  * compilation unit. All type checks and file/program ownership stay cold.
  */
 #include <linux/module.h>
+#include <linux/kallsyms.h>
 #include <linux/filter.h>
 #include <linux/btf.h>
 #include <linux/capability.h>
@@ -174,9 +175,22 @@ __bpf_kfunc int bpf_ebpfos_function_view_compose(u32 base,
  result = ebpfos_function_view_compose(base, snapshot, imports__sz / sizeof(*imports), generation);
  kfree(snapshot);return result;
 }
+__bpf_kfunc int bpf_ebpfos_function_view_open_native(
+ const struct ebpfos_function_view_native_source *sources, u32 sources__sz, u64 generation)
+{
+ struct ebpfos_function_view_native_source *snapshot;
+ int result;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!sources__sz || sources__sz % sizeof(*sources)) return -EINVAL;
+ snapshot = kmemdup(sources, sources__sz, GFP_KERNEL);
+ if (!snapshot) return -ENOMEM;
+ result = ebpfos_function_view_open_native(snapshot, sources__sz / sizeof(*sources), generation);
+ kfree(snapshot);return result;
+}
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_pure, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_native, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_view_compose, KF_SLEEPABLE)
 BTF_KFUNCS_END(view_ids)
 static const struct btf_kfunc_id_set view_kfuncs;
@@ -193,3 +207,38 @@ static int __init view_init(void)
 #ifndef MODULE
 late_initcall(view_init);
 #endif
+
+/* Native construction is a trusted kernel API, never a raw userspace address.
+ * Restrict it to permanent image text so an object lease cannot outlive code.
+ * Loadable native modules require their own module reference before support. */
+int ebpfos_function_view_open_native(
+ const struct ebpfos_function_view_native_source *sources, u32 count, u64 generation)
+{
+ struct btf *native = bpf_get_btf_vmlinux();
+ struct ebpfos_function_view *view;
+ u32 i, j;
+ int error = -EINVAL;
+ if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
+ if (!count || IS_ERR_OR_NULL(native)) return -EINVAL;
+ view = kvzalloc(struct_size(view, members, count), GFP_KERNEL);
+ if (!view) return -ENOMEM;
+ view->count = count;view->generation = generation;
+ for (i = 0; i < count; ++i) {
+  const struct btf_type *source = btf_type_by_id(native, sources[i].native_function);
+  const struct btf_type *target = btf_type_by_id(native, sources[i].replacement);
+  unsigned long address;
+  for (j = 0; j < i; ++j)
+   if (sources[j].native_function == sources[i].native_function) { error = -ENOTUNIQ;goto fail; }
+  if (!source || !target || !btf_type_is_func(source) || !btf_type_is_func(target) ||
+      source->type != target->type) { error = -EPROTOTYPE;goto fail; }
+  address = kallsyms_lookup_name(btf_name_by_offset(native, target->name_off));
+  if (!address || !core_kernel_text(address)) { error = -ENOENT;goto fail; }
+  view->members[i].native_function = sources[i].native_function;
+  view->members[i].binding.address = address;
+ }
+ error = ebpfos_function_view_publish(view);
+ if (error >= 0) return error;
+fail:
+ kvfree(view);return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_function_view_open_native);

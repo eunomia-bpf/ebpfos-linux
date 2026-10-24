@@ -52,10 +52,12 @@ static const struct file_operations task_view_ops = {
 void ebpfos_task_view_fork(struct task_struct *task)
 {
  if (task->ebpfos_task_view) get_file(task->ebpfos_task_view);
+ if (task->ebpfos_object_view) get_file(task->ebpfos_object_view);
 }
 void ebpfos_task_view_free(struct task_struct *task)
 {
  if (task->ebpfos_task_view) fput(task->ebpfos_task_view);
+ if (task->ebpfos_object_view) fput(task->ebpfos_object_view);
 }
 
 /* Bind only actual syscall exports, never a caller-provided address or ordinal.

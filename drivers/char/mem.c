@@ -10,6 +10,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/ebpfos_file_view.h>
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -676,7 +677,13 @@ static const struct file_operations port_fops = {
 };
 #endif
 
+static int open_zero(struct inode *inode, struct file *file)
+{
+	return ebpfos_file_view_open(file);
+}
+
 static const struct file_operations zero_fops = {
+	.open		= open_zero,
 	.llseek		= zero_lseek,
 	.write		= write_zero,
 	.read_iter	= read_iter_zero,

@@ -4,7 +4,7 @@ obj-y += admission.o component_graph.o executor_root.o core.o step_scope.o
 obj-y += native_set.o native_inline.o
 obj-y += checked_dispatch.o function_views.o
 ifeq ($(CONFIG_EBPFOS)$(CONFIG_X86_64),yy)
-obj-y += task_views.o
+obj-y += task_views.o file_views.o
 endif
 # Bare C-to-BPF entry linking currently uses x86-64 register ABI and no CFI
 # signature prefix. Never bypass another configuration's CFI entry contract.

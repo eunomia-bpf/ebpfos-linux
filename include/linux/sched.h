@@ -1649,10 +1649,11 @@ struct task_struct {
 	 * they are included in the randomized portion of task_struct.
 	 */
 #if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
-	/* The initial x64 substrate uses existing tail padding, preserving old
-	 * field offsets and sizeof(task_struct) in its retained image. */
+	/* Task-owned syscall and object-selection references. Objects retain
+	 * their own operations independently after creation. */
 	long (* const *ebpfos_syscalls)(const struct pt_regs *);
 	struct file *ebpfos_task_view;
+	struct file *ebpfos_object_view;
 #endif
 	randomized_struct_fields_end
 } __attribute__ ((aligned (64)));
