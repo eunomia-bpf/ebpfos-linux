@@ -13,6 +13,8 @@
 #include <linux/bpf.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/spinlock.h>
+#include <linux/list.h>
 #include "function_binding.h"
 struct ebpfos_function_view_member {
  u32 native_function;
@@ -23,6 +25,8 @@ struct ebpfos_function_view {
  u32 count;
  /* Cold object binding state; immutable code members and leases stay valid. */
  bool object_revoked;
+ raw_spinlock_t object_lock;
+ struct list_head object_files;
  struct ebpfos_function_view_member members[];
 };
 struct ebpfos_function_view_source {

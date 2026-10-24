@@ -43,6 +43,8 @@ static const struct file_operations ebpfos_function_view_operations = {
  */
 int ebpfos_function_view_publish(struct ebpfos_function_view *view)
 {
+ raw_spin_lock_init(&view->object_lock);
+ INIT_LIST_HEAD(&view->object_files);
  return anon_inode_getfd("ebpfos-function-view", &ebpfos_function_view_operations,
                         view, O_CLOEXEC | O_RDONLY);
 }
