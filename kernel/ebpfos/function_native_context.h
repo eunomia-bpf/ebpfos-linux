@@ -49,14 +49,17 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
    if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||
        insn->code == (BPF_JMP | BPF_CALL | BPF_X)) goto out;
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
-   if (pure) goto out;
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
-       insn->src_reg == BPF_PSEUDO_KOP_CALL) continue;
+       insn->src_reg == BPF_PSEUDO_KOP_CALL) {
+    if (pure) goto out;
+    continue;
+   }
    if (insn->src_reg) goto out;
    target = (unsigned long)__bpf_call_base + insn->imm;
    /* Stock may_goto fixups use initialized slots in this function's frame,
     * not bpf_run_ctx. Keep their original timeout and escape semantics. */
    if (target == (unsigned long)arch_bpf_timed_may_goto) continue;
+   if (pure) goto out;
    for (k = 0; k < ARRAY_SIZE(helpers); ++k) {
     const struct bpf_func_proto *prototype = bpf_base_func_proto(helpers[k], parent);
     if (prototype && target == (unsigned long)prototype->func) break;

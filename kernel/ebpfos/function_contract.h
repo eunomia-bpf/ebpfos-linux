@@ -148,7 +148,8 @@ compatible:
  * object owner may publish address in an existing operations table, then
  * release the lease only after the object and all its callbacks are dead.
  * This first common form admits context-free functions: no helper, kfunc,
- * tail call, timed-loop helper or private JIT stack can require bpf_run_ctx.
+ * tail call or private JIT stack can require bpf_run_ctx. The stock timed
+ * backedge operation uses the current function's initialized stack slots.
  */
 #include "function_binding.h"
 #include "function_native_context.h"
