@@ -47,6 +47,19 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
+static bool cell_native_result2_type(const struct btf *btf, u32 id)
+{
+ const struct btf_type *t = cell_record_type(btf, id);
+ const struct btf_member *m;
+ unsigned int i;
+ if (cell_record_type_tags(btf, id) || !t || BTF_INFO_KIND(t->info) != BTF_KIND_STRUCT ||
+     t->size != 16 || BTF_INFO_VLEN(t->info) != 2) return false;
+ m = (const struct btf_member *)(t + 1);
+ for (i = 0; i < 2; i++)
+  if (btf_member_bit_offset(t, i) != i * 64 || btf_member_bitfield_size(t, i) ||
+      cell_record_type_tags(btf, m[i].type) || !cell_record_word(cell_record_type(btf, m[i].type))) return false;
+ return true;
+}
 /* Naturally aligned integer leaves fit one x86 INTEGER eightbyte. Padding
  * carries no field authority; pointer/floating/qualified/bitfield layouts and
  * every field contract remain excluded. This is only native ABI matching.
@@ -117,7 +130,7 @@ static bool cell_single_scalar_record_register(const struct btf *native, u32 id,
         !BTF_INT_OFFSET(value) && !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
 static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type *nf,
- struct btf *compiled, const struct btf_type *cf)
+ struct btf *compiled, const struct btf_type *cf, bool result2)
 {
  const struct btf_type *np, *cp, *result;
  const struct btf_param *args, *actual;
@@ -130,7 +143,7 @@ static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type 
  if (!np || !cp || BTF_INFO_KIND(np->info) != BTF_KIND_FUNC_PROTO ||
      BTF_INFO_KIND(cp->info) != BTF_KIND_FUNC_PROTO || BTF_INFO_VLEN(cp->info) > 5) return false;
  result = cell_record_type(native, np->type);
- if (np->type && (!result || (BTF_INFO_KIND(result->info) != BTF_KIND_INT &&
+ if (np->type && !(result2 && cell_native_result2_type(native, np->type)) && (!result || (BTF_INFO_KIND(result->info) != BTF_KIND_INT &&
      BTF_INFO_KIND(result->info) != BTF_KIND_ENUM && BTF_INFO_KIND(result->info) != BTF_KIND_ENUM64) ||
      !result->size || result->size > 8)) return false;
  args = (const struct btf_param *)(np + 1);actual = (const struct btf_param *)(cp + 1);

@@ -20879,7 +20879,9 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 
 			/* This interface returns a scalar or void in the ordinary
 			 * native ABI. A padding-free single INTEGER record has the
-			 * same result register;pointer/other aggregates stay refused.
+			 * same result register. Two complete integer words use the
+			 * entry service's checked RAX/RDX result operation; direct
+			 * trampolines reject that form. Pointer/other aggregates refuse.
 			 * Existing tracing/error-injection policy is unchanged.
 			 */
 			if (tgt_prog || prog->sleepable ||
@@ -20889,6 +20891,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
 			if (t->type &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
+			    !cell_native_result2_type(btf, t->type) &&
 			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||
 			     !result->size || result->size > 8)) {
 				bpf_log(log, "replacement requires a scalar or void result\n");

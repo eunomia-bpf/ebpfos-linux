@@ -6,6 +6,7 @@
 #include "function_context_requirements.h"
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
+#include "native_result_abi.h"
 #include "function_register_prefix.h"
 #include <linux/module.h>
 /* Cold native-call contract shared by direct entries and owned ops tables.
@@ -103,7 +104,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  const struct btf_param *a, *b;
  struct bpf_prog_aux *aux = parent->aux;
  unsigned int i, index;
- bool scalar_records;
+ bool scalar_records, result2;
  if (!aux->btf || !aux->func || !aux->func_info_aux || !aux->func_info) return false;
  for (index = 1; index < aux->func_cnt && index < aux->func_info_cnt; ++index)
   if (aux->func_info[index].type_id == id) break;
@@ -114,11 +115,15 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      !aux->func[index]->jited || strcmp(btf_name_by_offset(native, native_function->name_off),
        btf_name_by_offset(aux->btf, function->name_off))) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
- if (!prototype || !btf_type_is_func_proto(prototype) ||
-     !cell_register_type(native, n->type, aux->btf, prototype->type, false)) return false;
+ if (!prototype || !btf_type_is_func_proto(prototype)) return false;
+ result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
+           !cell_record_type_tags(aux->btf, prototype->type) &&
+           cell_record_word(cell_record_type(aux->btf, prototype->type)) &&
+           ebpfos_prog_native_result2(aux->func[index]);
+ if (!result2 && !cell_register_type(native, n->type, aux->btf, prototype->type, false)) return false;
  if (!cell_context_requirements(native, native_function, aux->btf, function)) return false;
  scalar_records = IS_ENABLED(CONFIG_X86_64) &&
-                  cell_scalar_record_inputs(native, native_function, aux->btf, function);
+                  cell_scalar_record_inputs(native, native_function, aux->btf, function, result2);
  /* This form carries scalar bits only and rejects every parameter contract. */
  if (scalar_records) goto compatible;
  if (btf_type_vlen(prototype) != btf_type_vlen(n)) {

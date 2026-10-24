@@ -1607,6 +1607,7 @@ EBPFOS_LOCAL_ADD(64, BPF_DW, 64);
 #ifdef CONFIG_X86
 #include "koperation_frame_addresses.h"
 #include "koperation_native_arguments.h"
+#include "koperation_native_results.h"
 #include "koperation_percpu_reads.h"
 #endif
 #include "koperation_local_bits.h"
@@ -1881,6 +1882,7 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
  .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
 EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
  EBPFOS_NATIVE_ARGUMENT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
+ EBPFOS_NATIVE_RESULT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
 #undef EBPFOS_FRAME_ADDRESS_COMPONENT
 #endif
 #define EBPFOS_LOCAL_BITS_COMPONENT(op, upper, width, span, alu, type, mask_type) \
@@ -1951,6 +1953,7 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
  &ebpfos_kprog_##name##_component_set, &ebpfos_kprog_##name##_component_service_set,
  EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT_PTR)
  EBPFOS_NATIVE_ARGUMENT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT_PTR)
+ EBPFOS_NATIVE_RESULT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT_PTR)
 #undef EBPFOS_FRAME_ADDRESS_COMPONENT_PTR
 #endif
  EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_COMPONENT_PTR)
@@ -2282,6 +2285,7 @@ static int __init ebpfos_kprog_register(void)
  if (err) return err;
  EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_REGISTER)
  EBPFOS_NATIVE_ARGUMENT_ROWS(EBPFOS_FRAME_ADDRESS_REGISTER)
+ EBPFOS_NATIVE_RESULT_ROWS(EBPFOS_FRAME_ADDRESS_REGISTER)
 #undef EBPFOS_FRAME_ADDRESS_REGISTER
 #endif
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,

@@ -790,6 +790,14 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 	int err = 0;
 	int cnt = 0, i;
 
+	/* Two-word native results require the entry service's exact verified
+	 * subprogram and checked result-register operation. This trampoline has
+	 * a scalar result slot and cannot preserve the second result word.
+	 */
+	if (link->link.prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	    tr->func.model.ret_size > sizeof(u64))
+		return -EOPNOTSUPP;
+
 	kind = bpf_attach_type_to_tramp(link->link.prog);
 	if (tr->extension_prog)
 		/* cannot attach fentry/fexit if extension prog is attached.
