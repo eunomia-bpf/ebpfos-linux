@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/stop_machine.h>
 #include "syscall_kfuncs.h"
+#include "function_native.h"
 struct ebpfos_function_entry { u32 native_function, compiled_function; };
 /* Each symbol may come from a separately admitted object. Program references
  * and all symbol/ABI/context checks belong to cold linking, never invocation.
@@ -262,30 +263,6 @@ static long entry_ioctl(struct file *file, unsigned int command, unsigned long a
 static const struct file_operations entry_operations = {
  .release = entry_release, .llseek = noop_llseek, .unlocked_ioctl = entry_ioctl,
 };
-/* Pahole labels ordinary C globals STATIC in module BTF. The loaded ELF
- * symbol table supplies the actual linkage; require a unique global FUNC
- * so LLVM's private calling conventions cannot cross a native entry. */
-static unsigned long entry_module_symbol(struct module *module, const char *name)
-{
- unsigned long target = 0;
-#if defined(CONFIG_MODULES) && defined(CONFIG_KALLSYMS)
- struct mod_kallsyms *symbols;
- unsigned int i;
- rcu_read_lock();
- symbols = rcu_dereference(module->kallsyms);
- for (i = 0; symbols && i < symbols->num_symtab; ++i) {
-  const Elf_Sym *symbol = &symbols->symtab[i];
-  if (strcmp(name, symbols->strtab + symbol->st_name)) continue;
-  if (target || ELF_ST_BIND(symbol->st_info) != STB_GLOBAL ||
-      ELF_ST_TYPE(symbol->st_info) != STT_FUNC || symbol->st_shndx == SHN_UNDEF) {
-   target = 0;break;
-  }
-  target = kallsyms_symbol_value(symbol);
- }
- rcu_read_unlock();
-#endif
- return target;
-}
 static struct entry_set *entry_prepare(const struct ebpfos_function_link *entries,
  unsigned int count, bool native_targets)
 {
@@ -359,7 +336,7 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
      error = -EPROTOTYPE;goto native_out;
     }
     if (module) {
-     target = entry_module_symbol(module, btf_name_by_offset(replacement_btf, replacement->name_off));
+     target = ebpfos_module_function(module, btf_name_by_offset(replacement_btf, replacement->name_off));
      if (!target || !within_module_mem_type(target, module, MOD_TEXT)) error = -ENOENT;
      else error = 0;
     } else {

@@ -2,9 +2,11 @@
 #ifndef EBPFOS_FUNCTION_BINDING_H
 #define EBPFOS_FUNCTION_BINDING_H
 struct bpf_prog;
-/* A prepared function address owns the entire independently verified graph. */
+struct module;
+/* A prepared address owns its verified graph or trusted native module. */
 struct ebpfos_function_binding {
  struct bpf_prog *program;
+ struct module *module;
  unsigned long address;
 };
 #endif

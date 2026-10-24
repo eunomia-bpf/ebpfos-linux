@@ -7,6 +7,7 @@
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
 #include "function_register_prefix.h"
+#include <linux/module.h>
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -153,7 +154,7 @@ static inline int ebpfos_function_binding_open_pure(
  unsigned int i, j;
  unsigned long address;
  if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
- if (out->program || out->address || !native || !function || !btf_type_is_func(function))
+ if (out->program || out->module || out->address || !native || !function || !btf_type_is_func(function))
   return -EINVAL;
  program = bpf_prog_get_type_dev(fd, type, false);
  if (IS_ERR(program)) return PTR_ERR(program);
@@ -177,6 +178,7 @@ invalid:
 static inline void ebpfos_function_binding_put(struct ebpfos_function_binding *binding)
 {
  if (binding->program) bpf_prog_put(binding->program);
- binding->program = NULL;binding->address = 0;
+ module_put(binding->module);
+ binding->program = NULL;binding->module = NULL;binding->address = 0;
 }
 #endif

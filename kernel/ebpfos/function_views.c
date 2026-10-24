@@ -11,6 +11,7 @@
 #include "function_contract.h"
 #include "function_views.h"
 #include "syscall_kfuncs.h"
+#include "function_native.h"
 static int ebpfos_function_view_release(struct inode *inode, struct file *file)
 {
  struct ebpfos_function_view *view = file->private_data;
@@ -111,6 +112,8 @@ int ebpfos_function_view_compose(u32 base_descriptor,
   next->members[i] = base->members[i];
   if (next->members[i].binding.program)
    bpf_prog_inc(next->members[i].binding.program);
+  if (next->members[i].binding.module)
+   __module_get(next->members[i].binding.module);
  }
  for (i = 0; i < count; ++i) {
   const struct ebpfos_function_view_member *target, *source;
@@ -130,6 +133,7 @@ int ebpfos_function_view_compose(u32 base_descriptor,
   ebpfos_function_binding_put(&destination->binding);
   destination->binding = source->binding;
   if (destination->binding.program) bpf_prog_inc(destination->binding.program);
+  if (destination->binding.module) __module_get(destination->binding.module);
   fput(source_file);
  }
  error = ebpfos_function_view_publish(next);
@@ -187,10 +191,25 @@ __bpf_kfunc int bpf_ebpfos_function_view_open_native(
  result = ebpfos_function_view_open_native(snapshot, sources__sz / sizeof(*sources), generation);
  kfree(snapshot);return result;
 }
+__bpf_kfunc int bpf_ebpfos_function_view_open_native_btf(
+ const struct ebpfos_function_view_native_source *sources, u32 sources__sz,
+ u64 generation, u32 descriptor)
+{
+ struct ebpfos_function_view_native_source *snapshot;
+ int result;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (!sources__sz || sources__sz % sizeof(*sources)) return -EINVAL;
+ snapshot = kmemdup(sources, sources__sz, GFP_KERNEL);
+ if (!snapshot) return -ENOMEM;
+ result = ebpfos_function_view_open_native_btf(snapshot,
+   sources__sz / sizeof(*sources), generation, descriptor);
+ kfree(snapshot);return result;
+}
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_pure, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_native, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_function_view_open_native_btf, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_function_view_compose, KF_SLEEPABLE)
 BTF_KFUNCS_END(view_ids)
 static const struct btf_kfunc_id_set view_kfuncs;
@@ -242,3 +261,54 @@ fail:
  kvfree(view);return error;
 }
 EXPORT_SYMBOL_GPL(ebpfos_function_view_open_native);
+
+/* The caller supplies a loaded module's BTF fd, never a raw code address.
+ * Each export retains its module until every task and object reference dies. */
+int ebpfos_function_view_open_native_btf(
+ const struct ebpfos_function_view_native_source *sources, u32 count, u64 generation,
+ u32 descriptor)
+{
+ struct btf *native = bpf_get_btf_vmlinux(), *target_btf;
+ struct ebpfos_function_view *view;
+ struct module *module;
+ u32 i, j;
+ int error = -EINVAL;
+ if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
+ if (!count || IS_ERR_OR_NULL(native)) return -EINVAL;
+ target_btf = btf_get_by_fd(descriptor);
+ if (IS_ERR(target_btf)) return PTR_ERR(target_btf);
+ module = btf_try_get_module(target_btf);
+ if (!module) {error = -ENOENT;goto put_btf;}
+ view = kvzalloc(struct_size(view, members, count), GFP_KERNEL);
+ if (!view) {error = -ENOMEM;goto put_module;}
+ view->count = count;view->generation = generation;
+ for (i = 0; i < count; ++i) {
+  const struct btf_type *source = btf_type_by_id(native, sources[i].native_function);
+  const struct btf_type *target = btf_type_by_id(target_btf, sources[i].replacement);
+  unsigned long address;
+  for (j = 0; j < i; ++j)
+   if (sources[j].native_function == sources[i].native_function) {error = -ENOTUNIQ;goto fail;}
+  if (sources[i].replacement < btf_nr_types(native) || !source || !target ||
+      !btf_type_is_func(source) || !btf_type_is_func(target) ||
+      !cell_layout(native, source->type, target_btf, target->type, 0, false)) {
+   error = -EPROTOTYPE;goto fail;
+  }
+  address = ebpfos_module_function(module, btf_name_by_offset(target_btf, target->name_off));
+  if (!address) {error = -ENOENT;goto fail;}
+  __module_get(module);
+  view->members[i].native_function = sources[i].native_function;
+  view->members[i].binding.module = module;
+  view->members[i].binding.address = address;
+ }
+ error = ebpfos_function_view_publish(view);
+ if (error >= 0) goto put_module;
+fail:
+ for (i = 0; i < count; ++i) ebpfos_function_binding_put(&view->members[i].binding);
+ kvfree(view);
+put_module:
+ module_put(module);
+put_btf:
+ btf_put(target_btf);
+ return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_function_view_open_native_btf);

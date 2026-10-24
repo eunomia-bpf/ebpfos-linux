@@ -33,6 +33,9 @@ struct ebpfos_function_view_source {
 struct ebpfos_function_view_native_source { u32 native_function, replacement; };
 int ebpfos_function_view_open_native(
  const struct ebpfos_function_view_native_source *sources, u32 count, u64 generation);
+int ebpfos_function_view_open_native_btf(
+ const struct ebpfos_function_view_native_source *sources, u32 count, u64 generation,
+ u32 descriptor);
 /* Import an already checked export, retaining its existing code graph. */
 struct ebpfos_function_view_import { u32 view, native_function; };
 /* Resolve an export once while preparing an object's operations. The table
