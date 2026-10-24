@@ -21,6 +21,10 @@
 #include <linux/sched/signal.h>
 #include <linux/stacktrace.h>
 #include <linux/workqueue.h>
+#include <linux/cpu.h>
+#include <linux/smp.h>
+#include <linux/uaccess.h>
+#include <uapi/linux/ebpfos.h>
 #include <asm/text-patching.h>
 #include <linux/slab.h>
 #include <linux/stop_machine.h>
@@ -189,7 +193,13 @@ static void entry_free(struct entry_set *set)
 /* An RCU-tasks grace period drains entry selection, but a sleeping frame can
  * cross that period. Use Linux's reliable stack walker as well. Refuse an
  * unreliable or running task; never infer safety from a guessed stack. */
-struct entry_stack_check { struct entry_set *generation; unsigned int slot; };
+struct entry_running_stack { struct task_struct *task; int error; };
+struct entry_stack_check {
+ struct entry_set *generation;
+ unsigned int slot;
+ struct entry_running_stack *running;
+ bool found;
+};
 static bool entry_stack_address(void *opaque, unsigned long ip)
 {
  struct entry_stack_check *check = opaque;
@@ -198,26 +208,48 @@ static bool entry_stack_address(void *opaque, unsigned long ip)
  for (i = 0; i < set->count; ++i) {
   struct module *module = set->modules[i * 2 + check->slot];
   struct bpf_prog *program = set->programs[i * 2 + check->slot];
-  if (module && within_module_mem_type(ip, module, MOD_TEXT)) return false;
+  if (module && within_module_mem_type(ip, module, MOD_TEXT)) {check->found = true;return false;}
   if (!program) continue;
   if (ip >= (unsigned long)program->bpf_func &&
-      ip < (unsigned long)program->bpf_func + program->jited_len) return false;
+      ip < (unsigned long)program->bpf_func + program->jited_len) {check->found = true;return false;}
   for (j = 0; program->aux->func && j < program->aux->func_cnt; ++j) {
    struct bpf_prog *subprogram = program->aux->func[j];
    if (subprogram && ip >= (unsigned long)subprogram->bpf_func &&
-       ip < (unsigned long)subprogram->bpf_func + subprogram->jited_len) return false;
+       ip < (unsigned long)subprogram->bpf_func + subprogram->jited_len) {check->found = true;return false;}
   }
  }
  return true;
 }
-static int entry_stack_task(struct task_struct *task, void *check)
+static int entry_stack_walk(struct task_struct *task, struct entry_stack_check *check)
 {
  int error;
- if (task != current && task_curr(task)) return -EBUSY;
  if (!try_get_task_stack(task)) return 0;
+ check->found = false;
  error = arch_stack_walk_reliable(entry_stack_address, check, task);
  put_task_stack(task);
- return error ? -EBUSY : 0;
+ return check->found ? -EADDRINUSE : error ? -EBUSY : 0;
+}
+static void entry_stack_running(void *opaque)
+{
+ struct entry_stack_check check = *(struct entry_stack_check *)opaque;
+ struct entry_running_stack *running = &check.running[smp_processor_id()];
+ get_task_struct(current);
+ running->task = current;
+ running->error = entry_stack_walk(current, &check);
+}
+static int entry_stack_task(struct task_struct *task, void *opaque)
+{
+ struct entry_stack_check *check = opaque;
+ int cpu;
+ if (task_curr(task)) {
+  /* After disconnection and grace periods, a task with a clear stack
+   * cannot re-enter this generation through the removed entry. A task
+   * that woke after the CPU snapshot still needs its own reliable check. */
+  for_each_online_cpu(cpu)
+   if (check->running[cpu].task == task) return check->running[cpu].error;
+  return -EBUSY;
+ }
+ return entry_stack_walk(task, check);
 }
 /* A bare function pointer can outlive the caller's stack. Until an owner
  * holds a separate graph lease, address-taken BPF closures cannot be retired
@@ -238,10 +270,11 @@ static bool entry_program_addresses(struct bpf_prog *program)
 }
 static int entry_quiescent(struct entry_set *set, unsigned int slot)
 {
- struct entry_stack_check check = { set, slot };
+ struct entry_stack_check check = { .generation = set, .slot = slot };
  struct task_struct *group, *task;
  int error = 0;
  unsigned int i;
+ int cpu;
  bool executable = false;
  for (i = 0; i < set->count; ++i) {
   if (entry_program_addresses(set->programs[i * 2 + slot])) return -EOPNOTSUPP;
@@ -253,12 +286,23 @@ static int entry_quiescent(struct entry_set *set, unsigned int slot)
  /* Drain non-task interrupt readers as well, including interrupts from idle. */
  synchronize_rcu();
  synchronize_rcu_tasks();
+ check.running = kcalloc(nr_cpu_ids, sizeof(*check.running), GFP_KERNEL);
+ if (!check.running) return -ENOMEM;
+ cpus_read_lock();
+ /* Inspect running tasks on their own CPU, including interrupted frames.
+  * This avoids indefinitely refusing a still-running grace-period worker. */
+ on_each_cpu(entry_stack_running, &check, 1);
+ for_each_online_cpu(cpu)
+  if (check.running[cpu].error == -EADDRINUSE || !error) error = check.running[cpu].error;
  rcu_read_lock();
  for_each_process_thread(group, task) {
-  error = task_call_func(task, entry_stack_task, &check);
-  if (error) break;
+  int verdict = task_call_func(task, entry_stack_task, &check);
+  if (verdict == -EADDRINUSE || !error) error = verdict;
  }
  rcu_read_unlock();
+ for_each_online_cpu(cpu) put_task_struct(check.running[cpu].task);
+ cpus_read_unlock();
+ kfree(check.running);
  return error;
 }
 static int entry_all_quiescent(struct entry_set *set)
@@ -296,7 +340,17 @@ static int entry_release(struct inode *inode, struct file *file)
  else schedule_delayed_work(&set->release_work, 0);
  return error;
 }
-static const struct file_operations entry_operations = { .release = entry_release, .llseek = noop_llseek };
+static int entry_retire(struct entry_set *set, u32 id);
+static long entry_ioctl(struct file *file, unsigned int command, unsigned long argument)
+{
+ u32 id;
+ if (command != EBPFOS_IOC_FUNCTION_ENTRIES_RETIRE) return -ENOTTY;
+ if (get_user(id, (u32 __user *)argument)) return -EFAULT;
+ return entry_retire(file->private_data, id);
+}
+static const struct file_operations entry_operations = {
+ .release = entry_release, .llseek = noop_llseek, .unlocked_ioctl = entry_ioctl,
+};
 /* Pahole labels ordinary C globals STATIC in module BTF. The loaded ELF
  * symbol table supplies the actual linkage; require a unique global FUNC
  * so LLVM's private calling conventions cannot cross a native entry. */
@@ -437,6 +491,32 @@ static int entry_open(const struct ebpfos_function_link *entries,
  if (descriptor < 0) entry_free(set);
  return descriptor;
 }
+static int entry_retire(struct entry_set *set, u32 id)
+{
+ struct entry_set *generation;
+ unsigned int i, slot;
+ int error = -ESTALE;
+ mutex_lock(&entry_lock);
+ generation = entry_generation(set, id);
+ if (!generation) goto unlock;
+ if (set->poisoned || set->active == id) {error = -EBUSY;goto unlock;}
+ slot = entry_generation_slot(id);
+ error = entry_quiescent(generation, slot);
+ if (error) goto unlock;
+ if (id > 2) {
+  list_del(&generation->generation_node);entry_free(generation);
+ } else {
+  for (i = 0; i < set->count; ++i) {
+   if (set->programs[i * 2 + slot]) bpf_prog_put(set->programs[i * 2 + slot]);
+   set->programs[i * 2 + slot] = NULL;
+   module_put(set->modules[i * 2 + slot]);set->modules[i * 2 + slot] = NULL;
+  }
+  set->retired[slot] = true;
+ }
+unlock:
+ mutex_unlock(&entry_lock);return error;
+}
+
 __bpf_kfunc_start_defs();
 __bpf_kfunc int bpf_ebpfos_function_entries_open_many(
  const struct ebpfos_function_link *entries, u32 entries__sz)
@@ -661,31 +741,11 @@ __bpf_kfunc int bpf_ebpfos_function_entries_append_native(u32 fd, u32 btf_fd,
 __bpf_kfunc int bpf_ebpfos_function_entries_retire(u32 fd, u32 id)
 {
  struct fd file = fdget(fd);
- struct entry_set *set, *generation;
- unsigned int i, slot;
- int error = -ESTALE;
+ int error;
  if (fd_empty(file)) return -EBADF;
  if (fd_file(file)->f_op != &entry_operations) {fdput(file);return -EINVAL;}
- set = fd_file(file)->private_data;
- mutex_lock(&entry_lock);
- generation = entry_generation(set, id);
- if (!generation) goto unlock;
- if (set->poisoned || set->active == id) {error = -EBUSY;goto unlock;}
- slot = entry_generation_slot(id);
- error = entry_quiescent(generation, slot);
- if (error) goto unlock;
- if (id > 2) {
-  list_del(&generation->generation_node);entry_free(generation);
- } else {
-  for (i = 0; i < set->count; ++i) {
-   if (set->programs[i * 2 + slot]) bpf_prog_put(set->programs[i * 2 + slot]);
-   set->programs[i * 2 + slot] = NULL;
-   module_put(set->modules[i * 2 + slot]);set->modules[i * 2 + slot] = NULL;
-  }
-  set->retired[slot] = true;
- }
-unlock:
- mutex_unlock(&entry_lock);fdput(file);return error;
+ error = entry_retire(fd_file(file)->private_data, id);
+ fdput(file);return error;
 }
 /* Measurement control: identical atomic publication plus the old extra
  * stop-machine synchronization. No invocation-path work is added. */
