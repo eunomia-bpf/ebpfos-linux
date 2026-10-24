@@ -21,7 +21,7 @@ struct bound_file_operations {
  struct list_head entry;
 };
 
-/* Resolve once at open; callback dispatch reads only the immutable table.
+/* Resolve once at open; callback dispatch uses the existing operations slots.
  * Count file objects, not descriptors: dup and asynchronous references delay
  * release of their existing file rather than opening another one. */
 static DEFINE_MUTEX(bound_files_lock);
@@ -58,6 +58,9 @@ int ebpfos_object_view_select(int descriptor)
  if (descriptor != -1) {
   next = ebpfos_function_view_get(descriptor);
   if (IS_ERR(next)) return PTR_ERR(next);
+  if (READ_ONCE(ebpfos_function_view_data(next)->object_revoked)) {
+   fput(next);return -EOWNERDEAD;
+  }
  }
  old = current->ebpfos_object_view;
  current->ebpfos_object_view = next;
@@ -65,6 +68,33 @@ int ebpfos_object_view_select(int descriptor)
  return 0;
 }
 EXPORT_SYMBOL_GPL(ebpfos_object_view_select);
+
+/* Revoke future dispatch through every object sharing this binding. Calls
+ * which already fetched an old pointer can finish: ordinary file references
+ * retain the table and its code lease until the final callback is dead.
+ * Keep the release wrapper; restoring f_op itself would lose that ownership.
+ * This operation neither unwinds old calls nor reverses their shared writes.
+ */
+static int object_view_revoke(u32 descriptor)
+{
+ struct bound_file_operations *bound;
+ struct file *lease;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ lease = ebpfos_function_view_get(descriptor);
+ if (IS_ERR(lease)) return PTR_ERR(lease);
+ mutex_lock(&bound_files_lock);
+ WRITE_ONCE(((struct ebpfos_function_view *)lease->private_data)->object_revoked, true);
+ list_for_each_entry(bound, &bound_files, entry) {
+  if (bound->view != lease) continue;
+  WRITE_ONCE(bound->operations.llseek, bound->original->llseek);
+  WRITE_ONCE(bound->operations.read, bound->original->read);
+  WRITE_ONCE(bound->operations.read_iter, bound->original->read_iter);
+  WRITE_ONCE(bound->operations.fsync, bound->original->fsync);
+ }
+ mutex_unlock(&bound_files_lock);
+ fput(lease);
+ return 0;
+}
 
 int ebpfos_file_view_open(struct file *file)
 {
@@ -80,6 +110,7 @@ int ebpfos_file_view_open(struct file *file)
  lease = current->ebpfos_object_view;
  view = ebpfos_function_view_data(lease);
  mutex_lock(&bound_files_lock);
+ if (READ_ONCE(view->object_revoked)) goto unlock;
  list_for_each_entry(bound, &bound_files, entry) {
   if (bound->view == lease && bound->original == file->f_op) {
    refcount_inc(&bound->files);
@@ -137,9 +168,12 @@ EXPORT_SYMBOL_GPL(ebpfos_file_view_open);
 __bpf_kfunc_start_defs();
 __bpf_kfunc int bpf_ebpfos_object_view_select(int descriptor)
 { return ebpfos_object_view_select(descriptor); }
+__bpf_kfunc int bpf_ebpfos_object_view_revoke(u32 descriptor)
+{ return object_view_revoke(descriptor); }
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(object_view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_object_view_select, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_object_view_revoke, KF_SLEEPABLE)
 BTF_KFUNCS_END(object_view_ids)
 static const struct btf_kfunc_id_set object_view_kfuncs;
 static int object_view_filter(const struct bpf_prog *prog, u32 id)

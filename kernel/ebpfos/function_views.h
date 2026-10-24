@@ -21,6 +21,8 @@ struct ebpfos_function_view_member {
 struct ebpfos_function_view {
  u64 generation;
  u32 count;
+ /* Cold object binding state; immutable code members and leases stay valid. */
+ bool object_revoked;
  struct ebpfos_function_view_member members[];
 };
 struct ebpfos_function_view_source {
