@@ -13,6 +13,7 @@
 #include <linux/ebpfos_task_view.h>
 #include <linux/pid.h>
 #include <linux/resume_user_mode.h>
+#include <linux/bitmap.h>
 #include <asm/syscall.h>
 #include <asm/ptrace.h>
 #include <asm/unistd.h>
@@ -79,7 +80,9 @@ static bool task_view_code_contains(void *opaque, unsigned long ip)
  struct task_view *view = opaque;
  u32 i;
  for (i = 0; i < view->count; ++i)
-  if (ebpfos_program_contains(view->bindings[i].program, ip)) return true;
+  if (ebpfos_program_contains(view->bindings[i].program, ip) ||
+      (view->bindings[i].module &&
+       within_module_mem_type(ip, view->bindings[i].module, MOD_TEXT))) return true;
  return false;
 }
 static void task_view_release_work(struct work_struct *work)
@@ -91,9 +94,13 @@ static void task_view_release_work(struct work_struct *work)
 static int task_view_release(struct inode *inode, struct file *file)
 {
  struct task_view *view = file->private_data;
+ u32 i;
+ bool retire = view->revocable;
  /* Revocation may have removed the last file lease inside its own body.
   * Keep the graph through grace periods and every outstanding old frame. */
- if (view->revocable) schedule_delayed_work(&view->release_work, 0);
+ for (i = 0; i < view->count; ++i)
+  retire |= view->bindings[i].module != NULL;
+ if (retire) schedule_delayed_work(&view->release_work, 0);
  else task_view_free(view);
  return 0;
 }
@@ -130,12 +137,30 @@ void ebpfos_task_view_free(struct task_struct *task)
  * The source descriptor and loaded export supply the complete checked ABI.
  * A native bpf control entry guarantees self-selection has no old-view frame
  * beneath it. Each other task retains its own lease through sleeping calls. */
+static int task_view_slot(struct btf *native, u32 id, unsigned long *used)
+{
+ const struct btf_type *function = btf_type_by_id(native, id);
+ unsigned long address;
+ u32 nr, j;
+ if (!function || !btf_type_is_func(function)) return -EINVAL;
+ address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
+ if (!address) return -ENOENT;
+ for (nr = 0; nr < NR_syscalls; ++nr)
+  if ((unsigned long)sys_call_table[nr] == address) break;
+ if (nr == NR_syscalls) return -ENOENT;
+ if (nr == __NR_bpf) return -EBUSY;
+ for (j = nr + 1; j < NR_syscalls; ++j)
+  if ((unsigned long)sys_call_table[j] == address) return -ENOTUNIQ;
+ if (test_and_set_bit(nr, used)) return -ENOTUNIQ;
+ return nr;
+}
 static int task_view_open(const struct ebpfos_function_view_source *sources,
  u32 count, u64 generation, bool revocable)
 {
  struct btf *native = bpf_get_btf_vmlinux();
  struct task_view *view;
- u32 i, j, nr;
+ DECLARE_BITMAP(used, NR_syscalls);
+ u32 i, nr;
  int error = -EINVAL;
  if (revocable && (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) ||
      !IS_ENABLED(CONFIG_TASKS_RCU))) return -EOPNOTSUPP;
@@ -146,21 +171,14 @@ static int task_view_open(const struct ebpfos_function_view_source *sources,
  view->count = count;view->generation = generation;view->revocable = revocable;
  INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
  memcpy(view->table, sys_call_table, sizeof(view->table));
+ bitmap_zero(used, NR_syscalls);
  for (i = 0; i < count; ++i) {
   const struct btf_type *function = btf_type_by_id(native, sources[i].native_function);
   struct bpf_prog *program;
-  unsigned long address, target;
-  if (!function || !btf_type_is_func(function)) goto fail;
-  address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
-  if (!address) {error = -ENOENT;goto fail;}
-  for (nr = 0; nr < NR_syscalls; ++nr)
-   if ((unsigned long)sys_call_table[nr] == address) break;
-  if (nr == NR_syscalls) {error = -ENOENT;goto fail;}
-  if (nr == __NR_bpf) {error = -EBUSY;goto fail;}
-  if (view->table[nr] != sys_call_table[nr]) {error = -ENOTUNIQ;goto fail;}
-  /* An aliased syscall is ambiguous unless all aliases agree. */
-  for (j = nr + 1; j < NR_syscalls; ++j)
-   if ((unsigned long)sys_call_table[j] == address) {error = -ENOTUNIQ;goto fail;}
+  unsigned long target;
+  int slot = task_view_slot(native, sources[i].native_function, used);
+  if (slot < 0) {error = slot;goto fail;}
+  nr = slot;
   /* A syscall entered from userspace is a sleepable task context. A graph
    * verified there need not pretend to be a non-sleepable tracing hook.
    * Keep the actual program domain; native callable/context checks below
@@ -193,6 +211,55 @@ fail:
  kvfree(view);return error;
 }
 
+/* Import RT's already checked native/verified exports, retaining their code
+ * directly rather than a parent view. Native bodies have ordinary module
+ * trust and callback ownership. They switch/roll back at the same user-return
+ * boundary; automatic in-body fault revocation requires a verified graph. */
+static int task_view_import(u32 descriptor, u64 generation)
+{
+ struct btf *native = bpf_get_btf_vmlinux();
+ const struct ebpfos_function_view *source;
+ struct task_view *view;
+ struct file *file;
+ DECLARE_BITMAP(used, NR_syscalls);
+ u32 i;
+ int error;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ if (IS_ERR_OR_NULL(native)) return -EINVAL;
+ if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI) ||
+     !IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU))
+  return -EOPNOTSUPP;
+ file = ebpfos_function_view_get(descriptor);
+ if (IS_ERR(file)) return PTR_ERR(file);
+ source = ebpfos_function_view_data(file);
+ if (!source->count || source->count > NR_syscalls) {error = -EINVAL;goto put_file;}
+ view = kvzalloc(struct_size(view, bindings, source->count), GFP_KERNEL);
+ if (!view) {error = -ENOMEM;goto put_file;}
+ view->count = source->count;view->generation = generation;view->revocable = true;
+ INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
+ memcpy(view->table, sys_call_table, sizeof(view->table));
+ bitmap_zero(used, NR_syscalls);
+ for (i = 0; i < source->count; ++i) {
+  const struct ebpfos_function_binding *binding = &source->members[i].binding;
+  int slot = task_view_slot(native, source->members[i].native_function, used);
+  if (slot < 0) {error = slot;goto fail;}
+  if (binding->program) {
+   if (ebpfos_program_addresses(binding->program) ||
+       !entry_context(binding->program, binding->address)) {error = -EOPNOTSUPP;goto fail;}
+   bpf_prog_inc(binding->program);
+  } else view->revocable = false;
+  if (binding->module) __module_get(binding->module);
+  view->bindings[i] = *binding;
+  view->table[slot] = (sys_call_ptr_t)binding->address;
+ }
+ error = anon_inode_getfd("ebpfos-task-view", &task_view_ops, view, O_CLOEXEC | O_RDONLY);
+ if (error >= 0) goto put_file;
+fail:
+ task_view_free(view);
+put_file:
+ fput(file);return error;
+}
+
 __bpf_kfunc_start_defs();
 static int task_view_open_snapshot(
  const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation, bool revocable)
@@ -213,6 +280,8 @@ __bpf_kfunc int bpf_ebpfos_task_view_open(
 __bpf_kfunc int bpf_ebpfos_task_view_open_revocable(
  const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
 {return task_view_open_snapshot(sources, sources__sz, generation, true);}
+__bpf_kfunc int bpf_ebpfos_task_view_import(u32 descriptor, u64 generation)
+{return task_view_import(descriptor, generation);}
 /* Only the calling task loses its binding. This is a failure-path operation,
  * not a runner or a check on successful calls. Retirement owns the old graph
  * until every frame is clear, including the frame making this request. */
@@ -345,6 +414,7 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(task_view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open_revocable, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_import, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_revoke, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_select, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_request, KF_SLEEPABLE)
