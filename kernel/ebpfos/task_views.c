@@ -11,6 +11,8 @@
 #include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/ebpfos_task_view.h>
+#include <linux/pid.h>
+#include <linux/resume_user_mode.h>
 #include <asm/syscall.h>
 #include <asm/ptrace.h>
 #include <asm/unistd.h>
@@ -29,6 +31,41 @@ struct task_view {
  sys_call_ptr_t table[NR_syscalls];
  struct ebpfos_function_binding bindings[];
 };
+
+/* One cold request per task. NULL next means the original native table.
+ * The task owns the incoming file reference until publication or cancellation.
+ * Active and pending references are protected by task_lock; only current
+ * publishes a table, after every old syscall/unit frame has unwound. */
+struct ebpfos_task_view_request { struct file *next; };
+static void task_view_request_free(struct ebpfos_task_view_request *request)
+{
+ if (!request) return;
+ if (request->next) fput(request->next);
+ kfree(request);
+}
+
+/* This runs ONLY at return to user mode, never at a general task_work_run()
+ * site inside a syscall. The entire syscall graph, including inline copies
+ * and nested/sleeping callees, has returned before this boundary. No test or
+ * trampoline is added to ordinary selected calls. */
+void ebpfos_task_view_resume(void)
+{
+ struct ebpfos_task_view_request *request;
+ struct file *old = NULL;
+ task_lock(current);
+ request = current->ebpfos_task_view_request;
+ if (request) {
+  current->ebpfos_task_view_request = NULL;
+  old = current->ebpfos_task_view;
+  current->ebpfos_task_view = request->next;
+  current->ebpfos_syscalls = request->next ?
+   ((struct task_view *)request->next->private_data)->table : sys_call_table;
+  request->next = NULL;
+ }
+ task_unlock(current);
+ if (old) fput(old);
+ kfree(request);
+}
 
 static void task_view_free(struct task_view *view)
 {
@@ -76,11 +113,15 @@ static const struct file_operations task_view_ops = {
 
 void ebpfos_task_view_fork(struct task_struct *task)
 {
+ /* A request names one task, not future children. A fork within its old
+  * syscall inherits the old complete view and its independent code lease. */
+ task->ebpfos_task_view_request = NULL;
  if (task->ebpfos_task_view) get_file(task->ebpfos_task_view);
  if (task->ebpfos_object_view) get_file(task->ebpfos_object_view);
 }
 void ebpfos_task_view_free(struct task_struct *task)
 {
+ task_view_request_free(task->ebpfos_task_view_request);
  if (task->ebpfos_task_view) fput(task->ebpfos_task_view);
  if (task->ebpfos_object_view) fput(task->ebpfos_object_view);
 }
@@ -177,17 +218,27 @@ __bpf_kfunc int bpf_ebpfos_task_view_open_revocable(
  * until every frame is clear, including the frame making this request. */
 __bpf_kfunc int bpf_ebpfos_task_view_revoke(void)
 {
- struct file *old = current->ebpfos_task_view;
- if (!old) return -ENOENT;
- if (!((struct task_view *)old->private_data)->revocable) return -EOPNOTSUPP;
+ struct ebpfos_task_view_request *request;
+ struct file *old;
+ task_lock(current);
+ old = current->ebpfos_task_view;
+ if (!old || !((struct task_view *)old->private_data)->revocable) {
+  task_unlock(current);
+  return old ? -EOPNOTSUPP : -ENOENT;
+ }
+ /* A fault takes precedence over an earlier requested update. */
+ request = current->ebpfos_task_view_request;
+ current->ebpfos_task_view_request = NULL;
  current->ebpfos_syscalls = sys_call_table;
  current->ebpfos_task_view = NULL;
+ task_unlock(current);
+ task_view_request_free(request);
  fput(old);
  return 0;
 }
 __bpf_kfunc int bpf_ebpfos_task_view_select(int descriptor)
 {
- struct file *old = current->ebpfos_task_view, *next = NULL;
+ struct file *old, *next = NULL;
  const sys_call_ptr_t *table = sys_call_table;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  /* The native bpf user entry is outside every selected syscall frame.
@@ -201,19 +252,104 @@ __bpf_kfunc int bpf_ebpfos_task_view_select(int descriptor)
   if (next->f_op != &task_view_ops) {fput(next);return -EINVAL;}
   table = ((struct task_view *)next->private_data)->table;
  }
+ task_lock(current);
+ if (current->ebpfos_task_view_request) {
+  task_unlock(current);
+  if (next) fput(next);
+  return -EBUSY;
+ }
+ old = current->ebpfos_task_view;
  /* Only current can change these fields. Entry observes them on the next
   * syscall; fork takes its lease after copying current's complete task. */
  current->ebpfos_task_view = next;
  current->ebpfos_syscalls = table;
+ task_unlock(current);
  if (old) fput(old);
  return 0;
 }
+
+static struct file *task_view_get(int descriptor)
+{
+ struct file *file;
+ if (descriptor == -1) return NULL;
+ file = fget(descriptor);
+ if (!file) return ERR_PTR(-EBADF);
+ if (file->f_op == &task_view_ops) return file;
+ fput(file);return ERR_PTR(-EINVAL);
+}
+/* Compare the actual old file identity, not a caller-chosen generation.
+ * pidfds prevent task-ID reuse; both descriptors belong to the requester.
+ * All failures leave the task's complete active and pending views unchanged. */
+__bpf_kfunc int bpf_ebpfos_task_view_request(int pidfd, int expected, int next)
+{
+ struct ebpfos_task_view_request *request;
+ struct task_struct *task;
+ struct file *old, *incoming;
+ unsigned int flags;
+ int error = 0;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ old = task_view_get(expected);
+ if (IS_ERR(old)) return PTR_ERR(old);
+ incoming = task_view_get(next);
+ if (IS_ERR(incoming)) {error = PTR_ERR(incoming);goto put_old;}
+ request = kzalloc(sizeof(*request), GFP_KERNEL);
+ if (!request) {error = -ENOMEM;goto put_incoming;}
+ request->next = incoming;
+ task = pidfd_get_task(pidfd, &flags);
+ if (IS_ERR(task)) {error = PTR_ERR(task);goto free_request;}
+ task_lock(task);
+ if (task->flags & (PF_KTHREAD | PF_EXITING)) error = -ESRCH;
+ else if (task->ebpfos_task_view != old) error = -ESTALE;
+ else if (task->ebpfos_task_view_request) error = -EBUSY;
+ else {task->ebpfos_task_view_request = request;request = NULL;}
+ task_unlock(task);
+ /* No wakeup of a sleeping old unit. A running userspace task is kicked
+  * into the same return boundary; blocked tasks finish their old call. */
+ if (!error) set_notify_resume(task);
+ put_task_struct(task);
+free_request:
+ task_view_request_free(request);
+ goto put_old;
+put_incoming:
+ if (incoming) fput(incoming);
+put_old:
+ if (old) fput(old);
+ return error;
+}
+/* Return 1 while a request is pending, 0 after publication/cancellation.
+ * Cancel never rolls back an already published view; queue its predecessor
+ * with request() for an ordinary boundary-safe rollback. */
+static int task_view_pending(int pidfd, bool cancel)
+{
+ struct ebpfos_task_view_request *request;
+ struct task_struct *task;
+ unsigned int flags;
+ int result;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ task = pidfd_get_task(pidfd, &flags);
+ if (IS_ERR(task)) return PTR_ERR(task);
+ task_lock(task);
+ request = task->ebpfos_task_view_request;
+ result = request ? 1 : 0;
+ if (cancel) task->ebpfos_task_view_request = NULL;
+ task_unlock(task);
+ if (cancel) task_view_request_free(request);
+ put_task_struct(task);
+ return result;
+}
+__bpf_kfunc int bpf_ebpfos_task_view_pending(int pidfd)
+{return task_view_pending(pidfd, false);}
+__bpf_kfunc int bpf_ebpfos_task_view_cancel(int pidfd)
+{return task_view_pending(pidfd, true);}
 __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(task_view_ids)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open_revocable, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_revoke, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_ebpfos_task_view_select, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_request, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_pending, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_ebpfos_task_view_cancel, KF_SLEEPABLE)
 BTF_KFUNCS_END(task_view_ids)
 static const struct btf_kfunc_id_set task_view_kfuncs;
 static int task_view_filter(const struct bpf_prog *prog, u32 id)

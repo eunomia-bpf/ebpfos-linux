@@ -1653,6 +1653,7 @@ struct task_struct {
 	 * their own operations independently after creation. */
 	long (* const *ebpfos_syscalls)(const struct pt_regs *);
 	struct file *ebpfos_task_view;
+	struct ebpfos_task_view_request *ebpfos_task_view_request;
 	struct file *ebpfos_object_view;
 #endif
 	randomized_struct_fields_end
