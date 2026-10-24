@@ -39,7 +39,7 @@ static int entry_native_pair_order(const void *a, const void *b)
  const struct text_poke_pair *first = a, *second = b;
  return first->addr < second->addr ? -1 : first->addr > second->addr;
 }
-static int entry_native_apply(struct entry_native_slot *slots, unsigned int count,
+static int entry_native_apply(struct entry_native_slot *old, struct entry_native_slot *next, unsigned int count,
  unsigned int from, unsigned int to)
 {
  struct text_poke_pair *pairs;
@@ -49,9 +49,10 @@ static int entry_native_apply(struct entry_native_slot *slots, unsigned int coun
  pairs = kvmalloc_array(count, sizeof(*pairs), GFP_KERNEL);
  if (!pairs) return -ENOMEM;
  for (i = 0; i < count; ++i) {
-  pairs[i].addr = (void *)slots[i].ip;
-  if (!entry_native_instruction(&slots[i], from, pairs[i].before) ||
-      !entry_native_instruction(&slots[i], to, pairs[i].after)) goto out;
+  pairs[i].addr = (void *)old[i].ip;
+  if (old[i].ip != next[i].ip) {error = -EINVAL;goto out;}
+  if (!entry_native_instruction(&old[i], from, pairs[i].before) ||
+      !entry_native_instruction(&next[i], to, pairs[i].after)) goto out;
  }
  sort(pairs, count, sizeof(*pairs), entry_native_pair_order, NULL);
  mutex_lock(&text_mutex);
