@@ -176,6 +176,10 @@ static void sync_global_pgds_l4(unsigned long start, unsigned long end)
 		const p4d_t *p4d_ref;
 		struct page *page;
 
+		/* The final PGD rounds up to zero. */
+		if (addr < start)
+			break;
+
 		/*
 		 * With folded p4d, pgd_none() is always false, we need to
 		 * handle synchronization on p4d level.
