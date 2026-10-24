@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef EBPFOS_FUNCTION_NATIVE_CONTEXT_H
 #define EBPFOS_FUNCTION_NATIVE_CONTEXT_H
-static bool entry_context(struct bpf_prog *parent, unsigned long entry)
+static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bool pure)
 {
  const enum bpf_func_id helpers[] = { BPF_FUNC_per_cpu_ptr, BPF_FUNC_this_cpu_ptr,
   BPF_FUNC_get_current_task_btf, BPF_FUNC_loop };
@@ -34,6 +34,7 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
   struct bpf_prog *function = aux->func[queue[head++]];
   if (!function || !function->jited || function->aux->priv_stack_ptr ||
       function->aux->tail_call_reachable || function->aux->exception_cb) goto out;
+  if (pure && function->aux->requires_rcu) goto out;
   for (j = 0; j < function->len; ++j) {
    const struct bpf_insn *insn = &function->insnsi[j];
    unsigned long target;
@@ -48,6 +49,7 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
    if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||
        insn->code == (BPF_JMP | BPF_CALL | BPF_X)) goto out;
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
+   if (pure) goto out;
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
        insn->src_reg == BPF_PSEUDO_KOP_CALL) continue;
    if (insn->src_reg) goto out;
@@ -66,5 +68,9 @@ static bool entry_context(struct bpf_prog *parent, unsigned long entry)
 out:
  kvfree(seen);kvfree(queue);return allowed;
 }
+static inline bool entry_context(struct bpf_prog *parent, unsigned long entry)
+{ return entry_context_check(parent, entry, false); }
+static inline bool entry_context_pure(struct bpf_prog *parent, unsigned long entry)
+{ return entry_context_check(parent, entry, true); }
 
 #endif

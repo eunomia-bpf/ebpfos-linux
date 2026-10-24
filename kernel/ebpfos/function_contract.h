@@ -151,12 +151,12 @@ compatible:
  * tail call, timed-loop helper or private JIT stack can require bpf_run_ctx.
  */
 #include "function_binding.h"
+#include "function_native_context.h"
 static inline int ebpfos_function_binding_open_pure(
  struct ebpfos_function_binding *out, u32 fd, enum bpf_prog_type type,
  struct btf *native, const struct btf_type *function, u32 compiled_id)
 {
  struct bpf_prog *program;
- unsigned int i, j;
  unsigned long address;
  if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
  if (out->program || out->module || out->address || !native || !function || !btf_type_is_func(function))
@@ -164,17 +164,8 @@ static inline int ebpfos_function_binding_open_pure(
  program = bpf_prog_get_type_dev(fd, type, false);
  if (IS_ERR(program)) return PTR_ERR(program);
  if (program->sleepable || !program->aux->func || !program->aux->func_cnt) goto invalid;
- for (i = 0; i < program->aux->func_cnt; ++i) {
-  struct bpf_prog *f = program->aux->func[i];
-  if (!f || !f->jited || f->aux->priv_stack_ptr || f->aux->requires_rcu) goto invalid;
-  for (j = 0; j < f->len; ++j) {
-   const struct bpf_insn *insn = &f->insnsi[j];
-   if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||
-       (insn->code == (BPF_JMP | BPF_CALL) && insn->src_reg != BPF_PSEUDO_CALL))
-    goto invalid;
-  }
- }
  if (!cell_callable(native, function, program, compiled_id, &address)) goto invalid;
+ if (!entry_context_pure(program, address)) goto invalid;
  out->program = program;out->address = address;
  return 0;
 invalid:
