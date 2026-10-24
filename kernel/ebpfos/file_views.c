@@ -5,6 +5,9 @@
 #include <linux/capability.h>
 #include <linux/interrupt.h>
 #include <linux/kallsyms.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/ebpfos_file_view.h>
 #include "function_views.h"
@@ -14,21 +17,36 @@ struct bound_file_operations {
  struct file_operations operations;
  const struct file_operations *original;
  struct file *view;
+ refcount_t files;
+ struct list_head entry;
 };
+
+/* Resolve once at open; callback dispatch reads only the immutable table.
+ * Count file objects, not descriptors: dup and asynchronous references delay
+ * release of their existing file rather than opening another one. */
+static DEFINE_MUTEX(bound_files_lock);
+static LIST_HEAD(bound_files);
 
 static int bound_file_release(struct inode *inode, struct file *file)
 {
  struct bound_file_operations *bound = container_of(file->f_op,
    struct bound_file_operations, operations);
  const struct file_operations *original = bound->original;
+ bool last;
  int result;
  file->f_op = original;
  result = original->release ? original->release(inode, file) : 0;
  /* __fput still calls fops_put after release; restore its original owner
-  * before freeing this private operations table and the code lease. */
+  * before releasing this file's table reference and the code lease. */
  file->f_op = original;
- fput(bound->view);
- kfree(bound);
+ mutex_lock(&bound_files_lock);
+ last = refcount_dec_and_test(&bound->files);
+ if (last) list_del(&bound->entry);
+ mutex_unlock(&bound_files_lock);
+ if (last) {
+  fput(bound->view);
+  kfree(bound);
+ }
  return result;
 }
 
@@ -55,15 +73,24 @@ int ebpfos_file_view_open(struct file *file)
  struct file *lease;
  struct btf *native;
  unsigned int i, changed = 0;
+ int error = 0;
  /* Object work never resolves a task's selection after creation. A new
   * object created in an interrupt or a kernel thread starts globally. */
  if (!in_task() || !current->mm || !current->ebpfos_object_view) return 0;
  lease = current->ebpfos_object_view;
  view = ebpfos_function_view_data(lease);
+ mutex_lock(&bound_files_lock);
+ list_for_each_entry(bound, &bound_files, entry) {
+  if (bound->view == lease && bound->original == file->f_op) {
+   refcount_inc(&bound->files);
+   file->f_op = &bound->operations;
+   goto unlock;
+  }
+ }
  native = bpf_get_btf_vmlinux();
- if (IS_ERR_OR_NULL(native)) return -EOPNOTSUPP;
+ if (IS_ERR_OR_NULL(native)) { error = -EOPNOTSUPP;goto unlock; }
  bound = kzalloc(sizeof(*bound), GFP_KERNEL);
- if (!bound) return -ENOMEM;
+ if (!bound) { error = -ENOMEM;goto unlock; }
  bound->operations = *file->f_op;
  bound->original = file->f_op;
  for (i = 0; i < view->count; ++i) {
@@ -71,9 +98,9 @@ int ebpfos_file_view_open(struct file *file)
   const struct btf_type *function = btf_type_by_id(native, member->native_function);
   unsigned long address;
   if (IS_ERR(ebpfos_function_view_find(view, member->native_function))) {
-   kfree(bound);return -ENOTUNIQ;
+   error = -ENOTUNIQ;goto free;
   }
-  if (!function || !btf_type_is_func(function)) { kfree(bound);return -EINVAL; }
+  if (!function || !btf_type_is_func(function)) { error = -EINVAL;goto free; }
   address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
   if (address && address == (unsigned long)file->f_op->llseek) {
    bound->operations.llseek = (void *)member->binding.address;
@@ -88,11 +115,18 @@ int ebpfos_file_view_open(struct file *file)
    changed++;
   }
  }
- if (!changed) { kfree(bound);return 0; }
+ if (!changed) goto free;
  bound->view = get_file(lease);
+ refcount_set(&bound->files, 1);
  bound->operations.release = bound_file_release;
+ list_add(&bound->entry, &bound_files);
  file->f_op = &bound->operations;
- return 0;
+ goto unlock;
+free:
+ kfree(bound);
+unlock:
+ mutex_unlock(&bound_files_lock);
+ return error;
 }
 EXPORT_SYMBOL_GPL(ebpfos_file_view_open);
 
