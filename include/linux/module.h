@@ -806,6 +806,13 @@ static inline bool is_module_text_address(unsigned long addr)
 	return false;
 }
 
+static inline bool within_module_mem_type(unsigned long addr,
+					  const struct module *mod,
+					  enum mod_mem_type type)
+{
+	return false;
+}
+
 static inline bool within_module_core(unsigned long addr,
 				      const struct module *mod)
 {
