@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Component publication and declared native-set registration.
-obj-y += admission.o component_graph.o executor_root.o core.o step_scope.o
+obj-y += admission.o component_graph.o executor_root.o core.o
 obj-y += native_set.o native_inline.o
-obj-y += checked_dispatch.o function_views.o
-ifeq ($(CONFIG_EBPFOS)$(CONFIG_X86_64),yy)
-obj-y += task_views.o file_views.o
-endif
+obj-y += checked_dispatch.o views.o
 # Bare C-to-BPF entry linking currently uses x86-64 register ABI and no CFI
 # signature prefix. Never bypass another configuration's CFI entry contract.
 ifeq ($(CONFIG_X86_64)$(CONFIG_DYNAMIC_FTRACE_WITH_JMP)$(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)$(CONFIG_CFI),yyy)
