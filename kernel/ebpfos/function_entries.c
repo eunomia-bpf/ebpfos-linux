@@ -298,6 +298,7 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
   struct entry_native_slot *slot = NULL;
+  error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
   address = kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
   if (!address || !core_kernel_text(address)) {error = -ENOENT;goto fail;}
