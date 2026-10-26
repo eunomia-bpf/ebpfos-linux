@@ -873,6 +873,9 @@ struct inode {
 #endif
 
 	void			*i_private; /* fs or device private pointer */
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	struct ebpfos_operations_owner *ebpfos_operations;
+#endif
 } __randomize_layout;
 
 /*

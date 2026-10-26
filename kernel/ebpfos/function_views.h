@@ -26,6 +26,7 @@ struct ebpfos_operations_target {
  struct list_head entry;
  unsigned long address;
  u32 type;
+ struct ebpfos_operations *operations;
 };
 struct ebpfos_function_view {
  u64 generation;

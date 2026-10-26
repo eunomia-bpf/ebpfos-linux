@@ -2,8 +2,10 @@
 #ifndef LINUX_EBPFOS_OPERATIONS_H
 #define LINUX_EBPFOS_OPERATIONS_H
 #include <linux/types.h>
+#include <linux/gfp_types.h>
 
 struct ebpfos_operations;
+struct ebpfos_operations_owner;
 struct module;
 #define EBPFOS_OPERATIONS_NAME_LEN 128
 struct ebpfos_operations_table_source {
@@ -29,4 +31,12 @@ struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *operat
  * analysis. NULL means the object keeps its global operations. */
 struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type_id, size_t size, struct module *original_owner);
+/* Reserve during fallible object allocation. Resolve later, without
+ * allocation or sleeping, before the object is first published. The owner
+ * serializes resolve with its existing publication lock. Put after the last
+ * ordinary reference; the independent record retains code through RCU. */
+struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type_id, gfp_t gfp);
+const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner,
+ const void *original);
+void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner);
 #endif

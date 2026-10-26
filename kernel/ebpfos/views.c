@@ -13,16 +13,14 @@
 #include "function_views.h"
 #include "syscall_kfuncs.h"
 #include "function_native.h"
+static void prepared_tables_free(struct ebpfos_function_view *view);
 static int ebpfos_function_view_release(struct inode *inode, struct file *file)
 {
  struct ebpfos_function_view *view = file->private_data;
- struct ebpfos_operations_target *target, *next;
  u32 i;
+ prepared_tables_free(view);
  for (i = 0; i < view->count; ++i)
   ebpfos_function_binding_put(&view->members[i].binding);
- list_for_each_entry_safe(target, next, &view->object_targets, entry) {
-  list_del(&target->entry);kfree(target);
- }
  kvfree(view);
  return 0;
 }
@@ -808,6 +806,7 @@ struct ebpfos_operations {
  struct file *view;
  struct module *original_owner;
  refcount_t references;
+ bool prepared;
  const void *original;
  void *table;
  struct list_head entry;
@@ -905,27 +904,102 @@ struct ebpfos_operations *ebpfos_operations_prepare(u32 descriptor,
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_prepare);
 
+/* A prepared table belongs to the view. Each published object owns a file
+ * reference, not a reference from the view back to itself. */
+static void prepared_table_free(struct ebpfos_operations *bound)
+{
+ struct ebpfos_function_view *view;
+ unsigned long flags;
+ if (!bound) return;
+ view = bound->view->private_data;
+ raw_spin_lock_irqsave(&view->object_lock, flags);
+ list_del(&bound->entry);
+ raw_spin_unlock_irqrestore(&view->object_lock, flags);
+ module_put(bound->original_owner);
+ kfree(bound->table);kfree(bound);
+}
+static void prepared_tables_free(struct ebpfos_function_view *view)
+{
+ struct ebpfos_operations_target *target, *next;
+ list_for_each_entry_safe(target, next, &view->object_targets, entry) {
+  prepared_table_free(target->operations);
+  list_del(&target->entry);kfree(target);
+ }
+}
+
 struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type_id, size_t size, struct module *original_owner)
 {
  struct file *lease;
  struct ebpfos_function_view *view;
  struct ebpfos_operations_target *target;
- struct ebpfos_operations *bound;
  if (!in_task() || !current->mm || !current->ebpfos_object_view) return NULL;
  lease = current->ebpfos_object_view;
  view = lease->private_data;
  if (READ_ONCE(view->object_revoked)) return NULL;
  list_for_each_entry(target, &view->object_targets, entry) {
   if (target->address != (unsigned long)original || target->type != type_id) continue;
-  bound = operations_prepare(get_file(lease), original, type_id, size, original_owner);
-  if (IS_ERR(bound) && (PTR_ERR(bound) == -ENOENT || PTR_ERR(bound) == -EOWNERDEAD))
-   return NULL;
-  return bound;
+  return ebpfos_operations_get(target->operations);
  }
  return NULL;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_current);
+
+struct ebpfos_operations_owner {
+ struct file *view;
+ struct rcu_head rcu;
+ u32 type;
+ bool resolved;
+};
+struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type_id, gfp_t gfp)
+{
+ struct file *lease;
+ struct ebpfos_function_view *view;
+ struct ebpfos_operations_target *target;
+ struct ebpfos_operations_owner *owner;
+ if (!in_task() || !current->mm || !current->ebpfos_object_view) return NULL;
+ lease = current->ebpfos_object_view;view = lease->private_data;
+ if (READ_ONCE(view->object_revoked)) return NULL;
+ list_for_each_entry(target, &view->object_targets, entry) {
+  if (target->type != type_id) continue;
+  owner = kzalloc(sizeof(*owner), gfp);
+  if (!owner) return ERR_PTR(-ENOMEM);
+  owner->view = get_file(lease);owner->type = type_id;
+  return owner;
+ }
+ return NULL;
+}
+EXPORT_SYMBOL_GPL(ebpfos_operations_reserve);
+
+const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner,
+ const void *original)
+{
+ struct ebpfos_function_view *view;
+ struct ebpfos_operations_target *target;
+ if (!owner || owner->resolved) return original;
+ owner->resolved = true;view = owner->view->private_data;
+ if (!READ_ONCE(view->object_revoked))
+  list_for_each_entry(target, &view->object_targets, entry)
+   if (target->address == (unsigned long)original && target->type == owner->type)
+    return target->operations->table;
+ /* The first publication did not use this view. Later aliases and changes
+  * to an already published object do not select another creation binding. */
+ fput(owner->view);owner->view = NULL;
+ return original;
+}
+EXPORT_SYMBOL_GPL(ebpfos_operations_resolve);
+
+static void operations_owner_release(struct rcu_head *rcu)
+{
+ struct ebpfos_operations_owner *owner = container_of(rcu, struct ebpfos_operations_owner, rcu);
+ if (owner->view) fput(owner->view);
+ kfree(owner);
+}
+void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
+{
+ if (owner) call_rcu(&owner->rcu, operations_owner_release);
+}
+EXPORT_SYMBOL_GPL(ebpfos_operations_owner_put);
 
 const void *ebpfos_operations_table(const struct ebpfos_operations *bound)
 { return bound->table; }
@@ -938,7 +1012,9 @@ void ebpfos_operations_put(struct ebpfos_operations *bound)
 {
  struct ebpfos_function_view *view;
  unsigned long flags;
- if (!bound || !refcount_dec_and_test(&bound->references)) return;
+ if (!bound) return;
+ if (bound->prepared) {fput(bound->view);return;}
+ if (!refcount_dec_and_test(&bound->references)) return;
  view = bound->view->private_data;
  raw_spin_lock_irqsave(&view->object_lock, flags);
  list_del(&bound->entry);
@@ -952,7 +1028,10 @@ EXPORT_SYMBOL_GPL(ebpfos_operations_put);
 
 struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *bound)
 {
- if (bound) refcount_inc(&bound->references);
+ if (bound) {
+  if (bound->prepared) get_file(bound->view);
+  else refcount_inc(&bound->references);
+ }
  return bound;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_get);
@@ -1176,6 +1255,13 @@ __bpf_kfunc int bpf_ebpfos_object_view_tables(u32 descriptor,
   target = kzalloc(sizeof(*target), GFP_KERNEL);
   if (!target) {error = -ENOMEM;goto finish;}
   target->address = address;target->type = snapshot[i].type;
+  target->operations = operations_prepare(get_file(lease), (const void *)address,
+    target->type, type->size, NULL);
+  if (IS_ERR(target->operations)) {
+   error = PTR_ERR(target->operations);kfree(target);goto finish;
+  }
+  target->operations->prepared = true;
+  fput(target->operations->view);
   list_add_tail(&target->entry, &prepared);
  }
  raw_spin_lock_irqsave(&view->object_lock, flags);
@@ -1191,6 +1277,7 @@ unlock_targets:
  raw_spin_unlock_irqrestore(&view->object_lock, flags);
 finish:
  list_for_each_entry_safe(target, next, &prepared, entry) {
+  prepared_table_free(target->operations);
   list_del(&target->entry);kfree(target);
  }
  fput(lease);

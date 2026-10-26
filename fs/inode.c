@@ -29,6 +29,12 @@
 
 #include "internal.h"
 
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#include <linux/ebpfos_operations.h>
+#include <linux/btf_ids.h>
+BTF_ID_LIST_SINGLE(ebpfos_inode_ops_btf_id, struct, inode_operations)
+#endif
+
 /*
  * Inode locking rules:
  *
@@ -301,9 +307,22 @@ int inode_init_always_gfp(struct super_block *sb, struct inode *inode, gfp_t gfp
 	inode->i_fsnotify_mask = 0;
 #endif
 	inode->i_flctx = NULL;
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	inode->ebpfos_operations = NULL;
+#endif
 
 	if (unlikely(security_inode_alloc(inode, gfp)))
 		return -ENOMEM;
+
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	inode->ebpfos_operations = ebpfos_operations_reserve(ebpfos_inode_ops_btf_id[0], gfp);
+	if (IS_ERR(inode->ebpfos_operations)) {
+		int error = PTR_ERR(inode->ebpfos_operations);
+		inode->ebpfos_operations = NULL;
+		security_inode_free(inode);
+		return error;
+	}
+#endif
 
 	this_cpu_inc(nr_inodes);
 
@@ -381,22 +400,37 @@ void __destroy_inode(struct inode *inode)
 		posix_acl_release(inode->i_default_acl);
 #endif
 	this_cpu_dec(nr_inodes);
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	ebpfos_operations_owner_put(inode->ebpfos_operations);
+	inode->ebpfos_operations = NULL;
+#endif
 }
 EXPORT_SYMBOL(__destroy_inode);
 
 static void destroy_inode(struct inode *inode)
 {
 	const struct super_operations *ops = inode->i_sb->s_op;
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	struct ebpfos_operations_owner *owner = inode->ebpfos_operations;
+	/* Filesystem teardown can still inspect the inode. Its callback may
+	 * free the inode itself, so retain the independent record locally. */
+	inode->ebpfos_operations = NULL;
+#endif
 
 	BUG_ON(!list_empty(&inode->i_lru));
 	__destroy_inode(inode);
 	if (ops->destroy_inode) {
 		ops->destroy_inode(inode);
 		if (!ops->free_inode)
-			return;
+			goto out;
 	}
 	inode->free_inode = ops->free_inode;
 	call_rcu(&inode->i_rcu, i_callback);
+out:
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	ebpfos_operations_owner_put(owner);
+#endif
+	return;
 }
 
 /**
