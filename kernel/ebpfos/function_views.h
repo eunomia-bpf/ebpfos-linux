@@ -29,6 +29,7 @@ struct ebpfos_function_view {
  bool object_revoked;
  raw_spinlock_t object_lock;
  struct list_head object_files;
+ struct list_head object_tables;
  struct ebpfos_function_view_member members[];
 };
 struct ebpfos_function_view_source {

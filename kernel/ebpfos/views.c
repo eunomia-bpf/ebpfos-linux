@@ -8,6 +8,7 @@
 #include <linux/btf.h>
 #include <linux/capability.h>
 #include <linux/seq_file.h>
+#include <linux/ebpfos_operations.h>
 #include "function_contract.h"
 #include "function_views.h"
 #include "syscall_kfuncs.h"
@@ -56,6 +57,7 @@ int ebpfos_function_view_publish(struct ebpfos_function_view *view)
  }
  raw_spin_lock_init(&view->object_lock);
  INIT_LIST_HEAD(&view->object_files);
+ INIT_LIST_HEAD(&view->object_tables);
  return anon_inode_getfd("ebpfos-function-view", &ebpfos_function_view_operations,
                         view, O_CLOEXEC | O_RDONLY);
 }
@@ -797,6 +799,115 @@ struct bound_file_operations {
 static DEFINE_MUTEX(bound_files_lock);
 static LIST_HEAD(bound_files);
 
+struct ebpfos_operations {
+ struct file *view;
+ const void *original;
+ void *table;
+ struct list_head entry;
+ u32 count;
+ u32 offsets[];
+};
+
+/* BTF describes the slots, not a list of method names. Inode, protocol and
+ * scheduler tables use this same preparation and code ownership path. */
+struct ebpfos_operations *ebpfos_operations_prepare(u32 descriptor,
+ const void *original, u32 type_id, size_t size)
+{
+ struct btf *native = bpf_get_btf_vmlinux();
+ const struct btf_type *record;
+ const struct btf_member *members;
+ struct ebpfos_function_view *view;
+ struct ebpfos_operations *bound;
+ struct file *lease;
+ unsigned long flags;
+ u32 i, j;
+ int error = -EINVAL;
+
+ if (!original || IS_ERR_OR_NULL(native)) return ERR_PTR(-EINVAL);
+ record = btf_type_by_id(native, type_id);
+ if (!record || !btf_type_is_struct(record) || size != record->size)
+  return ERR_PTR(-EPROTOTYPE);
+ lease = ebpfos_function_view_get(descriptor);
+ if (IS_ERR(lease)) return ERR_CAST(lease);
+ view = lease->private_data;
+ bound = kzalloc(struct_size(bound, offsets, btf_type_vlen(record)), GFP_KERNEL);
+ if (!bound) {error = -ENOMEM;goto put_view;}
+ bound->table = kmemdup(original, size, GFP_KERNEL);
+ if (!bound->table) {error = -ENOMEM;goto free_bound;}
+ bound->view = lease;
+ bound->original = original;
+ members = btf_members(record);
+ for (i = 0; i < btf_type_vlen(record); ++i) {
+  const struct btf_type *pointer, *prototype;
+  unsigned long address;
+  u32 offset = btf_member_bit_offset(record, i) / 8;
+  const struct ebpfos_function_view_member *match = NULL;
+
+  pointer = btf_type_skip_modifiers(native, members[i].type, NULL);
+  if (!pointer || !btf_type_is_ptr(pointer)) continue;
+  prototype = btf_type_skip_modifiers(native, pointer->type, NULL);
+  if (!prototype || !btf_type_is_func_proto(prototype)) continue;
+  if (btf_member_bitfield_size(record, i) ||
+      btf_member_bit_offset(record, i) % 8 ||
+      offset % sizeof(address) ||
+      offset > size || sizeof(address) > size - offset) goto free_table;
+  memcpy(&address, original + offset, sizeof(address));
+  if (!address) continue;
+  for (j = 0; j < view->count; ++j) {
+   const struct ebpfos_function_view_member *member = &view->members[j];
+   const struct btf_type *function;
+   if (address != member->native_address) continue;
+   if (match) {error = -ENOTUNIQ;goto free_table;}
+   function = btf_type_by_id(native, member->native_function);
+   if (!function || !btf_type_is_func(function) ||
+       !cell_layout(native, function->type, native, pointer->type, 0, false)) {
+    error = -EPROTOTYPE;goto free_table;
+   }
+   match = member;
+  }
+  if (!match) continue;
+  memcpy(bound->table + offset, &match->binding.address, sizeof(address));
+  bound->offsets[bound->count++] = offset;
+ }
+ if (!bound->count) {error = -ENOENT;goto free_table;}
+ raw_spin_lock_irqsave(&view->object_lock, flags);
+ if (view->object_revoked) {
+  raw_spin_unlock_irqrestore(&view->object_lock, flags);
+  error = -EOWNERDEAD;goto free_table;
+ }
+ list_add(&bound->entry, &view->object_tables);
+ raw_spin_unlock_irqrestore(&view->object_lock, flags);
+ return bound;
+free_table:
+ kfree(bound->table);
+free_bound:
+ kfree(bound);
+put_view:
+ fput(lease);
+ return ERR_PTR(error);
+}
+EXPORT_SYMBOL_GPL(ebpfos_operations_prepare);
+
+const void *ebpfos_operations_table(const struct ebpfos_operations *bound)
+{ return bound->table; }
+EXPORT_SYMBOL_GPL(ebpfos_operations_table);
+u32 ebpfos_operations_bound(const struct ebpfos_operations *bound)
+{ return bound->count; }
+EXPORT_SYMBOL_GPL(ebpfos_operations_bound);
+
+void ebpfos_operations_put(struct ebpfos_operations *bound)
+{
+ struct ebpfos_function_view *view = bound->view->private_data;
+ unsigned long flags;
+ raw_spin_lock_irqsave(&view->object_lock, flags);
+ list_del(&bound->entry);
+ raw_spin_unlock_irqrestore(&view->object_lock, flags);
+ fput(bound->view);
+ kfree(bound->table);
+ kfree(bound);
+}
+EXPORT_SYMBOL_GPL(ebpfos_operations_put);
+
 static int bound_file_release(struct inode *inode, struct file *file)
 {
  struct bound_file_operations *bound = container_of(file->f_op,
@@ -852,9 +963,19 @@ EXPORT_SYMBOL_GPL(ebpfos_object_view_select);
 static void revoke_file_bindings(struct ebpfos_function_view *view)
 {
  struct bound_file_operations *bound;
+ struct ebpfos_operations *table;
  unsigned long flags;
+ u32 i;
  raw_spin_lock_irqsave(&view->object_lock, flags);
  WRITE_ONCE(view->object_revoked, true);
+ list_for_each_entry(table, &view->object_tables, entry) {
+  for (i = 0; i < table->count; ++i) {
+   u32 offset = table->offsets[i];
+   unsigned long address;
+   memcpy(&address, table->original + offset, sizeof(address));
+   WRITE_ONCE(*(unsigned long *)(table->table + offset), address);
+  }
+ }
  list_for_each_entry(bound, &view->object_files, view_entry) {
   WRITE_ONCE(bound->operations.llseek, bound->original->llseek);
   WRITE_ONCE(bound->operations.read, bound->original->read);
