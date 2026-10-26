@@ -316,12 +316,44 @@ struct sockfs_inode {
 	struct list_head xattrs;
 	struct simple_xattr_limits xattr_limits;
 	struct socket_alloc;
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	struct ebpfos_operations *operations;
+#endif
 };
 
 static struct sockfs_inode *SOCKFS_I(struct inode *inode)
 {
 	return container_of(inode, struct sockfs_inode, vfs_inode);
 }
+
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#include <linux/ebpfos_operations.h>
+#include <linux/btf_ids.h>
+BTF_ID_LIST_SINGLE(ebpfos_proto_ops_btf_id, struct, proto_ops)
+
+static int socket_bind_operations(struct socket *sock)
+{
+	struct ebpfos_operations *bound;
+	bound = ebpfos_operations_current(sock->ops, ebpfos_proto_ops_btf_id[0],
+					 sizeof(*sock->ops), sock->ops->owner);
+	if (IS_ERR(bound))
+		return PTR_ERR(bound);
+	if (bound) {
+		SOCKFS_I(SOCK_INODE(sock))->operations = bound;
+		sock->ops = ebpfos_operations_table(bound);
+	}
+	return 0;
+}
+
+static void socket_inherit_operations(struct socket *next, struct socket *parent)
+{
+	SOCKFS_I(SOCK_INODE(next))->operations =
+		ebpfos_operations_get(SOCKFS_I(SOCK_INODE(parent))->operations);
+}
+#else
+static inline int socket_bind_operations(struct socket *sock) { return 0; }
+static inline void socket_inherit_operations(struct socket *next, struct socket *parent) {}
+#endif
 
 static struct inode *sock_alloc_inode(struct super_block *sb)
 {
@@ -342,6 +374,9 @@ static struct inode *sock_alloc_inode(struct super_block *sb)
 	si->socket.ops = NULL;
 	si->socket.sk = NULL;
 	si->socket.file = NULL;
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	si->operations = NULL;
+#endif
 
 	return &si->vfs_inode;
 }
@@ -358,6 +393,9 @@ static void sock_free_inode(struct inode *inode)
 {
 	struct sockfs_inode *si = SOCKFS_I(inode);
 
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	ebpfos_operations_put(si->operations);
+#endif
 	kmem_cache_free(sock_inode_cachep, si);
 }
 
@@ -1676,6 +1714,11 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	err = security_socket_post_create(sock, family, type, protocol, kern);
 	if (err)
 		goto out_sock_release;
+	if (!kern) {
+		err = socket_bind_operations(sock);
+		if (err)
+			goto out_sock_release;
+	}
 	*res = sock;
 
 	return 0;
@@ -2017,6 +2060,7 @@ struct file *do_accept(struct file *file, struct proto_accept_arg *arg,
 
 	newsock->type = sock->type;
 	newsock->ops = ops;
+	socket_inherit_operations(newsock, sock);
 
 	/*
 	 * We don't need try_module_get here, as the listening socket (sock)
@@ -3699,6 +3743,7 @@ int kernel_accept(struct socket *sock, struct socket **newsock, int flags)
 	}
 
 	(*newsock)->ops = ops;
+	socket_inherit_operations(*newsock, sock);
 	__module_get(ops->owner);
 
 done:

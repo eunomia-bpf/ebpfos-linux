@@ -22,6 +22,11 @@ struct ebpfos_function_view_member {
  unsigned long native_address;
  struct ebpfos_function_binding binding;
 };
+struct ebpfos_operations_target {
+ struct list_head entry;
+ unsigned long address;
+ u32 type;
+};
 struct ebpfos_function_view {
  u64 generation;
  u32 count;
@@ -30,6 +35,8 @@ struct ebpfos_function_view {
  raw_spinlock_t object_lock;
  struct list_head object_files;
  struct list_head object_tables;
+ struct list_head object_targets;
+ bool object_selected;
  struct ebpfos_function_view_member members[];
 };
 struct ebpfos_function_view_source {
