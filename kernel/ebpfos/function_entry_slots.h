@@ -9,25 +9,34 @@
  * ftrace path intact. These entries reserve patch space, not a callable ABI.
  */
 extern const void *const *const ebpfos_native_entry_functions __weak;
+extern const u8 *const ebpfos_native_entry_offsets __weak;
 extern const u32 ebpfos_native_entry_function_count __weak;
 
 static unsigned long entry_native_location(unsigned long address)
 {
  static const u8 endbr[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
  u8 actual[4];
- unsigned int i;
+ unsigned int i, offset = sizeof(endbr);
  if (!&ebpfos_native_entry_functions || !&ebpfos_native_entry_function_count)
   return 0;
  for (i = 0; i < ebpfos_native_entry_function_count; ++i)
   if ((unsigned long)ebpfos_native_entry_functions[i] == address) break;
- if (i == ebpfos_native_entry_function_count ||
-     copy_from_kernel_nofault(actual, (void *)address, sizeof(actual)) ||
-     memcmp(actual, endbr, sizeof(actual))) return 0;
+ if (i == ebpfos_native_entry_function_count) return 0;
+ /* Older producers reserve after ENDBR. A producer can also identify the
+  * zero offset of a function without an indirect landing pad. The immutable
+  * offset remains valid after the instruction has become a direct jump. */
+ if (&ebpfos_native_entry_offsets) {
+  if (!ebpfos_native_entry_offsets) return 0;
+  offset = ebpfos_native_entry_offsets[i];
+  if (offset && offset != sizeof(endbr)) return 0;
+ }
+ if (offset && (copy_from_kernel_nofault(actual, (void *)address, sizeof(actual)) ||
+     memcmp(actual, endbr, sizeof(actual)))) return 0;
  /* The producer also uses Linux's ordinary NOKPROBE metadata. A second
   * patch owner must not install a breakpoint inside this instruction.
   */
  if (IS_ENABLED(CONFIG_KPROBES) && !within_kprobe_blacklist(address)) return 0;
- return address + sizeof(endbr);
+ return address + offset;
 }
 
 /* entry_lock serializes journal ownership; text_mutex serializes Linux text
