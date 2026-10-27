@@ -5947,7 +5947,8 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 	if (CHECK_ATTR(BPF_LINK_CREATE))
 		return -EINVAL;
 
-	if (attr->link_create.attach_type == BPF_TRACE_ENTRY)
+	if (attr->link_create.attach_type == BPF_TRACE_ENTRY ||
+	    attr->link_create.attach_type == BPF_CGROUP_ENTRY)
 		return bpf_entry_link_create(attr, uattr.is_kernel);
 
 	if (attr->link_create.attach_type == BPF_STRUCT_OPS)

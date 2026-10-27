@@ -369,16 +369,25 @@ struct task_view {
  struct ebpfos_function_binding bindings[];
 };
 
-/* One cold request per task. NULL next means the original native table.
- * The task owns the incoming file reference until publication or cancellation.
- * Active and pending references are protected by task_lock; only current
- * publishes a table, after every old syscall/unit frame has unwound. */
-struct ebpfos_task_view_request { struct file *next; };
-static void task_view_request_free(struct ebpfos_task_view_request *request)
+/* Immutable requests can be shared by every task in a cgroup. The owner
+ * and each pending task hold a reference; publication acquires a separate
+ * file reference for the task's complete active syscall version. */
+#include <linux/refcount.h>
+struct ebpfos_task_view_request {
+ refcount_t references;
+ struct rcu_head rcu;
+ struct file *next;
+};
+static void task_view_request_rcu(struct rcu_head *rcu)
 {
- if (!request) return;
+ struct ebpfos_task_view_request *request = container_of(rcu, struct ebpfos_task_view_request, rcu);
  if (request->next) fput(request->next);
  kfree(request);
+}
+static void task_view_request_free(struct ebpfos_task_view_request *request)
+{
+ if (request && refcount_dec_and_test(&request->references))
+  call_rcu(&request->rcu, task_view_request_rcu);
 }
 
 /* This runs ONLY at return to user mode, never at a general task_work_run()
@@ -394,14 +403,13 @@ void ebpfos_task_view_resume(void)
  if (request) {
   current->ebpfos_task_view_request = NULL;
   old = current->ebpfos_task_view;
-  current->ebpfos_task_view = request->next;
+  current->ebpfos_task_view = request->next ? get_file(request->next) : NULL;
   current->ebpfos_syscalls = request->next ?
    ((struct task_view *)request->next->private_data)->table : sys_call_table;
-  request->next = NULL;
  }
  task_unlock(current);
  if (old) fput(old);
- kfree(request);
+ task_view_request_free(request);
 }
 
 static void task_view_free(struct task_view *view)
@@ -490,285 +498,197 @@ static int task_view_slot(struct btf *native, u32 id, unsigned long *used)
  if (test_and_set_bit(nr, used)) return -ENOTUNIQ;
  return nr;
 }
-static int task_view_open(const struct ebpfos_function_view_source *sources,
- u32 count, u64 generation, bool revocable)
+#include <linux/cgroup.h>
+#include <linux/bpf_entry_cgroup.h>
+#if defined(CONFIG_EBPFOS_ENTRY_LINK) && defined(CONFIG_CGROUP_BPF)
+struct ebpfos_cgroup_view {
+ struct cgroup *group;
+ struct ebpfos_task_view_request *request;
+ bool attached;
+};
+/* A permanent owner reference makes restoration allocation-free. */
+static struct ebpfos_task_view_request global_request = {
+ .references = REFCOUNT_INIT(1),
+};
+void ebpfos_cgroup_request_put(struct ebpfos_task_view_request *request)
+{ task_view_request_free(request); }
+struct ebpfos_task_view_request *ebpfos_cgroup_prepare(
+ const struct bpf_entry_target *sources, u32 count, u64 generation)
 {
+ struct ebpfos_task_view_request *request;
  struct btf *native = bpf_get_btf_vmlinux();
  struct task_view *view;
+ struct file *file;
  DECLARE_BITMAP(used, NR_syscalls);
- u32 i, nr;
- int error = -EINVAL;
- if (revocable && (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) ||
-     !IS_ENABLED(CONFIG_TASKS_RCU))) return -EOPNOTSUPP;
- if (IS_ERR_OR_NULL(native) || !count || count > NR_syscalls) return -EINVAL;
- if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
+ unsigned int i, roots = 0;
+ int error;
+ if (!count || IS_ERR_OR_NULL(native)) return ERR_PTR(-EINVAL);
+ if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU))
+  return ERR_PTR(-EOPNOTSUPP);
  view = kvzalloc(struct_size(view, bindings, count), GFP_KERNEL);
- if (!view) return -ENOMEM;
- view->count = count;view->generation = generation;view->revocable = revocable;
+ if (!view) return ERR_PTR(-ENOMEM);
+ view->count = count;view->generation = generation;view->revocable = true;
  INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
  memcpy(view->table, sys_call_table, sizeof(view->table));
  bitmap_zero(used, NR_syscalls);
  for (i = 0; i < count; ++i) {
-  const struct btf_type *function = btf_type_by_id(native, sources[i].native_function);
-  struct bpf_prog *program;
-  unsigned long target;
-  int slot = task_view_slot(native, sources[i].native_function, used);
-  if (slot < 0) {error = slot;goto fail;}
-  nr = slot;
-  /* A syscall entered from userspace is a sleepable task context. A graph
-   * verified there need not pretend to be a non-sleepable tracing hook.
-   * Keep the actual program domain; native callable/context checks below
-   * still cover the export and every reachable callee and callback. */
-  program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_SYSCALL, false);
-  if (IS_ERR(program) && PTR_ERR(program) == -EINVAL)
-   program = bpf_prog_get_type_dev(sources[i].program, BPF_PROG_TYPE_TRACING, false);
-  if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
+  struct bpf_prog *program = sources[i].program;
+  int slot = task_view_slot(native, sources[i].function, used);
+  /* Private members retain code with their syscall roots. They acquire no
+   * per-process direct-call dispatch of their own. */
+  if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
+  if (ebpfos_program_addresses(program)) {error = -EOPNOTSUPP;goto fail;}
+  bpf_prog_inc(program);
   view->bindings[i].program = program;
-  /* Escaped callback addresses need a separate owner lease. Do not promise
-   * fault revocation for a graph whose lifetime a stack scan cannot close. */
-  if (revocable && ebpfos_program_addresses(program)) {error = -EOPNOTSUPP;goto fail;}
-  if (!program->aux->ebpfos_component ||
-      (program->type == BPF_PROG_TYPE_SYSCALL ?
-       (!program->sleepable || program->expected_attach_type != 0) :
-       (program->sleepable || program->expected_attach_type != BPF_TRACE_REPLACE))) {
-   error = -EOPNOTSUPP;goto fail;
+  view->bindings[i].address = sources[i].address;
+  if (program->type == BPF_PROG_TYPE_NATIVE && program->aux->mod) {
+   __module_get(program->aux->mod);
+   view->bindings[i].module = program->aux->mod;
   }
-  if (!cell_callable(native, function, program, sources[i].compiled_function, &target)) {
-   error = -EPROTOTYPE;goto fail;
-  }
-  if (!entry_context(program, target)) {error = -EOPNOTSUPP;goto fail;}
-  view->bindings[i].address = target;
-  view->table[nr] = (sys_call_ptr_t)target;
+  if (slot >= 0) {view->table[slot] = (sys_call_ptr_t)sources[i].address;++roots;}
  }
- error = anon_inode_getfd("ebpfos-task-view", &task_view_ops, view, O_CLOEXEC | O_RDONLY);
- if (error >= 0) return error;
-fail:
- for (i = 0; i < count; ++i) ebpfos_function_binding_put(&view->bindings[i]);
- kvfree(view);return error;
-}
-
-/* Import RT's already checked native/verified exports, retaining their code
- * directly rather than a parent view. Native bodies have ordinary module
- * trust and callback ownership. They switch/roll back at the same user-return
- * boundary; automatic in-body fault revocation requires a verified graph. */
-static int task_view_import(u32 descriptor, u64 generation)
-{
- struct btf *native = bpf_get_btf_vmlinux();
- const struct ebpfos_function_view *source;
- struct task_view *view;
- struct file *file;
- DECLARE_BITMAP(used, NR_syscalls);
- u32 i;
- int error;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (IS_ERR_OR_NULL(native)) return -EINVAL;
- if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI) ||
-     !IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU))
-  return -EOPNOTSUPP;
- file = ebpfos_function_view_get(descriptor);
- if (IS_ERR(file)) return PTR_ERR(file);
- source = ebpfos_function_view_data(file);
- if (!source->count || source->count > NR_syscalls) {error = -EINVAL;goto put_file;}
- view = kvzalloc(struct_size(view, bindings, source->count), GFP_KERNEL);
- if (!view) {error = -ENOMEM;goto put_file;}
- view->count = source->count;view->generation = generation;view->revocable = true;
- INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
- memcpy(view->table, sys_call_table, sizeof(view->table));
- bitmap_zero(used, NR_syscalls);
- for (i = 0; i < source->count; ++i) {
-  const struct ebpfos_function_binding *binding = &source->members[i].binding;
-  int slot = task_view_slot(native, source->members[i].native_function, used);
-  if (slot < 0) {error = slot;goto fail;}
-  if (binding->program) {
-   if (ebpfos_program_addresses(binding->program) ||
-       !entry_context(binding->program, binding->address)) {error = -EOPNOTSUPP;goto fail;}
-   bpf_prog_inc(binding->program);
-  } else view->revocable = false;
-  if (binding->module) __module_get(binding->module);
-  view->bindings[i] = *binding;
-  view->table[slot] = (sys_call_ptr_t)binding->address;
- }
- error = anon_inode_getfd("ebpfos-task-view", &task_view_ops, view, O_CLOEXEC | O_RDONLY);
- if (error >= 0) goto put_file;
-fail:
- task_view_free(view);
-put_file:
- fput(file);return error;
-}
-
-__bpf_kfunc_start_defs();
-static int task_view_open_snapshot(
- const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation, bool revocable)
-{
- struct ebpfos_function_view_source *snapshot;
- int result;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (!sources__sz || sources__sz % sizeof(*sources) ||
-     sources__sz / sizeof(*sources) > NR_syscalls) return -EINVAL;
- snapshot = kmemdup(sources, sources__sz, GFP_KERNEL);
- if (!snapshot) return -ENOMEM;
- result = task_view_open(snapshot, sources__sz / sizeof(*sources), generation, revocable);
- kfree(snapshot);return result;
-}
-__bpf_kfunc int bpf_ebpfos_task_view_open(
- const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
-{return task_view_open_snapshot(sources, sources__sz, generation, false);}
-__bpf_kfunc int bpf_ebpfos_task_view_open_revocable(
- const struct ebpfos_function_view_source *sources, u32 sources__sz, u64 generation)
-{return task_view_open_snapshot(sources, sources__sz, generation, true);}
-__bpf_kfunc int bpf_ebpfos_task_view_import(u32 descriptor, u64 generation)
-{return task_view_import(descriptor, generation);}
-/* Only the calling task loses its binding. This is a failure-path operation,
- * not a runner or a check on successful calls. Retirement owns the old graph
- * until every frame is clear, including the frame making this request. */
-__bpf_kfunc int bpf_ebpfos_task_view_revoke(void)
-{
- struct ebpfos_task_view_request *request;
- struct file *old;
- task_lock(current);
- old = current->ebpfos_task_view;
- if (!old || !((struct task_view *)old->private_data)->revocable) {
-  task_unlock(current);
-  return old ? -EOPNOTSUPP : -ENOENT;
- }
- /* A fault takes precedence over an earlier requested update. */
- request = current->ebpfos_task_view_request;
- current->ebpfos_task_view_request = NULL;
- current->ebpfos_syscalls = sys_call_table;
- current->ebpfos_task_view = NULL;
- task_unlock(current);
- task_view_request_free(request);
- fput(old);
- return 0;
-}
-__bpf_kfunc int bpf_ebpfos_task_view_select(int descriptor)
-{
- struct file *old, *next = NULL;
- const sys_call_ptr_t *table = sys_call_table;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- /* The native bpf user entry is outside every selected syscall frame.
-  * Merely having a native bpf slot would not exclude a nested invocation
-  * from another, still-live selected syscall. Do not drop its graph lease. */
- if (syscall_get_nr(current, task_pt_regs(current)) != __NR_bpf ||
-     current->ebpfos_syscalls[__NR_bpf] != sys_call_table[__NR_bpf]) return -EBUSY;
- if (descriptor != -1) {
-  next = fget(descriptor);
-  if (!next) return -EBADF;
-  if (next->f_op != &task_view_ops) {fput(next);return -EINVAL;}
-  table = ((struct task_view *)next->private_data)->table;
- }
- task_lock(current);
- if (current->ebpfos_task_view_request) {
-  task_unlock(current);
-  if (next) fput(next);
-  return -EBUSY;
- }
- old = current->ebpfos_task_view;
- /* Only current can change these fields. Entry observes them on the next
-  * syscall; fork takes its lease after copying current's complete task. */
- current->ebpfos_task_view = next;
- current->ebpfos_syscalls = table;
- task_unlock(current);
- if (old) fput(old);
- return 0;
-}
-
-static struct file *task_view_get(int descriptor)
-{
- struct file *file;
- if (descriptor == -1) return NULL;
- file = fget(descriptor);
- if (!file) return ERR_PTR(-EBADF);
- if (file->f_op == &task_view_ops) return file;
- fput(file);return ERR_PTR(-EINVAL);
-}
-/* Compare the actual old file identity, not a caller-chosen generation.
- * pidfds prevent task-ID reuse; both descriptors belong to the requester.
- * All failures leave the task's complete active and pending views unchanged. */
-__bpf_kfunc int bpf_ebpfos_task_view_request(int pidfd, int expected, int next)
-{
- struct ebpfos_task_view_request *request;
- struct task_struct *task;
- struct file *old, *incoming;
- unsigned int flags;
- int error = 0;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- old = task_view_get(expected);
- if (IS_ERR(old)) return PTR_ERR(old);
- incoming = task_view_get(next);
- if (IS_ERR(incoming)) {error = PTR_ERR(incoming);goto put_old;}
+ if (!roots) {error = -EOPNOTSUPP;goto fail;}
  request = kzalloc(sizeof(*request), GFP_KERNEL);
- if (!request) {error = -ENOMEM;goto put_incoming;}
- request->next = incoming;
- task = pidfd_get_task(pidfd, &flags);
- if (IS_ERR(task)) {error = PTR_ERR(task);goto free_request;}
+ if (!request) {error = -ENOMEM;goto fail;}
+ file = anon_inode_getfile("bpf-entry-cgroup-table", &task_view_ops, view, O_RDONLY);
+ if (IS_ERR(file)) {error = PTR_ERR(file);kfree(request);goto fail;}
+ refcount_set(&request->references, 1);
+ request->next = file;
+ return request;
+fail:
+ task_view_free(view);return ERR_PTR(error);
+}
+/* All owner publication, membership movement and fork selection serialize on
+ * css_set_lock. Lookup and queueing therefore cannot install an older request
+ * after an update has already queued a newer version for the same task. */
+static struct ebpfos_task_view_request *cgroup_request_locked(struct task_struct *task)
+{
+ struct cgroup *group;
+ struct ebpfos_cgroup_view *view;
+ lockdep_assert_held(&css_set_lock);
+ for (group = task_dfl_cgroup(task); group; group = cgroup_parent(group)) {
+  view = group->bpf.entry_view;
+  if (view) return view->request;
+ }
+ return &global_request;
+}
+void ebpfos_cgroup_task_move(struct task_struct *task)
+{
+ struct ebpfos_task_view_request *request, *old;
+ lockdep_assert_held(&css_set_lock);
+ if (task->flags & (PF_KTHREAD | PF_EXITING)) return;
+ request = cgroup_request_locked(task);
  task_lock(task);
- if (task->flags & (PF_KTHREAD | PF_EXITING)) error = -ESRCH;
- else if (task->ebpfos_task_view != old) error = -ESTALE;
- else if (task->ebpfos_task_view_request) error = -EBUSY;
- else {task->ebpfos_task_view_request = request;request = NULL;}
+ if (!task->ebpfos_task_view_request && task->ebpfos_task_view == request->next) {
+  task_unlock(task);return;
+ }
+ refcount_inc(&request->references);
+ old = task->ebpfos_task_view_request;
+ task->ebpfos_task_view_request = request;
  task_unlock(task);
- /* No wakeup of a sleeping old unit. A running userspace task is kicked
-  * into the same return boundary; blocked tasks finish their old call. */
- if (!error) set_notify_resume(task);
- put_task_struct(task);
-free_request:
- task_view_request_free(request);
- goto put_old;
-put_incoming:
- if (incoming) fput(incoming);
-put_old:
- if (old) fput(old);
+ task_view_request_free(old);
+ set_notify_resume(task);
+}
+void ebpfos_cgroup_exec(void)
+{
+ unsigned long flags;
+ spin_lock_irqsave(&css_set_lock, flags);
+ ebpfos_cgroup_task_move(current);
+ spin_unlock_irqrestore(&css_set_lock, flags);
+}
+static void cgroup_refresh_locked(void)
+{
+ struct task_struct *leader, *task;
+ lockdep_assert_held(&css_set_lock);
+ rcu_read_lock();
+ for_each_process_thread(leader, task) ebpfos_cgroup_task_move(task);
+ rcu_read_unlock();
+}
+struct ebpfos_cgroup_view *ebpfos_cgroup_view_create(int fd,
+ struct ebpfos_task_view_request *request)
+{
+ struct ebpfos_cgroup_view *view;
+ struct cgroup *group = cgroup_get_from_fd(fd);
+ if (IS_ERR(group)) return ERR_CAST(group);
+ if (group->root != &cgrp_dfl_root) {cgroup_put(group);return ERR_PTR(-EOPNOTSUPP);}
+ view = kzalloc(sizeof(*view), GFP_KERNEL);
+ if (!view) {cgroup_put(group);return ERR_PTR(-ENOMEM);}
+ view->group = group;view->request = request;
+ return view;
+}
+int ebpfos_cgroup_view_attach(struct ebpfos_cgroup_view *view)
+{
+ unsigned long flags;
+ int error = 0;
+ cgroup_lock();
+ if (cgroup_is_dead(view->group)) {error = -ENOENT;goto out;}
+ spin_lock_irqsave(&css_set_lock, flags);
+ if (view->group->bpf.entry_view) error = -EBUSY;
+ else {
+  view->group->bpf.entry_view = view;
+  WRITE_ONCE(view->attached, true);
+  cgroup_refresh_locked();
+ }
+ spin_unlock_irqrestore(&css_set_lock, flags);
+out:
+ cgroup_unlock();return error;
+}
+int ebpfos_cgroup_view_update(struct ebpfos_cgroup_view *view,
+ struct ebpfos_task_view_request *next)
+{
+ struct ebpfos_task_view_request *old = NULL;
+ unsigned long flags;
+ int error = 0;
+ cgroup_lock();
+ spin_lock_irqsave(&css_set_lock, flags);
+ if (!view->attached) error = -ENOLINK;
+ else {
+  old = view->request;view->request = next;
+  cgroup_refresh_locked();
+ }
+ spin_unlock_irqrestore(&css_set_lock, flags);
+ cgroup_unlock();
+ task_view_request_free(old);
  return error;
 }
-/* Return 1 while a request is pending, 0 after publication/cancellation.
- * Cancel never rolls back an already published view; queue its predecessor
- * with request() for an ordinary boundary-safe rollback. */
-static int task_view_pending(int pidfd, bool cancel)
+void ebpfos_cgroup_view_detach(struct ebpfos_cgroup_view *view)
 {
- struct ebpfos_task_view_request *request;
- struct task_struct *task;
- unsigned int flags;
- int result;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- task = pidfd_get_task(pidfd, &flags);
- if (IS_ERR(task)) return PTR_ERR(task);
- task_lock(task);
- request = task->ebpfos_task_view_request;
- result = request ? 1 : 0;
- if (cancel) task->ebpfos_task_view_request = NULL;
- task_unlock(task);
- if (cancel) task_view_request_free(request);
- put_task_struct(task);
- return result;
+ unsigned long flags;
+ cgroup_lock();
+ spin_lock_irqsave(&css_set_lock, flags);
+ if (view->attached) {
+  view->group->bpf.entry_view = NULL;
+  WRITE_ONCE(view->attached, false);
+  cgroup_refresh_locked();
+ }
+ spin_unlock_irqrestore(&css_set_lock, flags);
+ cgroup_unlock();
 }
-__bpf_kfunc int bpf_ebpfos_task_view_pending(int pidfd)
-{return task_view_pending(pidfd, false);}
-__bpf_kfunc int bpf_ebpfos_task_view_cancel(int pidfd)
-{return task_view_pending(pidfd, true);}
-__bpf_kfunc_end_defs();
-BTF_KFUNCS_START(task_view_ids)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_open_revocable, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_import, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_revoke, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_select, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_request, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_pending, KF_SLEEPABLE)
-BTF_ID_FLAGS(func, bpf_ebpfos_task_view_cancel, KF_SLEEPABLE)
-BTF_KFUNCS_END(task_view_ids)
-static const struct btf_kfunc_id_set task_view_kfuncs;
-static int task_view_filter(const struct bpf_prog *prog, u32 id)
+void ebpfos_cgroup_offline(struct cgroup *group)
 {
- const struct btf_kfunc_id_set *sets[] = { &task_view_kfuncs };
- return ebpfos_syscall_kfunc_filter(prog, id, sets, ARRAY_SIZE(sets));
+ struct ebpfos_cgroup_view *view;
+ unsigned long flags;
+ /* The cgroup lifetime notifier already holds cgroup_mutex. */
+ spin_lock_irqsave(&css_set_lock, flags);
+ view = group->bpf.entry_view;
+ if (view) {
+  group->bpf.entry_view = NULL;
+  WRITE_ONCE(view->attached, false);
+  cgroup_refresh_locked();
+ }
+ spin_unlock_irqrestore(&css_set_lock, flags);
 }
-static const struct btf_kfunc_id_set task_view_kfuncs = {
- .owner = THIS_MODULE, .set = &task_view_ids, .filter = task_view_filter,
-};
-static int __init task_view_init(void)
-{return register_btf_kfunc_id_set(BPF_PROG_TYPE_UNSPEC, &task_view_kfuncs);}
-late_initcall(task_view_init);
+void ebpfos_cgroup_view_put(struct ebpfos_cgroup_view *view)
+{
+ if (!view) return;
+ task_view_request_free(view->request);
+ cgroup_put(view->group);kfree(view);
+}
+u64 ebpfos_cgroup_view_id(const struct ebpfos_cgroup_view *view)
+{ return view ? cgroup_id(view->group) : 0; }
+bool ebpfos_cgroup_view_active(const struct ebpfos_cgroup_view *view)
+{ return view && READ_ONCE(view->attached); }
+#endif
 
 // SPDX-License-Identifier: GPL-2.0-only
 /* Owners opt in where operations-table identity is not a type protocol and

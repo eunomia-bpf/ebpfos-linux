@@ -531,6 +531,7 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
   jsonw_uint_field(json_wtr, "count", full.entry.count);
   jsonw_uint_field(json_wtr, "target_btf_obj_id", full.entry.target_btf_obj_id);
   jsonw_uint_field(json_wtr, "revision", full.entry.revision);
+  jsonw_uint_field(json_wtr, "cgroup_id", full.entry.cgroup_id);
   jsonw_bool_field(json_wtr, "detached", full.entry.detached);
   jsonw_name(json_wtr, "members");
   jsonw_start_array(json_wtr);
@@ -544,6 +545,7 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
  } else {
   printf("\n\tcount %u target_btf_obj_id %u revision %llu detached %u  ",
    full.entry.count, full.entry.target_btf_obj_id, full.entry.revision, full.entry.detached);
+  printf("cgroup_id %llu  ", full.entry.cgroup_id);
   for (i = 0; i < count; ++i)
    printf("\n\ttarget_btf_id %u prog_id %u", targets[i], programs[i]);
  }

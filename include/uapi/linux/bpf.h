@@ -1159,6 +1159,7 @@ enum bpf_attach_type {
 	/* Exclusive, typed non-sleepable function-body replacement. */
 	BPF_TRACE_REPLACE,
 	BPF_TRACE_ENTRY,
+	BPF_CGROUP_ENTRY,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -6794,6 +6795,7 @@ struct bpf_link_info {
 			__aligned_u64 prog_ids;
 			__u32 detached;
 			__u32 :32;
+			__u64 cgroup_id;
 		} entry;
 		struct {
 			__aligned_u64 tp_name; /* in/out: tp_name buffer ptr */

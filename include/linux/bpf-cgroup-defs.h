@@ -9,6 +9,7 @@
 #include <linux/workqueue.h>
 
 struct bpf_prog_array;
+struct ebpfos_cgroup_view;
 
 #ifdef CONFIG_BPF_LSM
 /* Maximum number of concurrently attachable per-cgroup LSM hooks. */
@@ -53,6 +54,10 @@ enum cgroup_bpf_attach_type {
 };
 
 struct cgroup_bpf {
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+	/* Cold owner selection, protected by css_set_lock. */
+	struct ebpfos_cgroup_view *entry_view;
+#endif
 	/* array of effective progs in this cgroup */
 	struct bpf_prog_array __rcu *effective[MAX_CGROUP_BPF_ATTACH_TYPE];
 

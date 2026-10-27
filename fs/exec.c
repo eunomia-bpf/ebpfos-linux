@@ -48,6 +48,7 @@
 #include <linux/utsname.h>
 #include <linux/pid_namespace.h>
 #include <linux/module.h>
+#include <linux/ebpfos_task_view.h>
 #include <linux/namei.h>
 #include <linux/mount.h>
 #include <linux/security.h>
@@ -1715,6 +1716,7 @@ static int exec_binprm(struct linux_binprm *bprm)
 	}
 
 	audit_bprm(bprm);
+	ebpfos_cgroup_exec();
 	trace_sched_process_exec(current, old_pid, bprm);
 	ptrace_event(PTRACE_EVENT_EXEC, old_vpid);
 	proc_exec_connector(current);

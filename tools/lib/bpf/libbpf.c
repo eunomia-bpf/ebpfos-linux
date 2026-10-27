@@ -137,6 +137,7 @@ static const char * const attach_type_name[] = {
 	[BPF_TRACE_KPROBE_SESSION]	= "trace_kprobe_session",
 	[BPF_TRACE_UPROBE_SESSION]	= "trace_uprobe_session",
 	[BPF_TRACE_ENTRY] = "trace_entry",
+	[BPF_CGROUP_ENTRY] = "cgroup_entry",
 };
 
 static const char * const link_type_name[] = {
