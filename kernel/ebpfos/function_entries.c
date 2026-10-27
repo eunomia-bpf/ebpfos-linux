@@ -30,18 +30,18 @@
 #include <linux/stop_machine.h>
 #include "syscall_kfuncs.h"
 #include "function_native.h"
+#include "function_entries.h"
 struct ebpfos_function_entry { u32 native_function, compiled_function; };
 /* Each symbol may come from a separately admitted object. Program references
  * and all symbol/ABI/context checks belong to cold linking, never invocation.
  */
-struct ebpfos_function_link {
- u32 native_function, compiled_function, first, second;
-};
 struct entry_set {
  struct list_head retained, generations, generation_node;
  struct delayed_work release_work;
  u32 generation_id, next_generation;
  bool retired[2];
+ struct module *source_module;
+ struct btf *source_btf;
  struct module **modules;
  struct bpf_prog **programs;
  struct ftrace_ops operations;
@@ -52,7 +52,7 @@ struct entry_set {
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations;
  unsigned int count, active;
- bool published;
+ bool published, layout_epochs;
 };
 static DEFINE_MUTEX(entry_lock);
 /* A stopped CPU does not prove every suspended old frame has returned. Keep
@@ -115,11 +115,10 @@ static int entry_ftrace_apply(struct entry_set *set, unsigned int from, unsigned
  return update_ftrace_direct_mod(&set->operations,
   entry_generation(set, to)->hash[entry_generation_slot(to)], true);
 }
-static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
+static int entry_ownership(struct entry_set *set)
 {
  struct entry_set *owner;
  unsigned int i, j;
- int error;
  if (set->poisoned) return -EUCLEAN;
  /* Each reserved instruction has one active journal. Retained generations
   * keep executable ownership even if an exceptional rollback cannot finish. */
@@ -129,6 +128,12 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
    for (j = 0; j < owner->slot_count; ++j)
     if (set->slots[i].ip == owner->slots[j].ip) return -EBUSY;
  }
+ return 0;
+}
+static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
+{
+ int error = entry_ownership(set);
+ if (error) return error;
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
@@ -155,6 +160,11 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
  if (from != set->active || (from && !entry_generation(set, from)) ||
      (to && !entry_generation(set, to))) return -ESTALE;
  if (from == to) return 0;
+ /* A data layout must never be separated from its stopped migration.
+  * Closing an active layout journal retains it until explicit restoration,
+  * rather than blindly restoring text over new-layout objects.
+  */
+ if (set->layout_epochs) return -EOPNOTSUPP;
  /* The stock x86 text-poke batch performs its own CPU synchronization and
   * breakpoint-safe instruction update. Never call it with CPUs stopped: its
   * cross-CPU synchronizations must run. Legacy ftrace sets also keep their
@@ -185,6 +195,8 @@ static void entry_free(struct entry_set *set)
  if (set->modules)
   for (i = 0; i < set->count * 2; ++i) module_put(set->modules[i]);
  kvfree(set->modules);
+ module_put(set->source_module);
+ if (set->source_btf) btf_put(set->source_btf);
  if (set->programs)
   for (i = 0; i < set->count * 2; ++i)
    if (set->programs[i]) bpf_prog_put(set->programs[i]);
@@ -264,16 +276,18 @@ static const struct file_operations entry_operations = {
  .release = entry_release, .llseek = noop_llseek, .unlocked_ioctl = entry_ioctl,
 };
 static struct entry_set *entry_prepare(const struct ebpfos_function_link *entries,
- unsigned int count, bool native_targets)
+ unsigned int count, bool native_targets, struct btf *source)
 {
  struct entry_set *set;
- struct btf *btf = bpf_get_btf_vmlinux();
+ struct btf *vmlinux_btf = bpf_get_btf_vmlinux();
+ struct btf *btf = source ? source : vmlinux_btf;
  unsigned int i,j;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
  if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
      !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return ERR_PTR(-EOPNOTSUPP);
- if (!count || IS_ERR_OR_NULL(btf)) return ERR_PTR(-EINVAL);
+ if (!count || IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
+ if (source && !native_targets) return ERR_PTR(-EOPNOTSUPP);
  set = kzalloc(sizeof(*set), GFP_KERNEL);
  if (!set) return ERR_PTR(-ENOMEM);
  INIT_LIST_HEAD(&set->generations);
@@ -282,6 +296,12 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
  set->next_generation = 3;
  set->count = count;
  set->native_targets = native_targets;
+ if (source) {
+  set->source_module = btf_try_get_module(source);
+  if (!set->source_module) {error = -ENOENT;goto fail;}
+  btf_get(source);set->source_btf = source;
+ }
+
  set->modules = kvcalloc(count, 2 * sizeof(*set->modules), GFP_KERNEL);
  if (!set->modules) {error = -ENOMEM;goto fail;}
  set->programs = kvcalloc(count, 2 * sizeof(*set->programs), GFP_KERNEL);
@@ -300,8 +320,11 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
-  address = kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
-  if (!address || !core_kernel_text(address)) {error = -ENOENT;goto fail;}
+  if (source && entry->native_function < btf_nr_types(vmlinux_btf)) goto fail;
+  address = source ? ebpfos_module_function(set->source_module,
+   btf_name_by_offset(btf, function->name_off)) :
+   kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
+  if (!address || (!source && !core_kernel_text(address))) {error = -ENOENT;goto fail;}
   ip = ftrace_location(address);
 #ifdef FTRACE_MCOUNT_MAX_OFFSET
   /* ftrace_location() includes disabled records. Mirror stock ftrace's
@@ -311,7 +334,8 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) ip = 0;
 #endif
   if (!ip) {
-   ip = entry_native_location(address);
+   ip = source ? entry_module_native_location(set->source_module, address) :
+    entry_native_location(address);
    if (!ip) {error = -ENOENT;goto fail;}
    slot = &set->slots[set->slot_count++];slot->ip = ip;
   } else set->has_ftrace = true;
@@ -320,7 +344,7 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
   set->locations[set->count + i] = entry->native_function;
   for (j = 0; j < 2; ++j) {
    if (native_targets) {
-    struct btf *replacement_btf = btf;
+    struct btf *replacement_btf = vmlinux_btf;
     struct module *module = NULL;
     const struct btf_type *replacement;
     if (entry->compiled_function) {
@@ -332,13 +356,13 @@ static struct entry_set *entry_prepare(const struct ebpfos_function_link *entrie
     }
     replacement = btf_type_by_id(replacement_btf, j ? entry->second : entry->first);
     if (!replacement || !btf_type_is_func(replacement) ||
-        (module && (j ? entry->second : entry->first) < btf_nr_types(btf)) ||
+        (module && (j ? entry->second : entry->first) < btf_nr_types(vmlinux_btf)) ||
         !cell_layout(btf, function->type, replacement_btf, replacement->type, 0, false)) {
      error = -EPROTOTYPE;goto native_out;
     }
     if (module) {
      target = ebpfos_module_function(module, btf_name_by_offset(replacement_btf, replacement->name_off));
-     if (!target || !within_module_mem_type(target, module, MOD_TEXT)) error = -ENOENT;
+     if (!target || target == address || !within_module_mem_type(target, module, MOD_TEXT)) error = -ENOENT;
      else error = 0;
     } else {
      target = kallsyms_lookup_name(btf_name_by_offset(replacement_btf, replacement->name_off));
@@ -373,13 +397,76 @@ fail:
 static int entry_open(const struct ebpfos_function_link *entries,
  unsigned int count, bool native_targets)
 {
- struct entry_set *set = entry_prepare(entries, count, native_targets);
+ struct entry_set *set = entry_prepare(entries, count, native_targets, NULL);
  int descriptor;
  if (IS_ERR(set)) return PTR_ERR(set);
  descriptor = anon_inode_getfd("ebpfos-function-entries", &entry_operations, set, O_CLOEXEC | O_RDWR);
  if (descriptor < 0) entry_free(set);
  return descriptor;
 }
+int ebpfos_function_entries_open_epoch(u32 source_btf_fd,
+ const struct ebpfos_function_link *entries, unsigned int count)
+{
+ struct btf *source = NULL;
+ struct entry_set *set;
+ int descriptor;
+ if (!entries || !count) return -EINVAL;
+ if (source_btf_fd != U32_MAX) {
+  source = btf_get_by_fd(source_btf_fd);
+  if (IS_ERR(source)) return PTR_ERR(source);
+ }
+ set = entry_prepare(entries, count, true, source);
+ if (source) btf_put(source);
+ if (IS_ERR(set)) return PTR_ERR(set);
+ if (set->has_ftrace) {entry_free(set);return -EOPNOTSUPP;}
+ /* This constructor declares a layout journal before exposing its fd. */
+ set->layout_epochs = true;
+ descriptor = anon_inode_getfd("ebpfos-function-entries", &entry_operations,
+  set, O_CLOEXEC | O_RDWR);
+ if (descriptor < 0) entry_free(set);
+ return descriptor;
+}
+EXPORT_SYMBOL_GPL(ebpfos_function_entries_open_epoch);
+int ebpfos_function_entries_epoch(u32 fd, u32 from, u32 to,
+ int (*update)(void *), void (*undo)(void *), void *data)
+{
+ struct fd file = fdget(fd);
+ struct entry_set *set;
+ struct text_poke_pair *pairs = NULL;
+ int error;
+ if (fd_empty(file)) return -EBADF;
+ if (fd_file(file)->f_op != &entry_operations) {error = -EINVAL;goto out_file;}
+ set = fd_file(file)->private_data;
+ mutex_lock(&entry_lock);
+ error = -ESTALE;
+ if (from != set->active || (from && !entry_generation(set, from)) ||
+     (to && !entry_generation(set, to))) goto unlock;
+ error = -EINVAL;
+ /* Equal generations still require a migration. Refuse rather than changing
+  * data while publishing no corresponding layout version.
+  */
+ if (from == to) goto unlock;
+ error = -EOPNOTSUPP;
+ if (set->has_ftrace) goto unlock;
+ error = entry_ownership(set);
+ if (error) goto unlock;
+ pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,
+  to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
+  from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
+ if (IS_ERR(pairs)) {error = PTR_ERR(pairs);pairs = NULL;goto unlock;}
+ error = smp_text_poke_quiescent_transaction(pairs, set->slot_count, update, undo, data);
+ if (!error) {
+  if (to && !set->published) {
+   set->published = true;list_add_tail(&set->retained, &entry_retained);
+  }
+  set->active = to;set->layout_epochs = true;
+ }
+unlock:
+ kvfree(pairs);mutex_unlock(&entry_lock);
+out_file:
+ fdput(file);return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_function_entries_epoch);
 static int entry_retire(struct entry_set *set, u32 id)
 {
  struct entry_set *generation;
@@ -521,7 +608,7 @@ __bpf_kfunc int bpf_ebpfos_function_entries_prepare(u32 fd, u32 from,
  snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
  if (!snapshot) { error = -ENOMEM;goto out_file; }
  set = fd_file(file)->private_data;
- prepared = entry_prepare(snapshot, entries__sz / sizeof(*entries), set->native_targets);
+ prepared = entry_prepare(snapshot, entries__sz / sizeof(*entries), set->native_targets, set->source_btf);
  kfree(snapshot);
  if (IS_ERR(prepared)) { error = PTR_ERR(prepared);goto out_file; }
  set = fd_file(file)->private_data;
@@ -529,7 +616,8 @@ __bpf_kfunc int bpf_ebpfos_function_entries_prepare(u32 fd, u32 from,
  error = -ESTALE;
  if (set->poisoned || set->active != from) goto out_unlock;
  error = -EINVAL;
- if (set->count != prepared->count || set->slot_count != prepared->slot_count ||
+ if (set->source_btf != prepared->source_btf ||
+     set->count != prepared->count || set->slot_count != prepared->slot_count ||
      set->has_ftrace != prepared->has_ftrace) goto out_unlock;
  for (i = 0; i < set->count; ++i) {
   for (j = 0; j < prepared->count; ++j)
@@ -583,7 +671,8 @@ static int entry_append(u32 fd, struct entry_set *prepared)
  set = fd_file(file)->private_data;
  mutex_lock(&entry_lock);
  error = -EINVAL;
- if (set->count != prepared->count || set->slot_count != prepared->slot_count ||
+ if (set->source_btf != prepared->source_btf ||
+     set->count != prepared->count || set->slot_count != prepared->slot_count ||
      set->has_ftrace != prepared->has_ftrace) goto unlock;
  /* Require exactly the journal's complete ordered unit. The runtime emits
   * this order automatically; partial or reordered appends cannot mutate it. */
@@ -610,7 +699,7 @@ __bpf_kfunc int bpf_ebpfos_function_entries_append_many(u32 fd,
  if (!entries__sz || entries__sz % sizeof(*entries)) return -EINVAL;
  snapshot = kmemdup(entries, entries__sz, GFP_KERNEL);
  if (!snapshot) return -ENOMEM;
- prepared = entry_prepare(snapshot, entries__sz / sizeof(*entries), false);
+ prepared = entry_prepare(snapshot, entries__sz / sizeof(*entries), false, NULL);
  kfree(snapshot);
  return IS_ERR(prepared) ? PTR_ERR(prepared) : entry_append(fd, prepared);
 }
@@ -631,7 +720,7 @@ __bpf_kfunc int bpf_ebpfos_function_entries_append_native(u32 fd, u32 btf_fd,
  for (i = 0; i < count; ++i)
   links[i] = (struct ebpfos_function_link){snapshot[i].native_function, btf_fd + 1,
    snapshot[i].first_function, snapshot[i].first_function};
- prepared = entry_prepare(links, count, true);
+ prepared = entry_prepare(links, count, true, NULL);
  kvfree(links);kfree(snapshot);
  return IS_ERR(prepared) ? PTR_ERR(prepared) : entry_append(fd, prepared);
 }
