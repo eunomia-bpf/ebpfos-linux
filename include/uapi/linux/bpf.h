@@ -1091,6 +1091,8 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
 	BPF_PROG_TYPE_NETFILTER,
+	/* Source-built, resident native body. Privileged staged exception. */
+	BPF_PROG_TYPE_NATIVE,
 	__MAX_BPF_PROG_TYPE
 };
 
@@ -1156,6 +1158,7 @@ enum bpf_attach_type {
 	BPF_TRACE_FSESSION,
 	/* Exclusive, typed non-sleepable function-body replacement. */
 	BPF_TRACE_REPLACE,
+	BPF_TRACE_ENTRY,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1180,6 +1183,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_UPROBE_MULTI = 12,
 	BPF_LINK_TYPE_NETKIT = 13,
 	BPF_LINK_TYPE_SOCKMAP = 14,
+	BPF_LINK_TYPE_ENTRY = 15,
 	__MAX_BPF_LINK_TYPE,
 };
 
@@ -1893,6 +1897,12 @@ union bpf_attr {
 				};
 				__u64		expected_revision;
 			} cgroup;
+			struct {
+				__u32 count;
+				__u32 reserved;
+				__aligned_u64 target_btf_ids;
+				__aligned_u64 prog_fds;
+			} entry;
 		};
 	} link_create;
 
@@ -1915,6 +1925,13 @@ union bpf_attr {
 			 */
 			__u32           old_map_fd;
 		};
+		/* Entry links update the complete, ordered member array. */
+		struct {
+			__u32 count;
+			__u32 reserved;
+			__aligned_u64 prog_fds;
+			__aligned_u64 old_prog_fds;
+		} entry;
 	} link_update;
 
 	struct {
@@ -6769,6 +6786,15 @@ struct bpf_link_info {
 	__u32 id;
 	__u32 prog_id;
 	union {
+		struct {
+			__u32 count;
+			__u32 target_btf_obj_id;
+			__u64 revision;
+			__aligned_u64 target_btf_ids;
+			__aligned_u64 prog_ids;
+			__u32 detached;
+			__u32 :32;
+		} entry;
 		struct {
 			__aligned_u64 tp_name; /* in/out: tp_name buffer ptr */
 			__u32 tp_name_len;     /* in/out: tp_name buffer len */

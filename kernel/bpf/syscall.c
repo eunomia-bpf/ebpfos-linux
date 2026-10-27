@@ -3,6 +3,7 @@
  */
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
+#include <linux/bpf_entry.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/bpf_trace.h>
 #include <linux/bpf_lirc.h>
@@ -2915,6 +2916,54 @@ static int bpf_prog_mark_insn_arrays_ready(struct bpf_prog *prog)
 /* last field in 'union bpf_attr' used by this command */
 #define BPF_PROG_LOAD_LAST_FIELD ebpfos_field_access_cnt
 
+/* Resident native versions use the ordinary program registry, descriptors,
+ * pinning and LSM hooks. No verifier or JIT is claimed for this staged type.
+ * Text comes from source-built kernel/modules; aux->mod and attach_btf own it.
+ */
+static int bpf_native_prog_load(union bpf_attr *attr)
+{
+ union bpf_attr allowed = {};
+ struct bpf_prog *prog;
+ int err;
+ if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ allowed.prog_type = attr->prog_type;
+ allowed.expected_attach_type = attr->expected_attach_type;
+ allowed.attach_btf_obj_fd = attr->attach_btf_obj_fd;
+ allowed.attach_btf_id = attr->attach_btf_id;
+ memcpy(allowed.prog_name, attr->prog_name, sizeof(allowed.prog_name));
+ if (memcmp(&allowed, attr, sizeof(allowed)) ||
+     attr->expected_attach_type != BPF_TRACE_ENTRY) return -EINVAL;
+ prog = bpf_prog_alloc(bpf_prog_size(0), GFP_USER);
+ if (!prog) return -ENOMEM;
+ prog->aux->user = get_current_user();
+ atomic64_set(&prog->aux->refcnt, 1);
+ prog->expected_attach_type = BPF_TRACE_ENTRY;
+ prog->gpl_compatible = 1;
+ err = find_prog_type(BPF_PROG_TYPE_NATIVE, prog);
+ if (err) goto free_prog;
+ err = bpf_obj_name_cpy(prog->aux->name, attr->prog_name, sizeof(attr->prog_name));
+ if (err < 0) goto free_prog;
+ err = bpf_native_prog_init(prog, attr);
+ if (err) goto free_prog;
+ prog->aux->load_time = ktime_get_boottime_ns();
+ err = security_bpf_prog_load(prog, attr, NULL, false);
+ if (err) goto put_prog;
+ err = bpf_prog_alloc_id(prog);
+ if (err) goto put_prog;
+ perf_event_bpf_event(prog, PERF_BPF_EVENT_PROG_LOAD, 0);
+ bpf_audit_prog(prog, BPF_AUDIT_LOAD);
+ err = bpf_prog_new_fd(prog);
+ if (err < 0) bpf_prog_put(prog);
+ return err;
+put_prog:
+ __bpf_prog_put_noref(prog, false);
+ return err;
+free_prog:
+ free_uid(prog->aux->user);
+ bpf_prog_free(prog);
+ return err;
+}
+
 static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 {
 	enum bpf_prog_type type = attr->prog_type;
@@ -2928,6 +2977,10 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 
 	if (CHECK_ATTR(BPF_PROG_LOAD))
 		return -EINVAL;
+	if (type == BPF_PROG_TYPE_NATIVE) {
+		if (uattr.is_kernel) return -EOPNOTSUPP;
+		return bpf_native_prog_load(attr);
+	}
 	if (!!attr->ebpfos_field_accesses != !!attr->ebpfos_field_access_cnt)
 		return -EINVAL;
 	if (attr->ebpfos_field_access_cnt &&
@@ -3387,7 +3440,11 @@ static void bpf_link_free(struct bpf_link *link)
 
 	bpf_link_free_id(link->id);
 	/* detach BPF program, clean up used resources */
-	if (link->prog)
+	/* An entry link owns an array of programs instead of one link->prog.
+	 * Its final close must still restore every replaced entry. Unsettled prime
+	 * cleanup owns no published binding and must not release it twice.
+	 */
+	if (link->prog || (link->type == BPF_LINK_TYPE_ENTRY && link->id))
 		ops->release(link);
 	if (ops->dealloc_deferred) {
 		/*
@@ -5890,6 +5947,9 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 	if (CHECK_ATTR(BPF_LINK_CREATE))
 		return -EINVAL;
 
+	if (attr->link_create.attach_type == BPF_TRACE_ENTRY)
+		return bpf_entry_link_create(attr, uattr.is_kernel);
+
 	if (attr->link_create.attach_type == BPF_STRUCT_OPS)
 		return bpf_struct_ops_link_create(attr);
 
@@ -6015,7 +6075,7 @@ out_put:
 	return ret;
 }
 
-#define BPF_LINK_UPDATE_LAST_FIELD link_update.old_prog_fd
+#define BPF_LINK_UPDATE_LAST_FIELD link_update.entry.old_prog_fds
 
 static int link_update(union bpf_attr *attr, bool from_kernel)
 {
@@ -6040,6 +6100,16 @@ static int link_update(union bpf_attr *attr, bool from_kernel)
 	 */
 	if (from_kernel && link->ops != &bpf_tracing_link_lops) {
 		ret = -EOPNOTSUPP;
+		goto out_put_link;
+	}
+
+	if (link->type == BPF_LINK_TYPE_ENTRY) {
+		ret = bpf_entry_link_update(link, attr);
+		goto out_put_link;
+	}
+	if (attr->link_update.entry.count || attr->link_update.entry.reserved ||
+	    attr->link_update.entry.prog_fds || attr->link_update.entry.old_prog_fds) {
+		ret = -EINVAL;
 		goto out_put_link;
 	}
 

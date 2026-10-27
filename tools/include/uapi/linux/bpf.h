@@ -1091,6 +1091,8 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
 	BPF_PROG_TYPE_NETFILTER,
+	/* Source-built, resident native body. Privileged staged exception. */
+	BPF_PROG_TYPE_NATIVE,
 	__MAX_BPF_PROG_TYPE
 };
 
@@ -1156,6 +1158,7 @@ enum bpf_attach_type {
 	BPF_TRACE_FSESSION,
 	/* Exclusive, typed non-sleepable function-body replacement. */
 	BPF_TRACE_REPLACE,
+	BPF_TRACE_ENTRY,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1180,6 +1183,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_UPROBE_MULTI = 12,
 	BPF_LINK_TYPE_NETKIT = 13,
 	BPF_LINK_TYPE_SOCKMAP = 14,
+	BPF_LINK_TYPE_ENTRY = 15,
 	__MAX_BPF_LINK_TYPE,
 };
 
@@ -1298,7 +1302,6 @@ enum bpf_perf_event_type {
  * bpf_copy_from_user().
  */
 #define BPF_F_SLEEPABLE		(1U << 4)
-#define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
 /* If BPF_F_XDP_HAS_FRAGS is used in BPF_PROG_LOAD command, the loaded program
  * fully support xdp frags.
@@ -1314,6 +1317,8 @@ enum bpf_perf_event_type {
 #define BPF_F_TEST_REG_INVARIANTS	(1U << 7)
 
 /* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
+/* Restrict a sleepable syscall program to the typed component-call ABI. */
+#define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.
@@ -1521,7 +1526,11 @@ enum {
 	BPF_STREAM_STDERR = 2,
 };
 
-/* Per-function field authority; func_info_idx is scoped to this load. */
+/* A field write declaration for BPF_F_EBPFOS_COMPONENT programs.
+ * BTF IDs refer to the vmlinux BTF of the kernel that loads the program.
+ * func_info_idx identifies exactly one function in the load's func_info;
+ * its authority is checked before verification, never shared with callees.
+ */
 struct bpf_ebpfos_field_access {
 	__u32 btf_id;
 	__u32 offset;
@@ -1669,6 +1678,9 @@ union bpf_attr {
 		 * verification.
 		 */
 		__s32		keyring_id;
+		/* Administrator-declared scalar kernel fields writable by this
+		 * component program. Each row is checked against vmlinux BTF.
+		 */
 		__aligned_u64	ebpfos_field_accesses;
 		__u32		ebpfos_field_access_cnt;
 	};
@@ -1885,6 +1897,12 @@ union bpf_attr {
 				};
 				__u64		expected_revision;
 			} cgroup;
+			struct {
+				__u32 count;
+				__u32 reserved;
+				__aligned_u64 target_btf_ids;
+				__aligned_u64 prog_fds;
+			} entry;
 		};
 	} link_create;
 
@@ -1907,6 +1925,13 @@ union bpf_attr {
 			 */
 			__u32           old_map_fd;
 		};
+		/* Entry links update the complete, ordered member array. */
+		struct {
+			__u32 count;
+			__u32 reserved;
+			__aligned_u64 prog_fds;
+			__aligned_u64 old_prog_fds;
+		} entry;
 	} link_update;
 
 	struct {
@@ -6762,6 +6787,15 @@ struct bpf_link_info {
 	__u32 prog_id;
 	union {
 		struct {
+			__u32 count;
+			__u32 target_btf_obj_id;
+			__u64 revision;
+			__aligned_u64 target_btf_ids;
+			__aligned_u64 prog_ids;
+			__u32 detached;
+			__u32 :32;
+		} entry;
+		struct {
 			__aligned_u64 tp_name; /* in/out: tp_name buffer ptr */
 			__u32 tp_name_len;     /* in/out: tp_name buffer len */
 			__u32 :32;
@@ -7262,6 +7296,7 @@ enum {
 	TCP_BPF_SOCK_OPS_CB_FLAGS = 1008, /* Get or Set TCP sock ops flags */
 	SK_BPF_CB_FLAGS		= 1009, /* Get or set sock ops flags in socket */
 	SK_BPF_BYPASS_PROT_MEM	= 1010, /* Get or Set sk->sk_bypass_prot_mem */
+
 };
 
 enum {

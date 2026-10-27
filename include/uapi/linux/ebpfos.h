@@ -122,7 +122,6 @@ struct ebpfos_ioc_root_quiesce {
 
 /* Entry-journal file descriptor: retire one inactive logical generation.
  * Both native ioctl and BPF kfunc callers use the same retirement checks. */
-#define EBPFOS_IOC_FUNCTION_ENTRIES_RETIRE _IOW(EBPFOS_IOC_MAGIC, 0x40, __u32)
 
 /* A BTF-generated typed stub must be registered for symbol before enable. */
 #endif /* _UAPI_EBPFOS_H */

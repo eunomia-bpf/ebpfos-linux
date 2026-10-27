@@ -514,6 +514,44 @@ show_perf_event_event_json(struct bpf_link_info *info, json_writer_t *wtr)
 		free((void *)perf_config);
 }
 
+static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
+{
+ struct bpf_link_info full = {};
+ __u32 len = sizeof(full), i, count = info->entry.count;
+ __u32 *targets = calloc(count, sizeof(*targets));
+ __u32 *programs = calloc(count, sizeof(*programs));
+ int err = -ENOMEM;
+ if (!targets || !programs) goto out;
+ full.entry.count = count;
+ full.entry.target_btf_ids = ptr_to_u64(targets);
+ full.entry.prog_ids = ptr_to_u64(programs);
+ err = bpf_link_get_info_by_fd(fd, &full, &len);
+ if (err) goto out;
+ if (json) {
+  jsonw_uint_field(json_wtr, "count", full.entry.count);
+  jsonw_uint_field(json_wtr, "target_btf_obj_id", full.entry.target_btf_obj_id);
+  jsonw_uint_field(json_wtr, "revision", full.entry.revision);
+  jsonw_bool_field(json_wtr, "detached", full.entry.detached);
+  jsonw_name(json_wtr, "members");
+  jsonw_start_array(json_wtr);
+  for (i = 0; i < count; ++i) {
+   jsonw_start_object(json_wtr);
+   jsonw_uint_field(json_wtr, "target_btf_id", targets[i]);
+   jsonw_uint_field(json_wtr, "prog_id", programs[i]);
+   jsonw_end_object(json_wtr);
+  }
+  jsonw_end_array(json_wtr);
+ } else {
+  printf("\n\tcount %u target_btf_obj_id %u revision %llu detached %u  ",
+   full.entry.count, full.entry.target_btf_obj_id, full.entry.revision, full.entry.detached);
+  for (i = 0; i < count; ++i)
+   printf("\n\ttarget_btf_id %u prog_id %u", targets[i], programs[i]);
+ }
+out:
+ free(targets);free(programs);
+ return err;
+}
+
 static int show_link_close_json(int fd, struct bpf_link_info *info)
 {
 	struct bpf_prog_info prog_info;
@@ -525,6 +563,9 @@ static int show_link_close_json(int fd, struct bpf_link_info *info)
 	show_link_header_json(info, json_wtr);
 
 	switch (info->type) {
+	case BPF_LINK_TYPE_ENTRY:
+		if (show_entry_members(fd, info, true)) return -1;
+		break;
 	case BPF_LINK_TYPE_RAW_TRACEPOINT:
 		jsonw_string_field(json_wtr, "tp_name",
 				   u64_to_ptr(info->raw_tracepoint.tp_name));
@@ -924,6 +965,9 @@ static int show_link_close_plain(int fd, struct bpf_link_info *info)
 	show_link_header_plain(info);
 
 	switch (info->type) {
+	case BPF_LINK_TYPE_ENTRY:
+		if (show_entry_members(fd, info, false)) return -1;
+		break;
 	case BPF_LINK_TYPE_RAW_TRACEPOINT:
 		printf("\n\ttp '%s'  ",
 		       (const char *)u64_to_ptr(info->raw_tracepoint.tp_name));

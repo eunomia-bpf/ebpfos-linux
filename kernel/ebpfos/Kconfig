@@ -18,3 +18,12 @@ config EBPFOS_KOPERATION
 	help
 	  Build the generic verifier-checked terminal-effect call. The verifier
 	  validates the terminal backedge before the x86 JIT emits its effect.
+
+config EBPFOS_ENTRY_LINK
+ bool "Typed multi-target BPF entry links"
+ depends on EBPFOS && X86_64 && DYNAMIC_FTRACE_WITH_JMP && DYNAMIC_FTRACE_WITH_DIRECT_CALLS
+ depends on !CFI
+ default y
+ help
+   Replace reserved native entries through BPF program and link objects.
+   Native programs are source-built staged exceptions requiring CAP_SYS_ADMIN.

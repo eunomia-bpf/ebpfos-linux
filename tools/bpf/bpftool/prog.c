@@ -435,6 +435,11 @@ static void print_prog_header_json(struct bpf_prog_info *info, int fd)
 		     info->tag[4], info->tag[5], info->tag[6], info->tag[7]);
 
 	jsonw_bool_field(json_wtr, "gpl_compatible", info->gpl_compatible);
+	if (info->type == BPF_PROG_TYPE_NATIVE) {
+		jsonw_bool_field(json_wtr, "staged", true);
+		jsonw_uint_field(json_wtr, "native_btf_obj_id", info->attach_btf_obj_id);
+		jsonw_uint_field(json_wtr, "native_btf_id", info->attach_btf_id);
+	}
 	if (info->run_time_ns) {
 		jsonw_uint_field(json_wtr, "run_time_ns", info->run_time_ns);
 		jsonw_uint_field(json_wtr, "run_cnt", info->run_cnt);
@@ -521,6 +526,9 @@ static void print_prog_header_plain(struct bpf_prog_info *info, int fd)
 	fprint_hex(stdout, info->tag, BPF_TAG_SIZE, "");
 	print_dev_plain(info->ifindex, info->netns_dev, info->netns_ino);
 	printf("%s", info->gpl_compatible ? "  gpl" : "");
+	if (info->type == BPF_PROG_TYPE_NATIVE)
+		printf("  staged native_btf_obj_id %u native_btf_id %u",
+		       info->attach_btf_obj_id, info->attach_btf_id);
 	if (info->run_time_ns)
 		printf(" run_time_ns %llu run_cnt %llu",
 		       info->run_time_ns, info->run_cnt);
