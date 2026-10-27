@@ -2571,6 +2571,18 @@ populate_extable:
 			goto populate_extable;
 
 		/* call */
+		case BPF_JMP | BPF_CALL | BPF_X:
+			/* LLVM encodes the target register in imm. The BPF argument
+			 * registers already have the native x86 calling convention.
+			 * A private frame pointer would require saving a caller-saved
+			 * native register; that stack mode is not used with callx.
+			 */
+			if (priv_frame_ptr || imm32 < BPF_REG_0 || imm32 >= BPF_REG_FP)
+				return -EOPNOTSUPP;
+			if (is_ereg(imm32))
+				EMIT1(0x41);
+			EMIT2(0xFF, 0xD0 + reg2hex[imm32]);
+			break;
 		case BPF_JMP | BPF_CALL: {
 			u32 recovery = 0, exception_data = 0;
 			bool fault_call = false;
@@ -4235,6 +4247,11 @@ void bpf_jit_free(struct bpf_prog *prog)
 	}
 
 	bpf_prog_unlock_free(prog);
+}
+
+bool bpf_jit_supports_callx(void)
+{
+	return true;
 }
 
 bool bpf_jit_supports_exceptions(void)

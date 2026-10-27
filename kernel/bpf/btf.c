@@ -7125,6 +7125,7 @@ enum bpf_struct_walk_result {
 	WALK_SCALAR = 0,
 	WALK_PTR,
 	WALK_PTR_UNTRUSTED,
+	WALK_FUNC,
 	WALK_STRUCT,
 };
 
@@ -7371,6 +7372,10 @@ error:
 			btf_pointer_flags(btf, mtype->type, &tmp_flag, nullable);
 
 			stype = btf_type_skip_modifiers(btf, mtype->type, &id);
+			if (btf_type_is_func_proto(stype)) {
+				*next_btf_id = id;
+				return WALK_FUNC;
+			}
 			if (nullable)
 				*next_btf_id = id;
 			*flag |= tmp_flag;
@@ -7442,6 +7447,10 @@ int btf_struct_access(struct bpf_verifier_log *log,
 		err = btf_struct_walk(log, btf, t, off, size, &id, &tmp_flag, field_name, NULL);
 
 		switch (err) {
+		case WALK_FUNC:
+			*next_btf_id = id;
+			*flag = tmp_flag | PTR_MAYBE_NULL;
+			return PTR_TO_BTF_FUNC;
 		case WALK_PTR:
 			/* For local types, the destination register cannot
 			 * become a pointer again.
@@ -7496,7 +7505,7 @@ int btf_struct_store_access(struct bpf_verifier_log *log,
 	do {
 		ret = btf_struct_walk(log, reg->btf, t, off, size, &id, flag,
 				      field_name, nullable);
-		if (ret == WALK_PTR || ret == WALK_PTR_UNTRUSTED) {
+		if (ret == WALK_PTR || ret == WALK_PTR_UNTRUSTED || ret == WALK_FUNC) {
 			*pointee_id = id;
 			return PTR_TO_BTF_ID;
 		}

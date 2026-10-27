@@ -1803,6 +1803,11 @@ EXPORT_SYMBOL_GPL(__bpf_call_base);
 
 bool bpf_opcode_in_insntable(u8 code)
 {
+	/* Register calls are JIT-only; verification and runtime selection both
+	 * require a supporting JIT before this instruction can execute.
+	 */
+	if (code == (BPF_JMP | BPF_CALL | BPF_X))
+		return true;
 #define BPF_INSN_2_TBL(x, y)    [BPF_##x | BPF_##y] = true
 #define BPF_INSN_3_TBL(x, y, z) [BPF_##x | BPF_##y | BPF_##z] = true
 	static const bool public_insntable[256] = {
@@ -2677,7 +2682,7 @@ struct bpf_prog *__bpf_prog_select_runtime(struct bpf_verifier_env *env, struct 
 	 * interpreter fallback until descriptor retirement is implemented.
 	 */
 	if (IS_ENABLED(CONFIG_BPF_JIT_ALWAYS_ON) ||
-	    bpf_prog_has_kfunc_call(fp) || bpf_prog_has_kop_call(fp))
+	    bpf_prog_has_kfunc_call(fp) || bpf_prog_has_kop_call(fp) || fp->aux->has_callx)
 		jit_needed = true;
 
 	if (!bpf_prog_select_interpreter(fp))
@@ -3359,6 +3364,11 @@ void * __weak bpf_arch_text_copy(void *dst, void *src, size_t len)
 int __weak bpf_arch_text_invalidate(void *dst, size_t len)
 {
 	return -ENOTSUPP;
+}
+
+bool __weak bpf_jit_supports_callx(void)
+{
+	return false;
 }
 
 bool __weak bpf_jit_supports_exceptions(void)

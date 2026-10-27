@@ -1470,7 +1470,8 @@ static void print_subprog_arg_access(struct bpf_verifier_env *env,
 		bool has_extra = false;
 		u8 cls = BPF_CLASS(insns[idx].code);
 		bool is_ldx_stx_call = cls == BPF_LDX || cls == BPF_STX ||
-				       insns[idx].code == (BPF_JMP | BPF_CALL);
+				       (insns[idx].code == (BPF_JMP | BPF_CALL) ||
+					insns[idx].code == (BPF_JMP | BPF_CALL | BPF_X));
 
 		verbose(env, "%3d: ", idx);
 		bpf_verbose_insn(env, &insns[idx]);
@@ -1643,7 +1644,8 @@ redo:
 		if (err)
 			goto err_free;
 
-		if (insn->code == (BPF_JMP | BPF_CALL)) {
+		if (insn->code == (BPF_JMP | BPF_CALL) ||
+		    insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
 			err = record_call_access(env, instance, at_in[i], idx);
 			if (err)
 				goto err_free;
@@ -2088,6 +2090,9 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 			use = def & ~BIT(BPF_REG_0);
 			if (bpf_get_call_summary(env, insn, &cs))
 				use = GENMASK(cs.num_params, 1);
+			if (BPF_SRC(insn->code) == BPF_X &&
+			    insn->imm >= BPF_REG_0 && insn->imm < BPF_REG_FP)
+				use |= BIT(insn->imm);
 			break;
 		default:
 			def = 0;

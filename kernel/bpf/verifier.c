@@ -2532,8 +2532,9 @@ static int mark_btf_ld_reg(struct bpf_verifier_env *env,
 		mark_reg_unknown(env, regs, regno);
 		return 0;
 	case PTR_TO_BTF_ID:
+	case PTR_TO_BTF_FUNC:
 		mark_reg_known_zero(env, regs, regno);
-		regs[regno].type = PTR_TO_BTF_ID | flag;
+		regs[regno].type = reg_type | flag;
 		regs[regno].btf = btf;
 		regs[regno].btf_id = btf_id;
 		if (type_may_be_null(flag))
@@ -4294,6 +4295,7 @@ static bool is_spillable_regtype(enum bpf_reg_type type)
 	case PTR_TO_BUF:
 	case PTR_TO_MEM:
 	case PTR_TO_FUNC:
+	case PTR_TO_BTF_FUNC:
 	case PTR_TO_MAP_KEY:
 	case PTR_TO_ARENA:
 		return true;
@@ -6215,7 +6217,8 @@ static int check_max_stack_depth(struct bpf_verifier_env *env)
 	 */
 	for (int i = env->subprog_cnt - 1; i >= 0; i--) {
 		if (!i || si[i].is_async_cb) {
-			priv_stack_supported = !i && priv_stack_mode == PRIV_STACK_ADAPTIVE;
+			priv_stack_supported = !i && priv_stack_mode == PRIV_STACK_ADAPTIVE &&
+					       !env->prog->aux->has_callx;
 			ret = check_max_stack_depth_subprog(env, i, dinfo,
 					priv_stack_supported);
 			if (ret < 0) {
@@ -6918,7 +6921,19 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	if (ret < 0)
 		return ret;
 
-	if (ret != PTR_TO_BTF_ID) {
+	if (ret == PTR_TO_BTF_FUNC) {
+		/* A readable address does not establish a callable address. Keep
+		 * the owner's lifetime and address-space restrictions on the
+		 * field value; an explicit source NULL test is still required.
+		 */
+		flag |= PTR_MAYBE_NULL;
+		if (!is_trusted_reg(reg) && !(is_rcu_reg(reg) && in_rcu_cs(env)))
+			flag |= PTR_UNTRUSTED;
+		if (is_rcu_reg(reg))
+			flag |= MEM_RCU;
+		if (flag & MEM_RCU && !in_rcu_cs(env))
+			flag |= PTR_UNTRUSTED;
+	} else if (ret != PTR_TO_BTF_ID) {
 		/* just mark; */
 
 	} else if (type_flag(reg->type) & PTR_UNTRUSTED) {
@@ -12540,6 +12555,12 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	    !arg_mem_size)
 		return KF_ARG_PTR_TO_NULL;
 
+	/* A prototype supplies ordinary argument types, not the state
+	 * transitions or hidden arguments of a particular registered API.
+	 */
+	if (meta->func_id == U32_MAX)
+		goto generic_pointer;
+
 	if (is_kfunc_arg_alloc_obj(meta->btf, &args[argno]))
 		return KF_ARG_PTR_TO_ALLOC_BTF_ID;
 
@@ -12585,6 +12606,7 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 	if (is_kfunc_arg_res_spin_lock(meta->btf, &args[argno]))
 		return KF_ARG_PTR_TO_RES_SPIN_LOCK;
 
+generic_pointer:
 	if ((base_type(reg->type) == PTR_TO_BTF_ID || reg2btf_ids[base_type(reg->type)])) {
 		if (!btf_type_is_struct(ref_t)) {
 			verbose(env, "kernel function %s args#%d pointer type %s %s is not supported\n",
@@ -13353,7 +13375,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		bool is_ret_buf_sz = false;
 		int kf_arg_type, size_arg, nullable, address;
 
-		if (is_kfunc_arg_prog_aux(btf, &args[i])) {
+		if (meta->func_id != U32_MAX && is_kfunc_arg_prog_aux(btf, &args[i])) {
 			/* Reject repeated use bpf_prog_aux */
 			if (meta->arg_prog) {
 				verifier_bug(env, "Only 1 prog->aux argument supported per-kfunc");
@@ -13364,7 +13386,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			continue;
 		}
 
-		if (is_kfunc_arg_ignore(btf, &args[i]) || is_kfunc_arg_implicit(meta, i))
+		if ((meta->func_id != U32_MAX && is_kfunc_arg_ignore(btf, &args[i])) ||
+		    is_kfunc_arg_implicit(meta, i))
 			continue;
 
 		t = btf_type_skip_modifiers(btf, args[i].type, NULL);
@@ -13388,6 +13411,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				verbose(env, "R%d is not a scalar\n", regno);
 				return -EINVAL;
 			}
+			if (meta->func_id == U32_MAX)
+				continue;
 
 			if (is_kfunc_arg_constant(meta->btf, &args[i])) {
 				if (meta->arg_constant.found) {
@@ -13464,6 +13489,27 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
+		if (meta->func_id == U32_MAX && btf_type_is_func_proto(ref_t)) {
+			/* An unknown native method has no callback-verification
+			 * protocol for a BPF subprogram. A native callback already
+			 * loaded from a typed field retains that field's prototype.
+			 */
+			if (nullable && bpf_register_is_null(reg)) {
+				ret = mark_chain_precision(env, regno);
+				if (ret)
+					return ret;
+				continue;
+			}
+			if (base_type(reg->type) != PTR_TO_BTF_FUNC ||
+			    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+			    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
+			    !tnum_is_const(reg->var_off) || reg->var_off.value ||
+			    !btf_types_are_same(reg->btf, reg->btf_id, btf, ref_id)) {
+				verbose(env, "callx arg#%d requires a matching typed native callback\n", i);
+				return -EACCES;
+			}
+			continue;
+		}
 		if (size_arg >= 0) {
 			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
 							args[size_arg].type, NULL);
@@ -13950,6 +13996,121 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		return -EINVAL;
 	}
 
+	return 0;
+}
+
+/* A typed callback field supplies a prototype, not a registered target.
+ * Reuse kfunc argument checking without inventing a FUNC or target set.
+ */
+static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn)
+{
+	struct bpf_reg_state *regs = cur_regs(env), *target = &regs[insn->imm];
+	struct bpf_kfunc_call_arg_meta meta = {};
+	const struct btf_type *type, *pointee;
+	struct btf *btf;
+	u32 id, i, nargs;
+	int err;
+
+	/* Unlike a registered kfunc, a field prototype does not carry a
+	 * target allow-list or destructive-call permission. Keep this native
+	 * call facility restricted to the kernel administrator.
+	 */
+	if (!capable(CAP_SYS_ADMIN)) {
+		verbose(env, "callx requires CAP_SYS_ADMIN\n");
+		return -EPERM;
+	}
+	if (!env->prog->jit_requested || !bpf_jit_supports_callx()) {
+		verbose(env, "callx requires a supporting JIT\n");
+		return -EOPNOTSUPP;
+	}
+	if (env->cur_state->active_locks) {
+		verbose(env, "callx cannot establish a lock-held target contract\n");
+		return -EACCES;
+	}
+	err = check_reg_arg(env, insn->imm, SRC_OP);
+	if (err)
+		return err;
+	if (base_type(target->type) != PTR_TO_BTF_FUNC ||
+	    target->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+	    !tnum_is_const(target->var_off) || target->var_off.value) {
+		verbose(env, "callx requires a non-NULL function pointer loaded from a trusted BTF field\n");
+		return -EACCES;
+	}
+	if (target->type & MEM_RCU && !in_rcu_cs(env)) {
+		verbose(env, "callx function pointer is outside its RCU lifetime\n");
+		return -EACCES;
+	}
+	btf = target->btf;
+	meta.btf = btf;
+	meta.func_proto = btf_type_by_id(btf, target->btf_id);
+	if (!meta.func_proto || !btf_type_is_func_proto(meta.func_proto))
+		return -EINVAL;
+	/* No target identity or target-specific effects can be inferred from a
+	 * field prototype. This value lies outside the BTF type-ID range, so
+	 * special kfunc handling and FUNC declaration tags cannot match it.
+	 */
+	meta.func_id = U32_MAX;
+	meta.func_name = "callx";
+	nargs = btf_type_vlen(meta.func_proto);
+	if (nargs > MAX_BPF_FUNC_REG_ARGS)
+		return -EINVAL;
+	for (i = 1; i <= nargs; i++) {
+		type = btf_type_skip_modifiers(btf, btf_params(meta.func_proto)[i - 1].type, NULL);
+		if (btf_type_is_scalar(type) && (!type->size || type->size > sizeof(u64))) {
+			verbose(env, "callx arg#%d does not fit one native argument register\n", i - 1);
+			return -EINVAL;
+		}
+		err = check_reg_arg(env, i, SRC_OP);
+		if (err)
+			return err;
+		if (btf_type_is_scalar(type)) {
+			struct bpf_reg_state *arg = &regs[i];
+			u32 encoding = btf_type_is_int(type) ? btf_int_encoding(type) : 0;
+			u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(type) ?
+				btf_int_bits(type) : type->size * 8;
+			bool sign = btf_type_is_int(type) ?
+				encoding & BTF_INT_SIGNED : btf_type_kflag(type);
+			if (!bits || bits > 64)
+				return -EINVAL;
+			if (bits < 32 && ((sign && (arg->s32_min_value < -(1 << (bits - 1)) ||
+				      arg->s32_max_value > (1 << (bits - 1)) - 1)) ||
+			    (!sign && arg->u32_max_value > (1U << bits) - 1))) {
+				verbose(env, "callx arg#%d lacks its native scalar extension\n", i - 1);
+				return -EINVAL;
+			}
+		}
+	}
+	err = check_kfunc_args(env, &meta, env->insn_idx);
+	if (err)
+		return err;
+	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
+	clear_caller_saved_regs(env, regs);
+	if (btf_type_is_void(type)) {
+		/* R0 is not readable after a void call. */
+	} else if (btf_type_is_scalar(type) && type->size <= sizeof(u64)) {
+		mark_reg_unknown(env, regs, BPF_REG_0);
+		mark_btf_func_reg_size(env, BPF_REG_0, type->size);
+	} else if (btf_type_is_ptr(type)) {
+		pointee = btf_type_skip_modifiers(btf, type->type, &id);
+		if (btf_type_is_struct(pointee)) {
+			/* A prototype supplies no acquire, lifetime or nonnull promise. */
+			err = mark_btf_ld_reg(env, regs, BPF_REG_0, PTR_TO_BTF_ID,
+					      btf, id, PTR_MAYBE_NULL | PTR_UNTRUSTED |
+					      kfunc_pointer_flags(btf, type));
+		} else {
+			err = mark_btf_ld_reg(env, regs, BPF_REG_0, PTR_TO_MEM,
+					      btf, id, PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_RDONLY |
+					      kfunc_pointer_flags(btf, type));
+			regs[BPF_REG_0].id = ++env->id_gen;
+		}
+		if (err)
+			return err;
+		mark_btf_func_reg_size(env, BPF_REG_0, sizeof(void *));
+	} else {
+		verbose(env, "callx return type is not a scalar or pointer\n");
+		return -EINVAL;
+	}
+	env->prog->aux->has_callx = true;
 	return 0;
 }
 
@@ -19009,6 +19170,8 @@ static int do_check_insn(struct bpf_verifier_env *env, bool *do_print_state)
 
 		env->jmps_processed++;
 		if (opcode == BPF_CALL) {
+			if (BPF_SRC(insn->code) == BPF_X)
+				return check_callx(env, insn);
 			if (env->cur_state->active_locks) {
 				if ((insn->src_reg == BPF_REG_0 &&
 				     insn->imm != BPF_FUNC_spin_unlock &&
@@ -19722,6 +19885,14 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 	switch (opcode) {
 	case BPF_CALL:
+		if (BPF_SRC(insn->code) == BPF_X) {
+			if (class != BPF_JMP || insn->src_reg || insn->dst_reg ||
+			    insn->off || insn->imm < BPF_REG_0 || insn->imm >= BPF_REG_FP) {
+				verbose(env, "callx uses invalid register or reserved fields\n");
+				return -EINVAL;
+			}
+			return 0;
+		}
 		if (BPF_SRC(insn->code) != BPF_K ||
 		    (insn->src_reg != BPF_PSEUDO_KFUNC_CALL && insn->off != 0) ||
 		    (insn->src_reg != BPF_REG_0 && insn->src_reg != BPF_PSEUDO_CALL &&
