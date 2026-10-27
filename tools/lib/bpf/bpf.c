@@ -761,6 +761,13 @@ int bpf_link_create(int prog_fd, int target_fd,
 	}
 
 	switch (attach_type) {
+	case BPF_TRACE_ENTRY:
+		attr.link_create.entry.count = OPTS_GET(opts, entry.count, 0);
+		attr.link_create.entry.target_btf_ids = ptr_to_u64(OPTS_GET(opts, entry.target_btf_ids, NULL));
+		attr.link_create.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
+		if (!OPTS_ZEROED(opts, entry))
+			return libbpf_err(-EINVAL);
+		break;
 	case BPF_TRACE_ITER:
 		attr.link_create.iter_info = ptr_to_u64(OPTS_GET(opts, iter_info, (void *)0));
 		attr.link_create.iter_info_len = iter_info_len;
@@ -960,6 +967,9 @@ int bpf_link_update(int link_fd, int new_prog_fd,
 		attr.link_update.old_prog_fd = OPTS_GET(opts, old_prog_fd, 0);
 	else if (OPTS_GET(opts, old_map_fd, 0))
 		attr.link_update.old_map_fd = OPTS_GET(opts, old_map_fd, 0);
+	attr.link_update.entry.count = OPTS_GET(opts, entry.count, 0);
+	attr.link_update.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
+	attr.link_update.entry.old_prog_fds = ptr_to_u64(OPTS_GET(opts, entry.old_prog_fds, NULL));
 
 	ret = sys_bpf(BPF_LINK_UPDATE, &attr, attr_sz);
 	return libbpf_err_errno(ret);
