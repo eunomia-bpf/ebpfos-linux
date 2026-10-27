@@ -16,6 +16,8 @@
 #include <linux/security.h>
 #include <linux/cred.h>
 #include <linux/eventpoll.h>
+#include <linux/ebpfos_file_view.h>
+#include <linux/ebpfos_operations.h>
 #include <linux/rcupdate.h>
 #include <linux/mount.h>
 #include <linux/capability.h>
@@ -94,6 +96,7 @@ static inline void backing_file_free(struct backing_file *ff)
 
 static inline void file_free(struct file *f)
 {
+	ebpfos_file_view_free(f);
 	security_file_free(f);
 	if (likely(!(f->f_mode & FMODE_NOACCOUNT)))
 		percpu_counter_dec(&nr_files);
@@ -208,6 +211,9 @@ static int init_file(struct file *f, int flags, const struct cred *cred)
 	file_set_fsnotify_mode(f, FMODE_NONOTIFY_PERM);
 
 	f->f_op		= NULL;
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+	f->ebpfos_operations = NULL;
+#endif
 	f->f_mapping	= NULL;
 	f->private_data = NULL;
 	f->f_inode	= NULL;
@@ -377,6 +383,7 @@ static void file_init_path(struct file *file, const struct path *path,
 	file->f_iocb_flags = iocb_flags(file);
 	file->f_mode |= FMODE_OPENED;
 	file->f_op = fop;
+	ebpfos_file_view_open(file);
 	if ((file->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_inc(path->dentry->d_inode);
 }
@@ -475,6 +482,12 @@ struct file *alloc_file_clone(struct file *base, int flags,
 	if (!IS_ERR(f)) {
 		path_get(&f->f_path);
 		f->f_mapping = base->f_mapping;
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+		if (fops == base->f_op && base->ebpfos_operations) {
+			ebpfos_operations_put(f->ebpfos_operations);
+			f->ebpfos_operations = ebpfos_operations_get(base->ebpfos_operations);
+		}
+#endif
 	}
 	return f;
 }

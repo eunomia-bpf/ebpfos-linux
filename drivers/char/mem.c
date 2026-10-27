@@ -10,7 +10,6 @@
  */
 
 #include <linux/mm.h>
-#include <linux/ebpfos_file_view.h>
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -749,12 +748,7 @@ static int memory_open(struct inode *inode, struct file *filp)
 			return error;
 	}
 
-	/* This owner installs the final device operations. Other file classes
-	 * retain their own table identities and open protocols. */
-	error = ebpfos_file_view_open(filp);
-	if (error && filp->f_op->release)
-		filp->f_op->release(inode, filp);
-	return error;
+	return 0;
 }
 
 static const struct file_operations memory_fops = {

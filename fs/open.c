@@ -6,6 +6,7 @@
  */
 
 #include <linux/string.h>
+#include <linux/ebpfos_file_view.h>
 #include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
@@ -995,6 +996,7 @@ static int do_dentry_open(struct file *f,
 		}
 	}
 
+	ebpfos_file_view_open(f);
 	return 0;
 
 cleanup_all:

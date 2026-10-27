@@ -3,6 +3,7 @@
 #define _LINUX_BPF_ENTRY_CGROUP_H
 #include <linux/bpf.h>
 struct ebpfos_cgroup_view;
+struct bpf_operations_set;
 struct ebpfos_task_view_request;
 struct bpf_entry_target {
  u32 function;
@@ -11,7 +12,7 @@ struct bpf_entry_target {
 };
 #if defined(CONFIG_EBPFOS_ENTRY_LINK) && defined(CONFIG_CGROUP_BPF)
 struct ebpfos_task_view_request *ebpfos_cgroup_prepare(
- const struct bpf_entry_target *, u32 count, u64 generation);
+ const struct bpf_entry_target *, u32 count, u64 generation, struct bpf_operations_set *);
 void ebpfos_cgroup_request_put(struct ebpfos_task_view_request *);
 struct ebpfos_cgroup_view *ebpfos_cgroup_view_create(int fd,
  struct ebpfos_task_view_request *);
@@ -23,7 +24,7 @@ u64 ebpfos_cgroup_view_id(const struct ebpfos_cgroup_view *);
 bool ebpfos_cgroup_view_active(const struct ebpfos_cgroup_view *);
 #else
 static inline struct ebpfos_task_view_request *ebpfos_cgroup_prepare(
- const struct bpf_entry_target *targets, u32 count, u64 generation)
+ const struct bpf_entry_target *targets, u32 count, u64 generation, struct bpf_operations_set *operations)
 { return ERR_PTR(-EOPNOTSUPP); }
 static inline void ebpfos_cgroup_request_put(struct ebpfos_task_view_request *request) {}
 static inline struct ebpfos_cgroup_view *ebpfos_cgroup_view_create(int fd,

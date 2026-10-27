@@ -25,6 +25,7 @@
 #include <linux/seq_file.h>
 #include <linux/bpf_entry.h>
 #include <linux/bpf_entry_cgroup.h>
+#include <linux/bpf_operations.h>
 #include <asm/text-patching.h>
 #include <linux/slab.h>
 #include <linux/stop_machine.h>
@@ -42,6 +43,7 @@ struct entry_set {
  struct module *source_module;
  struct btf *source_btf;
  struct bpf_prog **programs;
+ struct bpf_operations_set *tables;
  struct ftrace_ops operations;
  struct ftrace_hash *hash[2];
  struct entry_native_slot *slots;
@@ -49,7 +51,7 @@ struct entry_set {
  bool has_ftrace, poisoned;
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations, *addresses;
- unsigned int count, active;
+ unsigned int count, active, table_count;
  bool published;
 };
 static DEFINE_MUTEX(entry_lock);
@@ -89,6 +91,29 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
 }
 
 #include "function_entry_slots.h"
+
+/* One cold native-call contract for direct entries and generated tables. */
+int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
+ bool task, unsigned long *target)
+{
+ const struct btf_type *function = btf_type_by_id(btf, id);
+ if (!function || !btf_type_is_func(function)) return -EINVAL;
+ if (program->type == BPF_PROG_TYPE_NATIVE) {
+  struct btf *replacement_btf = program->aux->attach_btf;
+  const struct btf_type *replacement = btf_type_by_id(replacement_btf, program->aux->attach_btf_id);
+  if (!replacement || !btf_type_is_func(replacement) ||
+      !cell_layout(btf, function->type, replacement_btf, replacement->type, 0, false)) return -EPROTOTYPE;
+  *target = (unsigned long)program->bpf_func;
+  return 0;
+ }
+ if (!program->aux->ebpfos_component ||
+     !((program->type == BPF_PROG_TYPE_TRACING && !program->sleepable &&
+        program->expected_attach_type == BPF_TRACE_REPLACE) ||
+       (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
+        !program->expected_attach_type))) return -EOPNOTSUPP;
+ if (!entry_export(btf, function, program, target)) return -EPROTOTYPE;
+ return entry_context(program, *target) ? 0 : -EOPNOTSUPP;
+}
 
 /* Every appended generation owns an immutable prepared set. Revision IDs
  * are never recycled after retirement. */
@@ -131,7 +156,10 @@ static int entry_ownership(struct entry_set *set)
 }
 static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
 {
+ struct bpf_operations_set *old_tables = from ? entry_generation(set, from)->tables : NULL;
+ struct bpf_operations_set *next_tables = to ? entry_generation(set, to)->tables : NULL;
  int error = entry_ownership(set);
+ if (!error) error = bpf_operations_global_check(next_tables, old_tables);
  if (error) return error;
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
@@ -150,6 +178,7 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
   set->poisoned = true;
   return -EUCLEAN;
  }
+ if (!error) bpf_operations_global_replace(next_tables, old_tables);
  return error;
 }
 static int entry_switch(struct entry_set *set, unsigned int from, unsigned int to)
@@ -191,6 +220,7 @@ static void entry_free(struct entry_set *set)
  if (set->programs)
   for (i = 0; i < set->count * 2; ++i)
    if (set->programs[i]) bpf_prog_put(set->programs[i]);
+ bpf_operations_set_put(set->tables);
  kvfree(set->programs);
  free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->slots);kvfree(set->locations);kvfree(set->addresses);kfree(set);
 }
@@ -255,6 +285,7 @@ static void entry_retire_work(struct work_struct *work)
    set->programs[i * 2 + slot] = NULL;
   }
   set->retired[slot] = true;
+  if (!slot) {bpf_operations_set_put(set->tables);set->tables = NULL;}
  }
  list_for_each_entry_safe(generation, next, &set->generations, generation_node) {
   if (generation->generation_id == set->active) continue;
@@ -289,7 +320,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
  if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
      !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return ERR_PTR(-EOPNOTSUPP);
- if (!count || IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
+ if (IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
  set = kzalloc(sizeof(*set), GFP_KERNEL);
  if (!set) return ERR_PTR(-ENOMEM);
  INIT_LIST_HEAD(&set->generations);
@@ -357,23 +388,8 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     if (IS_ERR(program)) {error = PTR_ERR(program);goto fail;}
    }
    set->programs[i * 2 + j] = program;
-   if (program->type == BPF_PROG_TYPE_NATIVE) {
-    struct btf *replacement_btf = program->aux->attach_btf;
-    const struct btf_type *replacement = btf_type_by_id(replacement_btf,
-     program->aux->attach_btf_id);
-    if (!cell_layout(btf, function->type, replacement_btf, replacement->type, 0, false)) {
-     error = -EPROTOTYPE;goto fail;
-    }
-    target = (unsigned long)program->bpf_func;
-   } else {
-    if (!program->aux->ebpfos_component ||
-        !((program->type == BPF_PROG_TYPE_TRACING && !program->sleepable &&
-           program->expected_attach_type == BPF_TRACE_REPLACE) ||
-          (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
-           !program->expected_attach_type))) {error = -EOPNOTSUPP;goto fail;}
-    if (!entry_export(btf, function, program, &target)) {error = -EPROTOTYPE;goto fail;}
-    if (!entry_context(program, target)) {error = -EOPNOTSUPP;goto fail;}
-   }
+   error = bpf_entry_program_address(btf, entry->native_function, program, task, &target);
+   if (error) goto fail;
    if (!task && target == address) {error = -EINVAL;goto fail;}
    set->addresses[i] = target;
    if (slot) {
@@ -447,7 +463,7 @@ static struct ebpfos_task_view_request *entry_task_prepare(struct entry_set *set
  for (i = 0; i < set->count; ++i)
   sources[i] = (struct bpf_entry_target){set->locations[set->count + i],
    set->programs[i * 2], set->addresses[i]};
- request = ebpfos_cgroup_prepare(sources, set->count, revision);
+ request = ebpfos_cgroup_prepare(sources, set->count, revision, set->tables);
  kvfree(sources);return request;
 }
 static bool entry_link_active(struct bpf_entry_link *entry)
@@ -488,6 +504,7 @@ static void entry_link_fdinfo(const struct bpf_link *link, struct seq_file *seq)
  slot = entry_generation_slot(entry->set->active);
  seq_printf(seq, "count:\t%u\nrevision:\t%u\ndetached:\t%u\n",
   entry->set->count, entry->set->active, !entry_link_active(entry));
+ seq_printf(seq, "operations_count:\t%u\n", entry->set->table_count);
  seq_printf(seq, "cgroup_id:\t%llu\n", ebpfos_cgroup_view_id(entry->cgroup));
  for (i = 0; i < entry->set->count; ++i)
   seq_printf(seq, "target:\t%lu\t%u\n", entry->set->locations[entry->set->count + i],
@@ -500,9 +517,11 @@ static int entry_link_info(const struct bpf_link *link, struct bpf_link_info *in
  struct entry_set *generation;
  u32 __user *targets = u64_to_user_ptr(info->entry.target_btf_ids);
  u32 __user *programs = u64_to_user_ptr(info->entry.prog_ids);
+ u32 __user *tables = u64_to_user_ptr(info->entry.operations_ids);
+ u32 table_count = info->entry.operations_count;
  unsigned int i, count = info->entry.count, slot;
  int error = 0;
- if (!!targets != !!programs || (!!count != !!targets)) return -EINVAL;
+ if (!!targets != !!programs || (!!count != !!targets) || (!!table_count != !!tables)) return -EINVAL;
  mutex_lock(&entry_lock);
  generation = entry_link_active(entry) ? entry_generation(entry->set, entry->set->active) : NULL;
  slot = entry_generation_slot(entry->set->active);
@@ -511,6 +530,9 @@ static int entry_link_info(const struct bpf_link *link, struct bpf_link_info *in
       put_user(generation ? generation->programs[i * 2 + slot]->aux->id : 0, programs + i)) {
    error = -EFAULT;break;
   }
+ info->entry.operations_count = entry->set->table_count;
+ for (i = 0; i < min(table_count, info->entry.operations_count); ++i)
+  if (put_user(generation ? bpf_operations_set_id(generation->tables, i) : 0, tables + i)) {error = -EFAULT;break;}
  info->entry.count = entry->set->count;
  info->entry.target_btf_obj_id = btf_obj_id(entry->set->source_btf ?
   entry->set->source_btf : bpf_get_btf_vmlinux());
@@ -538,11 +560,18 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  struct ebpfos_task_view_request *request;
  bool task = attr->link_create.attach_type == BPF_CGROUP_ENTRY;
  u32 *targets, *programs, count = attr->link_create.entry.count, i;
+ u32 operations_count = attr->link_create.entry.operations_count, *operations_fds;
  int error;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (kernel) return -EOPNOTSUPP;
  if (attr->link_create.prog_fd || attr->link_create.flags ||
-     attr->link_create.entry.reserved || !count) return -EINVAL;
+     attr->link_create.entry.reserved || attr->link_create.entry.operations_reserved ||
+     (!count && !operations_count)) return -EINVAL;
+ /* Global text and table transactions need one publication mechanism. The
+  * current table publication is atomic by itself; do not split a mixed
+  * global transaction into two observable publications. Cgroup publication
+  * already publishes both through its one immutable task table. */
+ if (!task && count && operations_count) return -EOPNOTSUPP;
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
  if (IS_ERR(targets)) return PTR_ERR(targets);
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.prog_fds), count, sizeof(u32));
@@ -557,6 +586,12 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  set = entry_prepare(members, count, source, task);
  if (source) btf_put(source);
  if (IS_ERR(set)) {error = PTR_ERR(set);goto free_members;}
+ operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.operations_fds), operations_count, sizeof(u32));
+ if (IS_ERR(operations_fds)) {error = PTR_ERR(operations_fds);goto free_set;}
+ set->tables = bpf_operations_prepare(operations_fds, operations_count);
+ set->table_count = operations_count;
+ kvfree(operations_fds);
+ if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
  /* A reserved-entry batch has one common text publication. Mixed or legacy
   * ftrace updates do not provide this transaction and stay unsupported. */
  if (set->has_ftrace) {error = -EOPNOTSUPP;goto free_set;}
@@ -606,17 +641,23 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  struct entry_member *members;
  struct ebpfos_task_view_request *request = NULL;
  struct bpf_prog **expected = NULL;
+ struct bpf_operations_set *expected_tables = NULL;
+ u32 operations_count = attr->link_update.entry.operations_count, *operations_fds;
  u32 *programs, *old_fds = NULL, count = attr->link_update.entry.count;
  unsigned int i, slot, id = 0;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (link->ops != &entry_link_ops || attr->link_update.entry.reserved ||
      attr->link_update.new_prog_fd || attr->link_update.old_prog_fd ||
-     count != set->count || !count ||
-     (!!(attr->link_update.flags & BPF_F_REPLACE) != !!attr->link_update.entry.old_prog_fds)) return -EINVAL;
+     attr->link_update.entry.operations_reserved || count != set->count ||
+     operations_count != set->table_count || (!count && !operations_count) ||
+     ((attr->link_update.flags & BPF_F_REPLACE) ?
+       ((count && !attr->link_update.entry.old_prog_fds) ||
+        (operations_count && !attr->link_update.entry.old_operations_fds)) :
+       (attr->link_update.entry.old_prog_fds || attr->link_update.entry.old_operations_fds))) return -EINVAL;
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.prog_fds), count, sizeof(u32));
  if (IS_ERR(programs)) return PTR_ERR(programs);
- if (attr->link_update.flags & BPF_F_REPLACE) {
+ if ((attr->link_update.flags & BPF_F_REPLACE) && count) {
   old_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.old_prog_fds), count, sizeof(u32));
   if (IS_ERR(old_fds)) {error = PTR_ERR(old_fds);old_fds = NULL;goto out;}
   expected = kvcalloc(count, sizeof(*expected), GFP_KERNEL);
@@ -633,6 +674,18 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  prepared = entry_prepare(members, count, set->source_btf, entry->cgroup != NULL);
  kvfree(members);
  if (IS_ERR(prepared)) {error = PTR_ERR(prepared);goto out;}
+ operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.operations_fds), operations_count, sizeof(u32));
+ if (IS_ERR(operations_fds)) {error = PTR_ERR(operations_fds);entry_free(prepared);goto out;}
+ prepared->tables = bpf_operations_prepare(operations_fds, operations_count);
+ kvfree(operations_fds);
+ if (IS_ERR(prepared->tables)) {error = PTR_ERR(prepared->tables);prepared->tables = NULL;entry_free(prepared);goto out;}
+ if ((attr->link_update.flags & BPF_F_REPLACE) && operations_count) {
+  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.old_operations_fds), operations_count, sizeof(u32));
+  if (IS_ERR(operations_fds)) {error = PTR_ERR(operations_fds);entry_free(prepared);goto out;}
+  expected_tables = bpf_operations_prepare(operations_fds, operations_count);
+  kvfree(operations_fds);
+  if (IS_ERR(expected_tables)) {error = PTR_ERR(expected_tables);expected_tables = NULL;entry_free(prepared);goto out;}
+ }
  mutex_lock(&entry_lock);
  error = -ENOLINK;
  if (!entry_link_active(entry)) goto unlock;
@@ -641,11 +694,13 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  for (i = 0; i < count * 2; ++i)
   if (set->locations[i] != prepared->locations[i]) goto unlock;
  old = entry_generation(set, set->active);
+ if (!bpf_operations_set_targets(prepared->tables, old->tables)) goto unlock;
  slot = entry_generation_slot(set->active);
  error = -EPERM;
  if (expected)
   for (i = 0; i < count; ++i)
    if (old->programs[i * 2 + slot] != expected[i]) goto unlock;
+ if (expected_tables && !bpf_operations_set_same(old->tables, expected_tables)) goto unlock;
  error = -EOVERFLOW;
  if (set->next_generation > INT_MAX) goto unlock;
  id = set->next_generation;
@@ -669,6 +724,7 @@ unlock:
 out:
  if (expected)
   for (i = 0; i < count; ++i) if (expected[i]) bpf_prog_put(expected[i]);
+ bpf_operations_set_put(expected_tables);
  kvfree(expected);kvfree(old_fds);kvfree(programs);
  return error;
 }

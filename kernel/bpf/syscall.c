@@ -4,6 +4,7 @@
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/bpf_entry.h>
+#include <linux/bpf_operations.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/bpf_trace.h>
 #include <linux/bpf_lirc.h>
@@ -262,6 +263,8 @@ static int bpf_map_update_value(struct bpf_map *map, struct file *map_file,
 	/* Need to create a kthread, thus must support schedule */
 	if (bpf_map_is_offloaded(map)) {
 		return bpf_map_offload_update_elem(map, key, value, flags);
+	} else if (map->map_type == BPF_MAP_TYPE_OPERATIONS) {
+		return bpf_operations_update(map, key, value, flags);
 	} else if (map->map_type == BPF_MAP_TYPE_CPUMAP ||
 		   map->map_type == BPF_MAP_TYPE_ARENA ||
 		   map->map_type == BPF_MAP_TYPE_STRUCT_OPS) {
@@ -1414,7 +1417,8 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	attr->map_flags &= ~BPF_F_TOKEN_FD;
 
 	if (attr->btf_vmlinux_value_type_id) {
-		if (attr->map_type != BPF_MAP_TYPE_STRUCT_OPS ||
+		if ((attr->map_type != BPF_MAP_TYPE_STRUCT_OPS &&
+		     attr->map_type != BPF_MAP_TYPE_OPERATIONS) ||
 		    attr->btf_key_type_id || attr->btf_value_type_id)
 			return -EINVAL;
 	} else if (attr->btf_key_type_id && !attr->btf_value_type_id) {
@@ -1423,6 +1427,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 
 	if (attr->map_type != BPF_MAP_TYPE_BLOOM_FILTER &&
 	    attr->map_type != BPF_MAP_TYPE_ARENA &&
+	    attr->map_type != BPF_MAP_TYPE_OPERATIONS &&
 	    attr->map_extra != 0)
 		return -EINVAL;
 
@@ -1514,6 +1519,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	case BPF_MAP_TYPE_CPUMAP:
 	case BPF_MAP_TYPE_ARENA:
 	case BPF_MAP_TYPE_INSN_ARRAY:
+	case BPF_MAP_TYPE_OPERATIONS:
 		if (!bpf_token_capable(token, CAP_BPF))
 			goto put_token;
 		break;
@@ -1566,7 +1572,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	     * counter part.  Thus, attr->btf_fd has
 	     * to be valid also.
 	     */
-	    attr->btf_vmlinux_value_type_id) {
+	    (attr->btf_vmlinux_value_type_id && attr->map_type != BPF_MAP_TYPE_OPERATIONS)) {
 		struct btf *btf;
 
 		btf = btf_get_by_fd(attr->btf_fd);
@@ -5574,6 +5580,10 @@ static int bpf_map_get_info_by_fd(struct file *file,
 	info.btf_vmlinux_value_type_id = map->btf_vmlinux_value_type_id;
 	if (map->map_type == BPF_MAP_TYPE_STRUCT_OPS)
 		bpf_map_struct_ops_info_fill(&info, map);
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+	if (map->map_type == BPF_MAP_TYPE_OPERATIONS)
+		bpf_operations_info(map, &info);
+#endif
 
 	if (bpf_map_is_offloaded(map)) {
 		err = bpf_map_offload_info_fill(&info, map);
@@ -6076,7 +6086,7 @@ out_put:
 	return ret;
 }
 
-#define BPF_LINK_UPDATE_LAST_FIELD link_update.entry.old_prog_fds
+#define BPF_LINK_UPDATE_LAST_FIELD link_update.entry.old_operations_fds
 
 static int link_update(union bpf_attr *attr, bool from_kernel)
 {

@@ -518,6 +518,12 @@ static int show_map_close_json(int fd, struct bpf_map_info *info)
 	}
 	jsonw_int_field(json_wtr, "frozen", frozen);
 
+	if (info->type == BPF_MAP_TYPE_OPERATIONS) {
+		jsonw_uint_field(json_wtr, "operations_type_id", info->btf_vmlinux_value_type_id);
+		jsonw_uint_field(json_wtr, "operations_btf_obj_id", info->btf_vmlinux_id);
+		jsonw_uint_field(json_wtr, "original_variable_btf_id", info->map_extra);
+	}
+
 	if (info->btf_id)
 		jsonw_int_field(json_wtr, "btf_id", info->btf_id);
 
@@ -801,6 +807,10 @@ static int get_map_kv_btf(const struct bpf_map_info *info, struct btf **btf)
 				p_err("failed to get kernel btf");
 				return -errno;
 			}
+		}
+		if (info->type == BPF_MAP_TYPE_OPERATIONS && info->btf_vmlinux_id > 1) {
+			*btf = btf__load_from_kernel_by_id_split(info->btf_vmlinux_id, btf_vmlinux);
+			return libbpf_get_error(*btf);
 		}
 		*btf = btf_vmlinux;
 	} else if (info->btf_value_type_id) {

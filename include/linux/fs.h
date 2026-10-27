@@ -1299,6 +1299,9 @@ struct file {
 		freeptr_t		f_freeptr;
 	};
 	file_ref_t			f_ref;
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+	struct ebpfos_operations *ebpfos_operations;
+#endif
 	/* --- cacheline 3 boundary (192 bytes) --- */
 } __randomize_layout
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */

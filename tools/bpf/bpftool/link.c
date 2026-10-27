@@ -518,13 +518,17 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
 {
  struct bpf_link_info full = {};
  __u32 len = sizeof(full), i, count = info->entry.count;
- __u32 *targets = calloc(count, sizeof(*targets));
- __u32 *programs = calloc(count, sizeof(*programs));
+ __u32 *targets = calloc(count ? count : 1, sizeof(*targets));
+ __u32 *programs = calloc(count ? count : 1, sizeof(*programs));
+ __u32 operations_count = info->entry.operations_count;
+ __u32 *operations = calloc(operations_count ? operations_count : 1, sizeof(*operations));
  int err = -ENOMEM;
- if (!targets || !programs) goto out;
+ if (!targets || !programs || !operations) goto out;
  full.entry.count = count;
- full.entry.target_btf_ids = ptr_to_u64(targets);
- full.entry.prog_ids = ptr_to_u64(programs);
+ full.entry.target_btf_ids = count ? ptr_to_u64(targets) : 0;
+ full.entry.prog_ids = count ? ptr_to_u64(programs) : 0;
+ full.entry.operations_count = operations_count;
+ full.entry.operations_ids = operations_count ? ptr_to_u64(operations) : 0;
  err = bpf_link_get_info_by_fd(fd, &full, &len);
  if (err) goto out;
  if (json) {
@@ -533,6 +537,10 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
   jsonw_uint_field(json_wtr, "revision", full.entry.revision);
   jsonw_uint_field(json_wtr, "cgroup_id", full.entry.cgroup_id);
   jsonw_bool_field(json_wtr, "detached", full.entry.detached);
+  jsonw_name(json_wtr, "operations_ids");
+  jsonw_start_array(json_wtr);
+  for (i = 0; i < operations_count; ++i) jsonw_uint(json_wtr, operations[i]);
+  jsonw_end_array(json_wtr);
   jsonw_name(json_wtr, "members");
   jsonw_start_array(json_wtr);
   for (i = 0; i < count; ++i) {
@@ -546,11 +554,12 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
   printf("\n\tcount %u target_btf_obj_id %u revision %llu detached %u  ",
    full.entry.count, full.entry.target_btf_obj_id, full.entry.revision, full.entry.detached);
   printf("cgroup_id %llu  ", full.entry.cgroup_id);
+  for (i = 0; i < operations_count; ++i) printf("\n\toperations_id %u", operations[i]);
   for (i = 0; i < count; ++i)
    printf("\n\ttarget_btf_id %u prog_id %u", targets[i], programs[i]);
  }
 out:
- free(targets);free(programs);
+ free(targets);free(programs);free(operations);
  return err;
 }
 

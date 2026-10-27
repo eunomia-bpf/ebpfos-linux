@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef EBPFOS_FUNCTION_NATIVE_CONTEXT_H
 #define EBPFOS_FUNCTION_NATIVE_CONTEXT_H
-#include <linux/ebpfos_file_view.h>
 static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bool pure)
 {
  const enum bpf_func_id helpers[] = { BPF_FUNC_per_cpu_ptr, BPF_FUNC_this_cpu_ptr,
@@ -52,7 +51,7 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
        insn->src_reg == BPF_PSEUDO_KOP_CALL) {
-    if (pure && !ebpfos_file_view_fault_call(insn)) goto out;
+    if (pure) goto out;
     continue;
    }
    if (insn->src_reg) goto out;

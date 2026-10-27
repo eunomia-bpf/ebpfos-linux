@@ -20,6 +20,7 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/bpf.h>
+#include <linux/bpf_operations.h>
 #include <linux/bpf_lsm.h>
 #include <linux/skmsg.h>
 #include <linux/perf_event.h>
@@ -8836,6 +8837,23 @@ static struct btf *btf_get_module_btf(const struct module *module)
 
 	return btf;
 }
+
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+/* Kernel callers pass an ID from their own compiled .BTF_ids section, as
+ * kfunc and struct_ops registration already do. Resolve it once at module
+ * initialization, after distilled base BTF has been relocated. */
+u32 btf_module_type_id(const struct module *module, u32 id)
+{
+ struct btf *btf = btf_get_module_btf(module);
+ u32 resolved = 0;
+ if (!IS_ERR_OR_NULL(btf)) {
+  resolved = btf_relocate_id(btf, id);
+  btf_put(btf);
+ }
+ return resolved;
+}
+EXPORT_SYMBOL_GPL(btf_module_type_id);
+#endif
 
 static int check_btf_kconfigs(const struct module *module, const char *feature)
 {

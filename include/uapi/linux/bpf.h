@@ -1046,6 +1046,7 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_CGRP_STORAGE,
 	BPF_MAP_TYPE_ARENA,
 	BPF_MAP_TYPE_INSN_ARRAY,
+	BPF_MAP_TYPE_OPERATIONS,
 	__MAX_BPF_MAP_TYPE
 };
 
@@ -1567,6 +1568,8 @@ union bpf_attr {
 		 * number of hash functions (if 0, the bloom filter will default
 		 * to using 5 hash functions).
 		 *
+		 * BPF_MAP_TYPE_OPERATIONS - BTF VAR ID of the native table.
+		 *
 		 * BPF_MAP_TYPE_ARENA - contains the address where user space
 		 * is going to mmap() the arena. It has to be page aligned.
 		 */
@@ -1903,6 +1906,9 @@ union bpf_attr {
 				__u32 reserved;
 				__aligned_u64 target_btf_ids;
 				__aligned_u64 prog_fds;
+				__u32 operations_count;
+				__u32 operations_reserved;
+				__aligned_u64 operations_fds;
 			} entry;
 		};
 	} link_create;
@@ -1932,6 +1938,10 @@ union bpf_attr {
 			__u32 reserved;
 			__aligned_u64 prog_fds;
 			__aligned_u64 old_prog_fds;
+			__u32 operations_count;
+			__u32 operations_reserved;
+			__aligned_u64 operations_fds;
+			__aligned_u64 old_operations_fds;
 		} entry;
 	} link_update;
 
@@ -6796,6 +6806,9 @@ struct bpf_link_info {
 			__u32 detached;
 			__u32 :32;
 			__u64 cgroup_id;
+			__u32 operations_count;
+			__u32 :32;
+			__aligned_u64 operations_ids;
 		} entry;
 		struct {
 			__aligned_u64 tp_name; /* in/out: tp_name buffer ptr */

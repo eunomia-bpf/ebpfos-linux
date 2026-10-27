@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef _LINUX_BPF_OPERATIONS_H
+#define _LINUX_BPF_OPERATIONS_H
+#include <linux/bpf.h>
+struct bpf_operations_set;
+struct ebpfos_operations;
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+u32 btf_module_type_id(const struct module *, u32);
+long bpf_operations_update(struct bpf_map *, void *, void *, u64);
+struct bpf_operations_set *bpf_operations_prepare(const u32 *fds, u32 count);
+struct bpf_operations_set *bpf_operations_set_get(struct bpf_operations_set *set);
+void bpf_operations_set_put(struct bpf_operations_set *set);
+u32 bpf_operations_set_count(const struct bpf_operations_set *set);
+u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
+bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
+bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bpf_operations_set *b);
+int bpf_operations_global_check(struct bpf_operations_set *set, struct bpf_operations_set *old);
+void bpf_operations_global_replace(struct bpf_operations_set *set, struct bpf_operations_set *old);
+struct ebpfos_operations *bpf_operations_find(struct bpf_operations_set *, const void *, u32, size_t);
+struct bpf_operations_set *ebpfos_task_operations(void);
+void bpf_operations_info(struct bpf_map *, struct bpf_map_info *);
+#else
+static inline long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flags) { return -EOPNOTSUPP; }
+static inline void bpf_operations_set_put(struct bpf_operations_set *set) {}
+static inline struct bpf_operations_set *ebpfos_task_operations(void) { return NULL; }
+#endif
+#endif
