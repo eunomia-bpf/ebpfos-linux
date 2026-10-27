@@ -7853,6 +7853,22 @@ static int bpf_object_load_prog(struct bpf_object *obj, struct bpf_program *prog
 	__u32 log_level = prog->log_level;
 	int ret, err;
 
+	/* A native program is a descriptor of resident source-built text. Its
+	 * ELF instructions and object-local BTF are not submitted as bytecode.
+	 * The kernel resolves the qualified attach target and retains its code.
+	 */
+	if (prog->type == BPF_PROG_TYPE_NATIVE) {
+		LIBBPF_OPTS(bpf_prog_load_opts, native,
+			.expected_attach_type = prog->expected_attach_type,
+			.attach_btf_obj_fd = prog->attach_btf_obj_fd,
+			.attach_btf_id = prog->attach_btf_id);
+		ret = bpf_prog_load(prog->type, prog->name, NULL, NULL, 0, &native);
+		if (ret < 0)
+			return ret;
+		*prog_fd = ret;
+		return 0;
+	}
+
 	/* Be more helpful by rejecting programs that can't be validated early
 	 * with more meaningful and actionable error message.
 	 */
