@@ -762,6 +762,7 @@ int bpf_link_create(int prog_fd, int target_fd,
 
 	switch (attach_type) {
 	case BPF_TRACE_ENTRY:
+	case BPF_CGROUP_ENTRY:
 		attr.link_create.entry.count = OPTS_GET(opts, entry.count, 0);
 		attr.link_create.entry.target_btf_ids = ptr_to_u64(OPTS_GET(opts, entry.target_btf_ids, NULL));
 		attr.link_create.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
