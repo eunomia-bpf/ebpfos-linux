@@ -53,6 +53,16 @@ struct text_poke_pair {
 };
 extern int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int count);
 
+/* Cold code/data transaction. Acquires cpus_read_lock before text_mutex;
+ * the caller holds neither, excludes NMI/MCE users, and retains every object.
+ * update runs with all CPUs stopped and IRQs disabled; it must establish
+ * quiescence before changing data. On error, undo restores any data it wrote.
+ * Neither callback may sleep, allocate, or depend on another stopped CPU.
+ * This primitive does not discover users or establish migration correctness.
+ */
+extern int smp_text_poke_quiescent_transaction(const struct text_poke_pair *pairs,
+	unsigned int count, int (*update)(void *), void (*undo)(void *), void *data);
+
 #define INT3_INSN_SIZE		1
 #define INT3_INSN_OPCODE	0xCC
 

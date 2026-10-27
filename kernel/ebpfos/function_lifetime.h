@@ -116,4 +116,30 @@ static int ebpfos_code_quiescent(bool (*contains)(void *, unsigned long), void *
  kfree(check.running);
  return error;
 }
+/* Only from a stop_machine callback running on every online CPU. Current
+ * tasks are the stop workers in that callback, not the interrupted callers;
+ * their displaced task stacks and idle stacks are stable until it returns.
+ * The caller separately excludes NMI users and the transaction's own code.
+ * This scan neither disconnects entries nor establishes an object inventory.
+ */
+static inline int ebpfos_code_stopped(bool (*contains)(void *, unsigned long), void *owner)
+{
+ struct ebpfos_stack_check check = { .contains = contains, .owner = owner };
+ struct task_struct *group, *task;
+ int error = 0, cpu;
+ if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE)) return -EOPNOTSUPP;
+ rcu_read_lock();
+ for_each_process_thread(group, task) {
+  int verdict;
+  if (task_curr(task)) continue;
+  verdict = ebpfos_stack_walk(task, &check);
+  if (verdict == -EADDRINUSE || !error) error = verdict;
+ }
+ for_each_online_cpu(cpu) {
+  int verdict = ebpfos_stack_walk(idle_task(cpu), &check);
+  if (verdict == -EADDRINUSE || !error) error = verdict;
+ }
+ rcu_read_unlock();
+ return error;
+}
 #endif
