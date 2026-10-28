@@ -6851,6 +6851,8 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 	return -EACCES;
 }
 
+#include "btf_field_range.h"
+
 /* owned_type:component is emitted on the object declaration by the compiler.
  * Only scalar bytes acquire the size-of-object rule. Pointer and managed
  * fields continue through the existing typed path below.
@@ -6888,6 +6890,7 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 				     int value_regno, bool *handled)
 {
 	struct bpf_reg_state *reg = regs + regno;
+	struct bpf_reg_state source = *reg;
 	u32 id = reg->btf_id, bytes, begin, end;
 	const struct btf_type *t;
 	int err;
@@ -6922,8 +6925,12 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 		if (err)
 			return err;
 	}
-	if (atype == BPF_READ && value_regno >= 0)
+	if (atype == BPF_READ && value_regno >= 0) {
 		mark_reg_unknown(env, regs, value_regno);
+		err = check_btf_field_ranges(env, regs, regno, off, size, atype, value_regno, &source);
+		if (err)
+			return err;
+	}
 	*handled = true;
 	return 0;
 }
@@ -6942,6 +6949,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	u32 btf_id = 0;
 	bool pointer_field = false;
 	bool owned_scalar = false;
+	struct bpf_reg_state source = *reg;
 	int ret;
 
 	if (!env->allow_ptr_leaks) {
@@ -6957,6 +6965,11 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		return -EINVAL;
 	}
 
+	if (atype == BPF_WRITE) {
+		ret = check_btf_field_ranges(env, regs, regno, off, size, atype, value_regno, NULL);
+		if (ret)
+			return ret;
+	}
 	ret = check_owned_scalar_access(env, regs, regno, off, size, atype,
 					value_regno, &owned_scalar);
 	if (ret || owned_scalar)
@@ -7150,6 +7163,12 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		ret = mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf, btf_id, flag);
 		if (ret < 0)
 			return ret;
+		if (regs[value_regno].type == SCALAR_VALUE) {
+			ret = check_btf_field_ranges(env, regs, regno,
+					off - source.var_off.value, size, atype, value_regno, &source);
+			if (ret)
+				return ret;
+		}
 	}
 
 	return 0;
