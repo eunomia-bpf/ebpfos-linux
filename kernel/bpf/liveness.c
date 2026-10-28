@@ -1376,6 +1376,20 @@ static int record_call_access(struct bpf_verifier_env *env,
 		if (callee < 0) return 0;
 		sub = &env->subprog_info[callee];
 		if (!sub->native_frame) return 0;
+		/* A native global can read caller memory through a pointer argument.
+		 * Its argument-area slots are not the pointed-to storage.
+		 */
+		for (u32 arg = 0; arg < sub->native_abi.nr_args; arg++) {
+			const struct btf_type *type = btf_type_skip_modifiers(env->prog->aux->btf,
+				sub->native_abi.args[arg].type_id, NULL);
+
+			if (!type || !btf_type_is_ptr(type)) continue;
+			for (int frame = 0; frame <= depth; frame++) {
+				err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+				if (err) return err;
+			}
+			break;
+		}
 		if (sub->native_arg_in) {
 			err = record_stack_access(instance, &at[BPF_REG_ARG_SP],
 				sub->native_arg_in, depth, insn_idx);
@@ -1393,8 +1407,17 @@ static int record_call_access(struct bpf_verifier_env *env,
 		err = record_stack_access(instance, &at[BPF_REG_ARG_SP],
 			env->subprog_info[instance->subprog].native_arg_out, depth, insn_idx);
 		if (err) return err;
+		/* Argument-area contents can themselves be pointers to any caller
+		 * frame. The call's ordinary type/extent checks still decide access.
+		 */
+		for (int frame = 0; frame <= depth; frame++) {
+			err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+			if (err) return err;
+		}
 	}
 
+	if (env->subprog_info[instance->subprog].native_frame)
+		num_params = MAX_BPF_NATIVE_REG_ARGS;
 	if (bpf_get_call_summary(env, insn, &cs))
 		num_params = cs.num_params;
 
