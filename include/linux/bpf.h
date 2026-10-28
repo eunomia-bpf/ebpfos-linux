@@ -1357,10 +1357,11 @@ struct bpf_prog_offload {
 #define BTF_FMODEL_MEMORY_ARG		BIT(2)
 
 struct btf_func_model {
-	u8 ret_size;
+	u32 ret_size;
 	u8 ret_flags;
 	u8 nr_args;
-	u8 arg_size[MAX_BPF_FUNC_ARGS];
+	bool native_stack;
+	u32 arg_size[MAX_BPF_FUNC_ARGS];
 	u8 arg_flags[MAX_BPF_FUNC_ARGS];
 };
 
@@ -3281,6 +3282,11 @@ bool btf_struct_ids_match(struct bpf_verifier_log *log,
 			  bool strict);
 
 int btf_distill_func_proto(struct bpf_verifier_log *log,
+			   struct btf *btf,
+			   const struct btf_type *func_proto,
+			   const char *func_name,
+			   struct btf_func_model *m);
+int btf_distill_native_func_proto(struct bpf_verifier_log *log,
 			   struct btf *btf,
 			   const struct btf_type *func_proto,
 			   const char *func_name,

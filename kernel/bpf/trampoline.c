@@ -795,7 +795,7 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 	 * a scalar result slot and cannot preserve the second result word.
 	 */
 	if (link->link.prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	    tr->func.model.ret_size > sizeof(u64))
+	    (tr->func.model.ret_size > sizeof(u64) || tr->func.model.native_stack))
 		return -EOPNOTSUPP;
 
 	kind = bpf_attach_type_to_tramp(link->link.prog);

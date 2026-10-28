@@ -143,6 +143,15 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      !aux->func[index]->jited || !cell_export_name(native, native_function, aux->btf, id)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
+ /* Framed functions retain their complete logical native value ABI. The
+  * ordinary verifier checked that ABI independently; no wrapper executes.
+  */
+ if (IS_ENABLED(CONFIG_X86_64) && aux->func[index]->aux->native_frame &&
+     cell_layout(native, native_function->type, aux->btf, function->type, 0, false)) {
+  if (!cell_context_requirements(native, native_function, aux->btf, function) ||
+      !cell_argument_requirements(native, native_function, aux->btf, id)) return false;
+  goto compatible;
+ }
  result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
            !cell_record_type_tags(aux->btf, prototype->type) &&
            cell_record_word(cell_record_type(aux->btf, prototype->type)) &&

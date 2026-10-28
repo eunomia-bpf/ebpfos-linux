@@ -21471,7 +21471,10 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 		if (tgt_prog && conservative)
 			t = NULL;
 
-		ret = btf_distill_func_proto(log, btf, t, tname, &tgt_info->fmodel);
+		if (prog->expected_attach_type == BPF_TRACE_REPLACE && prog->aux->ebpfos_component)
+			ret = btf_distill_native_func_proto(log, btf, t, tname, &tgt_info->fmodel);
+		else
+			ret = btf_distill_func_proto(log, btf, t, tname, &tgt_info->fmodel);
 		if (ret < 0)
 			return ret;
 
@@ -21491,7 +21494,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    !IS_ENABLED(CONFIG_X86_64))
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
-			if (t->type &&
+			if (!tgt_info->fmodel.native_stack && t->type &&
 			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    !cell_native_result2_type(btf, t->type) &&

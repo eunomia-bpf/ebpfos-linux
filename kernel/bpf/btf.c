@@ -7828,6 +7828,8 @@ int btf_distill_func_proto(struct bpf_verifier_log *log,
 	u32 i, nargs;
 	int ret;
 
+	m->native_stack = false;
+
 	if (!func) {
 		/* BTF function prototype doesn't match the verifier types.
 		 * Fall back to MAX_BPF_FUNC_REG_ARGS u64 args.
@@ -7887,6 +7889,35 @@ int btf_distill_func_proto(struct bpf_verifier_log *log,
 		m->arg_flags[i] = __get_type_fmodel_flags(t);
 	}
 	m->nr_args = nargs;
+	return 0;
+}
+
+/* Native entries are called directly, without a tracing argument adapter. */
+int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
+				 const struct btf_type *proto, const char *name,
+				 struct btf_func_model *model)
+{
+	struct bpf_native_abi abi;
+	const struct btf_type *type;
+	int size, err = bpf_native_abi_plan(btf, proto, &abi);
+
+	if (err)
+		return err;
+	memset(model, 0, sizeof(*model));
+	size = __get_type_size(btf, proto->type, &type);
+	if (size < 0)
+		return size;
+	model->ret_size = size;
+	model->ret_flags = __get_type_fmodel_flags(type);
+	model->nr_args = btf_type_vlen(proto);
+	model->native_stack = abi.stack_size || abi.result_buffer;
+	for (u32 i = 0; i < model->nr_args; i++) {
+		size = __get_type_size(btf, btf_params(proto)[i].type, &type);
+		if (size <= 0)
+			return size ?: -EINVAL;
+		model->arg_size[i] = size;
+		model->arg_flags[i] = __get_type_fmodel_flags(type);
+	}
 	return 0;
 }
 
@@ -8549,6 +8580,16 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 	if (!prog->aux->func_info || !prog->aux->func_info_aux ||
 	    subprog >= prog->aux->func_info_cnt)
 		return -EINVAL;
+	if (prog->aux->func && subprog < prog->aux->func_cnt &&
+	    prog->aux->func[subprog]->aux->native_frame) {
+		const struct btf_type *fn = btf_type_by_id(prog->aux->btf, prog->aux->func_info[subprog].type_id);
+
+		info.native_frame = true;
+		error = bpf_native_abi_plan(prog->aux->btf,
+			btf_type_by_id(prog->aux->btf, fn->type), &info.native_abi);
+		if (error)
+			return error;
+	}
 	error = btf_prepare_func_arg_info(prog, subprog, &info, &log, NULL);
 	if (error)
 		return error;
