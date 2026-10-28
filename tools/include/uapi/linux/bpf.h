@@ -1542,7 +1542,7 @@ enum {
 };
 
 /* A field write declaration for BPF_F_EBPFOS_COMPONENT programs.
- * BTF IDs refer to the vmlinux BTF of the kernel that loads the program.
+ * BTF IDs refer to the kernel attachment BTF (vmlinux without a module).
  * func_info_idx identifies exactly one function in the load's func_info;
  * its authority is checked before verification, never shared with callees.
  */
