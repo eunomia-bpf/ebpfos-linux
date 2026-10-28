@@ -6842,7 +6842,8 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 		 */
 		if (!env->subprog_info[owner].type_authority) {
 			env->subprog_info[owner].type_authority = true;
-			verbose(env, "func#%u relies on verifier option F\n", owner);
+			verbose(env, "func#%u relies on verifier option F; name='%s'\n",
+				owner, bpf_verifier_subprog_name(env, owner));
 		}
 		return 0;
 	}

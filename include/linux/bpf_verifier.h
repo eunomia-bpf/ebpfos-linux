@@ -800,6 +800,7 @@ struct bpf_subprog_info {
 	bool requires_rcu: 1;
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
+	bool protocol_used: 1;
 	bool type_authority: 1;
 
 	enum priv_stack_mode priv_stack_mode;
@@ -1147,6 +1148,7 @@ static inline void bpf_trampoline_unpack_key(u64 key, u32 *obj_id, u32 *btf_id)
 		*btf_id = key & 0x7FFFFFFF;
 }
 
+const char *bpf_verifier_subprog_name(struct bpf_verifier_env *env, u32 subprog);
 int bpf_check_btf_info_early(struct bpf_verifier_env *env,
 			     const union bpf_attr *attr, bpfptr_t uattr);
 int bpf_check_btf_line(struct bpf_verifier_env *env,

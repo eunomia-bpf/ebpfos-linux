@@ -8,6 +8,17 @@
 
 #define verbose(env, fmt, args...) bpf_verifier_log_write(env, fmt, ##args)
 
+const char *bpf_verifier_subprog_name(struct bpf_verifier_env *env, u32 subprog)
+{
+	const struct bpf_prog_aux *aux = env->prog->aux;
+	const struct btf_type *type;
+
+	if (!aux->btf || !aux->func_info || subprog >= aux->func_info_cnt)
+		return "<unknown>";
+	type = btf_type_by_id(aux->btf, aux->func_info[subprog].type_id);
+	return type ? btf_name_by_offset(aux->btf, type->name_off) : "<unknown>";
+}
+
 static int check_abnormal_return(struct bpf_verifier_env *env)
 {
 	int i;

@@ -1344,6 +1344,13 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 			    sl->state.callback_unroll_depth == cur->callback_unroll_depth &&
 			    states_equal(env, &sl->state, cur, RANGE_WITHIN) &&
 			    !iter_active_depths_differ(&sl->state, cur)) {
+				u32 subprog = cur->frame[cur->curframe]->subprogno;
+
+				if (!env->subprog_info[subprog].protocol_used) {
+					env->subprog_info[subprog].protocol_used = true;
+					verbose(env, "func#%u relies on verifier option E; name='%s'\n",
+						subprog, bpf_verifier_subprog_name(env, subprog));
+				}
 				verbose(env, "kernel protocol loop state covered at insn %d\n", insn_idx);
 				loop = true;
 				goto hit;
