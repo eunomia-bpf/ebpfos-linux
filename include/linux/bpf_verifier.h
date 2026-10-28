@@ -770,6 +770,7 @@ struct bpf_subprog_info {
 	bool requires_rcu: 1;
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
+	bool type_authority: 1;
 
 	enum priv_stack_mode priv_stack_mode;
 	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_REG_ARGS];

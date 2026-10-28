@@ -6788,10 +6788,11 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 
 static int check_component_field_authority(struct bpf_verifier_env *env,
 					  const struct bpf_reg_state *dst,
-					  int off, int size, bool type_authority)
+					  int off, int size)
 {
 	u32 owner = env->cur_state->frame[env->cur_state->curframe]->subprogno;
 	const struct bpf_prog_aux *aux = env->prog->aux;
+	bool type_authority = false;
 
 	if (dst->type & (MEM_RDONLY | PTR_UNTRUSTED | PTR_MAYBE_NULL)) {
 		verbose(env, "pointer store: destination is not writable\n");
@@ -6805,10 +6806,23 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 	for (u32 i = 0; i < aux->ebpfos_field_access_cnt; i++) {
 		const struct bpf_ebpfos_field_access *f = &aux->ebpfos_field_accesses[i];
 
-		if (f->func_info_idx == owner &&
-		    btf_types_are_same(dst->btf, dst->btf_id, bpf_get_btf_vmlinux(), f->btf_id) &&
-		    (type_authority || (f->offset == off && f->size == size)))
+		if (f->func_info_idx != owner ||
+		    !btf_types_are_same(dst->btf, dst->btf_id, bpf_get_btf_vmlinux(), f->btf_id))
+			continue;
+		if (tnum_is_const(dst->var_off) && f->offset == off && f->size == size)
 			return 0;
+		type_authority = true;
+	}
+	if (type_authority) {
+		/* Option F is the default source-authority policy. The field
+		 * record proves that this function writes this type. Bounds,
+		 * stored values and modeled lifetime keep their existing checks.
+		 */
+		if (!env->subprog_info[owner].type_authority) {
+			env->subprog_info[owner].type_authority = true;
+			verbose(env, "func#%u relies on verifier option F\n", owner);
+		}
+		return 0;
 	}
 	verbose(env, "pointer store: field authority missing for func#%u type=%u off=%d size=%d\n",
 		owner, dst->btf_id, off, size);
@@ -6855,7 +6869,9 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	if (!btf_type_is_scalar_region(reg->btf, id, begin, end - begin))
 		return 0;
 	if (atype == BPF_WRITE && env->prog->aux->ebpfos_component) {
-		err = check_component_field_authority(env, reg, off, size, true);
+		err = check_component_field_authority(env, reg,
+				tnum_is_const(reg->var_off) ? off + reg->var_off.value : off,
+				size);
 		if (err)
 			return err;
 	}
@@ -6934,7 +6950,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 
 	if (atype == BPF_WRITE) {
 		if (env->prog->aux->ebpfos_component) {
-			ret = check_component_field_authority(env, reg, off, size, false);
+			ret = check_component_field_authority(env, reg, off, size);
 			if (ret)
 				return ret;
 		}
