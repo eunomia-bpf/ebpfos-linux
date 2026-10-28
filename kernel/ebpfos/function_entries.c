@@ -76,7 +76,6 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
  struct bpf_prog *program, unsigned long *address)
 {
  struct bpf_prog_aux *aux = program->aux;
- const char *name = btf_name_by_offset(native, function->name_off);
  unsigned int i;
  bool found = false;
  if (!aux->btf || !aux->func_info || !aux->func) return false;
@@ -84,7 +83,7 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
   u32 id = aux->func_info[i].type_id;
   const struct btf_type *candidate = btf_type_by_id(aux->btf, id);
   if (!candidate || !btf_type_is_func(candidate) ||
-      strcmp(name, btf_name_by_offset(aux->btf, candidate->name_off))) continue;
+      !cell_export_name(native, function, aux->btf, id)) continue;
   if (found || !cell_callable(native, function, program, id, address)) return false;
   found = true;
  }

@@ -100,6 +100,25 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  if (!btf_type_is_int(y) && !btf_is_any_enum(y)) return false;
  return x->size == y->size;
 }
+/* A compiler-selected source entry can have a different final native name.
+ * This selects an export only; its ABI/context/proof checks remain below. */
+static bool cell_export_name(struct btf *native, const struct btf_type *target,
+ struct btf *compiled, u32 id)
+{
+ const struct btf_type *function = btf_type_by_id(compiled, id), *tag;
+ const char *name = btf_name_by_offset(native, target->name_off);
+ u32 at;
+ if (!function || !btf_type_is_func(function)) return false;
+ if (!strcmp(name, btf_name_by_offset(compiled, function->name_off))) return true;
+ for (at = 1; (tag = btf_type_by_id(compiled, at)); ++at) {
+  const char *text;
+  if (BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG || tag->type != id ||
+      btf_decl_tag(tag)->component_idx != -1) continue;
+  text = btf_name_by_offset(compiled, tag->name_off);
+  if (!strncmp(text, "component.target/", 17) && !strcmp(text + 17, name)) return true;
+ }
+ return false;
+}
 static bool cell_callable(struct btf *native, const struct btf_type *native_function,
  struct bpf_prog *parent, u32 id, unsigned long *address)
 {
@@ -121,8 +140,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      (!trusted && (!aux->func_info_aux[index].verified || aux->func_info_aux[index].unreliable))) return false;
  function = btf_type_by_id(aux->btf, id);
  if (!function || !btf_type_is_func(function) || btf_func_linkage(function) != BTF_FUNC_GLOBAL ||
-     !aux->func[index]->jited || strcmp(btf_name_by_offset(native, native_function->name_off),
-       btf_name_by_offset(aux->btf, function->name_off))) return false;
+     !aux->func[index]->jited || !cell_export_name(native, native_function, aux->btf, id)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
  result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
