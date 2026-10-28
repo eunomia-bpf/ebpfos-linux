@@ -8195,7 +8195,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	}
 	args = (const struct btf_param *)(t + 1);
 	nargs = btf_type_vlen(t);
-	if (nargs > (bpf_jit_supports_native_args() && prog->jit_requested ?
+	if (nargs > (sub->native_frame ? MAX_BPF_FUNC_ARGS :
+		     bpf_jit_supports_native_args() && prog->jit_requested ?
 		     MAX_BPF_NATIVE_REG_ARGS : MAX_BPF_FUNC_REG_ARGS)) {
 		if (!is_global)
 			return -EINVAL;
@@ -8209,7 +8210,9 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		t = btf_type_by_id(btf, t->type);
 	if (!btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
-	      btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type))) {
+	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||
+	       (sub->native_frame && sub->native_abi.result_buffer &&
+	        btf_native_scalar_storage(btf, btf_type_by_id(btf, fn_t->type)->type, 0))))) {
 		if (!is_global)
 			return -EINVAL;
 		bpf_log(log,
@@ -8506,6 +8509,10 @@ skip_pointer:
 				sub->args[i].has_scalar_max = true;
 				sub->args[i].scalar_max = scalar_max;
 			}
+			sub->args[i].arg_type = ARG_ANYTHING;
+			continue;
+		}
+		if (sub->native_frame && btf_native_scalar_storage(btf, args[i].type, 0)) {
 			sub->args[i].arg_type = ARG_ANYTHING;
 			continue;
 		}

@@ -116,6 +116,7 @@ struct bpf_reg_state {
 	 * from the pointed-to object, and is shared with all bpf_reg_states
 	 * with the same id as us.
 	 */
+	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
@@ -234,9 +235,10 @@ enum bpf_stack_slot_type {
 /* 4-byte stack slot granularity for liveness analysis */
 #define BPF_HALF_REG_SIZE	4
 #define STACK_SLOT_SZ		4
-#define STACK_SLOTS		(MAX_BPF_STACK / BPF_HALF_REG_SIZE)
+#define BPF_TRACKED_STACK (2 * MAX_BPF_STACK)
+#define STACK_SLOTS		(BPF_TRACKED_STACK / BPF_HALF_REG_SIZE)
 #define STACK_MASK_WORDS		DIV_ROUND_UP(STACK_SLOTS, 64)
-#define BPF_STACK_REG_SLOTS	(MAX_BPF_STACK / BPF_REG_SIZE)
+#define BPF_STACK_REG_SLOTS	(BPF_TRACKED_STACK / BPF_REG_SIZE)
 
 typedef struct {
 	u64 v[STACK_MASK_WORDS];
@@ -444,7 +446,7 @@ struct bpf_jmp_history_entry {
 };
 
 /* Maximum number of register states that can exist at once */
-#define BPF_ID_MAP_SIZE ((MAX_BPF_REG + MAX_BPF_STACK / BPF_REG_SIZE) * MAX_CALL_FRAMES)
+#define BPF_ID_MAP_SIZE ((MAX_BPF_REG + BPF_TRACKED_STACK / BPF_REG_SIZE) * MAX_CALL_FRAMES)
 struct bpf_verifier_state {
 	/* call stack tracking */
 	struct bpf_func_state *frame[MAX_CALL_FRAMES];
@@ -795,7 +797,7 @@ struct bpf_subprog_info {
 	bool keep_fastcall_stack: 1;
 	bool changes_pkt_data: 1;
 	bool might_sleep: 1;
-	u8 arg_cnt:3;
+	u8 arg_cnt:4;
 	/* Verification used the runner's implicit RCU critical section. */
 	bool requires_rcu: 1;
 	/* Termination follows a declared external kernel protocol. */

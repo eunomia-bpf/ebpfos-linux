@@ -79,6 +79,17 @@ static inline int bpf_native_classify(struct btf *btf, u32 id, u32 *size, u8 *wo
  }
  return 0;
 }
+static bool btf_native_scalar_storage(struct btf *btf, u32 id, u32 depth)
+{
+ const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
+ if (!t || depth > 32) return false;
+ if (btf_type_is_int(t) || btf_is_any_enum(t)) return true;
+ if (btf_type_is_array(t)) return btf_native_scalar_storage(btf, btf_array(t)->type, depth + 1);
+ if (!btf_type_is_struct(t)) return false;
+ for (u32 i = 0; i < btf_type_vlen(t); i++)
+  if (!btf_native_scalar_storage(btf, btf_members(t)[i].type, depth + 1)) return false;
+ return true;
+}
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  struct bpf_native_abi *abi)
 {

@@ -1121,8 +1121,9 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		 * subprogs are allowed to write into parent slots, but they cannot write
 		 * _any_ FP-derived pointer into it (either their own or parent's FP).
 		 */
-		for (r = BPF_REG_0; r <= BPF_REG_5; r++)
-			at_out[r] = none;
+		for (r = 0; r < MAX_BPF_REG; r++)
+			if (r == BPF_REG_0 || bpf_is_arg_reg(r))
+				at_out[r] = none;
 	} else if (class == BPF_LDX) {
 		u32 sz = bpf_size_to_bytes(BPF_SIZE(insn->code));
 		bool src_is_local_fp = can_be_local_fp(depth, insn->src_reg, src);
@@ -1299,6 +1300,19 @@ static int record_load_store_access(struct bpf_verifier_env *env,
 	struct arg_track resolved, *ptr;
 	int oi;
 
+	if (class == BPF_JMP && BPF_OP(insn->code) == BPF_EXIT) {
+		const struct bpf_subprog_info *sub = &env->subprog_info[instance->subprog];
+
+		if (sub->native_frame && sub->native_abi.result_buffer) {
+			u32 size = sub->native_abi.args[0].size;
+			s64 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) +
+				round_up(sub->native_arg_in, 8) + round_up(size, 8);
+			struct arg_track result = arg_single(depth, -end);
+
+			return record_stack_access(instance, &result, size, depth, insn_idx);
+		}
+	}
+
 	switch (class) {
 	case BPF_LDX:
 		ptr = &at[insn->src_reg];
@@ -1356,13 +1370,29 @@ static int record_call_access(struct bpf_verifier_env *env,
 	struct bpf_call_summary cs;
 	int r, err = 0, num_params = 5;
 
-	if (bpf_pseudo_call(insn))
+	if (bpf_pseudo_call(insn)) {
+		int callee = bpf_find_subprog(env, insn_idx + insn->imm + 1);
+		const struct bpf_subprog_info *sub;
+
+		if (callee < 0) return 0;
+		sub = &env->subprog_info[callee];
+		if (!sub->native_frame) return 0;
+		if (sub->native_arg_in) {
+			err = record_stack_access(instance, &at[BPF_REG_ARG_SP],
+				sub->native_arg_in, depth, insn_idx);
+			if (err) return err;
+		}
+		if (sub->native_abi.result_buffer && at[BPF_REG_1].frame >= 0)
+			return record_stack_access(instance, &at[BPF_REG_1],
+				-(s64)sub->native_abi.args[0].size, at[BPF_REG_1].frame, insn_idx);
 		return 0;
+	}
 
 	if (bpf_get_call_summary(env, insn, &cs))
 		num_params = cs.num_params;
 
-	for (r = BPF_REG_1; r < BPF_REG_1 + num_params; r++) {
+	for (int arg = 0; arg < min_t(int, num_params, MAX_BPF_NATIVE_REG_ARGS); arg++) {
+		r = bpf_arg_regno(arg);
 		int frame = at[r].frame;
 		s64 bytes;
 
@@ -1370,9 +1400,9 @@ static int record_call_access(struct bpf_verifier_env *env,
 			continue;
 
 		if (bpf_helper_call(insn)) {
-			bytes = bpf_helper_stack_access_bytes(env, insn, r - 1, insn_idx);
+			bytes = bpf_helper_stack_access_bytes(env, insn, arg, insn_idx);
 		} else if (bpf_pseudo_kfunc_call(insn)) {
-			bytes = bpf_kfunc_stack_access_bytes(env, insn, r - 1, insn_idx);
+			bytes = bpf_kfunc_stack_access_bytes(env, insn, arg, insn_idx);
 		} else {
 			for (int f = 0; f <= depth; f++) {
 				err = mark_stack_read(instance, f, insn_idx, SPIS_ALL);
@@ -1579,11 +1609,27 @@ static int compute_subprog_args(struct bpf_verifier_env *env,
 
 	/* Entry: R10 is always precisely the current frame's FP */
 	at_in[0][BPF_REG_FP] = arg_single(depth, 0);
+	if (env->subprog_info[subprog].native_frame) {
+		const struct bpf_subprog_info *sub = &env->subprog_info[subprog];
+		s64 out = sub->native_local_stack + round_up(sub->native_arg_out, 8);
+
+		at_in[0][BPF_REG_ARG_SP] = arg_single(depth, -out);
+		at_in[0][BPF_REG_ARG_FP] = arg_single(depth,
+			-(out + round_up(sub->native_arg_in, 8) + 16));
+	}
 
 	/* R1-R5: from caller or ARG_NONE for main */
 	if (callee_entry) {
-		for (r = BPF_REG_1; r <= BPF_REG_5; r++)
-			at_in[0][r] = callee_entry[r];
+		for (r = 0; r < MAX_BPF_NATIVE_REG_ARGS; r++)
+			at_in[0][bpf_arg_regno(r)] = callee_entry[bpf_arg_regno(r)];
+	}
+
+	if (env->subprog_info[subprog].native_frame && env->subprog_info[subprog].native_abi.result_buffer) {
+		const struct bpf_subprog_info *sub = &env->subprog_info[subprog];
+		s64 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) +
+			round_up(sub->native_arg_in, 8) + round_up(sub->native_abi.args[0].size, 8);
+
+		at_in[0][BPF_REG_1] = arg_single(depth, -end);
 	}
 
 	/* Entry: all stack slots are ARG_NONE */
@@ -1681,8 +1727,8 @@ err_free:
 /* Return true if any of R1-R5 is derived from a frame pointer. */
 static bool has_fp_args(struct arg_track *args)
 {
-	for (int r = BPF_REG_1; r <= BPF_REG_5; r++)
-		if (args[r].frame != ARG_NONE)
+	for (int arg = 0; arg < MAX_BPF_NATIVE_REG_ARGS; arg++)
+		if (args[bpf_arg_regno(arg)].frame != ARG_NONE)
 			return true;
 	return false;
 }
@@ -1807,7 +1853,7 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 	/* For each reachable call site in the subprog, recurse into callees */
 	for (int p = po_start; p < po_end; p++) {
 		int idx = env->cfg.insn_postorder[p];
-		struct arg_track callee_args[BPF_REG_5 + 1];
+		struct arg_track callee_args[MAX_BPF_REG];
 		struct arg_track none = { .frame = ARG_NONE };
 		struct bpf_insn *insn = &insns[idx];
 		struct func_instance *callee_instance;
@@ -1823,8 +1869,8 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 				continue;
 
 			/* Build entry args: R1-R5 from at_in at call site */
-			for (int r = BPF_REG_1; r <= BPF_REG_5; r++)
-				callee_args[r] = info[subprog].at_in[j][r];
+			for (int arg = 0; arg < MAX_BPF_NATIVE_REG_ARGS; arg++)
+				callee_args[bpf_arg_regno(arg)] = info[subprog].at_in[j][bpf_arg_regno(arg)];
 		} else if (bpf_calls_callback(env, idx)) {
 			callee = find_callback_subprog(env, insn, idx, &caller_reg, &cb_callee_reg);
 			if (callee == -2) {
@@ -1844,8 +1890,8 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 			if (callee < 0)
 				continue;
 
-			for (int r = BPF_REG_1; r <= BPF_REG_5; r++)
-				callee_args[r] = none;
+			for (int arg = 0; arg < MAX_BPF_NATIVE_REG_ARGS; arg++)
+				callee_args[bpf_arg_regno(arg)] = none;
 			callee_args[cb_callee_reg] = info[subprog].at_in[j][caller_reg];
 		} else {
 			continue;
@@ -1966,7 +2012,7 @@ struct insn_live_regs {
 };
 
 /* Bitmask with 1s for all caller saved registers */
-#define ALL_CALLER_SAVED_REGS ((1u << CALLER_SAVED_REGS) - 1)
+#define ALL_CALLER_SAVED_REGS (BIT(BPF_REG_0) | BPF_REGMASK_ARGS)
 
 /* Compute info->{use,def} fields for the instruction */
 static void compute_insn_live_regs(struct bpf_verifier_env *env,
@@ -2088,8 +2134,11 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 		case BPF_CALL:
 			def = ALL_CALLER_SAVED_REGS;
 			use = def & ~BIT(BPF_REG_0);
-			if (bpf_get_call_summary(env, insn, &cs))
-				use = GENMASK(cs.num_params, 1);
+			if (bpf_get_call_summary(env, insn, &cs)) {
+				use = 0;
+				for (unsigned int arg = 0; arg < min_t(u32, cs.num_params, MAX_BPF_NATIVE_REG_ARGS); arg++)
+					use |= BIT(bpf_arg_regno(arg));
+			}
 			if (BPF_SRC(insn->code) == BPF_X &&
 			    insn->imm >= BPF_REG_0 && insn->imm < BPF_REG_FP)
 				use |= BIT(insn->imm);
