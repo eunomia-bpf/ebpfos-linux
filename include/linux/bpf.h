@@ -38,7 +38,6 @@ struct bpf_verifier_log;
 struct perf_event;
 struct bpf_prog;
 struct bpf_prog_aux;
-struct ebpfos_prog_identity;
 struct bpf_map;
 struct bpf_arena;
 struct sock;
@@ -1952,7 +1951,6 @@ struct bpf_prog_aux {
 	u64 ebpfos_kop_capability_mask;
 	u64 ebpfos_kop_effect_mask;
 	u8 ebpfos_kop_semantic_set_sha256[SHA256_DIGEST_SIZE];
-	struct ebpfos_prog_identity *ebpfos_identity;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;

@@ -4,7 +4,7 @@
 /* x86-64 INTEGER input records occupying complete argument-register words.
  * This is cold ABI matching, not a verifier or a pointer capability rule.
  */
-static const struct btf_type *cell_record_type(const struct btf *btf, u32 id)
+static inline const struct btf_type *cell_record_type(const struct btf *btf, u32 id)
 {
  unsigned int depth;
  for (depth = 0; depth < 32; depth++) {
@@ -14,7 +14,7 @@ static const struct btf_type *cell_record_type(const struct btf *btf, u32 id)
  }
  return NULL;
 }
-static bool cell_record_tags(const struct btf *btf, const struct btf_type *target, bool parameter)
+static inline bool cell_record_tags(const struct btf *btf, const struct btf_type *target, bool parameter)
 {
  u32 id;
  for (id = 1; ; id++) {
@@ -26,7 +26,7 @@ static bool cell_record_tags(const struct btf *btf, const struct btf_type *targe
  }
  return false;
 }
-static bool cell_record_type_tags(const struct btf *btf, u32 id)
+static inline bool cell_record_type_tags(const struct btf *btf, u32 id)
 {
  unsigned int depth;
  for (depth = 0; depth < 32; depth++) {
@@ -37,7 +37,7 @@ static bool cell_record_type_tags(const struct btf *btf, u32 id)
  }
  return true;
 }
-static bool cell_record_word(const struct btf_type *t)
+static inline bool cell_record_word(const struct btf_type *t)
 {
  u32 value;
  if (!t || t->size != 8) return false;
@@ -47,7 +47,7 @@ static bool cell_record_word(const struct btf_type *t)
  return BTF_INT_BITS(value) == 64 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
-static unsigned int cell_record_scalar_bits(const struct btf_type *t)
+static inline unsigned int cell_record_scalar_bits(const struct btf_type *t)
 {
  u32 value;
  if (!t || (t->size != 1 && t->size != 2 && t->size != 4 && t->size != 8)) return 0;
@@ -58,7 +58,7 @@ static unsigned int cell_record_scalar_bits(const struct btf_type *t)
  return BTF_INT_BITS(value) == t->size * 8 && !BTF_INT_OFFSET(value) &&
         !(BTF_INT_ENCODING(value) & BTF_INT_BOOL) ? t->size * 8 : 0;
 }
-static bool cell_native_result2_type(const struct btf *btf, u32 id)
+static inline bool cell_native_result2_type(const struct btf *btf, u32 id)
 {
  const struct btf_type *t = cell_record_type(btf, id);
  const struct btf_member *m;
@@ -79,7 +79,7 @@ static bool cell_native_result2_type(const struct btf *btf, u32 id)
  * carries no field authority; pointer/floating/qualified/bitfield layouts and
  * every field contract remain excluded. This is only native ABI matching.
  */
-static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
+static inline unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
  unsigned int *bytes, unsigned int depth)
 {
  const struct btf_type *t;
@@ -122,7 +122,7 @@ static unsigned int cell_integer_record_alignment(const struct btf *btf, u32 id,
  *bytes = t->size;
  return alignment;
 }
-static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id,
+static inline unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id,
  unsigned int depth)
 {
  const struct btf_type *t = cell_record_type(btf, id);
@@ -131,7 +131,7 @@ static unsigned int cell_single_scalar_record_bits(const struct btf *btf, u32 id
      (t->size != 4 && t->size != 8)) return 0;
  return cell_integer_record_alignment(btf, id, &bytes, depth) ? bytes * 8 : 0;
 }
-static bool cell_single_scalar_record_register(const struct btf *native, u32 id,
+static inline bool cell_single_scalar_record_register(const struct btf *native, u32 id,
  const struct btf *compiled, u32 actual)
 {
  const struct btf_type *type;
@@ -144,7 +144,7 @@ static bool cell_single_scalar_record_register(const struct btf *native, u32 id,
  return type->size * 8 == bits && BTF_INT_BITS(value) == bits &&
         !BTF_INT_OFFSET(value) && !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
-static bool cell_scalar_record_inputs(struct btf *native, const struct btf_type *nf,
+static inline bool cell_scalar_record_inputs(struct btf *native, const struct btf_type *nf,
  struct btf *compiled, const struct btf_type *cf, bool result2)
 {
  const struct btf_type *np, *cp, *result;

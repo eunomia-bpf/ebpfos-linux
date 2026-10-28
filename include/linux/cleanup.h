@@ -549,11 +549,12 @@ static inline void class_##_name##_destructor(class_##_name##_t *_T) _unlock;
  * dereferenced appropriately.
  */
 #define DECLARE_LOCK_GUARD_1_ATTRS(_name, _lock, _unlock)		\
-static inline class_##_name##_t class_##_name##_constructor(lock_##_name##_t *_T) _lock;\
+static __always_inline class_##_name##_t __class_##_name##_constructor_attrs(lock_##_name##_t *_T) __no_context_analysis _lock \
+{ return class_##_name##_constructor(_T); }\
 static __always_inline void __class_##_name##_cleanup_ctx(class_##_name##_t **_T) \
 	__no_context_analysis _unlock { }
 #define WITH_LOCK_GUARD_1_ATTRS(_name, _T)				\
-	class_##_name##_constructor(_T),				\
+	__class_##_name##_constructor_attrs(_T),		\
 	*__UNIQUE_ID(unlock) __cleanup(__class_##_name##_cleanup_ctx) = (void *)(unsigned long)(_T)
 
 #define DEFINE_LOCK_GUARD_1(_name, _type, _lock, _unlock, ...)		\

@@ -109,7 +109,7 @@ static bool task_view_code_contains(void *opaque, unsigned long ip)
        within_module_mem_type(ip, view->bindings[i].module, MOD_TEXT))) return true;
  return false;
 }
-static void task_view_release_work(struct work_struct *work)
+static inline void task_view_release_work(struct work_struct *work)
 {
  struct task_view *view = container_of(to_delayed_work(work), struct task_view, release_work);
  if (!ebpfos_code_quiescent(task_view_code_contains, view)) task_view_free(view);
@@ -161,7 +161,7 @@ void ebpfos_task_view_free(struct task_struct *task)
  * The source descriptor and loaded export supply the complete checked ABI.
  * A native bpf control entry guarantees self-selection has no old-view frame
  * beneath it. Each other task retains its own lease through sleeping calls. */
-static int task_view_slot(struct btf *native, u32 id, unsigned long *used)
+static inline int task_view_slot(struct btf *native, u32 id, unsigned long *used)
 {
  const struct btf_type *function = btf_type_by_id(native, id);
  unsigned long address;

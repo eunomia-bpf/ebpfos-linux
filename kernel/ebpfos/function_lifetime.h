@@ -13,7 +13,7 @@
 #include <linux/stacktrace.h>
 /* A grace period alone does not drain sleeping native/BPF frames. Both entry
  * journals and revoked task views use this same reliable stack check. */
-static bool ebpfos_program_contains(struct bpf_prog *program, unsigned long ip)
+static inline bool ebpfos_program_contains(struct bpf_prog *program, unsigned long ip)
 {
  unsigned int j;
  if (!program) return false;
@@ -33,13 +33,13 @@ struct ebpfos_stack_check {
  struct ebpfos_running_stack *running;
  bool found;
 };
-static bool ebpfos_stack_address(void *opaque, unsigned long ip)
+static inline bool ebpfos_stack_address(void *opaque, unsigned long ip)
 {
  struct ebpfos_stack_check *check = opaque;
  if (check->contains(check->owner, ip)) {check->found = true;return false;}
  return true;
 }
-static int ebpfos_stack_walk(struct task_struct *task, struct ebpfos_stack_check *check)
+static inline int ebpfos_stack_walk(struct task_struct *task, struct ebpfos_stack_check *check)
 {
  int error;
  if (!try_get_task_stack(task)) return 0;
@@ -48,7 +48,7 @@ static int ebpfos_stack_walk(struct task_struct *task, struct ebpfos_stack_check
  put_task_stack(task);
  return check->found ? -EADDRINUSE : error ? -EBUSY : 0;
 }
-static void ebpfos_stack_running(void *opaque)
+static inline void ebpfos_stack_running(void *opaque)
 {
  struct ebpfos_stack_check check = *(struct ebpfos_stack_check *)opaque;
  struct ebpfos_running_stack *running = &check.running[smp_processor_id()];
@@ -56,7 +56,7 @@ static void ebpfos_stack_running(void *opaque)
  running->task = current;
  running->error = ebpfos_stack_walk(current, &check);
 }
-static int ebpfos_stack_task(struct task_struct *task, void *opaque)
+static inline int ebpfos_stack_task(struct task_struct *task, void *opaque)
 {
  struct ebpfos_stack_check *check = opaque;
  int cpu;
@@ -73,7 +73,7 @@ static int ebpfos_stack_task(struct task_struct *task, void *opaque)
 /* A bare function pointer can outlive the caller's stack. Until an owner
  * holds a separate graph lease, address-taken BPF closures cannot be retired
  * by a stack scan. Synchronous callbacks are conservatively retained too. */
-static bool ebpfos_program_addresses(struct bpf_prog *program)
+static inline bool ebpfos_program_addresses(struct bpf_prog *program)
 {
  unsigned int i, j;
  if (!program) return false;
@@ -87,7 +87,7 @@ static bool ebpfos_program_addresses(struct bpf_prog *program)
  }
  return false;
 }
-static int ebpfos_code_quiescent(bool (*contains)(void *, unsigned long), void *owner)
+static inline int ebpfos_code_quiescent(bool (*contains)(void *, unsigned long), void *owner)
 {
  struct ebpfos_stack_check check = { .contains = contains, .owner = owner };
  struct task_struct *group, *task;

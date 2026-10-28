@@ -29,28 +29,6 @@
 #include <asm/sync_core.h>
 #include <asm/tsc.h>
 
-/* C-callable boundaries for Linux's original checked dual-result macro.
- * The .S entries keep their RAX/RDX convention; the macro performs that call.
- */
-#define RETAIN_GET_USER(width, type) \
-	noinline __used int ebpfos_native_get_user_##width(const type __user *source, type *value) \
-	{ return do_get_user_call(get_user, *value, source); }
-RETAIN_GET_USER(1, u8)
-RETAIN_GET_USER(2, u16)
-RETAIN_GET_USER(4, u32)
-RETAIN_GET_USER(8, u64)
-#undef RETAIN_GET_USER
-
-/* Keep Linux's checked CX/AX store macro behind its original C types. */
-#define RETAIN_PUT_USER(width, type) \
-	noinline __used int ebpfos_native_put_user_##width(type value, type __user *destination) \
-	{ return do_put_user_call(put_user, value, destination); }
-RETAIN_PUT_USER(1, u8)
-RETAIN_PUT_USER(2, u16)
-RETAIN_PUT_USER(4, u32)
-RETAIN_PUT_USER(8, u64)
-#undef RETAIN_PUT_USER
-
 #define NATIVE_INLINE_FUNCTION(source, native, flags) \
 	static __typeof__(&source) const __used ebpfos_native_inline_##native = &source;
 /* Retain a source-only assembly declaration as a typed record member. */

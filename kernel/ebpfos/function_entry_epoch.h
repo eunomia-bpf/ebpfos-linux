@@ -59,13 +59,13 @@ static int entry_epoch_update(void *opaque)
  int error = ebpfos_code_stopped(entry_epoch_contains, call->set);
  if (error) return error;
  call->called = true;
- return ((int (*)(u32))call->program->bpf_func)(BPF_ENTRY_EPOCH_APPLY);
+ return ((int (*)(u32))(void *)call->program->bpf_func)(BPF_ENTRY_EPOCH_APPLY);
 }
 static void entry_epoch_undo(void *opaque)
 {
  struct entry_epoch_call *call = opaque;
  if (call->called) call->undo_error =
-  ((int (*)(u32))call->program->bpf_func)(BPF_ENTRY_EPOCH_UNDO);
+  ((int (*)(u32))(void *)call->program->bpf_func)(BPF_ENTRY_EPOCH_UNDO);
 }
 static int entry_epoch_apply(struct entry_set *set, unsigned int from,
  unsigned int to, struct bpf_prog *program)

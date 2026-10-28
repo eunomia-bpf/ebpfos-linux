@@ -3143,14 +3143,15 @@ static inline class_##name##_t class_##name##_constructor(type *lock, type *lock
 { class_##name##_t _t = { .lock = lock, .lock2 = lock2 }, *_T = &_t;			\
   _lock; return _t; }
 #define DECLARE_LOCK_GUARD_2_ATTRS(_name, _lock, _unlock1, _unlock2)			\
-static inline class_##_name##_t class_##_name##_constructor(lock_##_name##_t *_T1,	\
-							    lock_##_name##_t *_T2) _lock; \
+static __always_inline class_##_name##_t __class_##_name##_constructor_attrs(lock_##_name##_t *_T1, \
+	lock_##_name##_t *_T2) __no_context_analysis _lock \
+{ return class_##_name##_constructor(_T1, _T2); } \
 static __always_inline void __class_##_name##_cleanup_ctx1(class_##_name##_t **_T1)	\
 	__no_context_analysis _unlock1 { }						\
 static __always_inline void __class_##_name##_cleanup_ctx2(class_##_name##_t **_T2)	\
 	__no_context_analysis _unlock2 { }
 #define WITH_LOCK_GUARD_2_ATTRS(_name, _T1, _T2)					\
-	class_##_name##_constructor(_T1, _T2),						\
+	__class_##_name##_constructor_attrs(_T1, _T2),						\
 	*__UNIQUE_ID(unlock1) __cleanup(__class_##_name##_cleanup_ctx1) = (void *)(_T1),\
 	*__UNIQUE_ID(unlock2) __cleanup(__class_##_name##_cleanup_ctx2) = (void *)(_T2)
 
