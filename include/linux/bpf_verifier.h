@@ -8,6 +8,7 @@
 #include <linux/btf.h> /* for struct btf and btf_id() */
 #include <linux/filter.h> /* for MAX_BPF_STACK */
 #include <linux/tnum.h>
+#include <linux/bitmap.h>
 
 /* Maximum variable offset umax_value permitted when resolving memory accesses.
  * In practice this is far bigger than any realistic pointer offset; this limit
@@ -232,38 +233,62 @@ enum bpf_stack_slot_type {
 /* 4-byte stack slot granularity for liveness analysis */
 #define BPF_HALF_REG_SIZE	4
 #define STACK_SLOT_SZ		4
-#define STACK_SLOTS		(MAX_BPF_STACK / BPF_HALF_REG_SIZE)	/* 128 */
+#define STACK_SLOTS		(MAX_BPF_STACK / BPF_HALF_REG_SIZE)
+#define STACK_MASK_WORDS		DIV_ROUND_UP(STACK_SLOTS, 64)
+#define BPF_STACK_REG_SLOTS	(MAX_BPF_STACK / BPF_REG_SIZE)
 
 typedef struct {
-	u64 v[2];
+	u64 v[STACK_MASK_WORDS];
 } spis_t;
 
 #define SPIS_ZERO	((spis_t){})
-#define SPIS_ALL	((spis_t){{ U64_MAX, U64_MAX }})
+#define SPIS_ALL	((spis_t){{ [0 ... STACK_MASK_WORDS - 1] = U64_MAX }})
 
 static inline bool spis_is_zero(spis_t s)
 {
-	return s.v[0] == 0 && s.v[1] == 0;
+	unsigned int i;
+
+	for (i = 0; i < STACK_MASK_WORDS; i++)
+		if (s.v[i])
+			return false;
+	return true;
 }
 
 static inline bool spis_equal(spis_t a, spis_t b)
 {
-	return a.v[0] == b.v[0] && a.v[1] == b.v[1];
+	unsigned int i;
+
+	for (i = 0; i < STACK_MASK_WORDS; i++)
+		if (a.v[i] != b.v[i])
+			return false;
+	return true;
 }
 
 static inline spis_t spis_or(spis_t a, spis_t b)
 {
-	return (spis_t){{ a.v[0] | b.v[0], a.v[1] | b.v[1] }};
+	unsigned int i;
+
+	for (i = 0; i < STACK_MASK_WORDS; i++)
+		a.v[i] |= b.v[i];
+	return a;
 }
 
 static inline spis_t spis_and(spis_t a, spis_t b)
 {
-	return (spis_t){{ a.v[0] & b.v[0], a.v[1] & b.v[1] }};
+	unsigned int i;
+
+	for (i = 0; i < STACK_MASK_WORDS; i++)
+		a.v[i] &= b.v[i];
+	return a;
 }
 
 static inline spis_t spis_not(spis_t s)
 {
-	return (spis_t){{ ~s.v[0], ~s.v[1] }};
+	unsigned int i;
+
+	for (i = 0; i < STACK_MASK_WORDS; i++)
+		s.v[i] = ~s.v[i];
+	return s;
 }
 
 static inline bool spis_test_bit(spis_t s, u32 slot)
@@ -380,38 +405,41 @@ struct bpf_func_state {
 
 #define MAX_CALL_FRAMES 8
 
+#define INSN_F_SPI_BITS ilog2(BPF_STACK_REG_SLOTS)
+
 /* instruction history flags, used in bpf_jmp_history_entry.flags field */
 enum {
 	/* instruction references stack slot through PTR_TO_STACK register;
 	 * we also store stack's frame number in lower 3 bits (MAX_CALL_FRAMES is 8)
-	 * and accessed stack slot's index in next 6 bits (MAX_BPF_STACK is 512,
-	 * 8 bytes per slot, so slot index (spi) is [0, 63])
+	 * and the accessed stack slot's index above them. Each slot is 8 bytes.
 	 */
 	INSN_F_FRAMENO_MASK = 0x7, /* 3 bits */
 
-	INSN_F_SPI_MASK = 0x3f, /* 6 bits */
+	INSN_F_SPI_MASK = BPF_STACK_REG_SLOTS - 1,
 	INSN_F_SPI_SHIFT = 3, /* shifted 3 bits to the left */
 
-	INSN_F_STACK_ACCESS = BIT(9),
+	INSN_F_STACK_ACCESS = BIT(3 + INSN_F_SPI_BITS),
 
-	INSN_F_DST_REG_STACK = BIT(10), /* dst_reg is PTR_TO_STACK */
-	INSN_F_SRC_REG_STACK = BIT(11), /* src_reg is PTR_TO_STACK */
-	/* total 12 bits are used now. */
+	INSN_F_DST_REG_STACK = BIT(4 + INSN_F_SPI_BITS),
+	INSN_F_SRC_REG_STACK = BIT(5 + INSN_F_SPI_BITS),
 };
 
 static_assert(INSN_F_FRAMENO_MASK + 1 >= MAX_CALL_FRAMES);
 static_assert(INSN_F_SPI_MASK + 1 >= MAX_BPF_STACK / 8);
 
+struct bpf_linked_regs {
+	u64 lo, hi;
+};
+
 struct bpf_jmp_history_entry {
 	u32 idx;
-	/* insn idx can't be bigger than 1 million */
-	u32 prev_idx : 20;
+	u32 prev_idx;
 	/* special INSN_F_xxx flags */
-	u32 flags : 12;
+	u32 flags;
 	/* additional registers that need precision tracking when this
-	 * jump is backtracked, vector of six 10-bit records
+	 * jump is backtracked, with full-width stack slot indexes
 	 */
-	u64 linked_regs;
+	struct bpf_linked_regs linked_regs;
 };
 
 /* Maximum number of register states that can exist at once */
@@ -782,7 +810,7 @@ struct backtrack_state {
 	struct bpf_verifier_env *env;
 	u32 frame;
 	u32 reg_masks[MAX_CALL_FRAMES];
-	u64 stack_masks[MAX_CALL_FRAMES];
+	unsigned long stack_masks[MAX_CALL_FRAMES][BITS_TO_LONGS(BPF_STACK_REG_SLOTS)];
 };
 
 struct bpf_id_pair {
@@ -1143,7 +1171,7 @@ struct list_head *bpf_explored_state(struct bpf_verifier_env *env, int idx);
 void bpf_free_verifier_state(struct bpf_verifier_state *state, bool free_self);
 void bpf_free_backedges(struct bpf_scc_visit *visit);
 int bpf_push_jmp_history(struct bpf_verifier_env *env, struct bpf_verifier_state *cur,
-			 int insn_flags, u64 linked_regs);
+			 int insn_flags, struct bpf_linked_regs linked_regs);
 void bpf_bt_sync_linked_regs(struct backtrack_state *bt, struct bpf_jmp_history_entry *hist);
 void bpf_mark_reg_not_init(const struct bpf_verifier_env *env,
 			   struct bpf_reg_state *reg);
@@ -1203,7 +1231,7 @@ static inline void bpf_bt_set_frame_reg(struct backtrack_state *bt, u32 frame, u
 
 static inline void bpf_bt_set_frame_slot(struct backtrack_state *bt, u32 frame, u32 slot)
 {
-	bt->stack_masks[frame] |= 1ull << slot;
+	__set_bit(slot, bt->stack_masks[frame]);
 }
 
 static inline bool bt_is_frame_reg_set(struct backtrack_state *bt, u32 frame, u32 reg)
@@ -1213,7 +1241,7 @@ static inline bool bt_is_frame_reg_set(struct backtrack_state *bt, u32 frame, u3
 
 static inline bool bt_is_frame_slot_set(struct backtrack_state *bt, u32 frame, u32 slot)
 {
-	return bt->stack_masks[frame] & (1ull << slot);
+	return test_bit(slot, bt->stack_masks[frame]);
 }
 
 bool bpf_map_is_rdonly(const struct bpf_map *map);
@@ -1365,7 +1393,7 @@ u32 bpf_vlog_alignment(u32 pos);
 struct bpf_subprog_info *bpf_find_containing_subprog(struct bpf_verifier_env *env, int off);
 int bpf_jmp_offset(struct bpf_insn *insn);
 struct bpf_iarray *bpf_insn_successors(struct bpf_verifier_env *env, u32 idx);
-void bpf_fmt_stack_mask(char *buf, ssize_t buf_sz, u64 stack_mask);
+void bpf_fmt_stack_mask(char *buf, ssize_t buf_sz, const unsigned long *stack_mask);
 bool bpf_subprog_is_global(const struct bpf_verifier_env *env, int subprog);
 
 int bpf_find_subprog(struct bpf_verifier_env *env, int off);
@@ -1427,7 +1455,7 @@ struct bpf_kfunc_call_arg_meta {
 		u32 ref_obj_id;
 	} initialized_dynptr;
 	struct {
-		u8 spi;
+		u16 spi;
 		u8 frameno;
 	} iter;
 	struct bpf_map_desc map;

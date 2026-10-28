@@ -66,6 +66,17 @@ config BPF_JIT_ALWAYS_ON
 	  is permanently set to 1 and setting any other value than that will
 	  return failure.
 
+config BPF_STACK_SHIFT
+	int "Maximum BPF stack size as log2(bytes)"
+	depends on X86_64 && BPF_JIT_ALWAYS_ON
+	range 9 13
+	default 13
+	help
+	  Set the maximum frame and combined BPF call-stack size. Values from
+	  9 to 13 select 512 bytes through 8 KiB. Large local objects retain
+	  their original stack layout. This requires the x86-64 JIT; it does
+	  not allocate per-CPU storage or add checks to generated programs.
+
 config BPF_JIT_DEFAULT_ON
 	def_bool ARCH_WANT_DEFAULT_BPF_JIT || BPF_JIT_ALWAYS_ON
 	depends on HAVE_EBPF_JIT && BPF_JIT

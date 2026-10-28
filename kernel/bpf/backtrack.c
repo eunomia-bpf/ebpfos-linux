@@ -9,7 +9,7 @@
 
 /* for any branch, call, exit record the history of jmps in the given state */
 int bpf_push_jmp_history(struct bpf_verifier_env *env, struct bpf_verifier_state *cur,
-			 int insn_flags, u64 linked_regs)
+			 int insn_flags, struct bpf_linked_regs linked_regs)
 {
 	u32 cnt = cur->jmp_history_cnt;
 	struct bpf_jmp_history_entry *p;
@@ -25,9 +25,11 @@ int bpf_push_jmp_history(struct bpf_verifier_env *env, struct bpf_verifier_state
 				env, "insn history: insn_idx %d cur flags %x new flags %x",
 				env->insn_idx, env->cur_hist_ent->flags, insn_flags);
 		env->cur_hist_ent->flags |= insn_flags;
-		verifier_bug_if(env->cur_hist_ent->linked_regs != 0, env,
-				"insn history: insn_idx %d linked_regs: %#llx",
-				env->insn_idx, env->cur_hist_ent->linked_regs);
+		verifier_bug_if(env->cur_hist_ent->linked_regs.lo ||
+				env->cur_hist_ent->linked_regs.hi, env,
+				"insn history: insn_idx %d linked_regs: %#llx/%#llx",
+				env->insn_idx, env->cur_hist_ent->linked_regs.lo,
+				env->cur_hist_ent->linked_regs.hi);
 		env->cur_hist_ent->linked_regs = linked_regs;
 		return 0;
 	}
@@ -131,13 +133,13 @@ static inline void bt_reset(struct backtrack_state *bt)
 
 static inline u32 bt_empty(struct backtrack_state *bt)
 {
-	u64 mask = 0;
 	int i;
 
 	for (i = 0; i <= bt->frame; i++)
-		mask |= bt->reg_masks[i] | bt->stack_masks[i];
-
-	return mask == 0;
+		if (bt->reg_masks[i] ||
+		    !bitmap_empty(bt->stack_masks[i], BPF_STACK_REG_SLOTS))
+			return false;
+	return true;
 }
 
 static inline int bt_subprog_enter(struct backtrack_state *bt)
@@ -177,7 +179,7 @@ static inline void bt_clear_reg(struct backtrack_state *bt, u32 reg)
 
 static inline void bt_clear_frame_slot(struct backtrack_state *bt, u32 frame, u32 slot)
 {
-	bt->stack_masks[frame] &= ~(1ull << slot);
+	__clear_bit(slot, bt->stack_masks[frame]);
 }
 
 static inline u32 bt_frame_reg_mask(struct backtrack_state *bt, u32 frame)
@@ -190,12 +192,12 @@ static inline u32 bt_reg_mask(struct backtrack_state *bt)
 	return bt->reg_masks[bt->frame];
 }
 
-static inline u64 bt_frame_stack_mask(struct backtrack_state *bt, u32 frame)
+static inline unsigned long *bt_frame_stack_mask(struct backtrack_state *bt, u32 frame)
 {
 	return bt->stack_masks[frame];
 }
 
-static inline u64 bt_stack_mask(struct backtrack_state *bt)
+static inline unsigned long *bt_stack_mask(struct backtrack_state *bt)
 {
 	return bt->stack_masks[bt->frame];
 }
@@ -226,16 +228,14 @@ static void fmt_reg_mask(char *buf, ssize_t buf_sz, u32 reg_mask)
 	}
 }
 /* format stack slots bitmask, e.g., "-8,-24,-40" for 0x15 mask */
-void bpf_fmt_stack_mask(char *buf, ssize_t buf_sz, u64 stack_mask)
+void bpf_fmt_stack_mask(char *buf, ssize_t buf_sz, const unsigned long *stack_mask)
 {
-	DECLARE_BITMAP(mask, 64);
 	bool first = true;
 	int i, n;
 
 	buf[0] = '\0';
 
-	bitmap_from_u64(mask, stack_mask);
-	for_each_set_bit(i, mask, 64) {
+	for_each_set_bit(i, stack_mask, BPF_STACK_REG_SLOTS) {
 		n = snprintf(buf, buf_sz, "%s%d", first ? "" : ",", -(i + 1) * 8);
 		first = false;
 		buf += n;
@@ -418,10 +418,10 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 				/* we are now tracking register spills correctly,
 				 * so any instance of leftover slots is a bug
 				 */
-				if (bt_stack_mask(bt) != 0) {
+				if (!bitmap_empty(bt_stack_mask(bt), BPF_STACK_REG_SLOTS)) {
 					verifier_bug(env,
-						     "static subprog leftover stack slots %llx",
-						     bt_stack_mask(bt));
+						     "static subprog leftover stack slots %*pb",
+						     BPF_STACK_REG_SLOTS, bt_stack_mask(bt));
 					return -EFAULT;
 				}
 				/* propagate r1-r5 to the caller */
@@ -448,9 +448,9 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 					     bt_reg_mask(bt));
 				return -EFAULT;
 			}
-			if (bt_stack_mask(bt) != 0) {
-				verifier_bug(env, "callback leftover stack slots %llx",
-					     bt_stack_mask(bt));
+			if (!bitmap_empty(bt_stack_mask(bt), BPF_STACK_REG_SLOTS)) {
+				verifier_bug(env, "callback leftover stack slots %*pb",
+					     BPF_STACK_REG_SLOTS, bt_stack_mask(bt));
 				return -EFAULT;
 			}
 			/* clear r1-r5 in callback subprog's mask */
@@ -806,7 +806,7 @@ int bpf_mark_chain_precision(struct bpf_verifier_env *env,
 			if (st->curframe == 0 &&
 			    st->frame[0]->subprogno > 0 &&
 			    st->frame[0]->callsite == BPF_MAIN_FUNC &&
-			    bt_stack_mask(bt) == 0 &&
+			    bitmap_empty(bt_stack_mask(bt), BPF_STACK_REG_SLOTS) &&
 			    (bt_reg_mask(bt) & ~BPF_REGMASK_ARGS) == 0) {
 				bitmap_from_u64(mask, bt_reg_mask(bt));
 				for_each_set_bit(i, mask, 32) {
@@ -820,8 +820,9 @@ int bpf_mark_chain_precision(struct bpf_verifier_env *env,
 				return 0;
 			}
 
-			verifier_bug(env, "backtracking func entry subprog %d reg_mask %x stack_mask %llx",
-				     st->frame[0]->subprogno, bt_reg_mask(bt), bt_stack_mask(bt));
+			verifier_bug(env, "backtracking func entry subprog %d reg_mask %x stack_mask %*pb",
+				     st->frame[0]->subprogno, bt_reg_mask(bt),
+				     BPF_STACK_REG_SLOTS, bt_stack_mask(bt));
 			return -EFAULT;
 		}
 
@@ -882,8 +883,7 @@ int bpf_mark_chain_precision(struct bpf_verifier_env *env,
 				}
 			}
 
-			bitmap_from_u64(mask, bt_frame_stack_mask(bt, fr));
-			for_each_set_bit(i, mask, 64) {
+			for_each_set_bit(i, bt_frame_stack_mask(bt, fr), BPF_STACK_REG_SLOTS) {
 				if (verifier_bug_if(i >= func->allocated_stack / BPF_REG_SIZE,
 						    env, "stack slot %d, total slots %d",
 						    i, func->allocated_stack / BPF_REG_SIZE))

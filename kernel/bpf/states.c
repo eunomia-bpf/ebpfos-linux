@@ -1394,7 +1394,7 @@ hit:
 			 */
 			err = 0;
 			if (bpf_is_jmp_point(env, env->insn_idx))
-				err = bpf_push_jmp_history(env, cur, 0, 0);
+				err = bpf_push_jmp_history(env, cur, 0, (struct bpf_linked_regs){});
 			err = err ? : propagate_precision(env, &sl->state, cur, NULL);
 			if (err)
 				return err;

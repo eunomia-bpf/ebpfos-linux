@@ -4122,7 +4122,7 @@ static void mark_indirect_target(struct bpf_verifier_env *env, int idx)
 }
 
 #define LR_FRAMENO_BITS	3
-#define LR_SPI_BITS	6
+#define LR_SPI_BITS	INSN_F_SPI_BITS
 #define LR_ENTRY_BITS	(LR_SPI_BITS + LR_FRAMENO_BITS + 1)
 #define LR_SIZE_BITS	4
 #define LR_FRAMENO_MASK	((1ull << LR_FRAMENO_BITS) - 1)
@@ -4132,11 +4132,13 @@ static void mark_indirect_target(struct bpf_verifier_env *env, int idx)
 #define LR_IS_REG_OFF	(LR_SPI_BITS + LR_FRAMENO_BITS)
 #define LINKED_REGS_MAX	6
 
+static_assert(LR_ENTRY_BITS * LINKED_REGS_MAX + LR_SIZE_BITS <= 128);
+
 struct linked_reg {
 	u8 frameno;
 	union {
-		u8 spi;
-		u8 regno;
+		u16 spi;
+		u16 regno;
 	};
 	bool is_reg;
 };
@@ -4154,48 +4156,53 @@ static struct linked_reg *linked_regs_push(struct linked_regs *s)
 	return NULL;
 }
 
-/* Use u64 as a vector of 6 10-bit values, use first 4-bits to track
- * number of elements currently in stack.
- * Pack one history entry for linked registers as 10 bits in the following format:
- * - 3-bits frameno
- * - 6-bits spi_or_reg
- * - 1-bit  is_reg
+/* Six records retain the full configured slot index. The low four bits
+ * contain the count; the 512-byte configuration keeps its original encoding.
  */
-static u64 linked_regs_pack(struct linked_regs *s)
+static struct bpf_linked_regs linked_regs_pack(struct linked_regs *s)
 {
-	u64 val = 0;
+	struct bpf_linked_regs val = { .lo = s->cnt };
 	int i;
 
 	for (i = 0; i < s->cnt; ++i) {
 		struct linked_reg *e = &s->entries[i];
-		u64 tmp = 0;
+		unsigned int shift = LR_SIZE_BITS + (s->cnt - 1 - i) * LR_ENTRY_BITS;
+		u64 tmp;
 
-		tmp |= e->frameno;
-		tmp |= e->spi << LR_SPI_OFF;
-		tmp |= (e->is_reg ? 1 : 0) << LR_IS_REG_OFF;
-
-		val <<= LR_ENTRY_BITS;
-		val |= tmp;
+		tmp = e->frameno | ((u64)e->spi << LR_SPI_OFF) |
+		      ((u64)e->is_reg << LR_IS_REG_OFF);
+		if (shift < 64) {
+			val.lo |= tmp << shift;
+			if (shift > 64 - LR_ENTRY_BITS)
+				val.hi |= tmp >> (64 - shift);
+		} else {
+			val.hi |= tmp << (shift - 64);
+		}
 	}
-	val <<= LR_SIZE_BITS;
-	val |= s->cnt;
 	return val;
 }
 
-static void linked_regs_unpack(u64 val, struct linked_regs *s)
+static void linked_regs_unpack(struct bpf_linked_regs val, struct linked_regs *s)
 {
 	int i;
 
-	s->cnt = val & LR_SIZE_MASK;
-	val >>= LR_SIZE_BITS;
+	s->cnt = val.lo & LR_SIZE_MASK;
 
 	for (i = 0; i < s->cnt; ++i) {
 		struct linked_reg *e = &s->entries[i];
+		unsigned int shift = LR_SIZE_BITS + i * LR_ENTRY_BITS;
+		u64 tmp;
 
-		e->frameno =  val & LR_FRAMENO_MASK;
-		e->spi     = (val >> LR_SPI_OFF) & LR_SPI_MASK;
-		e->is_reg  = (val >> LR_IS_REG_OFF) & 0x1;
-		val >>= LR_ENTRY_BITS;
+		if (shift < 64) {
+			tmp = val.lo >> shift;
+			if (shift > 64 - LR_ENTRY_BITS)
+				tmp |= val.hi << (64 - shift);
+		} else {
+			tmp = val.hi >> (shift - 64);
+		}
+		e->frameno = tmp & LR_FRAMENO_MASK;
+		e->spi = (tmp >> LR_SPI_OFF) & LR_SPI_MASK;
+		e->is_reg = (tmp >> LR_IS_REG_OFF) & 1;
 	}
 }
 
@@ -4236,7 +4243,7 @@ void bpf_bt_sync_linked_regs(struct backtrack_state *bt, struct bpf_jmp_history_
 	bool some_precise = false;
 	int i;
 
-	if (!hist || hist->linked_regs == 0)
+	if (!hist || (!hist->linked_regs.lo && !hist->linked_regs.hi))
 		return;
 
 	linked_regs_unpack(hist->linked_regs, &linked_regs);
@@ -4535,7 +4542,7 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 	}
 
 	if (insn_flags)
-		return bpf_push_jmp_history(env, env->cur_state, insn_flags, 0);
+		return bpf_push_jmp_history(env, env->cur_state, insn_flags, (struct bpf_linked_regs){});
 	return 0;
 }
 
@@ -4863,7 +4870,7 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 		insn_flags = 0; /* we are not restoring spilled register */
 	}
 	if (insn_flags)
-		return bpf_push_jmp_history(env, env->cur_state, insn_flags, 0);
+		return bpf_push_jmp_history(env, env->cur_state, insn_flags, (struct bpf_linked_regs){});
 	return 0;
 }
 
@@ -17988,7 +17995,7 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 	}
 
 	if (insn_flags) {
-		err = bpf_push_jmp_history(env, this_branch, insn_flags, 0);
+		err = bpf_push_jmp_history(env, this_branch, insn_flags, (struct bpf_linked_regs){});
 		if (err)
 			return err;
 	}
@@ -19356,7 +19363,7 @@ static int do_check(struct bpf_verifier_env *env)
 		}
 
 		if (bpf_is_jmp_point(env, env->insn_idx)) {
-			err = bpf_push_jmp_history(env, state, 0, 0);
+			err = bpf_push_jmp_history(env, state, 0, (struct bpf_linked_regs){});
 			if (err)
 				return err;
 		}
