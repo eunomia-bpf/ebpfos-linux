@@ -21653,6 +21653,57 @@ int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	return 0;
 }
 
+/* Trusted kernel code still needs compiler frame sizes and native call/JIT
+ * preparation. No register, pointer, lifetime or termination fact is proved.
+ * In particular, an unvisited instruction is not dead code in this tier.
+ */
+static int prepare_trusted_kernel(struct bpf_verifier_env *env,
+				 union bpf_attr *attr, bpfptr_t uattr)
+{
+	bpfptr_t sizes = make_bpfptr(attr->trusted_stack_sizes, uattr.is_kernel);
+	u32 depth;
+	int i;
+
+	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux))
+		return -EOPNOTSUPP;
+	if (!attr->trusted_stack_sizes ||
+	    attr->trusted_stack_size_cnt != env->subprog_cnt)
+		return -EINVAL;
+	for (i = 0; i < env->subprog_cnt; i++) {
+		if (copy_from_bpfptr_offset(&depth, sizes, i * sizeof(depth), sizeof(depth)))
+			return -EFAULT;
+		if (depth > MAX_BPF_STACK)
+			return -E2BIG;
+		env->subprog_info[i].stack_depth = depth;
+	}
+	env->prog->aux->stack_depth = env->subprog_info[0].stack_depth;
+	for (i = 0; i < env->prog->len; i++) {
+		const struct bpf_insn *insn = &env->prog->insnsi[i];
+
+		env->insn_aux_data[i].seen = 1;
+		/* Fixups dereference the helper descriptor normally checked by
+		 * check_helper_call(). This is backend input validation only.
+		 */
+		if (insn->code == (BPF_JMP | BPF_CALL) && !insn->src_reg) {
+			if (!env->ops->get_func_proto ||
+			    !env->ops->get_func_proto(insn->imm, env->prog))
+				return -EINVAL;
+			/* No constant map or key was proved. Retain the ordinary
+			 * helper call rather than specializing against a NULL map.
+			 */
+			bpf_map_ptr_store(&env->insn_aux_data[i], NULL, false, true);
+			bpf_map_key_store(&env->insn_aux_data[i], BPF_MAP_KEY_POISON);
+		}
+		if (insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
+			if (!bpf_jit_supports_callx())
+				return -EOPNOTSUPP;
+			env->prog->aux->has_callx = true;
+		}
+	}
+	verbose(env, "trusted kernel tier: safety proof skipped\n");
+	return 0;
+}
+
 int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u32 uattr_size)
 {
 	u64 start_time = ktime_get_ns();
@@ -21800,6 +21851,11 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	ret = check_attach_btf_id(env);
 	if (ret)
 		goto skip_full_check;
+	if (env->prog->aux->trusted_kernel) {
+		ret = sort_subprogs_topo(env);
+		ret = ret ?: prepare_trusted_kernel(env, attr, uattr);
+		goto skip_full_check;
+	}
 
 	ret = bpf_compute_const_regs(env);
 	if (ret < 0)
@@ -21853,24 +21909,25 @@ skip_full_check:
 	/* might decrease stack depth, keep it before passes that
 	 * allocate additional slots.
 	 */
-	if (ret == 0)
+	if (ret == 0 && !env->prog->aux->trusted_kernel)
 		ret = bpf_remove_fastcall_spills_fills(env);
 
 	if (ret == 0)
 		ret = check_max_stack_depth(env);
 
 	/* instruction rewrites happen after this point */
-	if (ret == 0)
+	if (ret == 0 && !env->prog->aux->trusted_kernel)
 		ret = bpf_optimize_bpf_loop(env);
 
-	if (is_priv) {
+	/* No safety proof supplied dead-branch facts for trusted code. */
+	if (is_priv && !env->prog->aux->trusted_kernel) {
 		if (ret == 0)
 			bpf_opt_hard_wire_dead_code_branches(env);
 		if (ret == 0)
 			ret = bpf_opt_remove_dead_code(env);
 		if (ret == 0)
 			ret = bpf_opt_remove_nops(env);
-	} else {
+	} else if (!env->prog->aux->trusted_kernel) {
 		if (ret == 0)
 			sanitize_dead_code(env);
 	}
@@ -21885,7 +21942,8 @@ skip_full_check:
 	/* do 32-bit optimization after insn patching has done so those patched
 	 * insns could be handled correctly.
 	 */
-	if (ret == 0 && !bpf_prog_is_offloaded(env->prog->aux)) {
+	if (ret == 0 && !env->prog->aux->trusted_kernel &&
+	    !bpf_prog_is_offloaded(env->prog->aux)) {
 		ret = bpf_opt_subreg_zext_lo32_rnd_hi32(env, attr);
 		env->prog->aux->verifier_zext = bpf_jit_needs_zext() ? !ret
 								     : false;

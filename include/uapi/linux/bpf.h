@@ -1326,6 +1326,15 @@ enum bpf_perf_event_type {
 /* Restrict a sleepable syscall program to the typed component-call ABI. */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
+/* CAP_SYS_ADMIN: trust kernel-source bytecode, retaining JIT preparation. */
+#define BPF_F_TRUSTED_KERNEL	(1U << 11)
+
+enum bpf_prog_tier {
+	BPF_PROG_TIER_VERIFIED,
+	BPF_PROG_TIER_TRUSTED,
+	BPF_PROG_TIER_NATIVE,
+};
+
 /* link_create.kprobe_multi.flags used in LINK_CREATE command for
  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.
  */
@@ -1691,6 +1700,11 @@ union bpf_attr {
 		 */
 		__aligned_u64	ebpfos_field_accesses;
 		__u32		ebpfos_field_access_cnt;
+		/* Trusted compiler frame sizes, in subprogram order (including
+		 * entry), from LLVM's .stack_sizes. These are not verified bounds.
+		 */
+		__aligned_u64	trusted_stack_sizes;
+		__u32		trusted_stack_size_cnt;
 	};
 
 	struct { /* anonymous struct used by BPF_OBJ_* commands */
@@ -6764,7 +6778,7 @@ struct bpf_prog_info {
 	__u32 verified_insns;
 	__u32 attach_btf_obj_id;
 	__u32 attach_btf_id;
-	__u32 :32;
+	__u32 tier;
 } __attribute__((aligned(8)));
 
 struct bpf_map_info {

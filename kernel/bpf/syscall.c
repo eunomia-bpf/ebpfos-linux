@@ -2920,7 +2920,7 @@ static int bpf_prog_mark_insn_arrays_ready(struct bpf_prog *prog)
 }
 
 /* last field in 'union bpf_attr' used by this command */
-#define BPF_PROG_LOAD_LAST_FIELD ebpfos_field_access_cnt
+#define BPF_PROG_LOAD_LAST_FIELD trusted_stack_size_cnt
 
 /* Resident native versions use the ordinary program registry, descriptors,
  * pinning and LSM hooks. No verifier or JIT is claimed for this staged type.
@@ -2987,6 +2987,18 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		if (uattr.is_kernel) return -EOPNOTSUPP;
 		return bpf_native_prog_load(attr);
 	}
+	if (attr->prog_flags & BPF_F_TRUSTED_KERNEL) {
+		/* Like loading native modules, this grants kernel execution,
+		 * not a delegated BPF token privilege or a safety guarantee.
+		 */
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		if (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
+		    attr->prog_flags & BPF_F_TOKEN_FD || attr->prog_ifindex)
+			return -EINVAL;
+	} else if (attr->trusted_stack_sizes || attr->trusted_stack_size_cnt) {
+		return -EINVAL;
+	}
 	if (!!attr->ebpfos_field_accesses != !!attr->ebpfos_field_access_cnt)
 		return -EINVAL;
 	if (attr->ebpfos_field_access_cnt &&
@@ -3017,6 +3029,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_XDP_DEV_BOUND_ONLY |
 				 BPF_F_TEST_REG_INVARIANTS |
 				 BPF_F_EBPFOS_COMPONENT |
+				 BPF_F_TRUSTED_KERNEL |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
@@ -3150,6 +3163,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->sleepable = !!(attr->prog_flags & BPF_F_SLEEPABLE);
 	prog->aux->ebpfos_component =
 		!!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT);
+	prog->aux->trusted_kernel = !!(attr->prog_flags & BPF_F_TRUSTED_KERNEL);
 	prog->aux->ebpfos_load_insn_cnt = attr->insn_cnt;
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
@@ -5267,7 +5281,7 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	u32 ulen, len;
 	int err;
 
-	len = offsetofend(struct bpf_prog_info, attach_btf_id);
+	len = offsetofend(struct bpf_prog_info, tier);
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), len, info_len);
 	if (err)
 		return err;
@@ -5278,6 +5292,8 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 		return -EFAULT;
 
 	info.type = prog->type;
+	info.tier = prog->type == BPF_PROG_TYPE_NATIVE ? BPF_PROG_TIER_NATIVE :
+		prog->aux->trusted_kernel ? BPF_PROG_TIER_TRUSTED : BPF_PROG_TIER_VERIFIED;
 	info.id = prog->aux->id;
 	info.load_time = prog->aux->load_time;
 	info.created_by_uid = from_kuid_munged(current_user_ns(),

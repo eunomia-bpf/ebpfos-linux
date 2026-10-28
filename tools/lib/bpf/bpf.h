@@ -116,9 +116,11 @@ struct bpf_prog_load_opts {
 	/* Exact vmlinux-BTF scalar fields declared by the component runtime. */
 	const struct bpf_ebpfos_field_access *ebpfos_field_accesses;
 	__u32 ebpfos_field_access_cnt;
+	const __u32 *trusted_stack_sizes;
+	__u32 trusted_stack_size_cnt;
 	size_t :0;
 };
-#define bpf_prog_load_opts__last_field ebpfos_field_access_cnt
+#define bpf_prog_load_opts__last_field trusted_stack_size_cnt
 
 LIBBPF_API int bpf_prog_load(enum bpf_prog_type prog_type,
 			     const char *prog_name, const char *license,

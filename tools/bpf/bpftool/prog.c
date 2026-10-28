@@ -435,6 +435,9 @@ static void print_prog_header_json(struct bpf_prog_info *info, int fd)
 		     info->tag[4], info->tag[5], info->tag[6], info->tag[7]);
 
 	jsonw_bool_field(json_wtr, "gpl_compatible", info->gpl_compatible);
+	jsonw_string_field(json_wtr, "tier",
+		info->type == BPF_PROG_TYPE_NATIVE ? "native" :
+		info->tier == BPF_PROG_TIER_TRUSTED ? "trusted" : "verified");
 	if (info->type == BPF_PROG_TYPE_NATIVE) {
 		jsonw_bool_field(json_wtr, "staged", true);
 		jsonw_uint_field(json_wtr, "native_btf_obj_id", info->attach_btf_obj_id);
@@ -526,6 +529,8 @@ static void print_prog_header_plain(struct bpf_prog_info *info, int fd)
 	fprint_hex(stdout, info->tag, BPF_TAG_SIZE, "");
 	print_dev_plain(info->ifindex, info->netns_dev, info->netns_ino);
 	printf("%s", info->gpl_compatible ? "  gpl" : "");
+	printf("  tier %s", info->type == BPF_PROG_TYPE_NATIVE ? "native" :
+	       info->tier == BPF_PROG_TIER_TRUSTED ? "trusted" : "verified");
 	if (info->type == BPF_PROG_TYPE_NATIVE)
 		printf("  staged native_btf_obj_id %u native_btf_id %u",
 		       info->attach_btf_obj_id, info->attach_btf_id);

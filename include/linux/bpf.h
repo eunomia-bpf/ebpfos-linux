@@ -1938,6 +1938,7 @@ struct bpf_prog_aux {
 	bool might_sleep;
 	bool kprobe_write_ctx;
 	bool ebpfos_component;
+	bool trusted_kernel;
 	/* Cold native bindings must supply any context assumed by verification. */
 	bool requires_rcu;
 	u32 ebpfos_load_insn_cnt;
