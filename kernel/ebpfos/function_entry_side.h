@@ -9,6 +9,7 @@
 struct entry_side_cell {
  struct rb_node node;
  const char *key;
+ u32 scope;
  struct bpf_map *before,*after;
 };
 struct entry_side_index {struct rb_root root;bool before,migration;};
@@ -16,6 +17,7 @@ static int entry_side_program(struct bpf_prog *program,void *data)
 {
  struct entry_side_index *index=data;struct bpf_prog_aux *aux=program->aux;
  unsigned int i;int error=0;
+ u32 scope=btf_obj_id(aux->attach_btf?aux->attach_btf:bpf_get_btf_vmlinux());
  mutex_lock(&aux->used_maps_mutex);
  for(i=0;i<aux->used_map_cnt;++i) {
   struct bpf_map *map=aux->used_maps[i];
@@ -30,14 +32,14 @@ static int entry_side_program(struct bpf_prog *program,void *data)
   while(*link) {
    int order;
    parent=*link;cell=rb_entry(parent,struct entry_side_cell,node);
-   order=strcmp(key,cell->key);
+   order=scope<cell->scope?-1:scope>cell->scope?1:strcmp(key,cell->key);
    if(!order)break;
    link=order<0?&parent->rb_left:&parent->rb_right;cell=NULL;
   }
   if(!cell) {
    cell=kzalloc(sizeof(*cell),GFP_KERNEL);
    if(!cell){error=-ENOMEM;break;}
-   cell->key=key;rb_link_node(&cell->node,parent,link);rb_insert_color(&cell->node,&index->root);
+   cell->key=key;cell->scope=scope;rb_link_node(&cell->node,parent,link);rb_insert_color(&cell->node,&index->root);
   }
   if(index->before) {
    if(cell->before&&cell->before!=map){error=-EXDEV;break;}
@@ -58,14 +60,24 @@ static int entry_side_members(struct entry_set *set,unsigned int slot,struct ent
  }
  return set?bpf_operations_visit_programs(set->tables,entry_side_program,index):0;
 }
-static int entry_side_compatible(struct entry_set *before,unsigned int slot,
+static int entry_side_compatible(struct entry_set *owner,struct entry_set *before,unsigned int slot,
  struct entry_set *after,bool migration)
 {
  struct entry_side_index index={.root=RB_ROOT,.before=true,.migration=migration};
- struct rb_node *node;int error;
+ struct rb_node *node;struct entry_set *other;int error;
  /* Retained program references own every indexed map and BTF key. */
  error=entry_side_members(before,slot,&index);
  if(!error){index.before=false;error=entry_side_members(after,0,&index);}
+ /* Publication holds entry_lock. Other bindings must keep the same object
+  * fields even during an epoch confined to this journal. Avoid scanning
+  * unrelated programs when this transaction has no side fields at all. */
+ if(!error&&!RB_EMPTY_ROOT(&index.root))list_for_each_entry(other,&entry_sharing_sets,sharing) {
+  struct entry_set *active;
+  if(other==owner||!other->active)continue;
+  active=entry_generation(other,other->active);
+  error=entry_side_members(active,entry_generation_slot(other->active),&index);
+  if(error)break;
+ }
  while((node=rb_first(&index.root))) {
   struct entry_side_cell *cell=rb_entry(node,struct entry_side_cell,node);
   rb_erase(node,&index.root);kfree(cell);

@@ -35,7 +35,7 @@ struct entry_member { u32 native_function, program; };
  * and all symbol/ABI/context checks belong to cold linking, never invocation.
  */
 struct entry_set {
- struct list_head retained, generations, generation_node;
+ struct list_head retained, generations, generation_node, sharing;
  struct delayed_work release_work, retire_work;
  bool closing, epoch_mode;
  struct bpf_prog *migration, *reverse;
@@ -59,6 +59,8 @@ static DEFINE_MUTEX(entry_lock);
 /* A stopped CPU does not prove every suspended old frame has returned. Keep
  * actual published graphs alive until their owners can prove retirement. */
 static LIST_HEAD(entry_retained);
+/* All live journals, including cgroup and operations-only bindings. */
+static LIST_HEAD(entry_sharing_sets);
 
 /* Bare native ABI calls have no bpf_run_ctx. These standard helpers depend
  * only on explicit operands or the native CPU/task, not on such a frame.
@@ -90,7 +92,6 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
  return found;
 }
 
-#include "function_entry_side.h"
 #include "function_entry_slots.h"
 #include "function_entry_calls.h"
 static int entry_callers_stopped(struct entry_set *set);
@@ -131,6 +132,7 @@ static struct entry_set *entry_generation(struct entry_set *set, unsigned int id
 }
 static unsigned int entry_generation_slot(unsigned int id)
 { return 0; }
+#include "function_entry_side.h"
 static int entry_ownership(struct entry_set *set)
 {
  struct entry_set *owner;
@@ -338,6 +340,7 @@ static void entry_release_work(struct work_struct *work)
  error = set->poisoned ? -EUCLEAN : entry_switch(set, set->active, 0);
  if (!error) error = entry_all_quiescent(set);
  if (!error && set->published) list_del(&set->retained);
+ if (!error) list_del_init(&set->sharing);
  mutex_unlock(&entry_lock);
  if (!error) entry_free(set);
  else schedule_delayed_work(&set->release_work, HZ / 10);
@@ -354,6 +357,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  if (IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
  set = kzalloc(sizeof(*set), GFP_KERNEL);
  if (!set) return ERR_PTR(-ENOMEM);
+ INIT_LIST_HEAD(&set->sharing);
  INIT_LIST_HEAD(&set->generations);
  INIT_LIST_HEAD(&set->generation_node);
  INIT_DELAYED_WORK(&set->release_work, entry_release_work);
@@ -658,7 +662,6 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  set->table_count = operations_count;
  kvfree(operations_fds);
  if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
- error=entry_side_compatible(NULL,0,set,false);if(error)goto free_set;
  set->epoch_mode = attr->link_create.flags & BPF_F_ENTRY_EPOCH;
  if (task) {
   request = entry_task_prepare(set, 1);
@@ -675,10 +678,12 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  error = bpf_link_prime(&entry->link, &primer);
  if (error) {kfree(entry);goto free_set;}
  mutex_lock(&entry_lock);
- if (group) {
+ error=entry_side_compatible(NULL,NULL,0,set,false);
+ if (!error && group) {
   error = ebpfos_cgroup_view_attach(group);
   if (!error) set->active = 1;
- } else error = entry_switch(set, 0, 1);
+ } else if (!error) error = entry_switch(set, 0, 1);
+ if (!error) list_add_tail(&set->sharing,&entry_sharing_sets);
  mutex_unlock(&entry_lock);
  if (error) {
   bpf_link_cleanup(&primer);
@@ -776,7 +781,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
   for (i = 0; i < count; ++i)
    if (old->programs[i * 2 + slot] != expected[i]) goto unlock;
  if (expected_tables && !bpf_operations_set_same(old->tables, expected_tables)) goto unlock;
- error=entry_side_compatible(old,slot,prepared,migration!=NULL);if(error)goto unlock;
+ error=entry_side_compatible(set,old,slot,prepared,migration!=NULL);if(error)goto unlock;
  error = -EBUSY;
  /* One outstanding layout epoch. A reverse update must use the retained
   * inverse, not another conversion with an unrelated population contract. */
