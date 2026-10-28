@@ -444,8 +444,14 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   if (!ip) {
    ip = source ? entry_module_native_location(set->source_module, address) :
     entry_native_location(address);
-   if (!ip) {error = -ENOENT;goto fail;}
-   slot = &set->slots[set->slot_count++];slot->ip = ip;
+   if (!ip) {
+    if (!source) {error = -ENOENT;goto fail;}
+    /* An unpadded module entry uses the same closed direct-caller
+     * transaction as noinstr text. No reservation is added to its body. */
+    call_sites = true;ip = address;
+   } else {
+    slot = &set->slots[set->slot_count++];slot->ip = ip;
+   }
   } else set->has_ftrace = true;
   }
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
@@ -465,14 +471,14 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    if (error) goto fail;
    if (!task && target == address) {error = -EINVAL;goto fail;}
    set->addresses[i] = target;
-   if (call_sites) {
+   if (call_sites && entry_module_noinstr(set->source_module, address)) {
     if (program->type != BPF_PROG_TYPE_NATIVE || !program->aux->mod ||
         !entry_module_noinstr(program->aux->mod, target)) {error = -EOPNOTSUPP;goto fail;}
    } else if (slot) {
     u8 instruction[5];
     if (!entry_native_jump(ip, target, instruction)) {error = -ERANGE;goto fail;}
     slot->target[j] = target;
-   } else if (!task && !add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
+   } else if (!task && !call_sites && !add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
   }
   if (call_sites) {
    error = entry_module_calls(set, address, target, owner);
