@@ -45,9 +45,17 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     if (!seen[callee]) {seen[callee] = true;queue[tail++] = callee;}
     continue;
    }
-   /* Tail calls and register calls do not name an immutable local closure. */
-   if (insn->code == (BPF_JMP | BPF_TAIL_CALL) ||
-       insn->code == (BPF_JMP | BPF_CALL | BPF_X)) goto out;
+   if (insn->code == (BPF_JMP | BPF_TAIL_CALL)) goto out;
+   /* Trusted source retains Linux's native indirect calls and their execution
+    * context. There is no immutable BPF target graph to inspect here. This is
+    * the tier's stated source/compiler trust, not a verified context proof.
+    * Keep the verified and pure-binding restrictions until their target
+    * context contracts are available at load time.
+    */
+   if (insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
+    if (pure || !aux->trusted_kernel) goto out;
+    continue;
+   }
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
        insn->src_reg == BPF_PSEUDO_KOP_CALL) {
