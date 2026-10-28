@@ -23,7 +23,9 @@ config EBPFOS_ENTRY_LINK
  bool "Typed multi-target BPF entry links"
  depends on EBPFOS && X86_64 && DYNAMIC_FTRACE_WITH_JMP && DYNAMIC_FTRACE_WITH_DIRECT_CALLS
  depends on !CFI
+ select INSTRUCTION_DECODER
  default y
  help
-   Replace reserved native entries through BPF program and link objects.
+   Replace reserved native entries or module-local noinstr callers through
+   BPF program and link objects.
    Native programs are source-built staged exceptions requiring CAP_SYS_ADMIN.

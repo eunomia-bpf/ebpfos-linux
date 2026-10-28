@@ -34,6 +34,16 @@ static int is_exported(const char *name, unsigned long value,
 	return ks && kernel_symbol_value(ks) == value;
 }
 
+/* A link covering module-local callers must exclude exports: another module
+ * can acquire an exported entry after the caller inventory was prepared. */
+bool module_address_is_exported(const struct module *mod, unsigned long address)
+{
+ unsigned int i;
+ for (i = 0; i < mod->num_syms; ++i)
+  if (kernel_symbol_value(&mod->syms[i]) == address) return true;
+ return false;
+}
+
 /* As per nm */
 static char elf_type(const Elf_Sym *sym, const struct load_info *info)
 {

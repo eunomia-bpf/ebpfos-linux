@@ -49,7 +49,7 @@ struct entry_set {
  struct ftrace_hash *hash[2];
  struct entry_native_slot *slots;
  unsigned int slot_count;
- bool has_ftrace, poisoned;
+ bool has_ftrace, poisoned, call_sites;
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations, *addresses;
  unsigned int count, active, table_count;
@@ -93,6 +93,8 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
 }
 
 #include "function_entry_slots.h"
+#include "function_entry_calls.h"
+static int entry_callers_stopped(struct entry_set *set);
 
 /* One cold native-call contract for direct entries and generated tables. */
 int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
@@ -164,12 +166,15 @@ static int entry_ownership(struct entry_set *set)
  * users: stopping task/IRQ creators does not stop NMI execution.
  */
 struct entry_tables_publication {
+ struct entry_set *set;
  struct bpf_operations_set *old, *next;
  bool published;
 };
 static int entry_tables_publish(void *opaque)
 {
  struct entry_tables_publication *publication = opaque;
+ int error = publication->set->call_sites ? entry_callers_stopped(publication->set) : 0;
+ if (error) return error;
  /* entry_lock held by the caller excludes every other global publisher.
   * Both prepared generations hold their map sets, so these ref operations
   * cannot release the last set while CPUs are stopped.
@@ -187,7 +192,8 @@ static void entry_tables_undo(void *opaque)
 static int entry_tables_apply(struct entry_set *set, unsigned int from, unsigned int to,
  struct bpf_operations_set *old, struct bpf_operations_set *next)
 {
- struct entry_tables_publication publication = { .old = old, .next = next };
+ struct entry_tables_publication publication = {
+  .set = set, .old = old, .next = next };
  struct text_poke_pair *pairs;
  int error;
  if (set->has_ftrace) return -EOPNOTSUPP;
@@ -211,7 +217,7 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse);
  if (!error) error = bpf_operations_global_check(next_tables, old_tables);
  if (error) return error;
- if (set->count && set->table_count)
+ if (set->call_sites || (set->count && set->table_count))
   return entry_tables_apply(set, from, to, old_tables, next_tables);
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
@@ -241,8 +247,8 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
      (to && !entry_generation(set, to))) return -ESTALE;
  if (from == to) return 0;
  /* The stock x86 text-poke batch performs its own CPU synchronization and
-  * breakpoint-safe instruction update. Mixed table/entry sets use the
-  * stopped transaction above instead. Never run the INT3 updater stopped: its
+  * breakpoint-safe instruction update. Caller-site and mixed table/entry
+  * sets use the stopped transaction above instead. Never run the INT3 updater stopped: its
   * cross-CPU synchronizations must run. Legacy ftrace sets also keep their
   * following stop-machine point; reserved transactions already publish once.
   * Unchanged layouts and retained old code permit in-flight old frames.
@@ -250,8 +256,8 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
  error = entry_apply(set, from, to);
  if (error) return error;
  set->active = to;
- /* Reserved entries have one common publication inside the stock text
-  * patcher's INT3 phase. It already serializes instruction visibility. */
+ /* The reserved-only INT3 transaction and the stopped caller/table
+  * transaction have already serialized instruction visibility. */
  if (!set->has_ftrace) return 0;
  error = stop_machine(entry_publication_point, NULL, NULL);
  if (error) {
@@ -295,6 +301,11 @@ static bool entry_code_contains(void *opaque, unsigned long ip)
  return false;
 }
 #include "function_entry_epoch.h"
+
+static int entry_callers_stopped(struct entry_set *set)
+{
+ return ebpfos_code_stopped(entry_epoch_contains, set);
+}
 
 static int entry_quiescent(struct entry_set *set, unsigned int slot)
 {
@@ -367,7 +378,7 @@ static void entry_release_work(struct work_struct *work)
  else schedule_delayed_work(&set->release_work, HZ / 10);
 }
 static struct entry_set *entry_prepare(const struct entry_member *entries,
- unsigned int count, struct btf *source, bool task)
+ unsigned int count, struct btf *source, bool task, struct entry_set *owner)
 {
  struct entry_set *set;
  struct btf *vmlinux_btf = bpf_get_btf_vmlinux();
@@ -407,6 +418,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   const struct entry_member *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
+  bool call_sites = false;
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
@@ -416,7 +428,11 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
   if (!address || (!source && !core_kernel_text(address))) {error = -ENOENT;goto fail;}
   ip = address;
-  if (!task) {
+  if (!task && source && entry_module_noinstr(set->source_module, address)) {
+   /* No entry patch or breakpoint in noinstr text. Replace every decoded
+    * direct caller instead, with all tasks and IRQs stopped. */
+   call_sites = true;ip = address;
+  } else if (!task) {
   ip = ftrace_location(address);
 #ifdef FTRACE_MCOUNT_MAX_OFFSET
   /* ftrace_location() includes disabled records. Mirror stock ftrace's
@@ -449,11 +465,19 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    if (error) goto fail;
    if (!task && target == address) {error = -EINVAL;goto fail;}
    set->addresses[i] = target;
-   if (slot) {
+   if (call_sites) {
+    if (program->type != BPF_PROG_TYPE_NATIVE || !program->aux->mod ||
+        !entry_module_noinstr(program->aux->mod, target)) {error = -EOPNOTSUPP;goto fail;}
+   } else if (slot) {
     u8 instruction[5];
     if (!entry_native_jump(ip, target, instruction)) {error = -ERANGE;goto fail;}
     slot->target[j] = target;
    } else if (!task && !add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
+  }
+  if (call_sites) {
+   error = entry_module_calls(set, address, target, owner);
+   if (error) goto fail;
+   set->call_sites = true;
   }
  }
  return set;
@@ -644,7 +668,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
   source = btf_get_by_fd(attr->link_create.target_fd);
   if (IS_ERR(source)) {error = PTR_ERR(source);goto free_members;}
  }
- set = entry_prepare(members, count, source, task);
+ set = entry_prepare(members, count, source, task, NULL);
  if (source) btf_put(source);
  if (IS_ERR(set)) {error = PTR_ERR(set);goto free_members;}
  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.operations_fds), operations_count, sizeof(u32));
@@ -743,7 +767,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  if (!members) {error = -ENOMEM;goto out;}
  for (i = 0; i < count; ++i)
   members[i] = (struct entry_member){set->locations[count + i], programs[i]};
- prepared = entry_prepare(members, count, set->source_btf, entry->cgroup != NULL);
+ prepared = entry_prepare(members, count, set->source_btf, entry->cgroup != NULL, set);
  kvfree(members);
  if (IS_ERR(prepared)) {error = PTR_ERR(prepared);goto out;}
  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.operations_fds), operations_count, sizeof(u32));
