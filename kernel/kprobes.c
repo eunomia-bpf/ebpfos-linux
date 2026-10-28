@@ -70,6 +70,66 @@ static bool kprobes_all_disarmed;
 static DEFINE_MUTEX(kprobe_mutex);
 static DEFINE_PER_CPU(struct kprobe *, kprobe_instance);
 
+/* Cold text ownership. The owner retains the source module, restores its
+ * original instructions before release, and adds no execution-time hook. */
+struct kprobe_text_reservation {
+ struct list_head list;
+ unsigned int count;
+ struct { unsigned long begin, end; } ranges[];
+};
+static LIST_HEAD(kprobe_text_reservations);
+static bool kprobe_text_owned(unsigned long address)
+{
+ struct kprobe_text_reservation *owner;
+ unsigned int i;
+ lockdep_assert_held(&kprobe_mutex);
+ list_for_each_entry(owner, &kprobe_text_reservations, list)
+  for (i = 0; i < owner->count; ++i)
+   if (address >= owner->ranges[i].begin && address < owner->ranges[i].end) return true;
+ return false;
+}
+struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length)
+{
+ struct kprobe_text_reservation *owner;
+ struct kprobe *probe;
+ unsigned int i, bucket;
+ int error = -EINVAL;
+ if (!count) return NULL;
+ owner = kvzalloc(struct_size(owner, ranges, count), GFP_KERNEL);
+ if (!owner) return ERR_PTR(-ENOMEM);
+ owner->count = count;
+ for (i = 0; i < count; ++i) {
+  unsigned long size, offset, begin;
+  if (!kallsyms_lookup_size_offset(ips[i], &size, &offset) || !size || !length ||
+      offset > size || length > size - offset) goto fail;
+  begin = ips[i] - offset;
+  if (ips[i] + length < ips[i]) goto fail;
+  owner->ranges[i].begin = begin;owner->ranges[i].end = ips[i] + length;
+ }
+ mutex_lock(&kprobe_mutex);
+ error = -EBUSY;
+ for (i = 0; i < count; ++i) {
+  if (kprobe_text_owned(owner->ranges[i].begin)) goto unlock;
+  for (bucket = 0; bucket < KPROBE_TABLE_SIZE; ++bucket)
+   hlist_for_each_entry(probe, &kprobe_table[bucket], hlist)
+    if ((unsigned long)probe->addr >= owner->ranges[i].begin &&
+        (unsigned long)probe->addr < owner->ranges[i].end) goto unlock;
+ }
+ list_add(&owner->list, &kprobe_text_reservations);
+ mutex_unlock(&kprobe_mutex);return owner;
+unlock:
+ mutex_unlock(&kprobe_mutex);
+fail:
+ kvfree(owner);return ERR_PTR(error);
+}
+void kprobe_text_release(struct kprobe_text_reservation *owner)
+{
+ if (!owner) return;
+ mutex_lock(&kprobe_mutex);list_del(&owner->list);mutex_unlock(&kprobe_mutex);
+ kvfree(owner);
+}
+
+
 kprobe_opcode_t * __weak kprobe_lookup_name(const char *name,
 					unsigned int __unused)
 {
@@ -1674,6 +1734,8 @@ static int __register_kprobe(struct kprobe *p)
 	struct kprobe *old_p;
 
 	guard(mutex)(&kprobe_mutex);
+
+	if (kprobe_text_owned((unsigned long)p->addr)) return -EBUSY;
 
 	old_p = get_kprobe(p->addr);
 	if (old_p)

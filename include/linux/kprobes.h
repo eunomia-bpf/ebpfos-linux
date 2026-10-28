@@ -177,6 +177,8 @@ struct kretprobe_blackpoint {
 	void *addr;
 };
 
+struct kprobe_text_reservation;
+
 struct kprobe_blacklist_entry {
 	struct list_head list;
 	unsigned long start_addr;
@@ -184,6 +186,8 @@ struct kprobe_blacklist_entry {
 };
 
 #ifdef CONFIG_KPROBES
+struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length);
+void kprobe_text_release(struct kprobe_text_reservation *);
 DECLARE_PER_CPU(struct kprobe *, current_kprobe);
 DECLARE_PER_CPU(struct kprobe_ctlblk, kprobe_ctlblk);
 
@@ -440,6 +444,8 @@ int kprobe_exceptions_notify(struct notifier_block *self,
 			     unsigned long val, void *data);
 
 #else /* !CONFIG_KPROBES: */
+static inline struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length) { return NULL; }
+static inline void kprobe_text_release(struct kprobe_text_reservation *reservation) {}
 
 static inline int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 {

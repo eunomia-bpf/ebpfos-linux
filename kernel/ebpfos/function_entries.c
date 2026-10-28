@@ -45,11 +45,10 @@ struct entry_set {
  struct btf *source_btf;
  struct bpf_prog **programs;
  struct bpf_operations_set *tables;
- struct ftrace_ops operations;
- struct ftrace_hash *hash[2];
+ struct ftrace_text_reservation *ftrace;
  struct entry_native_slot *slots;
  unsigned int slot_count;
- bool has_ftrace, poisoned, call_sites;
+ bool poisoned, call_sites;
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations, *addresses;
  unsigned int count, active, table_count;
@@ -132,17 +131,6 @@ static struct entry_set *entry_generation(struct entry_set *set, unsigned int id
 }
 static unsigned int entry_generation_slot(unsigned int id)
 { return 0; }
-static int entry_publication_point(void *unused) { return 0; }
-static int entry_ftrace_apply(struct entry_set *set, unsigned int from, unsigned int to)
-{
- if (!set->has_ftrace) return 0;
- if (!from) return update_ftrace_direct_add(&set->operations,
-  entry_generation(set, to)->hash[entry_generation_slot(to)]);
- if (!to) return update_ftrace_direct_del(&set->operations,
-  entry_generation(set, from)->hash[entry_generation_slot(from)]);
- return update_ftrace_direct_mod(&set->operations,
-  entry_generation(set, to)->hash[entry_generation_slot(to)], true);
-}
 static int entry_ownership(struct entry_set *set)
 {
  struct entry_set *owner;
@@ -193,7 +181,6 @@ static int entry_tables_apply(struct entry_set *set, unsigned int from, unsigned
  struct entry_tables_publication publication = { .set = set, .tables = tables };
  struct text_poke_pair *pairs;
  int error;
- if (set->has_ftrace) return -EOPNOTSUPP;
  pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
@@ -223,48 +210,25 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
  if (error) goto done;
- /* A successful patch can already have entered either generation. Retain
-  * both graphs before an ensuing ftrace/publication failure is recoverable. */
+ /* A successful patch may already have entered either generation. Keep
+  * both program graphs through stack-checked retirement. */
  if (to && !set->published) {
   set->published = true;
   list_add_tail(&set->retained, &entry_retained);
  }
- error = entry_ftrace_apply(set, from, to);
- if (error && entry_native_apply(to ? entry_generation(set, to)->slots : set->slots,
-     from ? entry_generation(set, from)->slots : set->slots, set->slot_count,
-     to ? entry_generation_slot(to) + 1 : 0, from ? entry_generation_slot(from) + 1 : 0)) {
-  set->poisoned = true;error = -EUCLEAN;
- }
- if (!error) bpf_operations_global_publish(&tables);
+ bpf_operations_global_publish(&tables);
 done:
  bpf_operations_global_release(&tables);return error;
 }
 static int entry_switch(struct entry_set *set, unsigned int from, unsigned int to)
 {
- int error, recovery;
+ int error;
  if (set->poisoned) return -EUCLEAN;
  if (from != set->active || (from && !entry_generation(set, from)) ||
      (to && !entry_generation(set, to))) return -ESTALE;
  if (from == to) return 0;
- /* The stock x86 text-poke batch performs its own CPU synchronization and
-  * breakpoint-safe instruction update. Caller-site and mixed table/entry
-  * sets use the stopped transaction above instead. Never run the INT3 updater stopped: its
-  * cross-CPU synchronizations must run. Legacy ftrace sets also keep their
-  * following stop-machine point; reserved transactions already publish once.
-  * Unchanged layouts and retained old code permit in-flight old frames.
-  */
  error = entry_apply(set, from, to);
- if (error) return error;
- set->active = to;
- /* The reserved-only INT3 transaction and the stopped caller/table
-  * transaction have already serialized instruction visibility. */
- if (!set->has_ftrace) return 0;
- error = stop_machine(entry_publication_point, NULL, NULL);
- if (error) {
-  recovery = entry_apply(set, to, from);
-  if (!recovery) set->active = from;
-  else {set->poisoned = true;error = -EUCLEAN;}
- }
+ if (!error) set->active = to;
  return error;
 }
 static void entry_free(struct entry_set *set)
@@ -276,6 +240,7 @@ static void entry_free(struct entry_set *set)
  }
  if (set->migration) bpf_prog_put(set->migration);
  if (set->reverse) bpf_prog_put(set->reverse);
+ ftrace_text_release(set->ftrace);
  module_put(set->source_module);
  if (set->source_btf) btf_put(set->source_btf);
  if (set->programs)
@@ -283,7 +248,7 @@ static void entry_free(struct entry_set *set)
    if (set->programs[i]) bpf_prog_put(set->programs[i]);
  bpf_operations_set_put(set->tables);
  kvfree(set->programs);
- free_ftrace_hash(set->hash[0]);free_ftrace_hash(set->hash[1]);kvfree(set->slots);kvfree(set->locations);kvfree(set->addresses);kfree(set);
+ kvfree(set->slots);kvfree(set->locations);kvfree(set->addresses);kfree(set);
 }
 #include "function_lifetime.h"
 struct entry_lifetime { struct entry_set *generation; unsigned int slot; };
@@ -386,8 +351,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  unsigned int i,j;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
- if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_JMP) ||
-     !IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS)) return ERR_PTR(-EOPNOTSUPP);
  if (IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
  set = kzalloc(sizeof(*set), GFP_KERNEL);
  if (!set) return ERR_PTR(-ENOMEM);
@@ -411,9 +374,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  if (!set->addresses) {error = -ENOMEM;goto fail;}
  set->slots = kvcalloc(count, sizeof(*set->slots), GFP_KERNEL);
  if (!set->slots) {error = -ENOMEM;goto fail;}
- set->hash[0] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
- set->hash[1] = alloc_ftrace_hash(FTRACE_HASH_DEFAULT_BITS);
- if (!set->hash[0] || !set->hash[1]) { error = -ENOMEM;goto fail; }
  for (i = 0; i < set->count; ++i) {
   const struct entry_member *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
@@ -452,7 +412,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    } else {
     slot = &set->slots[set->slot_count++];slot->ip = ip;
    }
-  } else set->has_ftrace = true;
+  } else {slot = &set->slots[set->slot_count++];slot->ip = ip;slot->ftrace = true;}
   }
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
   set->locations[i] = ip;
@@ -478,13 +438,21 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     u8 instruction[5];
     if (!entry_native_jump(ip, target, instruction)) {error = -ERANGE;goto fail;}
     slot->target[j] = target;
-   } else if (!task && !call_sites && !add_ftrace_hash_entry_direct(set->hash[j], ip, ftrace_jmp_set(target))) {error = -ENOMEM;goto fail;}
+   }
   }
   if (call_sites) {
    error = entry_module_calls(set, address, target, owner);
    if (error) goto fail;
    set->call_sites = true;
   }
+ }
+ if (!task && !owner) {
+  unsigned long *ips = kvmalloc_array(set->slot_count, sizeof(*ips), GFP_KERNEL);
+  unsigned int count = 0;
+  if (!ips) {error = -ENOMEM;goto fail;}
+  for (i = 0; i < set->slot_count; ++i) if (set->slots[i].ftrace) ips[count++] = set->slots[i].ip;
+  set->ftrace = ftrace_text_reserve(ips, count);kvfree(ips);
+  if (IS_ERR(set->ftrace)) {error = PTR_ERR(set->ftrace);set->ftrace = NULL;goto fail;}
  }
  return set;
 fail:
@@ -564,7 +532,10 @@ static int entry_link_detach(struct bpf_link *link)
   ebpfos_cgroup_view_detach(entry->cgroup);
   entry->set->active = 0;error = 0;
  } else error = entry_switch(entry->set, entry->set->active, 0);
- if (!error) entry->detached = true;
+ if (!error) {
+  ftrace_text_release(entry->set->ftrace);entry->set->ftrace = NULL;
+  entry->detached = true;
+ }
  mutex_unlock(&entry_lock);
  return error;
 }
@@ -684,9 +655,6 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  kvfree(operations_fds);
  if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
  set->epoch_mode = attr->link_create.flags & BPF_F_ENTRY_EPOCH;
- /* A reserved-entry batch has one common text publication. Mixed or legacy
-  * ftrace updates do not provide this transaction and stay unsupported. */
- if (set->has_ftrace) {error = -EOPNOTSUPP;goto free_set;}
  if (task) {
   request = entry_task_prepare(set, 1);
   if (IS_ERR(request)) {error = PTR_ERR(request);goto free_set;}
@@ -792,7 +760,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  error = -ENOLINK;
  if (!entry_link_active(entry)) goto unlock;
  error = -EINVAL;
- if (set->slot_count != prepared->slot_count || prepared->has_ftrace) goto unlock;
+ if (set->slot_count != prepared->slot_count) goto unlock;
  for (i = 0; i < count * 2; ++i)
   if (set->locations[i] != prepared->locations[i]) goto unlock;
  old = entry_generation(set, set->active);

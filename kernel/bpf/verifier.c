@@ -21111,7 +21111,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			 * native ABI. A padding-free single INTEGER record has the
 			 * same result register. Two complete integer words use the
 			 * entry service's checked RAX/RDX result operation; direct
-			 * trampolines reject that form. Pointer/other aggregates refuse.
+			 * trampolines reject that form. Trusted pointer results use RAX
+			 * without a verifier safety claim; other aggregates still refuse.
 			 * Existing tracing/error-injection policy is unchanged.
 			 */
 			if (tgt_prog || prog->sleepable ||
@@ -21120,6 +21121,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
 			if (t->type &&
+			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    !cell_native_result2_type(btf, t->type) &&
 			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||

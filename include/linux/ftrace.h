@@ -732,6 +732,9 @@ void ftrace_bug(int err, struct dyn_ftrace *rec);
 struct seq_file;
 
 extern int ftrace_text_reserved(const void *start, const void *end);
+struct ftrace_text_reservation;
+struct ftrace_text_reservation *ftrace_text_reserve(const unsigned long *ips, unsigned int count);
+void ftrace_text_release(struct ftrace_text_reservation *);
 
 struct ftrace_ops *ftrace_ops_trampoline(unsigned long addr);
 

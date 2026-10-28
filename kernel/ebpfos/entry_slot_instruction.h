@@ -10,7 +10,7 @@ static const unsigned char entry_native_nop[5] = { 0x0f, 0x1f, 0x44, 0, 8 };
 static const unsigned char entry_native_emulation[5] = { 0x0f, 0x1f, 0x44, 0, 0 };
 struct entry_native_slot {
  unsigned long ip, target[2], original;
- bool call;
+ bool call, ftrace;
 };
 
 static inline bool entry_native_jump(unsigned long ip, unsigned long target,
@@ -35,7 +35,7 @@ static inline bool entry_native_instruction(const struct entry_native_slot *slot
   if (slot->call) instruction[0] = 0xe8;
   return true;
  }
- for (i = 0; i < 5; ++i) instruction[i] = entry_native_nop[i];
+ for (i = 0; i < 5; ++i) instruction[i] = slot->ftrace ? entry_native_emulation[i] : entry_native_nop[i];
  return true;
 }
 #endif

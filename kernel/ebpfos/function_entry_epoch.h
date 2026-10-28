@@ -73,7 +73,7 @@ static int entry_epoch_apply(struct entry_set *set, unsigned int from,
  struct entry_epoch_call call = { .set = set, .program = program };
  struct text_poke_pair *pairs;
  int error;
- if (!set->epoch_mode || set->has_ftrace || set->table_count || !set->source_module) return -EOPNOTSUPP;
+ if (!set->epoch_mode || set->table_count || !set->source_module) return -EOPNOTSUPP;
  pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
