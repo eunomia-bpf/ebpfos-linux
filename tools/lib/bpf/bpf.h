@@ -487,9 +487,11 @@ struct bpf_link_update_opts {
 		__u32 operations_count;
 		const int *operations_fds;
 		const int *old_operations_fds;
+		__u32 migration_prog_fd;
+		__u32 reverse_prog_fd;
 	} entry;
 };
-#define bpf_link_update_opts__last_field entry.old_operations_fds
+#define bpf_link_update_opts__last_field entry.reverse_prog_fd
 
 LIBBPF_API int bpf_link_update(int link_fd, int new_prog_fd,
 			       const struct bpf_link_update_opts *opts);
