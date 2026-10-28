@@ -2244,6 +2244,77 @@ const struct btf_type *btf_type_id_size(const struct btf *btf,
 	return size_type;
 }
 
+/* Padding is scalar storage too. Any overlapping pointer or managed field
+ * keeps its ordinary typed access, including inside arrays and unions.
+ */
+static bool __btf_scalar_region(const struct btf *btf, u32 id, u32 off,
+			       u32 size, u32 depth)
+{
+	const struct btf_type *t = btf_type_skip_modifiers(btf, id, &id);
+	const struct btf_array *array;
+	struct btf_struct_meta *meta;
+	u32 bytes, first, last, i;
+
+	if (!t || !size || depth >= MAX_RESOLVE_DEPTH ||
+	    IS_ERR(btf_resolve_size(btf, t, &bytes)) || off > bytes || size > bytes - off)
+		return false;
+	if (btf_type_is_int(t) || btf_is_any_enum(t) || BTF_INFO_KIND(t->info) == BTF_KIND_FLOAT)
+		return true;
+	if (btf_type_is_array(t)) {
+		array = btf_type_array(t);
+		t = btf_type_by_id(btf, array->type);
+		if (!t || IS_ERR(btf_resolve_size(btf, t, &bytes)) || !bytes)
+			return false;
+		first = off / bytes;
+		last = (off + size - 1) / bytes;
+		if (first == last)
+			return __btf_scalar_region(btf, array->type, off % bytes, size, depth + 1);
+		return __btf_scalar_region(btf, array->type, off % bytes,
+					   bytes - off % bytes, depth + 1) &&
+		       __btf_scalar_region(btf, array->type, 0,
+					   (off + size - 1) % bytes + 1, depth + 1) &&
+		       (last == first + 1 ||
+			__btf_scalar_region(btf, array->type, 0, bytes, depth + 1));
+	}
+	if (!btf_type_is_struct(t))
+		return false;
+	meta = btf_find_struct_meta(btf, id);
+	if (meta && meta->record)
+		for (i = 0; i < meta->record->cnt; i++) {
+			const struct btf_field *field = &meta->record->fields[i];
+
+			if ((u64)off < (u64)field->offset + field->size && field->offset < off + size)
+				return false;
+		}
+	for (i = 0; i < btf_type_vlen(t); i++) {
+		const struct btf_member *m = &btf_type_member(t)[i];
+		const struct btf_type *member = btf_type_by_id(btf, m->type);
+		u32 begin = __btf_member_bit_offset(t, m) / 8, end;
+
+		if (!member || IS_ERR(btf_resolve_size(btf, member, &bytes)))
+			return false;
+		if (__btf_member_bitfield_size(t, m)) {
+			member = btf_type_skip_modifiers(btf, m->type, NULL);
+			if (!member || (!btf_type_is_int(member) && !btf_is_any_enum(member)))
+				return false;
+			continue;
+		}
+		end = min_t(u64, (u64)begin + bytes, off + size);
+		if (begin >= off + size || (u64)begin + bytes <= off)
+			continue;
+		if (!__btf_scalar_region(btf, m->type, max(off, begin) - begin,
+					end - max(off, begin), depth + 1))
+			return false;
+	}
+	return true;
+}
+
+bool btf_type_is_scalar_region(const struct btf *btf, u32 type_id,
+			      u32 off, u32 size)
+{
+	return __btf_scalar_region(btf, type_id, off, size, 0);
+}
+
 static int btf_df_check_member(struct btf_verifier_env *env,
 			       const struct btf_type *struct_type,
 			       const struct btf_member *member,

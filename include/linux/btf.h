@@ -177,6 +177,8 @@ int btf_get_info_by_fd(const struct btf *btf,
 const struct btf_type *btf_type_id_size(const struct btf *btf,
 					u32 *type_id,
 					u32 *ret_size);
+bool btf_type_is_scalar_region(const struct btf *btf, u32 type_id,
+			      u32 off, u32 size);
 
 /*
  * Options to control show behaviour.

@@ -6788,7 +6788,7 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 
 static int check_component_field_authority(struct bpf_verifier_env *env,
 					  const struct bpf_reg_state *dst,
-					  int off, int size)
+					  int off, int size, bool type_authority)
 {
 	u32 owner = env->cur_state->frame[env->cur_state->curframe]->subprogno;
 	const struct bpf_prog_aux *aux = env->prog->aux;
@@ -6807,12 +6807,62 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 
 		if (f->func_info_idx == owner &&
 		    btf_types_are_same(dst->btf, dst->btf_id, bpf_get_btf_vmlinux(), f->btf_id) &&
-		    f->offset == off && f->size == size)
+		    (type_authority || (f->offset == off && f->size == size)))
 			return 0;
 	}
 	verbose(env, "pointer store: field authority missing for func#%u type=%u off=%d size=%d\n",
 		owner, dst->btf_id, off, size);
 	return -EACCES;
+}
+
+/* owned_type:component is emitted on the object declaration by the compiler.
+ * Only scalar bytes acquire the size-of-object rule. Pointer and managed
+ * fields continue through the existing typed path below.
+ */
+static int check_owned_scalar_access(struct bpf_verifier_env *env,
+				     struct bpf_reg_state *regs, int regno,
+				     int off, int size, enum bpf_access_type atype,
+				     int value_regno, bool *handled)
+{
+	struct bpf_reg_state *reg = regs + regno;
+	u32 id = reg->btf_id, bytes, begin, end;
+	const struct btf_type *t;
+	const char *tag;
+	int err;
+
+	if (!is_trusted_reg(reg) || size <= 0 ||
+	    reg->type & (PTR_UNTRUSTED | PTR_MAYBE_NULL | MEM_USER | MEM_PERCPU) ||
+	    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
+	    (type_is_alloc(reg->type) && !reg->ref_obj_id) ||
+	    (reg->ref_obj_id && !find_reference_state(env->cur_state, reg->ref_obj_id)))
+		return 0;
+	t = btf_type_id_size(reg->btf, &id, &bytes);
+	if (!t || !btf_type_is_struct(t))
+		return 0;
+	tag = btf_find_decl_tag_value(reg->btf, t, -1, "owned_type:");
+	if (IS_ERR(tag) || strcmp(tag, "component"))
+		return 0;
+	if (atype == BPF_WRITE &&
+	    ((reg->type & (MEM_RDONLY | NON_OWN_REF)) ||
+	     (!env->prog->aux->ebpfos_component && !type_is_ptr_alloc_obj(reg->type)) ||
+	     (value_regno >= 0 && regs[value_regno].type != SCALAR_VALUE)))
+		return 0;
+	err = check_mem_region_access(env, regno, off, size, bytes, false);
+	if (err)
+		return err;
+	begin = off + reg->smin_value;
+	end = off + reg->umax_value + size;
+	if (!btf_type_is_scalar_region(reg->btf, id, begin, end - begin))
+		return 0;
+	if (atype == BPF_WRITE && env->prog->aux->ebpfos_component) {
+		err = check_component_field_authority(env, reg, off, size, true);
+		if (err)
+			return err;
+	}
+	if (atype == BPF_READ && value_regno >= 0)
+		mark_reg_unknown(env, regs, value_regno);
+	*handled = true;
+	return 0;
 }
 
 static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
@@ -6828,6 +6878,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	enum bpf_type_flag flag = 0;
 	u32 btf_id = 0;
 	bool pointer_field = false;
+	bool owned_scalar = false;
 	int ret;
 
 	if (!env->allow_ptr_leaks) {
@@ -6842,6 +6893,11 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			tname);
 		return -EINVAL;
 	}
+
+	ret = check_owned_scalar_access(env, regs, regno, off, size, atype,
+					value_regno, &owned_scalar);
+	if (ret || owned_scalar)
+		return ret;
 
 	if (!tnum_is_const(reg->var_off)) {
 		char tn_buf[48];
@@ -6878,7 +6934,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 
 	if (atype == BPF_WRITE) {
 		if (env->prog->aux->ebpfos_component) {
-			ret = check_component_field_authority(env, reg, off, size);
+			ret = check_component_field_authority(env, reg, off, size, false);
 			if (ret)
 				return ret;
 		}
