@@ -1,15 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Preserve the original callable ABI; assembler entries borrow a source member's ABI. */
+/* Preserve the original callable ABI, including retained C declarations for assembly. */
 struct native_set_entry {
 	const char *native;
-	const char *record;
-	const char *field;
 };
 
-#define NATIVE_FUNCTION(source, native, flags) { #native, NULL, NULL },
+#define NATIVE_FUNCTION(source, native, flags) { #native },
 #define NATIVE_PROTOTYPE(source)
-#define NATIVE_INLINE_FUNCTION(source, native, flags) { #native, NULL, NULL },
-#define NATIVE_STATIC_CALL(source, native, record, field, flags) { #native, #record, #field },
+#define NATIVE_INLINE_FUNCTION(source, native, flags) { #native },
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
@@ -21,7 +18,6 @@ static const struct native_set_entry native_set_entries[] = {
 #undef NATIVE_FUNCTION
 #undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
-#undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
@@ -47,7 +43,6 @@ struct native_set_contract {
 #define NATIVE_FUNCTION(source, native, flags)
 #define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags)
-#define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag) { #native, index, NATIVE_CONTRACT_ARG, tag, NULL, NULL },
 #define NATIVE_ENUM_MAX(native, index, record, sentinel) \
@@ -62,7 +57,6 @@ static const struct native_set_contract native_set_contracts[] = {
 #undef NATIVE_FUNCTION
 #undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
-#undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
@@ -118,41 +112,6 @@ static int native_code_symbol(struct object *obj, const char *name)
 	return found ? 0 : -ENOENT;
 }
 
-/* Original C FUNC can provide the declaration used by DECLARE_STATIC_CALL.
- * Check the original key against the image symbol before borrowing its ABI.
- */
-static int native_static_target(struct object *obj, const char *native, const char *target)
-{
- char key[256];GElf_Sym target_sym = {}, key_sym = {};unsigned int targets = 0, keys = 0;
- Elf_Data *symbols = obj->efile.symbols, *data;Elf_Scn *scn;GElf_Shdr section;
- size_t i, count, offset;unsigned long long value = 0;const unsigned char *bytes;
- if (strncmp(native, "__SCT__", 7) || gelf_getclass(obj->efile.elf) != ELFCLASS64 ||
-     snprintf(key, sizeof(key), "__SCK__%s", native + 7) >= (int)sizeof(key) || !symbols)
-  return -EINVAL;
- count = symbols->d_size / gelf_fsize(obj->efile.elf, ELF_T_SYM, 1, EV_CURRENT);
- for (i = 0; i < count; i++) {
-  GElf_Sym sym;const char *name;
-  if (!gelf_getsym(symbols, i, &sym))return -EINVAL;
-  if (sym.st_shndx == SHN_UNDEF)continue;
-  name = elf_strptr(obj->efile.elf, obj->efile.strtabidx, sym.st_name);
-  if (!name)continue;
-  if (!strcmp(name, target)){target_sym = sym;targets++;}
-  if (!strcmp(name, key)){key_sym = sym;keys++;}
- }
- if (targets != 1 || keys != 1 || native_code_symbol(obj, target) || key_sym.st_size < 8)
-  return -EINVAL;
- scn = elf_getscn(obj->efile.elf, key_sym.st_shndx);
- if (!scn || !gelf_getshdr(scn, &section) || section.sh_flags & SHF_EXECINSTR ||
-     key_sym.st_value < section.sh_addr)return -EINVAL;
- offset = key_sym.st_value - section.sh_addr;data = elf_getdata(scn, NULL);
- if (!data || !data->d_buf || offset > data->d_size || data->d_size - offset < 8)
-  return -EINVAL;
- bytes = (const unsigned char *)data->d_buf + offset;
- for (i = 0; i < 8; i++)value |= (unsigned long long)bytes[i] <<
-     (8 * (obj->efile.encoding == ELFDATA2LSB ? i : 7 - i));
- return value == target_sym.st_value ? 0 : -EINVAL;
-}
-
 static int native_member_proto(const struct btf *btf, const char *record, const char *field)
 {
 	const struct btf_type *t;
@@ -160,12 +119,6 @@ static int native_member_proto(const struct btf *btf, const char *record, const 
 	int id, proto = -ENOENT;
 	u32 i;
 
- if (!strcmp(record, "BTF_FUNC")) {
-  id = native_unique_type(btf, field, BTF_KIND_FUNC);
-  if (id < 0)return id;
-  t = btf__type_by_id(btf, id);id = t->type;t = btf__type_by_id(btf, id);
-  return t && btf_is_func_proto(t) ? id : -EINVAL;
- }
 	id = native_unique_type(btf, record, BTF_KIND_STRUCT);
 	if (id < 0)
 		return id;
@@ -330,22 +283,11 @@ static int native_set_btf(struct object *obj)
 			return -EINVAL;
 		}
 		func = native_unique_type(btf, e->native, BTF_KIND_FUNC);
-		if (e->record) {
-   if (!strcmp(e->record, "BTF_FUNC") && native_static_target(obj, e->native, e->field))
-    return -EINVAL;
-			proto = native_member_proto(btf, e->record, e->field);
-			if (proto < 0)
-				return proto;
-			if (func == -ENOENT)
-				func = btf__add_func(btf, e->native, BTF_FUNC_GLOBAL, proto);
-			else if (func >= 0 && btf__type_by_id(btf, func)->type != proto)
-				return -EINVAL;
-		}
 		/* Assembly has no DWARF function body. Borrow only the original C
 		 * declaration retained by NATIVE_PROTOTYPE, never a guessed ABI.
 		 * An ambiguous existing FUNC is still an error.
 		 */
-		if (func == -ENOENT && !e->record) {
+		if (func == -ENOENT) {
 			char record[256];
 			int length = snprintf(record, sizeof(record),
 					      "ebpfos_native_proto_%s", e->native);

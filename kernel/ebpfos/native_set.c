@@ -15,7 +15,6 @@ enum ebpfos_native_scalar_counts {
 #define NATIVE_FUNCTION(source, native, flags)
 #define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags)
-#define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
@@ -25,7 +24,6 @@ enum ebpfos_native_scalar_counts {
 #undef NATIVE_FUNCTION
 #undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
-#undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
@@ -38,7 +36,6 @@ BTF_KFUNCS_START(ebpfos_native_ids)
 #define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
-#define NATIVE_STATIC_CALL(source, native, record, field, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
@@ -48,7 +45,6 @@ BTF_KFUNCS_START(ebpfos_native_ids)
 #undef NATIVE_FUNCTION
 #undef NATIVE_PROTOTYPE
 #undef NATIVE_INLINE_FUNCTION
-#undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX

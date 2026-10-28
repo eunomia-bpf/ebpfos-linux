@@ -37,7 +37,6 @@
 	static const struct ebpfos_native_proto_##source __used \
 		ebpfos_native_proto_capture_##source = { .fn = &source };
 #define NATIVE_FUNCTION(source, native, flags)
-#define NATIVE_STATIC_CALL(source, native, record, field, flags)
 #define NATIVE_ALIAS(source, native)
 #define NATIVE_ARG(native, index, tag)
 #define NATIVE_ENUM_MAX(native, index, record, sentinel)
@@ -47,7 +46,6 @@
 #undef NATIVE_INLINE_FUNCTION
 #undef NATIVE_PROTOTYPE
 #undef NATIVE_FUNCTION
-#undef NATIVE_STATIC_CALL
 #undef NATIVE_ALIAS
 #undef NATIVE_ARG
 #undef NATIVE_ENUM_MAX
