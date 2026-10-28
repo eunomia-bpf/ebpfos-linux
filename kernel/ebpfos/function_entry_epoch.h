@@ -1,21 +1,27 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef EBPFOS_FUNCTION_ENTRY_EPOCH_H
 #define EBPFOS_FUNCTION_ENTRY_EPOCH_H
-/* Staged native migration programs have int(unsigned int) ABI. APPLY saves
+/* Migration exports have int(unsigned int) native ABI. Verified and trusted
+ * eBPF exports use the same cold binding as component entries; the program
+ * fd retains their complete JIT graph. Staged native exports remain supported.
+ * APPLY saves
  * current data before writes; UNDO restores that snapshot after any refusal.
  * The inverse is a separate program operating on current retained values.
  * Source ownership/population and equivalence remain compiler obligations.
  */
-static struct bpf_prog *entry_epoch_program(struct entry_set *set, u32 fd)
+static struct bpf_prog *entry_epoch_program(struct entry_set *set, u32 fd,
+ unsigned long *address)
 {
  struct bpf_prog *program = bpf_prog_get(fd);
  const struct btf_type *function, *prototype, *result, *argument;
  struct btf *btf;
  int error = -EOPNOTSUPP;
  if (IS_ERR(program)) return program;
- if (program->type != BPF_PROG_TYPE_NATIVE || !set->source_module ||
-     program->aux->mod != set->source_module) goto fail;
+ if (!set->source_module) goto fail;
  btf = program->aux->attach_btf;
+ /* The callback declaration must belong to this journal's source module.
+  * Its body may be a verified/trusted JIT export rather than module text. */
+ if (!btf || btf != set->source_btf) goto fail;
  function = btf_type_by_id(btf, program->aux->attach_btf_id);
  prototype = function ? btf_type_skip_modifiers(btf, function->type, NULL) : NULL;
  error = -EPROTOTYPE;
@@ -27,6 +33,9 @@ static struct bpf_prog *entry_epoch_program(struct entry_set *set, u32 fd)
      btf_int_bits(result) != 32 || btf_int_bits(argument) != 32 ||
      !(btf_int_encoding(result) & BTF_INT_SIGNED) ||
      btf_int_encoding(argument)) goto fail;
+ error = bpf_entry_program_address(btf, program->aux->attach_btf_id,
+  program, false, address);
+ if (error) goto fail;
  return program;
 fail:
  bpf_prog_put(program);return ERR_PTR(error);
@@ -49,7 +58,7 @@ static bool entry_epoch_contains(void *opaque, unsigned long ip)
 }
 struct entry_epoch_call {
  struct entry_set *set;
- struct bpf_prog *program;
+ unsigned long address;
  bool called;
  int undo_error;
 };
@@ -59,18 +68,18 @@ static int entry_epoch_update(void *opaque)
  int error = ebpfos_code_stopped(entry_epoch_contains, call->set);
  if (error) return error;
  call->called = true;
- return ((int (*)(u32))(void *)call->program->bpf_func)(BPF_ENTRY_EPOCH_APPLY);
+ return ((int (*)(u32))(void *)call->address)(BPF_ENTRY_EPOCH_APPLY);
 }
 static void entry_epoch_undo(void *opaque)
 {
  struct entry_epoch_call *call = opaque;
  if (call->called) call->undo_error =
-  ((int (*)(u32))(void *)call->program->bpf_func)(BPF_ENTRY_EPOCH_UNDO);
+  ((int (*)(u32))(void *)call->address)(BPF_ENTRY_EPOCH_UNDO);
 }
 static int entry_epoch_apply(struct entry_set *set, unsigned int from,
- unsigned int to, struct bpf_prog *program)
+ unsigned int to, unsigned long address)
 {
- struct entry_epoch_call call = { .set = set, .program = program };
+ struct entry_epoch_call call = { .set = set, .address = address };
  struct text_poke_pair *pairs;
  int error;
  if (!set->epoch_mode || set->table_count || !set->source_module) return -EOPNOTSUPP;

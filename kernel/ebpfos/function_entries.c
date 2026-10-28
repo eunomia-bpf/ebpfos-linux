@@ -39,6 +39,7 @@ struct entry_set {
  struct delayed_work release_work, retire_work;
  bool closing, epoch_mode;
  struct bpf_prog *migration, *reverse;
+ unsigned long migration_address, reverse_address;
  u32 generation_id, next_generation;
  bool retired[2];
  struct module *source_module;
@@ -54,7 +55,7 @@ struct entry_set {
  unsigned int count, active, table_count;
  bool published;
 };
-static int entry_epoch_apply(struct entry_set *, unsigned int, unsigned int, struct bpf_prog *);
+static int entry_epoch_apply(struct entry_set *, unsigned int, unsigned int, unsigned long);
 static DEFINE_MUTEX(entry_lock);
 /* A stopped CPU does not prove every suspended old frame has returned. Keep
  * actual published graphs alive until their owners can prove retirement. */
@@ -201,7 +202,7 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  struct bpf_operations_set *next_tables = to ? entry_generation(set, to)->tables : NULL;
  struct bpf_operations_global_update tables;
  int error = entry_ownership(set);
- if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse);
+ if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse_address);
  if (error) return error;
  error = bpf_operations_global_prepare(&tables, next_tables, old_tables);
  if (error) return error;
@@ -712,6 +713,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  struct ebpfos_task_view_request *request = NULL;
  struct bpf_prog **expected = NULL;
  struct bpf_prog *migration = NULL, *reverse = NULL;
+ unsigned long migration_address = 0, reverse_address = 0;
  struct bpf_operations_set *expected_tables = NULL;
  u32 operations_count = attr->link_update.entry.operations_count, *operations_fds;
  u32 *programs = NULL, *old_fds = NULL, count = attr->link_update.entry.count;
@@ -729,9 +731,9 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  if (!!attr->link_update.entry.migration_prog_fd != !!attr->link_update.entry.reverse_prog_fd) return -EINVAL;
  if (attr->link_update.entry.migration_prog_fd) {
   if (!set->epoch_mode || entry->cgroup || operations_count) return -EOPNOTSUPP;
-  migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd);
+  migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd, &migration_address);
   if (IS_ERR(migration)) return PTR_ERR(migration);
-  reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd);
+  reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd, &reverse_address);
   if (IS_ERR(reverse)) {error = PTR_ERR(reverse);reverse = NULL;goto out;}
   if (migration == reverse) {error = -EINVAL;goto out;}
  }
@@ -800,14 +802,16 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
   if (!error) {request = NULL;set->active = id;}
  } else if (migration) {
   error = entry_ownership(set);
-  if (!error) error = entry_epoch_apply(set, set->active, id, migration);
+  if (!error) error = entry_epoch_apply(set, set->active, id, migration_address);
   if (!error) {
    set->active = id;
    if (set->reverse) {
     bpf_prog_put(set->migration);bpf_prog_put(set->reverse);
     set->migration = NULL;set->reverse = NULL;
+    set->migration_address = 0;set->reverse_address = 0;
    } else {
     set->migration = migration;set->reverse = reverse;migration = NULL;reverse = NULL;
+    set->migration_address = migration_address;set->reverse_address = reverse_address;
    }
   }
  } else error = entry_switch(set, set->active, id);
