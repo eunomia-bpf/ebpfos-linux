@@ -14,6 +14,8 @@ u32 bpf_operations_set_count(const struct bpf_operations_set *set);
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
 bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
 bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bpf_operations_set *b);
+struct bpf_operations_set *bpf_operations_compose(struct bpf_operations_set *active,
+ struct bpf_operations_set *next, struct bpf_operations_set *old);
 struct bpf_operations_global_update {
  struct bpf_operations_set *before, *after;
 };

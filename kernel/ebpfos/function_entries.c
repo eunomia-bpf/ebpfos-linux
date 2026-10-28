@@ -529,8 +529,8 @@ static int entry_link_detach(struct bpf_link *link)
  int error;
  mutex_lock(&entry_lock);
  if (entry->cgroup) {
-  ebpfos_cgroup_view_detach(entry->cgroup);
-  entry->set->active = 0;error = 0;
+  error = ebpfos_cgroup_view_detach(entry->cgroup);
+  if (!error) entry->set->active = 0;
  } else error = entry_switch(entry->set, entry->set->active, 0);
  if (!error) {
   ftrace_text_release(entry->set->ftrace);entry->set->ftrace = NULL;
@@ -548,6 +548,10 @@ static void entry_link_release(struct bpf_link *link)
  mutex_lock(&entry_lock);entry->set->closing = true;mutex_unlock(&entry_lock);
  cancel_delayed_work_sync(&entry->set->retire_work);
  ebpfos_cgroup_view_put(entry->cgroup);
+ /* A cgroup owner retains its own complete program/table leases even if
+  * last-close must retry composition after an allocation failure. The
+  * entry journal never patches text for this private task selection. */
+ if (entry->cgroup) entry->set->active = 0;
  schedule_delayed_work(&entry->set->release_work, 0);
 }
 static void entry_link_dealloc(struct bpf_link *link)

@@ -336,32 +336,30 @@ static bool operations_set_has(struct bpf_operations_set *set, struct bpf_map *m
  for (i = 0; set && i < set->count; ++i) if (set->maps[i] == map) return true;
  return false;
 }
-int bpf_operations_global_prepare(struct bpf_operations_global_update *update,
+/* Compose cold, immutable selections. The caller retains and serializes the
+ * input snapshots. Ownership is by original table storage, not by map ID. */
+struct bpf_operations_set *bpf_operations_compose(struct bpf_operations_set *active,
  struct bpf_operations_set *next, struct bpf_operations_set *old)
 {
- /* The entry journal lock serializes preparation through publication.
-  * Build an immutable selection before stopping CPUs; objects that reserved
-  * an older selection can still resolve against that complete snapshot. */
- struct bpf_operations_set *active = rcu_dereference_protected(global_operations, 1), *merged = NULL;
+ struct bpf_operations_set *merged = NULL;
  u32 i, j, count, at = 0, have = bpf_operations_set_count(active);
  u32 remove = bpf_operations_set_count(old), add = bpf_operations_set_count(next);
- *update = (struct bpf_operations_global_update){};
  for (i = 0; i < remove; ++i)
-  if (!operations_set_has(active, old->maps[i])) return -EBUSY;
+  if (!operations_set_has(active, old->maps[i])) return ERR_PTR(-EBUSY);
  for (i = 0; i < add; ++i) {
   struct ebpfos_operations *wanted = container_of(next->maps[i], struct ebpfos_operations, map);
   for (j = 0; j < have; ++j) {
    struct ebpfos_operations *owner = container_of(active->maps[j], struct ebpfos_operations, map);
    if (wanted->original == owner->original && !operations_set_has(old, active->maps[j]))
-    return -EBUSY;
+    return ERR_PTR(-EBUSY);
   }
  }
- if (bpf_operations_set_same(next, old)) return 0;
- if (remove > have || add > U32_MAX - (have - remove)) return -E2BIG;
+ if (bpf_operations_set_same(next, old)) return bpf_operations_set_get(active);
+ if (remove > have || add > U32_MAX - (have - remove)) return ERR_PTR(-E2BIG);
  count = have - remove + add;
  if (count) {
   merged = kvzalloc(struct_size(merged, maps, count), GFP_KERNEL);
-  if (!merged) return -ENOMEM;
+  if (!merged) return ERR_PTR(-ENOMEM);
   refcount_set(&merged->refs, 1);merged->count = count;
   for (i = 0; i < have; ++i)
    if (!operations_set_has(old, active->maps[i])) {
@@ -371,6 +369,16 @@ int bpf_operations_global_prepare(struct bpf_operations_global_update *update,
    merged->maps[at++] = next->maps[i];bpf_map_inc(next->maps[i]);
   }
  }
+ return merged;
+}
+int bpf_operations_global_prepare(struct bpf_operations_global_update *update,
+ struct bpf_operations_set *next, struct bpf_operations_set *old)
+{
+ /* The entry journal lock serializes preparation through publication. */
+ struct bpf_operations_set *active = rcu_dereference_protected(global_operations, 1);
+ struct bpf_operations_set *merged = bpf_operations_compose(active, next, old);
+ *update = (struct bpf_operations_global_update){};
+ if (IS_ERR(merged)) return PTR_ERR(merged);
  update->before = bpf_operations_set_get(active);update->after = merged;
  return 0;
 }
