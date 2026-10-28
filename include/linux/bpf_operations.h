@@ -11,6 +11,7 @@ struct bpf_operations_set *bpf_operations_prepare(const u32 *fds, u32 count);
 struct bpf_operations_set *bpf_operations_set_get(struct bpf_operations_set *set);
 void bpf_operations_set_put(struct bpf_operations_set *set);
 u32 bpf_operations_set_count(const struct bpf_operations_set *set);
+int bpf_operations_visit_programs(const struct bpf_operations_set *,int (*visit)(struct bpf_prog *,void *),void *);
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
 bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
 bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bpf_operations_set *b);

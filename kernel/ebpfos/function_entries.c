@@ -90,6 +90,7 @@ static bool entry_export(struct btf *native, const struct btf_type *function,
  return found;
 }
 
+#include "function_entry_side.h"
 #include "function_entry_slots.h"
 #include "function_entry_calls.h"
 static int entry_callers_stopped(struct entry_set *set);
@@ -657,6 +658,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  set->table_count = operations_count;
  kvfree(operations_fds);
  if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
+ error=entry_side_compatible(NULL,0,set,false);if(error)goto free_set;
  set->epoch_mode = attr->link_create.flags & BPF_F_ENTRY_EPOCH;
  if (task) {
   request = entry_task_prepare(set, 1);
@@ -774,6 +776,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
   for (i = 0; i < count; ++i)
    if (old->programs[i * 2 + slot] != expected[i]) goto unlock;
  if (expected_tables && !bpf_operations_set_same(old->tables, expected_tables)) goto unlock;
+ error=entry_side_compatible(old,slot,prepared,migration!=NULL);if(error)goto unlock;
  error = -EBUSY;
  /* One outstanding layout epoch. A reverse update must use the retained
   * inverse, not another conversion with an unrelated population contract. */

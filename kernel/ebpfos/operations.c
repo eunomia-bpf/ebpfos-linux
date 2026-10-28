@@ -308,6 +308,21 @@ static void operations_set_rcu(struct rcu_head *rcu)
 }
 void bpf_operations_set_put(struct bpf_operations_set *set)
 { if (set && refcount_dec_and_test(&set->refs)) call_rcu(&set->rcu, operations_set_rcu); }
+int bpf_operations_visit_programs(const struct bpf_operations_set *set,
+ int (*visit)(struct bpf_prog *,void *),void *data)
+{
+ u32 i,j;int error;
+ for(i=0;set&&i<set->count;++i) {
+  struct ebpfos_operations *ops=container_of(set->maps[i],struct ebpfos_operations,map);
+  const struct btf_type *record=btf_type_by_id(ops->types,ops->map.btf_vmlinux_value_type_id);
+  /* Programs use native BTF field indices; holes are not bound methods.
+   * Ready operation objects are immutable and held by the prepared set. */
+  for(j=0;j<btf_type_vlen(record);++j)if(ops->programs[j]) {
+   error=visit(ops->programs[j],data);if(error)return error;
+  }
+ }
+ return 0;
+}
 u32 bpf_operations_set_count(const struct bpf_operations_set *set) { return set ? set->count : 0; }
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 at)
 { return set && at < set->count ? set->maps[at]->id : 0; }
