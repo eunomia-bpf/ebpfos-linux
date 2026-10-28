@@ -4,6 +4,7 @@
 #include <linux/bpf_verifier.h>
 #include <linux/filter.h>
 #include <linux/btf.h>
+#include <linux/capability.h>
 
 #define verbose(env, fmt, args...) bpf_verifier_log_write(env, fmt, ##args)
 
@@ -130,6 +131,37 @@ err_free:
 	return ret;
 }
 
+/* This contract narrows termination only. The ordinary state comparison,
+ * resource checks and SCC read/precision propagation still prove each loop
+ * iteration safe. It grants no pointer, field or execution-context authority.
+ */
+static int check_protocol_loop_contract(struct bpf_verifier_env *env,
+                                       const struct btf_type *type, u32 subprog)
+{
+	const char *value = btf_find_decl_tag_value(env->prog->aux->btf, type,
+						  -1, "loop:");
+
+	if (IS_ERR(value)) {
+		if (PTR_ERR(value) == -ENOENT)
+			return 0;
+		verbose(env, "invalid or duplicate loop contract for func#%u\n", subprog);
+		return PTR_ERR(value);
+	}
+	if (strcmp(value, "kernel_protocol")) {
+		verbose(env, "unknown loop contract for func#%u\n", subprog);
+		return -EINVAL;
+	}
+	/* Kernel-protocol progress is a privileged assumption, like supplying
+	 * the kernel code that implements the corresponding native protocol.
+	 */
+	if (!bpf_token_capable(env->prog->aux->token, CAP_SYS_ADMIN)) {
+		verbose(env, "kernel protocol loop contract requires CAP_SYS_ADMIN\n");
+		return -EPERM;
+	}
+	env->subprog_info[subprog].protocol_bounded = true;
+	return 0;
+}
+
 static int check_btf_func(struct bpf_verifier_env *env,
 			  const union bpf_attr *attr,
 			  bpfptr_t uattr)
@@ -196,6 +228,9 @@ static int check_btf_func(struct bpf_verifier_env *env,
 		}
 
 		env->subprog_info[i].name = btf_name_by_offset(btf, type->name_off);
+		ret = check_protocol_loop_contract(env, type, i);
+		if (ret)
+			goto err_free;
 		bpfptr_add(&urecord, urec_size);
 	}
 

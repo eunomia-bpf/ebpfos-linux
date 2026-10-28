@@ -1334,6 +1334,20 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 				}
 				goto skip_inf_loop_check;
 			}
+			/* The native protocol supplies progress. Reuse the ordinary
+			 * invariant comparison and SCC read/precision propagation;
+			 * the current work and resource limits still apply.
+			 */
+			if (env->subprog_info[cur->frame[cur->curframe]->subprogno].protocol_bounded &&
+			    env->insn_aux_data[insn_idx].scc &&
+			    sl->state.may_goto_depth == cur->may_goto_depth &&
+			    sl->state.callback_unroll_depth == cur->callback_unroll_depth &&
+			    states_equal(env, &sl->state, cur, RANGE_WITHIN) &&
+			    !iter_active_depths_differ(&sl->state, cur)) {
+				verbose(env, "kernel protocol loop state covered at insn %d\n", insn_idx);
+				loop = true;
+				goto hit;
+			}
 			/* attempt to detect infinite loop to avoid unnecessary doomed work */
 			if (states_maybe_looping(&sl->state, cur) &&
 			    states_equal(env, &sl->state, cur, EXACT) &&
