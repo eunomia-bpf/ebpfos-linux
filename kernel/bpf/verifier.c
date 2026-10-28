@@ -3149,6 +3149,9 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		}
 		err = btf_distill_func_proto(&env->log, kfunc.btf, kfunc.proto,
 					     kfunc.name, &func_model);
+		if (err && bpf_jit_supports_native_args() && env->prog->jit_requested)
+			err = btf_distill_native_func_proto(&env->log, kfunc.btf, kfunc.proto,
+						    kfunc.name, &func_model);
 		if (err)
 			goto err_remove_desc;
 		desc->addr = addr;
@@ -13671,8 +13674,49 @@ static int native_stack_scalar_arg(struct bpf_verifier_env *env,
 	return 0;
 }
 
+/* Integer records carry bytes, not pointer capabilities. */
+static int native_scalar_record_arg(struct bpf_verifier_env *env,
+				    const struct bpf_native_arg *arg)
+{
+	struct bpf_reg_state *regs = cur_regs(env);
+	int err;
+
+	if (arg->reg >= 0) {
+		for (u32 word = 0; word < arg->words; word++) {
+			u32 regno = bpf_arg_regno(arg->reg + word);
+
+			err = check_reg_arg(env, regno, SRC_OP);
+			if (err) return err;
+			if (regs[regno].type != SCALAR_VALUE) return -EACCES;
+		}
+		return 0;
+	}
+	struct bpf_subprog_info *sub = &env->subprog_info[cur_func(env)->subprogno];
+	struct bpf_reg_state *sp = &regs[BPF_REG_ARG_SP];
+	struct bpf_func_state *frame = bpf_func(env, sp);
+	s64 off;
+
+	if (!sub->native_frame || sp->type != PTR_TO_STACK || !tnum_is_const(sp->var_off) ||
+	    arg->stack_offset > sub->native_arg_out || arg->size > sub->native_arg_out - arg->stack_offset)
+		return -EINVAL;
+	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, arg->size, BPF_READ);
+	if (err) return err;
+	off = (s64)sp->var_off.value + arg->stack_offset;
+	for (u32 byte = 0; byte < arg->size; byte++) {
+		u32 slot_byte = -off - byte - 1;
+		struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
+		u8 type = slot->slot_type[slot_byte % 8];
+
+		if (type != STACK_MISC && type != STACK_ZERO &&
+		    !(type == STACK_SPILL && slot->spilled_ptr.type == SCALAR_VALUE))
+			return -EACCES;
+	}
+	return 0;
+}
+
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_arg_meta *meta,
-			    int insn_idx)
+			    int insn_idx, struct bpf_reg_state *native_result,
+			    u32 *native_result_size)
 {
 	const char *func_name = meta->func_name, *ref_tname;
 	const struct btf *btf = meta->btf;
@@ -13688,7 +13732,17 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	if (native) {
 		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi);
 		if (ret) return ret;
-		if (abi.result_buffer) return -EOPNOTSUPP;
+		if (abi.result_buffer) {
+			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
+
+			if (!btf_native_scalar_storage(meta->btf, meta->func_proto->type, 0) ||
+			    buffer->type != PTR_TO_STACK || !tnum_is_const(buffer->var_off))
+				return -EOPNOTSUPP;
+			ret = check_stack_access_within_bounds(env, BPF_REG_1, 0, abi.args[0].size, BPF_WRITE);
+			if (ret) return ret;
+			*native_result = *buffer;
+			*native_result_size = abi.args[0].size;
+		}
 	}
 	if (nargs > (native ? MAX_BPF_FUNC_ARGS : bpf_jit_supports_native_args() ? MAX_BPF_NATIVE_REG_ARGS : MAX_BPF_FUNC_REG_ARGS)) {
 		verbose(env, "Function %s has %d > %d args\n", func_name, nargs,
@@ -13709,8 +13763,17 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		struct native_scalar_arg_scope temporary __free(native_scalar_arg) = {};
 
 		if (native) {
-			const struct bpf_native_arg *location = &abi.args[i];
+			const struct bpf_native_arg *location = &abi.args[i + abi.result_buffer];
 
+			t = btf_type_skip_modifiers(btf, args[i].type, NULL);
+			if (btf_type_is_struct(t) || btf_type_is_array(t) ||
+			    (btf_type_is_scalar(t) && t->size > 8)) {
+				if (!btf_native_scalar_storage(meta->btf, args[i].type, 0))
+					return -EOPNOTSUPP;
+				ret = native_scalar_record_arg(env, location);
+				if (ret) return ret;
+				continue;
+			}
 			if (location->reg < 0) {
 				t = btf_type_skip_modifiers(btf, args[i].type, NULL);
 				if (!btf_type_is_scalar(t) || t->size > 8)
@@ -13742,7 +13805,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 		t = btf_type_skip_modifiers(btf, args[i].type, NULL);
 		size_arg = kfunc_arg_size_index(meta, i, nargs);
-		if (native && size_arg >= 0 && abi.args[size_arg].reg < 0)
+		if (native && size_arg >= 0 &&
+		    (abi.result_buffer || abi.args[size_arg].reg != size_arg ||
+		     abi.args[i].reg != i))
 			return -EOPNOTSUPP;
 		nullable = kfunc_mem_arg_tag(meta, i, "arg:nullable");
 		address = kfunc_mem_arg_tag(meta, i, "arg:address");
@@ -13759,7 +13824,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			return ret;
 
 		if (btf_type_is_scalar(t)) {
-			if (meta->func_id == U32_MAX && regno == 13) {
+			if (meta->func_id == U32_MAX && native) {
 				u32 encoding = btf_type_is_int(t) ? btf_int_encoding(t) : 0;
 				u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(t) ? btf_int_bits(t) : t->size * 8;
 				bool sign = btf_type_is_int(t) ? encoding & BTF_INT_SIGNED : btf_type_kflag(t);
@@ -13769,7 +13834,10 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				               reg->s32_max_value > (1 << (bits - 1)) - 1)) ||
 				     (!sign && reg->u32_max_value > (1U << bits) - 1))))
 					return -EINVAL;
-				if (bits < 32) bpf_mark_all_scalars_precise(env, env->cur_state);
+				if (bits < 32) {
+					ret = mark_chain_precision(env, regno);
+					if (ret) return ret;
+				}
 			}
 			if (reg->type != SCALAR_VALUE) {
 				verbose(env, "R%d is not a scalar\n", regno);
@@ -14360,6 +14428,12 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		return -EINVAL;
 	}
 
+	/* All inputs have been checked before the native result overwrites them. */
+	for (u32 byte = 0; byte < *native_result_size; byte++) {
+		ret = check_mem_access(env, insn_idx, BPF_REG_1, byte,
+			BPF_B, BPF_WRITE, -1, false, false);
+		if (ret) return ret;
+	}
 	return 0;
 }
 
@@ -14370,6 +14444,8 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 {
 	struct bpf_reg_state *regs = cur_regs(env), *target = &regs[insn->imm];
 	struct bpf_kfunc_call_arg_meta meta = {};
+	struct bpf_reg_state native_result = {};
+	u32 native_result_size = 0;
 	const struct btf_type *type, *pointee;
 	struct btf *btf;
 	u32 id, i, nargs;
@@ -14418,7 +14494,7 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	nargs = btf_type_vlen(meta.func_proto);
 	if (nargs > (env->subprog_info[cur_func(env)->subprogno].native_frame ? MAX_BPF_FUNC_ARGS : MAX_BPF_NATIVE_REG_ARGS))
 		return -EINVAL;
-	for (i = 1; i <= nargs; i++) {
+	for (i = 1; i <= nargs && !env->subprog_info[cur_func(env)->subprogno].native_frame; i++) {
 		type = btf_type_skip_modifiers(btf, btf_params(meta.func_proto)[i - 1].type, NULL);
 		if (btf_type_is_scalar(type) && (!type->size || type->size > sizeof(u64))) {
 			verbose(env, "callx arg#%d does not fit one native argument register\n", i - 1);
@@ -14446,12 +14522,14 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 			}
 		}
 	}
-	err = check_kfunc_args(env, &meta, env->insn_idx);
+	err = check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
 	if (err)
 		return err;
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
 	clear_caller_saved_regs(env, regs);
-	if (btf_type_is_void(type)) {
+	if (native_result_size) {
+		regs[BPF_REG_0] = native_result;
+	} else if (btf_type_is_void(type)) {
 		/* R0 is not readable after a void call. */
 	} else if ((btf_type_is_scalar(type) && type->size <= sizeof(u64)) ||
 		   btf_scalar_record_return(btf, meta.func_proto->type)) {
@@ -14911,6 +14989,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	int err, insn_idx = *insn_idx_p;
 	const struct btf_param *args;
 	struct btf *desc_btf;
+	struct bpf_reg_state native_result = {};
+	u32 native_result_size = 0;
 
 	/* skip for now, but return error when we find this in fixup_kfunc_call */
 	if (!insn->imm)
@@ -14973,7 +15053,7 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		insn_aux->non_sleepable = true;
 
 	/* Check the arguments */
-	err = check_kfunc_args(env, &meta, insn_idx);
+	err = check_kfunc_args(env, &meta, insn_idx, &native_result, &native_result_size);
 	if (err < 0)
 		return err;
 
@@ -15138,7 +15218,9 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		}
 	}
 
-	if (btf_type_is_scalar(t) ||
+	if (native_result_size) {
+		regs[BPF_REG_0] = native_result;
+	} else if (btf_type_is_scalar(t) ||
 	    btf_scalar_record_return(desc_btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		if (meta.btf == btf_vmlinux && (meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock] ||
@@ -15265,9 +15347,21 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 	nargs = btf_type_vlen(meta.func_proto);
 	args = (const struct btf_param *)(meta.func_proto + 1);
+	struct bpf_native_abi abi = {};
+	bool native = env->subprog_info[cur_func(env)->subprogno].native_frame;
+	if (native) {
+		err = bpf_native_abi_plan(desc_btf, meta.func_proto, &abi);
+		if (err) return err;
+	}
 	for (i = 0; i < nargs; i++) {
-		u32 regno = i + 1;
+		u32 regno = bpf_arg_regno(i);
 
+		if (native) {
+			const struct bpf_native_arg *arg = &abi.args[i + abi.result_buffer];
+
+			if (arg->reg < 0 || arg->words != 1 || arg->size > 8) continue;
+			regno = bpf_arg_regno(arg->reg);
+		}
 		t = btf_type_skip_modifiers(desc_btf, args[i].type, NULL);
 		if (btf_type_is_ptr(t))
 			mark_btf_func_reg_size(env, regno, sizeof(void *));

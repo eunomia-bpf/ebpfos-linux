@@ -17,6 +17,7 @@ struct bpf_native_abi {
 };
 struct btf;
 struct btf_type;
+bool btf_native_scalar_storage(struct btf *btf, u32 id, u32 depth);
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
                        struct bpf_native_abi *abi);
 #endif

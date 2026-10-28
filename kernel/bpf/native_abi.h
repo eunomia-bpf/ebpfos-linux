@@ -79,7 +79,7 @@ static inline int bpf_native_classify(struct btf *btf, u32 id, u32 *size, u8 *wo
  }
  return 0;
 }
-static bool btf_native_scalar_storage(struct btf *btf, u32 id, u32 depth)
+bool btf_native_scalar_storage(struct btf *btf, u32 id, u32 depth)
 {
  const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
  if (!t || depth > 32) return false;
