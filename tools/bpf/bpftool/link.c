@@ -537,6 +537,9 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
   jsonw_uint_field(json_wtr, "revision", full.entry.revision);
   jsonw_uint_field(json_wtr, "cgroup_id", full.entry.cgroup_id);
   jsonw_bool_field(json_wtr, "detached", full.entry.detached);
+  jsonw_uint_field(json_wtr, "epoch_flags", full.entry.epoch_flags);
+  jsonw_uint_field(json_wtr, "migration_prog_id", full.entry.migration_prog_id);
+  jsonw_uint_field(json_wtr, "reverse_prog_id", full.entry.reverse_prog_id);
   jsonw_name(json_wtr, "operations_ids");
   jsonw_start_array(json_wtr);
   for (i = 0; i < operations_count; ++i) jsonw_uint(json_wtr, operations[i]);
@@ -554,6 +557,8 @@ static int show_entry_members(int fd, struct bpf_link_info *info, bool json)
   printf("\n\tcount %u target_btf_obj_id %u revision %llu detached %u  ",
    full.entry.count, full.entry.target_btf_obj_id, full.entry.revision, full.entry.detached);
   printf("cgroup_id %llu  ", full.entry.cgroup_id);
+  printf("epoch_flags %u migration_prog_id %u reverse_prog_id %u  ",
+   full.entry.epoch_flags, full.entry.migration_prog_id, full.entry.reverse_prog_id);
   for (i = 0; i < operations_count; ++i) printf("\n\toperations_id %u", operations[i]);
   for (i = 0; i < count; ++i)
    printf("\n\ttarget_btf_id %u prog_id %u", targets[i], programs[i]);

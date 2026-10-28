@@ -1318,7 +1318,11 @@ enum bpf_perf_event_type {
 /* The verifier internal test flag. Behavior is undefined */
 #define BPF_F_TEST_REG_INVARIANTS	(1U << 7)
 
-/* Restrict a sleepable syscall program to the eBPFOS provider ABI. */
+/* Entry-link owned-layout transactions; only link/update time executes these. */
+#define BPF_F_ENTRY_EPOCH (1U << 0)
+#define BPF_ENTRY_EPOCH_APPLY 0
+#define BPF_ENTRY_EPOCH_UNDO 1
+
 /* Restrict a sleepable syscall program to the typed component-call ABI. */
 #define BPF_F_EBPFOS_COMPONENT	(1U << 10)
 
@@ -1942,6 +1946,8 @@ union bpf_attr {
 			__u32 operations_reserved;
 			__aligned_u64 operations_fds;
 			__aligned_u64 old_operations_fds;
+			__u32 migration_prog_fd;
+			__u32 reverse_prog_fd;
 		} entry;
 	} link_update;
 
@@ -6809,6 +6815,10 @@ struct bpf_link_info {
 			__u32 operations_count;
 			__u32 :32;
 			__aligned_u64 operations_ids;
+			__u32 epoch_flags;
+			__u32 migration_prog_id;
+			__u32 reverse_prog_id;
+			__u32 epoch_reserved;
 		} entry;
 		struct {
 			__aligned_u64 tp_name; /* in/out: tp_name buffer ptr */

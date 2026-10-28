@@ -37,7 +37,8 @@ struct entry_member { u32 native_function, program; };
 struct entry_set {
  struct list_head retained, generations, generation_node;
  struct delayed_work release_work, retire_work;
- bool closing;
+ bool closing, epoch_mode;
+ struct bpf_prog *migration, *reverse;
  u32 generation_id, next_generation;
  bool retired[2];
  struct module *source_module;
@@ -54,6 +55,7 @@ struct entry_set {
  unsigned int count, active, table_count;
  bool published;
 };
+static int entry_epoch_apply(struct entry_set *, unsigned int, unsigned int, struct bpf_prog *);
 static DEFINE_MUTEX(entry_lock);
 /* A stopped CPU does not prove every suspended old frame has returned. Keep
  * actual published graphs alive until their owners can prove retirement. */
@@ -148,6 +150,8 @@ static int entry_ownership(struct entry_set *set)
   * keep executable ownership even if an exceptional rollback cannot finish. */
  list_for_each_entry(owner, &entry_retained, retained) {
   if (owner == set || (!owner->active && !owner->poisoned)) continue;
+  if (set->source_module && set->source_module == owner->source_module &&
+      (set->epoch_mode || owner->epoch_mode)) return -EBUSY;
   for (i = 0; i < set->slot_count; ++i)
    for (j = 0; j < owner->slot_count; ++j)
     if (set->slots[i].ip == owner->slots[j].ip) return -EBUSY;
@@ -159,6 +163,7 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  struct bpf_operations_set *old_tables = from ? entry_generation(set, from)->tables : NULL;
  struct bpf_operations_set *next_tables = to ? entry_generation(set, to)->tables : NULL;
  int error = entry_ownership(set);
+ if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse);
  if (!error) error = bpf_operations_global_check(next_tables, old_tables);
  if (error) return error;
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
@@ -215,6 +220,8 @@ static void entry_free(struct entry_set *set)
  list_for_each_entry_safe(generation, next, &set->generations, generation_node) {
   list_del(&generation->generation_node);entry_free(generation);
  }
+ if (set->migration) bpf_prog_put(set->migration);
+ if (set->reverse) bpf_prog_put(set->reverse);
  module_put(set->source_module);
  if (set->source_btf) btf_put(set->source_btf);
  if (set->programs)
@@ -239,6 +246,8 @@ static bool entry_code_contains(void *opaque, unsigned long ip)
  }
  return false;
 }
+#include "function_entry_epoch.h"
+
 static int entry_quiescent(struct entry_set *set, unsigned int slot)
 {
  struct entry_lifetime lifetime = { .generation = set, .slot = slot };
@@ -505,6 +514,10 @@ static void entry_link_fdinfo(const struct bpf_link *link, struct seq_file *seq)
  seq_printf(seq, "count:\t%u\nrevision:\t%u\ndetached:\t%u\n",
   entry->set->count, entry->set->active, !entry_link_active(entry));
  seq_printf(seq, "operations_count:\t%u\n", entry->set->table_count);
+ seq_printf(seq, "epoch_flags:\t%u\nmigration_prog_id:\t%u\nreverse_prog_id:\t%u\n",
+  entry->set->epoch_mode ? BPF_F_ENTRY_EPOCH : 0,
+  entry->set->migration ? entry->set->migration->aux->id : 0,
+  entry->set->reverse ? entry->set->reverse->aux->id : 0);
  seq_printf(seq, "cgroup_id:\t%llu\n", ebpfos_cgroup_view_id(entry->cgroup));
  for (i = 0; i < entry->set->count; ++i)
   seq_printf(seq, "target:\t%lu\t%u\n", entry->set->locations[entry->set->count + i],
@@ -533,6 +546,9 @@ static int entry_link_info(const struct bpf_link *link, struct bpf_link_info *in
  info->entry.operations_count = entry->set->table_count;
  for (i = 0; i < min(table_count, info->entry.operations_count); ++i)
   if (put_user(generation ? bpf_operations_set_id(generation->tables, i) : 0, tables + i)) {error = -EFAULT;break;}
+ info->entry.epoch_flags = entry->set->epoch_mode ? BPF_F_ENTRY_EPOCH : 0;
+ info->entry.migration_prog_id = entry->set->migration ? entry->set->migration->aux->id : 0;
+ info->entry.reverse_prog_id = entry->set->reverse ? entry->set->reverse->aux->id : 0;
  info->entry.count = entry->set->count;
  info->entry.target_btf_obj_id = btf_obj_id(entry->set->source_btf ?
   entry->set->source_btf : bpf_get_btf_vmlinux());
@@ -564,7 +580,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  int error;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (kernel) return -EOPNOTSUPP;
- if (attr->link_create.prog_fd || attr->link_create.flags ||
+ if (attr->link_create.prog_fd || (attr->link_create.flags & ~BPF_F_ENTRY_EPOCH) ||
      attr->link_create.entry.reserved || attr->link_create.entry.operations_reserved ||
      (!count && !operations_count)) return -EINVAL;
  /* Global text and table transactions need one publication mechanism. The
@@ -572,6 +588,8 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
   * global transaction into two observable publications. Cgroup publication
   * already publishes both through its one immutable task table. */
  if (!task && count && operations_count) return -EOPNOTSUPP;
+ if ((attr->link_create.flags & BPF_F_ENTRY_EPOCH) &&
+     (task || operations_count || !count || !attr->link_create.target_fd)) return -EOPNOTSUPP;
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
  if (IS_ERR(targets)) return PTR_ERR(targets);
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.prog_fds), count, sizeof(u32));
@@ -592,6 +610,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  set->table_count = operations_count;
  kvfree(operations_fds);
  if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
+ set->epoch_mode = attr->link_create.flags & BPF_F_ENTRY_EPOCH;
  /* A reserved-entry batch has one common text publication. Mixed or legacy
   * ftrace updates do not provide this transaction and stay unsupported. */
  if (set->has_ftrace) {error = -EOPNOTSUPP;goto free_set;}
@@ -641,9 +660,10 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  struct entry_member *members;
  struct ebpfos_task_view_request *request = NULL;
  struct bpf_prog **expected = NULL;
+ struct bpf_prog *migration = NULL, *reverse = NULL;
  struct bpf_operations_set *expected_tables = NULL;
  u32 operations_count = attr->link_update.entry.operations_count, *operations_fds;
- u32 *programs, *old_fds = NULL, count = attr->link_update.entry.count;
+ u32 *programs = NULL, *old_fds = NULL, count = attr->link_update.entry.count;
  unsigned int i, slot, id = 0;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
@@ -655,8 +675,17 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
        ((count && !attr->link_update.entry.old_prog_fds) ||
         (operations_count && !attr->link_update.entry.old_operations_fds)) :
        (attr->link_update.entry.old_prog_fds || attr->link_update.entry.old_operations_fds))) return -EINVAL;
+ if (!!attr->link_update.entry.migration_prog_fd != !!attr->link_update.entry.reverse_prog_fd) return -EINVAL;
+ if (attr->link_update.entry.migration_prog_fd) {
+  if (!set->epoch_mode || entry->cgroup || operations_count) return -EOPNOTSUPP;
+  migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd);
+  if (IS_ERR(migration)) return PTR_ERR(migration);
+  reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd);
+  if (IS_ERR(reverse)) {error = PTR_ERR(reverse);reverse = NULL;goto out;}
+  if (migration == reverse) {error = -EINVAL;goto out;}
+ }
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.prog_fds), count, sizeof(u32));
- if (IS_ERR(programs)) return PTR_ERR(programs);
+ if (IS_ERR(programs)) {error = PTR_ERR(programs);programs = NULL;goto out;}
  if ((attr->link_update.flags & BPF_F_REPLACE) && count) {
   old_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.old_prog_fds), count, sizeof(u32));
   if (IS_ERR(old_fds)) {error = PTR_ERR(old_fds);old_fds = NULL;goto out;}
@@ -701,6 +730,10 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
   for (i = 0; i < count; ++i)
    if (old->programs[i * 2 + slot] != expected[i]) goto unlock;
  if (expected_tables && !bpf_operations_set_same(old->tables, expected_tables)) goto unlock;
+ error = -EBUSY;
+ /* One outstanding layout epoch. A reverse update must use the retained
+  * inverse, not another conversion with an unrelated population contract. */
+ if (migration && set->reverse && (migration != set->reverse || reverse != set->migration)) goto unlock;
  error = -EOVERFLOW;
  if (set->next_generation > INT_MAX) goto unlock;
  id = set->next_generation;
@@ -713,6 +746,18 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  if (entry->cgroup) {
   error = ebpfos_cgroup_view_update(entry->cgroup, request);
   if (!error) {request = NULL;set->active = id;}
+ } else if (migration) {
+  error = entry_ownership(set);
+  if (!error) error = entry_epoch_apply(set, set->active, id, migration);
+  if (!error) {
+   set->active = id;
+   if (set->reverse) {
+    bpf_prog_put(set->migration);bpf_prog_put(set->reverse);
+    set->migration = NULL;set->reverse = NULL;
+   } else {
+    set->migration = migration;set->reverse = reverse;migration = NULL;reverse = NULL;
+   }
+  }
  } else error = entry_switch(set, set->active, id);
  if (error && !set->poisoned) list_del(&prepared->generation_node);
  else prepared = NULL; /* Includes poisoned text: keep every possible target. */
@@ -724,6 +769,8 @@ unlock:
 out:
  if (expected)
   for (i = 0; i < count; ++i) if (expected[i]) bpf_prog_put(expected[i]);
+ if (migration) bpf_prog_put(migration);
+ if (reverse) bpf_prog_put(reverse);
  bpf_operations_set_put(expected_tables);
  kvfree(expected);kvfree(old_fds);kvfree(programs);
  return error;

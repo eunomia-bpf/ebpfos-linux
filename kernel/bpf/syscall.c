@@ -6086,7 +6086,7 @@ out_put:
 	return ret;
 }
 
-#define BPF_LINK_UPDATE_LAST_FIELD link_update.entry.old_operations_fds
+#define BPF_LINK_UPDATE_LAST_FIELD link_update.entry.reverse_prog_fd
 
 static int link_update(union bpf_attr *attr, bool from_kernel)
 {
