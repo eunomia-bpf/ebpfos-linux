@@ -4,5 +4,6 @@
 
 struct btf;
 bool btf_scalar_record_return(struct btf *btf, u32 id);
+unsigned int btf_record_return_words(struct btf *btf, u32 id);
 
 #endif

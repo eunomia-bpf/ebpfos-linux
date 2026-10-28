@@ -395,6 +395,8 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 				 * so for global func call it shouldn't be set
 				 * anymore
 				 */
+				if (env->insn_aux_data[idx].returns_two_regs)
+					bt_clear_reg(bt, BPF_REG_3);
 				if (bt_reg_mask(bt) & BPF_REGMASK_ARGS) {
 					verifier_bug(env, "global subprog unexpected regs %x",
 						     bt_reg_mask(bt));
@@ -466,8 +468,10 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			 */
 			if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL && insn->imm == 0)
 				return -ENOTSUPP;
-			/* regular helper call sets R0 */
+			/* Native INTEGER results can also set R3. */
 			bt_clear_reg(bt, BPF_REG_0);
+			if (env->insn_aux_data[idx].returns_two_regs)
+				bt_clear_reg(bt, BPF_REG_3);
 			if (bt_reg_mask(bt) & BPF_REGMASK_ARGS) {
 				/* if backtracking was looking for registers R1-R5
 				 * they should have been found already.
@@ -482,7 +486,7 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 					return -EFAULT;
 			}
 		} else if (opcode == BPF_EXIT) {
-			bool r0_precise;
+			bool r0_precise, r3_precise, result2;
 
 			/* Backtracking to a nested function call, 'idx' is a part of
 			 * the inner frame 'subseq_idx' is a part of the outer frame.
@@ -495,6 +499,10 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			if (subseq_idx >= 0 && bpf_calls_callback(env, subseq_idx))
 				for (i = 0; i < MAX_BPF_NATIVE_REG_ARGS; i++)
 					bt_clear_reg(bt, bpf_arg_regno(i));
+			result2 = subseq_idx > 0 && env->insn_aux_data[subseq_idx - 1].returns_two_regs;
+			r3_precise = result2 && bt_is_reg_set(bt, BPF_REG_3);
+			if (result2)
+				bt_clear_reg(bt, BPF_REG_3);
 			if (bt_reg_mask(bt) & BPF_REGMASK_ARGS) {
 				verifier_bug(env, "backtracking exit unexpected regs %x",
 					     bt_reg_mask(bt));
@@ -519,6 +527,8 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 
 			if (r0_precise)
 				bt_set_reg(bt, BPF_REG_0);
+			if (r3_precise)
+				bt_set_reg(bt, BPF_REG_3);
 			/* r6-r9 and stack slots will stay set in caller frame
 			 * bitmasks until we return back from callee(s)
 			 */

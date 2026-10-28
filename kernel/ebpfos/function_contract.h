@@ -7,6 +7,7 @@
 #include "function_scalar_span.h"
 #include "function_scalar_record_abi.h"
 #include "native_result_abi.h"
+#include "../bpf/btf_record_return.h"
 #include "function_register_prefix.h"
 #include <linux/module.h>
 /* Cold native-call contract shared by direct entries and owned ops tables.
@@ -85,6 +86,9 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  if (IS_ENABLED(CONFIG_X86_64) &&
      cell_single_scalar_record_register(native, a, compiled, b)) return true;
  if (!x || !y) return false;
+ if (!input && btf_scalar_record_return(native, a) &&
+     btf_scalar_record_return(compiled, b))
+  return cell_layout(native, a, compiled, b, 0, false);
  if (btf_type_is_ptr(x)) {
   if (!input) return false;
   if (input && btf_type_is_int(y) && y->size == sizeof(void *)) return true;
