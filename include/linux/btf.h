@@ -179,6 +179,8 @@ const struct btf_type *btf_type_id_size(const struct btf *btf,
 					u32 *ret_size);
 bool btf_type_is_scalar_region(const struct btf *btf, u32 type_id,
 			      u32 off, u32 size);
+bool btf_same_scalar_layout(const struct btf *left, u32 left_id,
+			    const struct btf *right, u32 right_id);
 
 /*
  * Options to control show behaviour.

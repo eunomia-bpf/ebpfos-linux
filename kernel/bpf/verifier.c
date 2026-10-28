@@ -373,6 +373,20 @@ static bool subprog_returns_void(struct bpf_verifier_env *env, int subprog)
 	return btf_type_is_void(type);
 }
 
+static bool subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog)
+{
+	struct btf *btf = env->prog->aux->btf;
+	const struct btf_type *func, *proto;
+
+	if (!btf || !env->prog->aux->func_info ||
+	    subprog >= env->prog->aux->func_info_cnt)
+		return false;
+	func = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
+	proto = func ? btf_type_by_id(btf, func->type) : NULL;
+	return proto && btf_type_is_func_proto(proto) &&
+	       btf_record_return_words(btf, proto->type) == 2;
+}
+
 static const char *subprog_name(const struct bpf_verifier_env *env, int subprog)
 {
 	struct bpf_func_info *info;
@@ -6840,6 +6854,33 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
  * Only scalar bytes acquire the size-of-object rule. Pointer and managed
  * fields continue through the existing typed path below.
  */
+static bool has_owned_scalar_contract(struct bpf_verifier_env *env,
+				      const struct bpf_reg_state *reg, u32 id,
+				      const struct btf_type *type)
+{
+	const struct btf *program = env->prog->aux->btf;
+	const struct btf_type *declared;
+	const char *tag;
+	s32 local_id;
+
+	tag = btf_find_decl_tag_value(reg->btf, type, -1, "owned_type:");
+	if (!IS_ERR(tag))
+		return !strcmp(tag, "component");
+	if (PTR_ERR(tag) != -ENOENT || !program || program == reg->btf)
+		return false;
+	/* Kernel object pointers retain kernel BTF. Transport only the compiler's
+	 * ownership classification from the matching program declaration; the
+	 * actual object's bounds, scalar partition and lifetime remain authoritative.
+	 */
+	local_id = btf_find_by_name_kind(program,
+			btf_name_by_offset(reg->btf, type->name_off), BTF_KIND_STRUCT);
+	if (local_id <= 0 || !btf_same_scalar_layout(reg->btf, id, program, local_id))
+		return false;
+	declared = btf_type_by_id(program, local_id);
+	tag = btf_find_decl_tag_value(program, declared, -1, "owned_type:");
+	return !IS_ERR(tag) && !strcmp(tag, "component");
+}
+
 static int check_owned_scalar_access(struct bpf_verifier_env *env,
 				     struct bpf_reg_state *regs, int regno,
 				     int off, int size, enum bpf_access_type atype,
@@ -6848,7 +6889,6 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg = regs + regno;
 	u32 id = reg->btf_id, bytes, begin, end;
 	const struct btf_type *t;
-	const char *tag;
 	int err;
 
 	if (!is_trusted_reg(reg) || size <= 0 ||
@@ -6860,8 +6900,7 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	t = btf_type_id_size(reg->btf, &id, &bytes);
 	if (!t || !btf_type_is_struct(t))
 		return 0;
-	tag = btf_find_decl_tag_value(reg->btf, t, -1, "owned_type:");
-	if (IS_ERR(tag) || strcmp(tag, "component"))
+	if (!has_owned_scalar_contract(env, reg, id, t))
 		return 0;
 	if (atype == BPF_WRITE &&
 	    ((reg->type & (MEM_RDONLY | NON_OWN_REF)) ||
@@ -10742,6 +10781,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return -EFAULT;
 
 	caller = state->frame[state->curframe];
+	env->insn_aux_data[*insn_idx].returns_two_regs = subprog_returns_two_regs(env, subprog);
 	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
 	if (!state->active_rcu_locks && !state->active_locks)
 		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
@@ -10782,6 +10822,10 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
+			if (subprog_returns_two_regs(env, subprog)) {
+				mark_reg_unknown(env, caller->regs, BPF_REG_3);
+				caller->regs[BPF_REG_3].subreg_def = DEF_NOT_SUBREG;
+			}
 		}
 
 		if (env->subprog_info[subprog].might_throw) {
@@ -11134,6 +11178,16 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	} else {
 		/* return to the caller whatever r0 had in the callee */
 		caller->regs[BPF_REG_0] = *r0;
+		if (subprog_returns_two_regs(env, callee->subprogno)) {
+			err = check_reg_arg(env, BPF_REG_3, SRC_OP);
+			if (err)
+				return err;
+			if (callee->regs[BPF_REG_3].type != SCALAR_VALUE) {
+				verbose(env, "second record result R3 is not a scalar\n");
+				return -EACCES;
+			}
+			caller->regs[BPF_REG_3] = callee->regs[BPF_REG_3];
+		}
 	}
 
 	/* for callbacks like bpf_loop or bpf_for_each_map_elem go back to callsite,
@@ -14169,7 +14223,12 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	} else if ((btf_type_is_scalar(type) && type->size <= sizeof(u64)) ||
 		   btf_scalar_record_return(btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
-		mark_btf_func_reg_size(env, BPF_REG_0, type->size);
+		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, type->size, sizeof(u64)));
+		if (btf_record_return_words(btf, meta.func_proto->type) == 2) {
+			mark_reg_unknown(env, regs, BPF_REG_3);
+			mark_btf_func_reg_size(env, BPF_REG_3, type->size - sizeof(u64));
+			cur_aux(env)->returns_two_regs = true;
+		}
 	} else if (btf_type_is_ptr(type)) {
 		pointee = btf_type_skip_modifiers(btf, type->type, &id);
 		if (btf_type_is_struct(pointee)) {
@@ -14852,7 +14911,14 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		if (meta.btf == btf_vmlinux && (meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock] ||
 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
 			__mark_reg_const_zero(env, &regs[BPF_REG_0]);
-		mark_btf_func_reg_size(env, BPF_REG_0, t->size);
+		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, t->size, sizeof(u64)));
+		if (btf_record_return_words(desc_btf, meta.func_proto->type) == 2) {
+			if (!env->prog->jit_requested || !bpf_jit_supports_native_args())
+				return -EOPNOTSUPP;
+			mark_reg_unknown(env, regs, BPF_REG_3);
+			mark_btf_func_reg_size(env, BPF_REG_3, t->size - sizeof(u64));
+			insn_aux->returns_two_regs = true;
+		}
 	} else if (btf_type_is_ptr(t)) {
 		ptr_type = btf_type_skip_modifiers(desc_btf, t->type, &ptr_type_id);
 		err = check_special_kfunc(env, &meta, regs, insn_aux, ptr_type, desc_btf);
@@ -18590,28 +18656,25 @@ enforce_retval:
 
 static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 {
-	struct bpf_reg_state *reg = reg_state(env, BPF_REG_0);
-	struct bpf_func_state *cur_frame = cur_func(env);
+	struct bpf_func_state *frame = cur_func(env);
+	unsigned int i, count = subprog_returns_two_regs(env, frame->subprogno) ? 2 : 1;
 	int err;
 
-	if (subprog_returns_void(env, cur_frame->subprogno))
+	if (subprog_returns_void(env, frame->subprogno))
 		return 0;
+	for (i = 0; i < count; i++) {
+		u32 regno = i ? BPF_REG_3 : BPF_REG_0;
+		struct bpf_reg_state *reg = reg_state(env, regno);
 
-	err = check_reg_arg(env, BPF_REG_0, SRC_OP);
-	if (err)
-		return err;
-
-	if (is_pointer_value(env, BPF_REG_0)) {
-		verbose(env, "R%d leaks addr as return value\n", BPF_REG_0);
-		return -EACCES;
+		err = check_reg_arg(env, regno, SRC_OP);
+		if (err)
+			return err;
+		if (reg->type != SCALAR_VALUE) {
+			verbose(env, "At subprogram exit R%u is not a scalar result (%s)\n",
+				regno, reg_type_str(env, reg->type));
+			return -EACCES;
+		}
 	}
-
-	if (reg->type != SCALAR_VALUE) {
-		verbose(env, "At subprogram exit the register R0 is not a scalar value (%s)\n",
-			reg_type_str(env, reg->type));
-		return -EINVAL;
-	}
-
 	return 0;
 }
 
