@@ -461,6 +461,8 @@ struct bpf_link_create_opts {
 			__u32 count;
 			const __u32 *target_btf_ids;
 			const int *prog_fds;
+			__u32 operations_count;
+			const int *operations_fds;
 		} entry;
 	};
 	size_t :0;
@@ -482,9 +484,12 @@ struct bpf_link_update_opts {
 		__u32 count;
 		const int *prog_fds;
 		const int *old_prog_fds;
+		__u32 operations_count;
+		const int *operations_fds;
+		const int *old_operations_fds;
 	} entry;
 };
-#define bpf_link_update_opts__last_field entry.old_prog_fds
+#define bpf_link_update_opts__last_field entry.old_operations_fds
 
 LIBBPF_API int bpf_link_update(int link_fd, int new_prog_fd,
 			       const struct bpf_link_update_opts *opts);

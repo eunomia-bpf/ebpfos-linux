@@ -2164,6 +2164,7 @@ struct btf_pipe {
 static int btf_rewrite_str(struct btf_pipe *p, __u32 *str_off)
 {
 	long mapped_off;
+	char *name;
 	int off, err;
 
 	if (!*str_off) /* nothing to do for empty strings */
@@ -2175,7 +2176,14 @@ static int btf_rewrite_str(struct btf_pipe *p, __u32 *str_off)
 		return 0;
 	}
 
-	off = btf__add_str(p->dst, btf__str_by_offset(p->src, *str_off));
+	/* dst can share src's base BTF. Building the base string index may
+	 * invalidate its raw data, including the borrowed source string.
+	 */
+	name = strdup(btf__str_by_offset(p->src, *str_off));
+	if (!name)
+		return -ENOMEM;
+	off = btf__add_str(p->dst, name);
+	free(name);
 	if (off < 0)
 		return off;
 

@@ -766,6 +766,8 @@ int bpf_link_create(int prog_fd, int target_fd,
 		attr.link_create.entry.count = OPTS_GET(opts, entry.count, 0);
 		attr.link_create.entry.target_btf_ids = ptr_to_u64(OPTS_GET(opts, entry.target_btf_ids, NULL));
 		attr.link_create.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
+		attr.link_create.entry.operations_count = OPTS_GET(opts, entry.operations_count, 0);
+		attr.link_create.entry.operations_fds = ptr_to_u64(OPTS_GET(opts, entry.operations_fds, NULL));
 		if (!OPTS_ZEROED(opts, entry))
 			return libbpf_err(-EINVAL);
 		break;
@@ -971,6 +973,9 @@ int bpf_link_update(int link_fd, int new_prog_fd,
 	attr.link_update.entry.count = OPTS_GET(opts, entry.count, 0);
 	attr.link_update.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
 	attr.link_update.entry.old_prog_fds = ptr_to_u64(OPTS_GET(opts, entry.old_prog_fds, NULL));
+	attr.link_update.entry.operations_count = OPTS_GET(opts, entry.operations_count, 0);
+	attr.link_update.entry.operations_fds = ptr_to_u64(OPTS_GET(opts, entry.operations_fds, NULL));
+	attr.link_update.entry.old_operations_fds = ptr_to_u64(OPTS_GET(opts, entry.old_operations_fds, NULL));
 
 	ret = sys_bpf(BPF_LINK_UPDATE, &attr, attr_sz);
 	return libbpf_err_errno(ret);
