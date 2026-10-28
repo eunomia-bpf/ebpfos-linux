@@ -14,8 +14,14 @@ u32 bpf_operations_set_count(const struct bpf_operations_set *set);
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
 bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
 bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bpf_operations_set *b);
-int bpf_operations_global_check(struct bpf_operations_set *set, struct bpf_operations_set *old);
-void bpf_operations_global_replace(struct bpf_operations_set *set, struct bpf_operations_set *old);
+struct bpf_operations_global_update {
+ struct bpf_operations_set *before, *after;
+};
+int bpf_operations_global_prepare(struct bpf_operations_global_update *,
+ struct bpf_operations_set *next, struct bpf_operations_set *old);
+void bpf_operations_global_publish(struct bpf_operations_global_update *);
+void bpf_operations_global_undo(struct bpf_operations_global_update *);
+void bpf_operations_global_release(struct bpf_operations_global_update *);
 struct ebpfos_operations *bpf_operations_find(struct bpf_operations_set *, const void *, u32, size_t);
 struct bpf_operations_set *ebpfos_task_operations(void);
 void bpf_operations_info(struct bpf_map *, struct bpf_map_info *);

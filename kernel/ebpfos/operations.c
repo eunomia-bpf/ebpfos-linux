@@ -330,18 +330,65 @@ bool bpf_operations_set_targets(const struct bpf_operations_set *a, const struct
  }
  return true;
 }
-int bpf_operations_global_check(struct bpf_operations_set *set, struct bpf_operations_set *old)
+static bool operations_set_has(struct bpf_operations_set *set, struct bpf_map *map)
 {
- /* The entry journal lock serializes all global owner changes. */
- struct bpf_operations_set *active = rcu_dereference_protected(global_operations, 1);
- return set && active && active != old ? -EBUSY : 0;
+ u32 i;
+ for (i = 0; set && i < set->count; ++i) if (set->maps[i] == map) return true;
+ return false;
 }
-void bpf_operations_global_replace(struct bpf_operations_set *set, struct bpf_operations_set *old)
+int bpf_operations_global_prepare(struct bpf_operations_global_update *update,
+ struct bpf_operations_set *next, struct bpf_operations_set *old)
 {
- if (rcu_access_pointer(global_operations) != old) return;
- rcu_assign_pointer(global_operations, bpf_operations_set_get(set));
+ /* The entry journal lock serializes preparation through publication.
+  * Build an immutable selection before stopping CPUs; objects that reserved
+  * an older selection can still resolve against that complete snapshot. */
+ struct bpf_operations_set *active = rcu_dereference_protected(global_operations, 1), *merged = NULL;
+ u32 i, j, count, at = 0, have = bpf_operations_set_count(active);
+ u32 remove = bpf_operations_set_count(old), add = bpf_operations_set_count(next);
+ *update = (struct bpf_operations_global_update){};
+ for (i = 0; i < remove; ++i)
+  if (!operations_set_has(active, old->maps[i])) return -EBUSY;
+ for (i = 0; i < add; ++i) {
+  struct ebpfos_operations *wanted = container_of(next->maps[i], struct ebpfos_operations, map);
+  for (j = 0; j < have; ++j) {
+   struct ebpfos_operations *owner = container_of(active->maps[j], struct ebpfos_operations, map);
+   if (wanted->original == owner->original && !operations_set_has(old, active->maps[j]))
+    return -EBUSY;
+  }
+ }
+ if (bpf_operations_set_same(next, old)) return 0;
+ if (remove > have || add > U32_MAX - (have - remove)) return -E2BIG;
+ count = have - remove + add;
+ if (count) {
+  merged = kvzalloc(struct_size(merged, maps, count), GFP_KERNEL);
+  if (!merged) return -ENOMEM;
+  refcount_set(&merged->refs, 1);merged->count = count;
+  for (i = 0; i < have; ++i)
+   if (!operations_set_has(old, active->maps[i])) {
+    merged->maps[at++] = active->maps[i];bpf_map_inc(active->maps[i]);
+   }
+  for (i = 0; i < add; ++i) {
+   merged->maps[at++] = next->maps[i];bpf_map_inc(next->maps[i]);
+  }
+ }
+ update->before = bpf_operations_set_get(active);update->after = merged;
+ return 0;
+}
+static void operations_global_replace(struct bpf_operations_set *next,
+ struct bpf_operations_set *old)
+{
+ if (next == old) return;
+ /* Both snapshots are retained by the cold update, so this put cannot
+  * release the last reference inside a stopped-CPU publication callback. */
+ rcu_assign_pointer(global_operations, bpf_operations_set_get(next));
  bpf_operations_set_put(old);
 }
+void bpf_operations_global_publish(struct bpf_operations_global_update *update)
+{ operations_global_replace(update->after, update->before); }
+void bpf_operations_global_undo(struct bpf_operations_global_update *update)
+{ operations_global_replace(update->before, update->after); }
+void bpf_operations_global_release(struct bpf_operations_global_update *update)
+{ bpf_operations_set_put(update->before);bpf_operations_set_put(update->after); }
 static struct ebpfos_operations *operations_find(struct bpf_operations_set *set,
  const void *original, u32 type, size_t size)
 {
@@ -403,7 +450,13 @@ struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
  if (!operations_type(selected, type) && !operations_type(global, type)) {
   rcu_read_unlock();return NULL;
  }
- selected = bpf_operations_set_get(selected);global = bpf_operations_set_get(global);
+ selected = bpf_operations_set_get(selected);
+ /* A removed RCU selection may already have reached zero refs while its
+  * memory awaits the grace period. Acquire only a live snapshot, retrying
+  * the published pointer before leaving the creation-time RCU section. */
+ do {
+  global = rcu_dereference(global_operations);
+ } while (global && !refcount_inc_not_zero(&global->refs));
  rcu_read_unlock();
  owner = kzalloc(sizeof(*owner), gfp);
  if (!owner) {bpf_operations_set_put(selected);bpf_operations_set_put(global);return ERR_PTR(-ENOMEM);}

@@ -167,7 +167,7 @@ static int entry_ownership(struct entry_set *set)
  */
 struct entry_tables_publication {
  struct entry_set *set;
- struct bpf_operations_set *old, *next;
+ struct bpf_operations_global_update *tables;
  bool published;
 };
 static int entry_tables_publish(void *opaque)
@@ -175,11 +175,9 @@ static int entry_tables_publish(void *opaque)
  struct entry_tables_publication *publication = opaque;
  int error = publication->set->call_sites ? entry_callers_stopped(publication->set) : 0;
  if (error) return error;
- /* entry_lock held by the caller excludes every other global publisher.
-  * Both prepared generations hold their map sets, so these ref operations
-  * cannot release the last set while CPUs are stopped.
-  */
- bpf_operations_global_replace(publication->next, publication->old);
+ /* The cold update holds both complete selection snapshots. No allocation
+  * or last-reference release occurs while CPUs are stopped. */
+ bpf_operations_global_publish(publication->tables);
  publication->published = true;
  return 0;
 }
@@ -187,13 +185,12 @@ static void entry_tables_undo(void *opaque)
 {
  struct entry_tables_publication *publication = opaque;
  if (publication->published)
-  bpf_operations_global_replace(publication->old, publication->next);
+  bpf_operations_global_undo(publication->tables);
 }
 static int entry_tables_apply(struct entry_set *set, unsigned int from, unsigned int to,
- struct bpf_operations_set *old, struct bpf_operations_set *next)
+ struct bpf_operations_global_update *tables)
 {
- struct entry_tables_publication publication = {
-  .set = set, .old = old, .next = next };
+ struct entry_tables_publication publication = { .set = set, .tables = tables };
  struct text_poke_pair *pairs;
  int error;
  if (set->has_ftrace) return -EOPNOTSUPP;
@@ -213,16 +210,19 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
 {
  struct bpf_operations_set *old_tables = from ? entry_generation(set, from)->tables : NULL;
  struct bpf_operations_set *next_tables = to ? entry_generation(set, to)->tables : NULL;
+ struct bpf_operations_global_update tables;
  int error = entry_ownership(set);
  if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse);
- if (!error) error = bpf_operations_global_check(next_tables, old_tables);
  if (error) return error;
- if (set->call_sites || (set->count && set->table_count))
-  return entry_tables_apply(set, from, to, old_tables, next_tables);
+ error = bpf_operations_global_prepare(&tables, next_tables, old_tables);
+ if (error) return error;
+ if (set->call_sites || (set->count && set->table_count)) {
+  error = entry_tables_apply(set, from, to, &tables);goto done;
+ }
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
- if (error) return error;
+ if (error) goto done;
  /* A successful patch can already have entered either generation. Retain
   * both graphs before an ensuing ftrace/publication failure is recoverable. */
  if (to && !set->published) {
@@ -233,11 +233,11 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  if (error && entry_native_apply(to ? entry_generation(set, to)->slots : set->slots,
      from ? entry_generation(set, from)->slots : set->slots, set->slot_count,
      to ? entry_generation_slot(to) + 1 : 0, from ? entry_generation_slot(from) + 1 : 0)) {
-  set->poisoned = true;
-  return -EUCLEAN;
+  set->poisoned = true;error = -EUCLEAN;
  }
- if (!error) bpf_operations_global_replace(next_tables, old_tables);
- return error;
+ if (!error) bpf_operations_global_publish(&tables);
+done:
+ bpf_operations_global_release(&tables);return error;
 }
 static int entry_switch(struct entry_set *set, unsigned int from, unsigned int to)
 {
