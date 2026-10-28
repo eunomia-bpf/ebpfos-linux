@@ -9,6 +9,7 @@
 #include <linux/filter.h> /* for MAX_BPF_STACK */
 #include <linux/tnum.h>
 #include <linux/bitmap.h>
+#include <linux/bpf_native_abi.h>
 
 /* Maximum variable offset umax_value permitted when resolving memory accesses.
  * In practice this is far bigger than any realistic pointer offset; this limit
@@ -802,7 +803,10 @@ struct bpf_subprog_info {
 	bool type_authority: 1;
 
 	enum priv_stack_mode priv_stack_mode;
-	struct bpf_subprog_arg_info args[MAX_BPF_NATIVE_REG_ARGS];
+	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_ARGS + 1];
+	struct bpf_native_abi native_abi;
+	u16 native_arg_in, native_arg_out, native_local_stack, native_stack_align;
+	bool native_frame;
 };
 
 struct bpf_verifier_env;

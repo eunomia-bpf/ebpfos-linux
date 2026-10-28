@@ -51,6 +51,8 @@ struct ctl_table_header;
 #define BPF_REG_CTX	BPF_REG_6
 #define BPF_REG_FP	BPF_REG_10
 #define BPF_REG_ARG6	BPF_REG_12
+#define BPF_REG_ARG_SP	BPF_REG_11
+#define BPF_REG_ARG_FP	BPF_REG_14
 
 /* Physical argument order of the native x86 integer calling convention. */
 static inline u32 bpf_arg_regno(u32 index)

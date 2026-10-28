@@ -4105,7 +4105,7 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 		return 0;
 	} else {
 		/* check whether register used as dest operand can be written to */
-		if (regno == BPF_REG_FP) {
+		if (regno == BPF_REG_FP || regno == BPF_REG_ARG_SP || regno == BPF_REG_ARG_FP) {
 			verbose(env, "frame pointer is read only\n");
 			return -EACCES;
 		}
@@ -20193,6 +20193,57 @@ static int check_insn_fields(struct bpf_verifier_env *env, struct bpf_insn *insn
  *
  * NOTE: btf_vmlinux is required for converting pseudo btf_id.
  */
+static int check_native_frames(struct bpf_verifier_env *env)
+{
+	struct bpf_prog_aux *aux = env->prog->aux;
+	struct btf *btf = aux->btf;
+
+	if (!btf || !aux->func_info)
+		return 0;
+	for (u32 i = 0; i < aux->func_info_cnt; i++) {
+		const struct btf_type *fn = btf_type_by_id(btf, aux->func_info[i].type_id);
+		struct bpf_subprog_info *sub = &env->subprog_info[i];
+		const struct btf_type *proto;
+		int id = btf_named_start_id(btf, false) - 1, err;
+
+		while ((id = btf_find_next_decl_tag(btf, fn, -1, "bpf:stack-args:", id)) > 0) {
+			const struct btf_type *tag = btf_type_by_id(btf, id);
+			const char *value = btf_name_by_offset(btf, tag->name_off) + 15;
+			u32 incoming, outgoing, local, alignment;
+
+			if (!bpf_jit_supports_native_args() || !env->prog->jit_requested)
+				return -EOPNOTSUPP;
+			if (sub->native_frame || sscanf(value, "%u:%u:%u:%u", &incoming, &outgoing, &local, &alignment) != 4)
+				return -EINVAL;
+			if (alignment < 8 || alignment > MAX_BPF_STACK || !is_power_of_2(alignment))
+				return -EOPNOTSUPP;
+			if (incoming > MAX_BPF_STACK || outgoing > MAX_BPF_STACK ||
+			    local > MAX_BPF_STACK - round_up(outgoing, 8))
+				return -E2BIG;
+			proto = btf_type_by_id(btf, fn->type);
+			err = bpf_native_abi_plan(btf, proto, &sub->native_abi);
+			if (err)
+				return err;
+			if (incoming != sub->native_abi.stack_size) {
+				verbose(env, "native incoming argument area differs from BTF prototype\n");
+				return -EINVAL;
+			}
+			sub->native_frame = true;
+			sub->native_arg_in = incoming;
+			sub->native_arg_out = outgoing;
+			sub->native_local_stack = local;
+			sub->native_stack_align = alignment;
+			sub->stack_depth = max(sub->stack_depth, local);
+		}
+	}
+	aux->native_frame = env->subprog_info[0].native_frame;
+	aux->native_arg_in = env->subprog_info[0].native_arg_in;
+	aux->native_arg_out = env->subprog_info[0].native_arg_out;
+	aux->native_local_stack = env->subprog_info[0].native_local_stack;
+	aux->native_stack_align = env->subprog_info[0].native_stack_align;
+	return 0;
+}
+
 static int check_and_resolve_insns(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *insn = env->prog->insnsi;
@@ -20204,8 +20255,10 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 		return err;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
-		if (insn->src_reg == 11 || insn->dst_reg == 11 ||
-		    ((insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6) &&
+		if (insn->src_reg == 13 || insn->dst_reg == 13 ||
+		    ((insn->src_reg == BPF_REG_ARG_SP || insn->dst_reg == BPF_REG_ARG_SP ||
+		      insn->src_reg == BPF_REG_ARG_FP || insn->dst_reg == BPF_REG_ARG_FP ||
+		      insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6) &&
 		     (!env->prog->jit_requested || !bpf_jit_supports_native_args()))) {
 			verbose(env, "instruction %d uses an unsupported native ABI register\n", i);
 			return -EINVAL;
@@ -20742,7 +20795,8 @@ static int do_check_main(struct bpf_verifier_env *env)
 	env->insn_idx = 0;
 	ret = do_check_common(env, 0);
 	if (!ret)
-		env->prog->aux->stack_depth = env->subprog_info[0].stack_depth;
+		env->prog->aux->stack_depth = max_t(u32, env->subprog_info[0].stack_depth,
+			env->subprog_info[0].native_local_stack);
 	return ret;
 }
 
@@ -21806,17 +21860,24 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 
 	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux))
 		return -EOPNOTSUPP;
-	if (!attr->trusted_stack_sizes ||
-	    attr->trusted_stack_size_cnt != env->subprog_cnt)
-		return -EINVAL;
+	if (!attr->trusted_stack_sizes || attr->trusted_stack_size_cnt != env->subprog_cnt) {
+		/* Complete compiler frame metadata replaces the legacy size array. */
+		for (i = 0; i < env->subprog_cnt; i++)
+			if (!env->subprog_info[i].native_frame)
+				return -EINVAL;
+	}
 	for (i = 0; i < env->subprog_cnt; i++) {
-		if (copy_from_bpfptr_offset(&depth, sizes, i * sizeof(depth), sizeof(depth)))
+		if (env->subprog_info[i].native_frame) {
+			depth = env->subprog_info[i].native_local_stack;
+		} else if (copy_from_bpfptr_offset(&depth, sizes, i * sizeof(depth), sizeof(depth))) {
 			return -EFAULT;
+		}
 		if (depth > MAX_BPF_STACK)
 			return -E2BIG;
 		env->subprog_info[i].stack_depth = depth;
 	}
-	env->prog->aux->stack_depth = env->subprog_info[0].stack_depth;
+	env->prog->aux->stack_depth = max_t(u32, env->subprog_info[0].stack_depth,
+			env->subprog_info[0].native_local_stack);
 	for (i = 0; i < env->prog->len; i++) {
 		const struct bpf_insn *insn = &env->prog->insnsi[i];
 
@@ -21963,6 +22024,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 		goto skip_full_check;
 
 	ret = bpf_check_btf_info(env, attr, uattr);
+	ret = ret ?: check_native_frames(env);
 	if (ret < 0)
 		goto skip_full_check;
 

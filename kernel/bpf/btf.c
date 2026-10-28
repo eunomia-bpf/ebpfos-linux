@@ -19,6 +19,7 @@
 #include <linux/bpf_verifier.h>
 #include <linux/btf.h>
 #include "btf_record_return.h"
+#include "native_abi.h"
 #include <linux/btf_ids.h>
 #include <linux/bpf.h>
 #include <linux/bpf_operations.h>

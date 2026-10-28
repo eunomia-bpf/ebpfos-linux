@@ -191,6 +191,8 @@ static const int reg2hex[] = {
 	[BPF_REG_9] = 7,  /* R15 callee saved */
 	[BPF_REG_FP] = 5, /* RBP readonly */
 	[BPF_REG_ARG6] = 1, /* R9 sixth native argument */
+	[BPF_REG_ARG_SP] = 4, /* RSP outgoing arguments */
+	[BPF_REG_ARG_FP] = 5, /* RBP incoming arguments */
 	[BPF_REG_AX] = 2, /* R10 temp register */
 	[AUX_REG] = 3,    /* R11 temp register */
 	[X86_REG_R9] = 1, /* R9 register, 6th function argument */
@@ -238,7 +240,7 @@ static bool is_ereg_8l(u32 reg)
 	return is_ereg(reg) ||
 	    (1 << reg) & (BIT(BPF_REG_1) |
 			  BIT(BPF_REG_2) |
-			  BIT(BPF_REG_FP));
+			  BIT(BPF_REG_FP) | BIT(BPF_REG_ARG_SP) | BIT(BPF_REG_ARG_FP));
 }
 
 static bool is_axreg(u32 reg)
@@ -1096,18 +1098,15 @@ static void emit_insn_suffix(u8 **pprog, u32 ptr_reg, u32 val_reg, int off)
 {
 	u8 *prog = *pprog;
 
-	if (is_imm8(off)) {
-		/* 1-byte signed displacement.
-		 *
-		 * If off == 0 we could skip this and save one extra byte, but
-		 * special case of x86 R13 which always needs an offset is not
-		 * worth the hassle
-		 */
-		EMIT2(add_2reg(0x40, ptr_reg, val_reg), off);
-	} else {
-		/* 4-byte signed displacement */
-		EMIT1_off32(add_2reg(0x80, ptr_reg, val_reg), off);
-	}
+	EMIT1(add_2reg(is_imm8(off) ? 0x40 : 0x80, ptr_reg, val_reg));
+	/* RSP and R12 need a SIB byte, including the native argument base. */
+	if (reg2hex[ptr_reg] == 4)
+		EMIT1(0x24);
+	if (is_imm8(off))
+		EMIT1(off);
+	else
+		EMIT(off, 4);
+
 	*pprog = prog;
 }
 
@@ -1297,6 +1296,24 @@ static void emit_stx(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, int off)
 }
 
 /* STX: *(u8*)(dst_reg + index_reg + off) = src_reg */
+/* Native arguments sit below saved registers, while local offsets keep
+ * their existing frame-pointer layout. Saves and restores need no SP moves.
+ */
+static void emit_native_frame_regs(u8 **pprog, bool *used, u32 local, u32 frame_reg, bool restore)
+{
+	int offset = -round_up(local, 8);
+
+	for (int i = 0; i < 4; i++) {
+		if (!used[i])
+			continue;
+		offset -= 8;
+		if (restore)
+			emit_ldx(pprog, BPF_DW, BPF_REG_6 + i, frame_reg, offset);
+		else
+			emit_stx(pprog, BPF_DW, frame_reg, BPF_REG_6 + i, offset);
+	}
+}
+
 static void emit_stx_index(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, u32 index_reg, int off)
 {
 	u8 *prog = *pprog;
@@ -1806,7 +1823,15 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	if (err)
 		return err;
 
-	emit_prologue(&prog, image, stack_depth,
+	u32 native_depth = stack_depth;
+	bool native_realign = bpf_prog->aux->native_frame && bpf_prog->aux->native_stack_align > 8;
+	u32 native_fp = native_realign ? X86_REG_R12 : BPF_REG_FP;
+	if (bpf_prog->aux->native_frame) {
+		native_depth = round_up(stack_depth, 8) + round_up(bpf_prog->aux->native_arg_out, 8);
+		for (int reg = 0; reg < 4; reg++)
+			native_depth += callee_regs_used[reg] ? 8 : 0;
+	}
+	emit_prologue(&prog, image, native_depth + (native_realign ? 8 : 0),
 		      bpf_prog_was_classic(bpf_prog), tail_call_reachable,
 		      bpf_is_subprog(bpf_prog), bpf_prog->aux->exception_cb);
 
@@ -1815,7 +1840,17 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	/* Exception callback will clobber callee regs for its own use, and
 	 * restore the original callee regs from main prog's stack frame.
 	 */
-	if (bpf_prog->aux->exception_boundary) {
+	if (bpf_prog->aux->native_frame) {
+		if (native_realign) {
+			emit_stx(&prog, BPF_DW, BPF_REG_ARG_FP, X86_REG_R12, -8);
+			/* Native stack realignment, preserving the incoming argument base. */
+			EMIT3_off32(0x48, 0x81, 0xE4, -(s32)bpf_prog->aux->native_stack_align);
+			EMIT_mov(X86_REG_R12, BPF_REG_ARG_SP);
+			if (native_depth)
+				EMIT3_off32(0x49, 0x81, 0xC4, native_depth);
+		}
+		emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, false);
+	} else if (bpf_prog->aux->exception_boundary) {
 		/* We also need to save r12, which is not mapped to any BPF
 		 * register, as we throw after entry into the kernel, which may
 		 * overwrite r12.
@@ -1830,6 +1865,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	if (arena_vm_start)
 		emit_mov_imm64(&prog, X86_REG_R12,
 			       arena_vm_start >> 32, (u32) arena_vm_start);
+
 
 	if (priv_frame_ptr)
 		emit_priv_frame_ptr(&prog, priv_frame_ptr);
@@ -1852,6 +1888,11 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 		u8 jmp_cond;
 		u8 *func;
 		int nops;
+
+		if (native_realign) {
+			if (src_reg == BPF_REG_FP) src_reg = native_fp;
+			if (dst_reg == BPF_REG_FP) dst_reg = native_fp;
+		}
 
 		if (priv_frame_ptr) {
 			if (src_reg == BPF_REG_FP)
@@ -2931,7 +2972,11 @@ emit_jmp:
 				if (emit_spectre_bhb_barrier(&prog, ip, bpf_prog))
 					return -EINVAL;
 			}
-			if (bpf_prog->aux->exception_boundary) {
+			if (bpf_prog->aux->native_frame) {
+				emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, true);
+				if (native_realign)
+					emit_ldx(&prog, BPF_DW, X86_REG_R12, BPF_REG_ARG_FP, -8);
+			} else if (bpf_prog->aux->exception_boundary) {
 				pop_callee_regs(&prog, all_callee_regs_used);
 				pop_r12(&prog);
 			} else {
@@ -4021,6 +4066,10 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 
 	if (!prog->jit_requested)
 		return prog;
+	if (prog->aux->native_frame && (prog->aux->tail_call_reachable ||
+	    prog->aux->exception_boundary || prog->aux->exception_cb ||
+	    bpf_arena_get_kern_vm_start(prog->aux->arena)))
+		return prog;
 
 	jit_data = prog->aux->jit_data;
 	if (!jit_data) {
@@ -4032,7 +4081,8 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 	for (i = 0; i < prog->len; i++) {
 		const struct bpf_insn *insn = &prog->insnsi[i];
 
-		if (insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6 ||
+		if (prog->aux->native_frame ||
+		    insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6 ||
 		    (insn->code == (BPF_JMP | BPF_CALL | BPF_X) && insn->imm == BPF_REG_ARG6))
 			prog->aux->jits_use_priv_stack = false;
 	}

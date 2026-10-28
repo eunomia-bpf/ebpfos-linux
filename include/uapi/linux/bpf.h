@@ -71,8 +71,10 @@ enum {
 	BPF_REG_8,
 	BPF_REG_9,
 	BPF_REG_10,
-	/* 11 is reserved for the LLVM stack pointer. */
+	BPF_REG_11, /* Native outgoing argument pointer, read-only. */
 	BPF_REG_12 = 12,
+	/* 13 is reserved for verifier argument typing. */
+	BPF_REG_14 = 14, /* Native incoming argument pointer, read-only. */
 	__MAX_BPF_REG,
 };
 
