@@ -915,6 +915,7 @@ struct bpf_verifier_env {
 	u32 hidden_subprog_cnt;		/* number of hidden subprogs */
 	int exception_callback_subprog;
 	bool explore_alu_limits;
+	u16 native_arg_temps;
 	bool allow_ptr_leaks;
 	/* Allow access to uninitialized stack memory. Writes with fixed offset are
 	 * always allowed, so this refers to reads (with fixed or variable offset),

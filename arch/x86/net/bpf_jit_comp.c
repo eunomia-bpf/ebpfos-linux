@@ -2306,10 +2306,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 		case BPF_ST | BPF_MEM | BPF_DW:
 			EMIT2(add_1mod(0x48, dst_reg), 0xC7);
 
-st:			if (is_imm8(insn->off))
-				EMIT2(add_1reg(0x40, dst_reg), insn->off);
-			else
-				EMIT1_off32(add_1reg(0x80, dst_reg), insn->off);
+st:			emit_insn_suffix(&prog, dst_reg, BPF_REG_0, insn->off);
 
 			EMIT(imm32, bpf_size_to_x86_bytes(BPF_SIZE(insn->code)));
 			break;

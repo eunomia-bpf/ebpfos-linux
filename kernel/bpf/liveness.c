@@ -1388,6 +1388,14 @@ static int record_call_access(struct bpf_verifier_env *env,
 		return 0;
 	}
 
+	if ((bpf_pseudo_kfunc_call(insn) || insn->code == (BPF_JMP | BPF_CALL | BPF_X)) &&
+	    env->subprog_info[instance->subprog].native_frame &&
+	    env->subprog_info[instance->subprog].native_arg_out) {
+		err = record_stack_access(instance, &at[BPF_REG_ARG_SP],
+			env->subprog_info[instance->subprog].native_arg_out, depth, insn_idx);
+		if (err) return err;
+	}
+
 	if (bpf_get_call_summary(env, insn, &cs))
 		num_params = cs.num_params;
 
@@ -2133,12 +2141,14 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 			break;
 		case BPF_CALL:
 			def = ALL_CALLER_SAVED_REGS;
+			use |= BIT(BPF_REG_ARG_SP);
 			use = def & ~BIT(BPF_REG_0);
 			if (bpf_get_call_summary(env, insn, &cs)) {
 				use = 0;
 				for (unsigned int arg = 0; arg < min_t(u32, cs.num_params, MAX_BPF_NATIVE_REG_ARGS); arg++)
 					use |= BIT(bpf_arg_regno(arg));
 			}
+			use |= BIT(BPF_REG_ARG_SP);
 			if (BPF_SRC(insn->code) == BPF_X &&
 			    insn->imm >= BPF_REG_0 && insn->imm < BPF_REG_FP)
 				use |= BIT(insn->imm);
