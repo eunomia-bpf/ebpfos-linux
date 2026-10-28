@@ -588,7 +588,7 @@ static int bpf_convert_filter(struct sock_filter *prog, int len,
 	u8 bpf_src;
 
 	BUILD_BUG_ON(BPF_MEMWORDS * sizeof(u32) > MAX_BPF_STACK);
-	BUILD_BUG_ON(BPF_REG_FP + 1 != MAX_BPF_REG);
+	BUILD_BUG_ON(BPF_REG_FP >= MAX_BPF_REG);
 
 	if (len <= 0 || len > BPF_MAXINSNS)
 		return -EINVAL;

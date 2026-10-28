@@ -779,6 +779,7 @@ struct bpf_subprog_info {
 	u32 linfo_idx; /* The idx to the main_prog->aux->linfo */
 	u32 postorder_start; /* The idx to the env->cfg.insn_postorder */
 	u32 exit_idx; /* Index of one of the BPF_EXIT instructions in this subprogram */
+	u32 readonly_result_size; /* independently checked stable byte buffer */
 	u16 stack_depth; /* max. stack depth used by this function */
 	u16 stack_extra;
 	/* offsets in range [stack_depth .. fastcall_stack_off)

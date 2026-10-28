@@ -275,33 +275,32 @@ __diag_pop();
 static inline bool update_insn(struct bpf_verifier_env *env,
 			       struct func_instance *instance, u32 frame, u32 insn_idx)
 {
-	spis_t new_before, new_after;
 	struct per_frame_masks *insn, *succ_insn;
 	struct bpf_iarray *succ;
-	u32 s;
-	bool changed;
+	bool changed = false;
+	u32 word, s;
 
 	succ = bpf_insn_successors(env, insn_idx);
 	if (succ->cnt == 0)
 		return false;
 
-	changed = false;
 	insn = get_frame_masks(instance, frame, insn_idx);
-	new_before = SPIS_ZERO;
-	new_after = SPIS_ZERO;
-	for (s = 0; s < succ->cnt; ++s) {
-		succ_insn = get_frame_masks(instance, frame, succ->items[s]);
-		new_after = spis_or(new_after, succ_insn->live_before);
-	}
-	/*
-	 * New "live_before" is a union of all "live_before" of successors
-	 * minus slots written by instruction plus slots read by instruction.
-	 * new_before = (new_after & ~insn->must_write) | insn->may_read
+	/* Compute the same union and kill/gen operation a word at a time.
+	 * Large configured BPF stacks must not create by-value mask temporaries
+	 * on the native verifier stack. Each word depends only on that word of
+	 * the successors, including the old value for a self edge.
 	 */
-	new_before = spis_or(spis_and(new_after, spis_not(insn->must_write)),
-			     insn->may_read);
-	changed |= !spis_equal(new_before, insn->live_before);
-	insn->live_before = new_before;
+	for (word = 0; word < STACK_MASK_WORDS; word++) {
+		u64 after = 0, before;
+
+		for (s = 0; s < succ->cnt; s++) {
+			succ_insn = get_frame_masks(instance, frame, succ->items[s]);
+			after |= succ_insn->live_before.v[word];
+		}
+		before = (after & ~insn->must_write.v[word]) | insn->may_read.v[word];
+		changed |= before != insn->live_before.v[word];
+		insn->live_before.v[word] = before;
+	}
 	return changed;
 }
 

@@ -11063,6 +11063,10 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 		if (sub->native_frame && sub->native_abi.result_buffer) {
 			caller->regs[BPF_REG_0] = result_buffer;
+		} else if (sub->readonly_result_size) {
+			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
+			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
+			caller->regs[BPF_REG_0].mem_size = sub->readonly_result_size;
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
@@ -19029,6 +19033,29 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
+	if (sub->readonly_result_size) {
+		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
+
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		if (err)
+			return err;
+		/* Array-map storage is retained for the program's lifetime. Do not
+		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
+		 */
+		if (result->type != PTR_TO_MAP_VALUE ||
+		    result->map_ptr->map_type != BPF_MAP_TYPE_ARRAY ||
+		    !IS_ERR_OR_NULL(result->map_ptr->record) ||
+		    result->ref_obj_id) {
+			verbose(env, "read-only result requires stable unmanaged array storage\n");
+			return -EACCES;
+		}
+		err = check_map_access_type(env, BPF_REG_0, 0,
+			sub->readonly_result_size, BPF_READ);
+		if (err)
+			return err;
+		return check_map_access(env, BPF_REG_0, 0,
+			sub->readonly_result_size, false, ACCESS_DIRECT);
+	}
 	if (subprog_returns_void(env, frame->subprogno))
 		return 0;
 	for (i = 0; i < count; i++) {
@@ -20915,6 +20942,11 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		 * which do not establish this ordinary global-call precondition.
 		 */
 		if (sub->is_cb || subprog_is_exc_cb(env, subprog)) {
+			if (sub->readonly_result_size) {
+				verbose(env, "read-only result contracts are unsupported for callbacks\n");
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
 			for (i = 0; i < sub->arg_cnt; i++) {
 				if (sub->args[i].has_scalar_max) {
 					verbose(env, "scalar maximum contracts are unsupported for callbacks\n");

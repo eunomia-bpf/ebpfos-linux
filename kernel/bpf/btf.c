@@ -8235,11 +8235,36 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			tname, nargs, MAX_BPF_FUNC_REG_ARGS);
 		return -EINVAL;
 	}
+	/* A bounded read-only result grants no pointer-field or write capability.
+	 * Its actual stable storage is checked at every independently verified exit.
+	 */
+	{
+		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_mem:");
+		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
+
+		if (!IS_ERR(tag)) {
+			u32 bytes;
+
+			if (!is_global || !btf_type_is_ptr(result) ||
+			    kstrtou32(tag, 10, &bytes) || !bytes || bytes >= BPF_MAX_VAR_SIZ) {
+				bpf_log(log, "invalid read-only result contract\n");
+				return -EINVAL;
+			}
+			result = btf_type_skip_modifiers(btf, result->type, NULL);
+			if (!btf_type_is_int(result) || result->size != 1) {
+				bpf_log(log, "read-only result requires a byte pointer\n");
+				return -EINVAL;
+			}
+			sub->readonly_result_size = bytes;
+		} else if (PTR_ERR(tag) != -ENOENT) {
+			return PTR_ERR(tag);
+		}
+	}
 	/* check that function is void or returns int, exception cb also requires this */
 	t = btf_type_by_id(btf, t->type);
 	while (btf_type_is_modifier(t))
 		t = btf_type_by_id(btf, t->type);
-	if (!btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
+	if (!sub->readonly_result_size && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||
 	       (sub->native_frame && sub->native_abi.result_buffer &&
