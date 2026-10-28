@@ -158,6 +158,51 @@ static int entry_ownership(struct entry_set *set)
  }
  return 0;
 }
+/* Publish the table default and every direct entry in the same stopped
+ * interval. Existing same-layout calls/objects retain their old code/maps.
+ * As with owned-state epochs, source contracts exclude NMI and transaction
+ * users: stopping task/IRQ creators does not stop NMI execution.
+ */
+struct entry_tables_publication {
+ struct bpf_operations_set *old, *next;
+ bool published;
+};
+static int entry_tables_publish(void *opaque)
+{
+ struct entry_tables_publication *publication = opaque;
+ /* entry_lock held by the caller excludes every other global publisher.
+  * Both prepared generations hold their map sets, so these ref operations
+  * cannot release the last set while CPUs are stopped.
+  */
+ bpf_operations_global_replace(publication->next, publication->old);
+ publication->published = true;
+ return 0;
+}
+static void entry_tables_undo(void *opaque)
+{
+ struct entry_tables_publication *publication = opaque;
+ if (publication->published)
+  bpf_operations_global_replace(publication->old, publication->next);
+}
+static int entry_tables_apply(struct entry_set *set, unsigned int from, unsigned int to,
+ struct bpf_operations_set *old, struct bpf_operations_set *next)
+{
+ struct entry_tables_publication publication = { .old = old, .next = next };
+ struct text_poke_pair *pairs;
+ int error;
+ if (set->has_ftrace) return -EOPNOTSUPP;
+ pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,
+  to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
+  from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
+ if (IS_ERR(pairs)) return PTR_ERR(pairs);
+ error = smp_text_poke_quiescent_transaction(pairs, set->slot_count,
+  entry_tables_publish, entry_tables_undo, &publication);
+ kvfree(pairs);
+ if (!error && to && !set->published) {
+  set->published = true;list_add_tail(&set->retained, &entry_retained);
+ }
+ return error;
+}
 static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to)
 {
  struct bpf_operations_set *old_tables = from ? entry_generation(set, from)->tables : NULL;
@@ -166,6 +211,8 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse);
  if (!error) error = bpf_operations_global_check(next_tables, old_tables);
  if (error) return error;
+ if (set->count && set->table_count)
+  return entry_tables_apply(set, from, to, old_tables, next_tables);
  error = entry_native_apply(from ? entry_generation(set, from)->slots : set->slots,
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
@@ -194,7 +241,8 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
      (to && !entry_generation(set, to))) return -ESTALE;
  if (from == to) return 0;
  /* The stock x86 text-poke batch performs its own CPU synchronization and
-  * breakpoint-safe instruction update. Never call it with CPUs stopped: its
+  * breakpoint-safe instruction update. Mixed table/entry sets use the
+  * stopped transaction above instead. Never run the INT3 updater stopped: its
   * cross-CPU synchronizations must run. Legacy ftrace sets also keep their
   * following stop-machine point; reserved transactions already publish once.
   * Unchanged layouts and retained old code permit in-flight old frames.
@@ -583,11 +631,6 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  if (attr->link_create.prog_fd || (attr->link_create.flags & ~BPF_F_ENTRY_EPOCH) ||
      attr->link_create.entry.reserved || attr->link_create.entry.operations_reserved ||
      (!count && !operations_count)) return -EINVAL;
- /* Global text and table transactions need one publication mechanism. The
-  * current table publication is atomic by itself; do not split a mixed
-  * global transaction into two observable publications. Cgroup publication
-  * already publishes both through its one immutable task table. */
- if (!task && count && operations_count) return -EOPNOTSUPP;
  if ((attr->link_create.flags & BPF_F_ENTRY_EPOCH) &&
      (task || operations_count || !count || !attr->link_create.target_fd)) return -EOPNOTSUPP;
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
