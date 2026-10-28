@@ -8675,6 +8675,11 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 
 	err = bpf_core_types_are_compat(obj->btf, local_type_id,
 					btf, targ_type_id);
+	/* The exact matcher also handles a named forward declaration behind a
+	 * pointer. The coarse kind comparison rejects that valid C interface.
+	 */
+	if (!err)
+		err = bpf_core_types_match(obj->btf, local_type_id, btf, targ_type_id);
 	if (err <= 0) {
 		const struct btf_type *local_type;
 		const char *targ_name, *local_name;
@@ -8725,6 +8730,9 @@ static int bpf_object__resolve_ksym_func_btf_id(struct bpf_object *obj,
 
 	ret = bpf_core_types_are_compat(obj->btf, local_func_proto_id,
 					kern_btf, kfunc_proto_id);
+	if (!ret)
+		ret = bpf_core_types_match(obj->btf, local_func_proto_id,
+					  kern_btf, kfunc_proto_id);
 	if (ret <= 0) {
 		if (ext->is_weak)
 			return 0;
