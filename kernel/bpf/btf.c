@@ -8120,7 +8120,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	}
 	args = (const struct btf_param *)(t + 1);
 	nargs = btf_type_vlen(t);
-	if (nargs > MAX_BPF_FUNC_REG_ARGS) {
+	if (nargs > (bpf_jit_supports_native_args() && prog->jit_requested ?
+		     MAX_BPF_NATIVE_REG_ARGS : MAX_BPF_FUNC_REG_ARGS)) {
 		if (!is_global)
 			return -EINVAL;
 		bpf_log(log, "Global function %s() with %d > %d args. Buggy compiler.\n",
@@ -8273,7 +8274,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 					sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
 				if (read_only)
 					sub->args[i].arg_type |= MEM_RDONLY;
-				sub->args[i].mem_size_reg = size_arg + BPF_REG_1;
+				sub->args[i].mem_size_reg = bpf_arg_regno(size_arg);
 				continue;
 			}
 			if (read_only) {

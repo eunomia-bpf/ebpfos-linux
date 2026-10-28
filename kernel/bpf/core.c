@@ -3362,6 +3362,11 @@ int __weak bpf_arch_text_invalidate(void *dst, size_t len)
 	return -ENOTSUPP;
 }
 
+bool __weak bpf_jit_supports_native_args(void)
+{
+	return false;
+}
+
 bool __weak bpf_jit_supports_callx(void)
 {
 	return false;

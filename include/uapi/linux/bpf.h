@@ -71,6 +71,8 @@ enum {
 	BPF_REG_8,
 	BPF_REG_9,
 	BPF_REG_10,
+	/* 11 is reserved for the LLVM stack pointer. */
+	BPF_REG_12 = 12,
 	__MAX_BPF_REG,
 };
 

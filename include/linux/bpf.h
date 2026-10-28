@@ -1345,6 +1345,7 @@ struct bpf_prog_offload {
  * a single function may have.
  */
 #define MAX_BPF_FUNC_REG_ARGS 5
+#define MAX_BPF_NATIVE_REG_ARGS 6
 
 /* The argument is a structure or a union. */
 #define BTF_FMODEL_STRUCT_ARG		BIT(0)

@@ -425,10 +425,10 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 					return -EFAULT;
 				}
 				/* propagate r1-r5 to the caller */
-				for (i = BPF_REG_1; i <= BPF_REG_5; i++) {
-					if (bt_is_reg_set(bt, i)) {
-						bt_clear_reg(bt, i);
-						bpf_bt_set_frame_reg(bt, bt->frame - 1, i);
+				for (i = 0; i < MAX_BPF_NATIVE_REG_ARGS; i++) {
+					if (bt_is_reg_set(bt, bpf_arg_regno(i))) {
+						bt_clear_reg(bt, bpf_arg_regno(i));
+						bpf_bt_set_frame_reg(bt, bt->frame - 1, bpf_arg_regno(i));
 					}
 				}
 				if (bt_subprog_exit(bt))
@@ -454,8 +454,8 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 				return -EFAULT;
 			}
 			/* clear r1-r5 in callback subprog's mask */
-			for (i = BPF_REG_1; i <= BPF_REG_5; i++)
-				bt_clear_reg(bt, i);
+			for (i = 0; i < MAX_BPF_NATIVE_REG_ARGS; i++)
+				bt_clear_reg(bt, bpf_arg_regno(i));
 			if (bt_subprog_exit(bt))
 				return -EFAULT;
 			return 0;
@@ -493,8 +493,8 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			 * invoking callback.
 			 */
 			if (subseq_idx >= 0 && bpf_calls_callback(env, subseq_idx))
-				for (i = BPF_REG_1; i <= BPF_REG_5; i++)
-					bt_clear_reg(bt, i);
+				for (i = 0; i < MAX_BPF_NATIVE_REG_ARGS; i++)
+					bt_clear_reg(bt, bpf_arg_regno(i));
 			if (bt_reg_mask(bt) & BPF_REGMASK_ARGS) {
 				verifier_bug(env, "backtracking exit unexpected regs %x",
 					     bt_reg_mask(bt));
@@ -635,7 +635,7 @@ void bpf_mark_all_scalars_precise(struct bpf_verifier_env *env,
 	for (st = st->parent; st; st = st->parent) {
 		for (i = 0; i <= st->curframe; i++) {
 			func = st->frame[i];
-			for (j = 0; j < BPF_REG_FP; j++) {
+			for (j = 0; j < MAX_BPF_REG; j++) {
 				reg = &func->regs[j];
 				if (reg->type != SCALAR_VALUE || reg->precise)
 					continue;

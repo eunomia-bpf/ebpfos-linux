@@ -1757,7 +1757,7 @@ static struct bpf_verifier_state *push_stack(struct bpf_verifier_env *env,
 }
 
 static const int caller_saved[CALLER_SAVED_REGS] = {
-	BPF_REG_0, BPF_REG_1, BPF_REG_2, BPF_REG_3, BPF_REG_4, BPF_REG_5
+	BPF_REG_0, BPF_REG_1, BPF_REG_2, BPF_REG_3, BPF_REG_4, BPF_REG_5, BPF_REG_ARG6
 };
 
 /* This helper doesn't clear reg->id */
@@ -8180,8 +8180,7 @@ static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg
 	struct bpf_call_arg_meta meta;
 	int err;
 
-	WARN_ON_ONCE(regno < BPF_REG_1 || regno > BPF_REG_5 ||
-		     pointer_regno < BPF_REG_1 || pointer_regno > BPF_REG_5);
+	WARN_ON_ONCE(!bpf_is_arg_reg(regno) || !bpf_is_arg_reg(pointer_regno));
 
 	memset(&meta, 0, sizeof(meta));
 
@@ -10383,7 +10382,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 	 * verifier sees.
 	 */
 	for (i = 0; i < sub->arg_cnt; i++) {
-		u32 regno = i + 1;
+		u32 regno = bpf_arg_regno(i);
 		struct bpf_reg_state *reg = &regs[regno];
 		struct bpf_subprog_arg_info *arg = &sub->args[i];
 
@@ -10858,8 +10857,8 @@ static int set_callee_state(struct bpf_verifier_env *env,
 	/* copy r1 - r5 args that callee can access.  The copy includes parent
 	 * pointers, which connects us up to the liveness chain
 	 */
-	for (i = BPF_REG_1; i <= BPF_REG_5; i++)
-		callee->regs[i] = caller->regs[i];
+	for (i = 0; i < MAX_BPF_NATIVE_REG_ARGS; i++)
+		callee->regs[bpf_arg_regno(i)] = caller->regs[bpf_arg_regno(i)];
 	return 0;
 }
 
@@ -12608,7 +12607,7 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 		       const char *ref_tname, const struct btf_param *args,
 		       int argno, int nargs, bool nullable)
 {
-	u32 regno = argno + 1;
+	u32 regno = bpf_arg_regno(argno);
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = &regs[regno];
 	bool arg_mem_size = false;
@@ -12619,8 +12618,8 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 		return KF_ARG_PTR_TO_CTX;
 
 	if (argno + 1 < nargs &&
-	    (is_kfunc_arg_mem_size(meta->btf, &args[argno + 1], &regs[regno + 1]) ||
-	     is_kfunc_arg_const_mem_size(meta->btf, &args[argno + 1], &regs[regno + 1])))
+	    (is_kfunc_arg_mem_size(meta->btf, &args[argno + 1], &regs[bpf_arg_regno(argno + 1)]) ||
+	     is_kfunc_arg_const_mem_size(meta->btf, &args[argno + 1], &regs[bpf_arg_regno(argno + 1)])))
 		arg_mem_size = true;
 
 	/* In this function, we verify the kfunc's BTF as per the argument type,
@@ -13438,7 +13437,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 	args = (const struct btf_param *)(meta->func_proto + 1);
 	nargs = btf_type_vlen(meta->func_proto);
-	if (nargs > MAX_BPF_FUNC_REG_ARGS) {
+	if (nargs > (bpf_jit_supports_native_args() ? MAX_BPF_NATIVE_REG_ARGS : MAX_BPF_FUNC_REG_ARGS)) {
 		verbose(env, "Function %s has %d > %d args\n", func_name, nargs,
 			MAX_BPF_FUNC_REG_ARGS);
 		return -EINVAL;
@@ -13448,10 +13447,10 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	 * verifier sees.
 	 */
 	for (i = 0; i < nargs; i++) {
-		struct bpf_reg_state *regs = cur_regs(env), *reg = &regs[i + 1];
+		struct bpf_reg_state *regs = cur_regs(env), *reg = &regs[bpf_arg_regno(i)];
 		const struct btf_type *t, *ref_t, *resolve_ret;
 		enum bpf_arg_type arg_type = ARG_DONTCARE;
-		u32 regno = i + 1, ref_id, type_size;
+		u32 regno = bpf_arg_regno(i), ref_id, type_size;
 		bool is_ret_buf_sz = false;
 		int kf_arg_type, size_arg, nullable, address;
 
@@ -13593,7 +13592,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (size_arg >= 0) {
 			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
 							args[size_arg].type, NULL);
-			struct bpf_reg_state *count = &regs[size_arg + 1];
+			struct bpf_reg_state *count = &regs[bpf_arg_regno(size_arg)];
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
 			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
 
@@ -13621,7 +13620,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			 * unsigned maximum for span checks, and marks precision. NULL
 			 * does not skip those scalar checks either.
 			 */
-			ret = check_kfunc_mem_size_reg(env, count, size_arg + 1,
+			ret = check_kfunc_mem_size_reg(env, count, bpf_arg_regno(size_arg),
 						    regno, read_only);
 			if (ret)
 				return ret;
@@ -13925,7 +13924,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		{
 			struct bpf_reg_state *buff_reg = &regs[regno];
 			const struct btf_param *buff_arg = &args[i];
-			struct bpf_reg_state *size_reg = &regs[regno + 1];
+			struct bpf_reg_state *size_reg = &regs[bpf_arg_regno(i + 1)];
 			const struct btf_param *size_arg = &args[i + 1];
 
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
@@ -13945,7 +13944,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				return -EACCES;
 			}
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
-				ret = check_kfunc_mem_size_reg(env, size_reg, regno + 1,
+				ret = check_kfunc_mem_size_reg(env, size_reg, bpf_arg_regno(i + 1),
 							    regno, read_only);
 
 				if (ret < 0) {
@@ -14132,7 +14131,7 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	meta.func_id = U32_MAX;
 	meta.func_name = "callx";
 	nargs = btf_type_vlen(meta.func_proto);
-	if (nargs > MAX_BPF_FUNC_REG_ARGS)
+	if (nargs > MAX_BPF_NATIVE_REG_ARGS)
 		return -EINVAL;
 	for (i = 1; i <= nargs; i++) {
 		type = btf_type_skip_modifiers(btf, btf_params(meta.func_proto)[i - 1].type, NULL);
@@ -14140,11 +14139,11 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 			verbose(env, "callx arg#%d does not fit one native argument register\n", i - 1);
 			return -EINVAL;
 		}
-		err = check_reg_arg(env, i, SRC_OP);
+		err = check_reg_arg(env, bpf_arg_regno(i - 1), SRC_OP);
 		if (err)
 			return err;
 		if (btf_type_is_scalar(type)) {
-			struct bpf_reg_state *arg = &regs[i];
+			struct bpf_reg_state *arg = &regs[bpf_arg_regno(i - 1)];
 			u32 encoding = btf_type_is_int(type) ? btf_int_encoding(type) : 0;
 			u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(type) ?
 				btf_int_bits(type) : type->size * 8;
@@ -17843,7 +17842,7 @@ static void collect_linked_regs(struct bpf_verifier_env *env,
 	for (i = vstate->curframe; i >= 0; i--) {
 		live_regs = aux[bpf_frame_insn_idx(vstate, i)].live_regs_before;
 		func = vstate->frame[i];
-		for (j = 0; j < BPF_REG_FP; j++) {
+		for (j = 0; j < MAX_BPF_REG; j++) {
 			if (!(live_regs & BIT(j)))
 				continue;
 			reg = &func->regs[j];
@@ -18617,7 +18616,7 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 }
 
 /* Bitmask with 1s for all caller saved registers */
-#define ALL_CALLER_SAVED_REGS ((1u << CALLER_SAVED_REGS) - 1)
+#define ALL_CALLER_SAVED_REGS (BPF_REGMASK_ARGS | BIT(BPF_REG_0))
 
 /* True if do_misc_fixups() replaces calls to helper number 'imm',
  * replacement patch is presumed to follow bpf_fastcall contract
@@ -18780,7 +18779,9 @@ static void mark_fastcall_pattern_for_call(struct bpf_verifier_env *env,
 	 * - includes R1-R5 if corresponding parameter has is described
 	 *   in the function prototype.
 	 */
-	clobbered_regs_mask = GENMASK(cs.num_params, cs.is_void ? 1 : 0);
+	clobbered_regs_mask = cs.is_void ? 0 : BIT(BPF_REG_0);
+	for (i = 0; i < cs.num_params; i++)
+		clobbered_regs_mask |= BIT(bpf_arg_regno(i));
 	/* e.g. if helper call clobbers r{0,1}, expect r{2,3,4,5} in the pattern */
 	expected_regs_mask = ~clobbered_regs_mask & ALL_CALLER_SAVED_REGS;
 
@@ -19969,7 +19970,7 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 	case BPF_CALL:
 		if (BPF_SRC(insn->code) == BPF_X) {
 			if (class != BPF_JMP || insn->src_reg || insn->dst_reg ||
-			    insn->off || insn->imm < BPF_REG_0 || insn->imm >= BPF_REG_FP) {
+			    insn->off || insn->imm < BPF_REG_0 || (insn->imm >= BPF_REG_FP && insn->imm != BPF_REG_ARG6)) {
 				verbose(env, "callx uses invalid register or reserved fields\n");
 				return -EINVAL;
 			}
@@ -20097,6 +20098,12 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 		return err;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
+		if (insn->src_reg == 11 || insn->dst_reg == 11 ||
+		    ((insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6) &&
+		     (!env->prog->jit_requested || !bpf_jit_supports_native_args()))) {
+			verbose(env, "instruction %d uses an unsupported native ABI register\n", i);
+			return -EINVAL;
+		}
 		if (insn->dst_reg >= MAX_BPF_REG) {
 			verbose(env, "R%d is invalid\n", insn->dst_reg);
 			return -EINVAL;
@@ -20434,8 +20441,9 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				goto out;
 			}
 		}
-		for (i = BPF_REG_1; i <= sub->arg_cnt; i++) {
-			arg = &sub->args[i - BPF_REG_1];
+		for (int ai = 0; ai < sub->arg_cnt; ai++) {
+			i = bpf_arg_regno(ai);
+			arg = &sub->args[ai];
 			reg = &regs[i];
 
 			if (arg->arg_type == ARG_PTR_TO_CTX) {
@@ -20496,10 +20504,11 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			}
 		}
 		/* All arguments exist before a pointer is related to its count. */
-		for (i = BPF_REG_1; i <= sub->arg_cnt; i++) {
+		for (int ai = 0; ai < sub->arg_cnt; ai++) {
+			i = bpf_arg_regno(ai);
 			struct bpf_reg_state *count;
 
-			arg = &sub->args[i - BPF_REG_1];
+			arg = &sub->args[ai];
 			if (!arg->mem_size_reg)
 				continue;
 			count = &regs[arg->mem_size_reg];

@@ -190,6 +190,7 @@ static const int reg2hex[] = {
 	[BPF_REG_8] = 6,  /* R14 callee saved */
 	[BPF_REG_9] = 7,  /* R15 callee saved */
 	[BPF_REG_FP] = 5, /* RBP readonly */
+	[BPF_REG_ARG6] = 1, /* R9 sixth native argument */
 	[BPF_REG_AX] = 2, /* R10 temp register */
 	[AUX_REG] = 3,    /* R11 temp register */
 	[X86_REG_R9] = 1, /* R9 register, 6th function argument */
@@ -203,6 +204,7 @@ static const int reg2pt_regs[] = {
 	[BPF_REG_3] = offsetof(struct pt_regs, dx),
 	[BPF_REG_4] = offsetof(struct pt_regs, cx),
 	[BPF_REG_5] = offsetof(struct pt_regs, r8),
+	[BPF_REG_ARG6] = offsetof(struct pt_regs, r9),
 	[BPF_REG_6] = offsetof(struct pt_regs, bx),
 	[BPF_REG_7] = offsetof(struct pt_regs, r13),
 	[BPF_REG_8] = offsetof(struct pt_regs, r14),
@@ -216,7 +218,7 @@ static const int reg2pt_regs[] = {
  */
 static bool is_ereg(u32 reg)
 {
-	return (1 << reg) & (BIT(BPF_REG_5) |
+	return (1 << reg) & (BIT(BPF_REG_5) | BIT(BPF_REG_ARG6) |
 			     BIT(AUX_REG) |
 			     BIT(BPF_REG_7) |
 			     BIT(BPF_REG_8) |
@@ -2577,7 +2579,7 @@ populate_extable:
 			 * A private frame pointer would require saving a caller-saved
 			 * native register; that stack mode is not used with callx.
 			 */
-			if (priv_frame_ptr || imm32 < BPF_REG_0 || imm32 >= BPF_REG_FP)
+			if (priv_frame_ptr || imm32 < BPF_REG_0 || (imm32 >= BPF_REG_FP && imm32 != BPF_REG_ARG6))
 				return -EOPNOTSUPP;
 			if (is_ereg(imm32))
 				EMIT1(0x41);
@@ -4027,6 +4029,13 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 			return prog;
 		prog->aux->jit_data = jit_data;
 	}
+	for (i = 0; i < prog->len; i++) {
+		const struct bpf_insn *insn = &prog->insnsi[i];
+
+		if (insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6 ||
+		    (insn->code == (BPF_JMP | BPF_CALL | BPF_X) && insn->imm == BPF_REG_ARG6))
+			prog->aux->jits_use_priv_stack = false;
+	}
 	priv_stack_ptr = prog->aux->priv_stack_ptr;
 	if (!priv_stack_ptr && prog->aux->jits_use_priv_stack) {
 		/* Allocate actual private stack size with verifier-calculated
@@ -4247,6 +4256,11 @@ void bpf_jit_free(struct bpf_prog *prog)
 	}
 
 	bpf_prog_unlock_free(prog);
+}
+
+bool bpf_jit_supports_native_args(void)
+{
+	return true;
 }
 
 bool bpf_jit_supports_callx(void)

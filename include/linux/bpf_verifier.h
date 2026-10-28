@@ -306,7 +306,7 @@ static inline void spis_or_range(spis_t *mask, u32 lo, u32 hi)
 
 #define BPF_REGMASK_ARGS ((1 << BPF_REG_1) | (1 << BPF_REG_2) | \
 			  (1 << BPF_REG_3) | (1 << BPF_REG_4) | \
-			  (1 << BPF_REG_5))
+			  (1 << BPF_REG_5) | (1 << BPF_REG_ARG6))
 
 #define BPF_MAIN_FUNC (-1)
 
@@ -801,7 +801,7 @@ struct bpf_subprog_info {
 	bool type_authority: 1;
 
 	enum priv_stack_mode priv_stack_mode;
-	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_REG_ARGS];
+	struct bpf_subprog_arg_info args[MAX_BPF_NATIVE_REG_ARGS];
 };
 
 struct bpf_verifier_env;
@@ -1534,7 +1534,7 @@ static inline u64 bpf_map_key_immediate(const struct bpf_insn_aux_data *aux)
 }
 
 #define MAX_PACKET_OFF 0xffff
-#define CALLER_SAVED_REGS 6
+#define CALLER_SAVED_REGS 7
 
 enum bpf_reg_arg_type {
 	SRC_OP,		/* register is used as source operand */

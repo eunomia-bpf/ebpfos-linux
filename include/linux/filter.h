@@ -50,6 +50,18 @@ struct ctl_table_header;
 #define BPF_REG_ARG5	BPF_REG_5
 #define BPF_REG_CTX	BPF_REG_6
 #define BPF_REG_FP	BPF_REG_10
+#define BPF_REG_ARG6	BPF_REG_12
+
+/* Physical argument order of the native x86 integer calling convention. */
+static inline u32 bpf_arg_regno(u32 index)
+{
+	return index == 5 ? BPF_REG_ARG6 : BPF_REG_1 + index;
+}
+
+static inline bool bpf_is_arg_reg(u32 reg)
+{
+	return (reg >= BPF_REG_1 && reg <= BPF_REG_5) || reg == BPF_REG_ARG6;
+}
 
 /* Additional register mappings for converted user programs. */
 #define BPF_REG_A	BPF_REG_0
@@ -1168,6 +1180,7 @@ bool bpf_jit_supports_kfunc_call(void);
 bool bpf_jit_supports_far_kfunc_call(void);
 bool bpf_jit_supports_exceptions(void);
 bool bpf_jit_supports_callx(void);
+bool bpf_jit_supports_native_args(void);
 bool bpf_jit_supports_ptr_xchg(void);
 bool bpf_jit_supports_arena(void);
 bool bpf_jit_supports_insn(struct bpf_insn *insn, bool in_arena);
