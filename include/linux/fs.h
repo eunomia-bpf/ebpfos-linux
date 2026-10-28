@@ -3,6 +3,7 @@
 #define _LINUX_FS_H
 
 #include <linux/fs/super.h>
+#include <linux/ebpfos_file_view.h>
 #include <linux/vfsdebug.h>
 #include <linux/linkage.h>
 #include <linux/wait_bit.h>
@@ -2362,6 +2363,7 @@ struct super_block *sget_dev(struct fs_context *fc, dev_t dev);
 		struct file *__file = (f); \
 		fops_put(__file->f_op); \
 		BUG_ON(!(__file->f_op = (fops))); \
+		ebpfos_file_view_open(__file); \
 	} while(0)
 
 extern int register_filesystem(struct file_system_type *);

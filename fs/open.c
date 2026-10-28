@@ -942,6 +942,7 @@ static int do_dentry_open(struct file *f,
 
 	/* normally all 3 are set; ->open() can clear them if needed */
 	f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+	ebpfos_file_view_open(f);
 	if (!open)
 		open = f->f_op->open;
 	if (open) {

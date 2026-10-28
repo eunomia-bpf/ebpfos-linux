@@ -442,11 +442,16 @@ EXPORT_SYMBOL_GPL(ebpfos_operations_owner_put);
 BTF_ID_LIST_SINGLE(operations_file_btf_id, struct, file_operations)
 int ebpfos_file_view_open(struct file *file)
 {
- struct ebpfos_operations *ops;
- if (file->ebpfos_operations) return 0;
+ struct ebpfos_operations *ops, *old = file->ebpfos_operations;
+ if (old && file->f_op == old->table) return 0;
  ops = ebpfos_operations_current(file->f_op, operations_file_btf_id[0], sizeof(*file->f_op), file->f_op->owner);
- if (ops) {file->ebpfos_operations = ops;file->f_op = ops->table;}
+ file->ebpfos_operations = ops;
+ if (ops) file->f_op = ops->table;
+ /* An open callback may replace its table before delegating. The old map's
+  * existing stack-checked retirement retains any still-running callback. */
+ ebpfos_operations_put(old);
  return 0;
 }
+EXPORT_SYMBOL(ebpfos_file_view_open);
 void ebpfos_file_view_free(struct file *file)
 { ebpfos_operations_put(file->ebpfos_operations); }
