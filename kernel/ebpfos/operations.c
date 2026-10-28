@@ -381,6 +381,7 @@ u32 ebpfos_operations_bound(const struct ebpfos_operations *ops) { return ops->c
 EXPORT_SYMBOL_GPL(ebpfos_operations_bound);
 struct ebpfos_operations_owner {
  struct bpf_operations_set *selected, *global;
+ struct ebpfos_operations *bound;
  struct rcu_head rcu;
  u32 type;
  bool resolved;
@@ -416,12 +417,21 @@ const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner, con
  owner->resolved = true;
  ops = operations_find(owner->selected, original, owner->type, 0);
  if (!ops) ops = operations_find(owner->global, original, owner->type, 0);
+ /* Selection sets are needed only until the actual table is known. Retain
+  * the matching map before dropping them; unrelated inodes must not keep
+  * every selected module alive until their own eventual destruction.
+  * The caller's publication lock serializes resolution with owner release.
+  */
+ owner->bound = ebpfos_operations_get(ops);
+ bpf_operations_set_put(owner->selected);owner->selected = NULL;
+ bpf_operations_set_put(owner->global);owner->global = NULL;
  return ops ? ops->table : original;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_resolve);
 static void operations_owner_rcu(struct rcu_head *rcu)
 {
  struct ebpfos_operations_owner *owner = container_of(rcu, struct ebpfos_operations_owner, rcu);
+ ebpfos_operations_put(owner->bound);
  bpf_operations_set_put(owner->selected);bpf_operations_set_put(owner->global);kfree(owner);
 }
 void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
