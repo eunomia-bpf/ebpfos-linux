@@ -18,6 +18,7 @@
 #include <linux/sort.h>
 #include <linux/bpf_verifier.h>
 #include <linux/btf.h>
+#include "btf_record_return.h"
 #include <linux/btf_ids.h>
 #include <linux/bpf.h>
 #include <linux/bpf_operations.h>
@@ -7656,6 +7657,18 @@ static bool btf_integer_return(struct btf *btf, u32 id, u32 offset, u32 depth)
 			return false;
 	}
 	return btf_type_vlen(type) != 0;
+}
+
+/* A single x86 INTEGER return register carries bits, not field capabilities.
+ * Keep its full value unknown, including boolean fields and padding.
+ */
+bool btf_scalar_record_return(struct btf *btf, u32 id)
+{
+	const struct btf_type *type = btf_type_skip_modifiers(btf, id, NULL);
+
+	return IS_ENABLED(CONFIG_X86_64) && type && btf_type_is_struct(type) &&
+		type->size && type->size <= sizeof(u64) && is_power_of_2(type->size) &&
+		btf_integer_return(btf, id, 0, 0);
 }
 
 int btf_distill_func_proto(struct bpf_verifier_log *log,

@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
+#include "btf_record_return.h"
 #include <linux/bpf_verifier.h>
 #include <linux/filter.h>
 #include <net/netlink.h>
@@ -14087,7 +14088,8 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	clear_caller_saved_regs(env, regs);
 	if (btf_type_is_void(type)) {
 		/* R0 is not readable after a void call. */
-	} else if (btf_type_is_scalar(type) && type->size <= sizeof(u64)) {
+	} else if ((btf_type_is_scalar(type) && type->size <= sizeof(u64)) ||
+		   btf_scalar_record_return(btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		mark_btf_func_reg_size(env, BPF_REG_0, type->size);
 	} else if (btf_type_is_ptr(type)) {
@@ -14766,7 +14768,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		}
 	}
 
-	if (btf_type_is_scalar(t)) {
+	if (btf_type_is_scalar(t) ||
+	    btf_scalar_record_return(desc_btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		if (meta.btf == btf_vmlinux && (meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock] ||
 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
