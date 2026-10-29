@@ -569,7 +569,7 @@ int bpf_check_cfg(struct bpf_verifier_env *env)
 {
 	int insn_cnt = env->prog->len;
 	int *insn_stack, *insn_state;
-	int ex_insn_beg, i, ret = 0;
+	int ex_insn_beg, i, orphan = 0, ret = 0;
 
 	insn_state = env->cfg.insn_state = kvzalloc_objs(int, insn_cnt,
 							 GFP_KERNEL_ACCOUNT);
@@ -623,6 +623,26 @@ walk_cfg:
 		insn_stack[0] = ex_insn_beg;
 		env->cfg.cur_stack = 1;
 		goto walk_cfg;
+	}
+
+	/* Compiler output can retain an epilogue after a terminal KOperation
+	 * proof or a non-returning native call. The privileged trusted tier
+	 * claims no safety proof, but its JIT must still receive structurally
+	 * valid instructions. Walk each remaining region with the same CFG
+	 * validator; do not merely ignore its branches or ldimm64 boundaries.
+	 * Ordinary verification continues to reject unreachable instructions.
+	 */
+	if (env->prog->aux->trusted_kernel) {
+		for (; orphan < insn_cnt; orphan++) {
+			if (insn_state[orphan] != EXPLORED) {
+				insn_state[orphan] = DISCOVERED;
+				insn_stack[0] = orphan;
+				env->cfg.cur_stack = 1;
+				goto walk_cfg;
+			}
+			if (bpf_is_ldimm64(&env->prog->insnsi[orphan]))
+				orphan++;
+		}
 	}
 
 	for (i = 0; i < insn_cnt; i++) {
