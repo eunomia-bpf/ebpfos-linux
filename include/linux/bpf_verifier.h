@@ -1444,6 +1444,7 @@ struct bpf_kfunc_call_arg_meta {
 	u32 kfunc_flags;
 	const struct btf_type *func_proto;
 	const char *func_name;
+	bool native_call;
 	/* Out parameters */
 	u32 ref_obj_id;
 	u8 release_regno;
@@ -1575,6 +1576,7 @@ enum bpf_reg_arg_type {
 struct bpf_kfunc_desc {
 	struct btf_func_model func_model;
 	const struct bpf_kop *kop;
+	bool native_call;
 	u32 func_id;
 	u32 flags;
 	s32 imm;

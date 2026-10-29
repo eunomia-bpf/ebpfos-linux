@@ -9782,6 +9782,17 @@ static int bpf_prog_type_to_kfunc_hook(enum bpf_prog_type prog_type)
 	}
 }
 
+/* Native source calls must not bypass a registered kfunc's hook or filter. */
+bool btf_kfunc_is_registered(const struct btf *btf, u32 kfunc_btf_id)
+{
+	enum btf_kfunc_hook hook;
+
+	for (hook = 0; hook < BTF_KFUNC_HOOK_MAX; hook++)
+		if (btf_kfunc_id_set_contains(btf, hook, kfunc_btf_id))
+			return true;
+	return false;
+}
+
 bool btf_kfunc_is_allowed(const struct btf *btf,
 			  u32 kfunc_btf_id,
 			  const struct bpf_prog *prog)

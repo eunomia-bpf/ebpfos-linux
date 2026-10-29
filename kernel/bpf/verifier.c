@@ -3130,6 +3130,8 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	desc->func_id = func_id;
 	desc->offset = offset;
 	desc->flags = kfunc.flags ? *kfunc.flags : 0;
+	desc->native_call = !kop_call && prog_aux->ebpfos_component &&
+		!btf_kfunc_is_registered(kfunc.btf, func_id);
 	if (kop_call) {
 		if (!kfunc.kop) {
 			verbose(env, "kfunc btf_id %u is not registered as a KOperation\n",
@@ -14164,7 +14166,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			    (btf_type_is_scalar(t) && t->size > 8)) {
 				if (!btf_native_value_storage(meta->btf, args[i].type)) return -EOPNOTSUPP;
 				ret = btf_native_scalar_storage(meta->btf, args[i].type, 0) ?
-					native_scalar_record_arg(env, location) : native_record_arg(env, meta->btf, location, false);
+					native_scalar_record_arg(env, location) :
+					native_record_arg(env, meta->btf, location, meta->native_call);
 				if (ret) return ret;
 				continue;
 			}
@@ -14186,6 +14189,15 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				regno = bpf_arg_regno(location->reg);
 			}
 			reg = &regs[regno];
+		}
+
+		/* A bare prototype cannot describe reference consumption. Keep
+		 * verifier-owned references behind registered effect contracts.
+		 */
+		if (meta->native_call &&
+		    (reg->ref_obj_id || (reg->type & NON_OWN_REF))) {
+			verbose(env, "native prototype cannot transfer a modeled reference\n");
+			return -EACCES;
 		}
 
 		if (meta->func_id != U32_MAX && is_kfunc_arg_prog_aux(btf, &args[i])) {
@@ -14842,60 +14854,31 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	return 0;
 }
 
-/* A typed callback field supplies a prototype, not a registered target.
- * Reuse kfunc argument checking without inventing a FUNC or target set.
+/* A native prototype conveys an ABI, not target-specific kfunc effects.
+ * Direct source calls and typed callbacks share every argument/result check.
+ * Native callee safety and progress remain the mixed-tier trust assumption.
  */
-static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn)
+static int check_native_prototype_call(struct bpf_verifier_env *env,
+                                      struct btf *btf,
+                                      const struct btf_type *prototype,
+                                      bool direct)
 {
-	struct bpf_reg_state *regs = cur_regs(env), *target = &regs[insn->imm];
-	struct bpf_kfunc_call_arg_meta meta = {};
+	struct bpf_reg_state *regs = cur_regs(env);
+	struct bpf_kfunc_call_arg_meta meta = {
+		.btf = btf,
+		.func_proto = prototype,
+		.func_id = U32_MAX,
+		.func_name = "native call",
+		.native_call = direct,
+	};
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
 	const struct btf_type *type;
-	struct btf *btf;
 	u32 i, nargs;
 	int err;
 
-	/* Unlike a registered kfunc, a field prototype does not carry a
-	 * target allow-list or destructive-call permission. Keep this native
-	 * call facility restricted to the kernel administrator.
-	 */
-	if (!capable(CAP_SYS_ADMIN)) {
-		verbose(env, "callx requires CAP_SYS_ADMIN\n");
-		return -EPERM;
-	}
-	if (!env->prog->jit_requested || !bpf_jit_supports_callx()) {
-		verbose(env, "callx requires a supporting JIT\n");
-		return -EOPNOTSUPP;
-	}
-	if (env->cur_state->active_locks) {
-		verbose(env, "callx cannot establish a lock-held target contract\n");
-		return -EACCES;
-	}
-	err = check_reg_arg(env, insn->imm, SRC_OP);
-	if (err)
-		return err;
-	if (base_type(target->type) != PTR_TO_BTF_FUNC ||
-	    target->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-	    !tnum_is_const(target->var_off) || target->var_off.value) {
-		verbose(env, "callx requires a non-NULL function pointer loaded from a trusted BTF field\n");
-		return -EACCES;
-	}
-	if (target->type & MEM_RCU && !in_rcu_cs(env)) {
-		verbose(env, "callx function pointer is outside its RCU lifetime\n");
-		return -EACCES;
-	}
-	btf = target->btf;
-	meta.btf = btf;
-	meta.func_proto = btf_type_by_id(btf, target->btf_id);
-	if (!meta.func_proto || !btf_type_is_func_proto(meta.func_proto))
+	if (!prototype || !btf_type_is_func_proto(prototype))
 		return -EINVAL;
-	/* No target identity or target-specific effects can be inferred from a
-	 * field prototype. This value lies outside the BTF type-ID range, so
-	 * special kfunc handling and FUNC declaration tags cannot match it.
-	 */
-	meta.func_id = U32_MAX;
-	meta.func_name = "callx";
 	nargs = btf_type_vlen(meta.func_proto);
 	if (nargs > (env->subprog_info[cur_func(env)->subprogno].native_frame ? MAX_BPF_FUNC_ARGS : MAX_BPF_NATIVE_REG_ARGS))
 		return -EINVAL;
@@ -14956,8 +14939,73 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 		verbose(env, "callx return type is not a scalar or pointer\n");
 		return -EINVAL;
 	}
+	return 0;
+}
+
+/* A typed callback field supplies a prototype, not a registered target.
+ * Reuse kfunc argument checking without inventing a FUNC or target set.
+ */
+static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn)
+{
+	struct bpf_reg_state *regs = cur_regs(env), *target = &regs[insn->imm];
+	int err;
+
+	/* Unlike a registered kfunc, a field prototype does not carry a
+	 * target allow-list or destructive-call permission. Keep this native
+	 * call facility restricted to the kernel administrator.
+	 */
+	if (!capable(CAP_SYS_ADMIN)) {
+		verbose(env, "callx requires CAP_SYS_ADMIN\n");
+		return -EPERM;
+	}
+	if (!env->prog->jit_requested || !bpf_jit_supports_callx()) {
+		verbose(env, "callx requires a supporting JIT\n");
+		return -EOPNOTSUPP;
+	}
+	if (env->cur_state->active_locks) {
+		verbose(env, "callx cannot establish a lock-held target contract\n");
+		return -EACCES;
+	}
+	err = check_reg_arg(env, insn->imm, SRC_OP);
+	if (err)
+		return err;
+	if (base_type(target->type) != PTR_TO_BTF_FUNC ||
+	    target->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+	    !tnum_is_const(target->var_off) || target->var_off.value) {
+		verbose(env, "callx requires a non-NULL function pointer loaded from a trusted BTF field\n");
+		return -EACCES;
+	}
+	if (target->type & MEM_RCU && !in_rcu_cs(env)) {
+		verbose(env, "callx function pointer is outside its RCU lifetime\n");
+		return -EACCES;
+	}
+	err = check_native_prototype_call(env, target->btf,
+			btf_type_by_id(target->btf, target->btf_id), false);
+	if (err)
+		return err;
 	env->prog->aux->has_callx = true;
 	return 0;
+}
+
+/* Native code owns this declaration. A caller's BTF cannot supply missing
+ * preconditions for another function. With no inputs and no pointer result,
+ * the ABI itself supplies the complete memory interface.
+ */
+static bool native_memory_contract(const struct bpf_kfunc_meta *kfunc)
+{
+	const struct btf_type *function = btf_type_by_id(kfunc->btf, kfunc->id);
+	const struct btf_type *result;
+	const char *tag;
+
+	result = btf_type_skip_modifiers(kfunc->btf, kfunc->proto->type, NULL);
+	if (!btf_type_vlen(kfunc->proto) &&
+	    (btf_type_is_void(result) ||
+	     (btf_type_is_scalar(result) && result->size <= sizeof(u64)) ||
+	     btf_scalar_record_return(kfunc->btf, kfunc->proto->type)))
+		return true;
+	tag = btf_find_decl_tag_value(kfunc->btf, function, -1,
+				     "native:memory_contract");
+	return !IS_ERR(tag) && !*tag;
 }
 
 int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
@@ -14968,18 +15016,32 @@ int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
 	struct bpf_kfunc_meta kfunc;
 	int err;
 
+	memset(meta, 0, sizeof(*meta));
 	err = fetch_kfunc_meta(env, func_id, offset, &kfunc);
 	if (err)
 		return err;
 
-	memset(meta, 0, sizeof(*meta));
 	meta->btf = kfunc.btf;
 	meta->func_id = kfunc.id;
 	meta->func_proto = kfunc.proto;
 	meta->func_name = kfunc.name;
 
-	if (!kfunc.flags || !btf_kfunc_is_allowed(kfunc.btf, kfunc.id, env->prog))
-		return -EACCES;
+	if (!kfunc.flags || !btf_kfunc_is_allowed(kfunc.btf, kfunc.id, env->prog)) {
+		/* The administrator's source component may use an ordinary native
+		 * entry with the same prototype contract as a typed callback. A
+		 * registered kfunc retains its hook, filter and effect contract.
+		 */
+		if (!env->prog->aux->ebpfos_component || !capable(CAP_SYS_ADMIN) ||
+		    kfunc.kop || btf_kfunc_is_registered(kfunc.btf, kfunc.id))
+			return -EACCES;
+		meta->native_call = true;
+		if (!native_memory_contract(&kfunc)) {
+			verbose(env, "native function %s requires a complete memory contract\n",
+				kfunc.name);
+			return -EACCES;
+		}
+		return 0;
+	}
 
 	meta->kfunc_flags = *kfunc.flags;
 
@@ -15399,10 +15461,36 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return 0;
 
 	err = bpf_fetch_kfunc_arg_meta(env, insn->imm, insn->off, &meta);
-	if (err == -EACCES && meta.func_name)
+	if (err == -EACCES && meta.func_name && !meta.native_call)
 		verbose(env, "calling kernel function %s is not allowed\n", meta.func_name);
 	if (err)
 		return err;
+	if (meta.native_call) {
+		u32 owner = cur_func(env)->subprogno;
+		struct bpf_verifier_state *state = env->cur_state;
+
+		/* An implicit current-task or global argument can also consume a
+		 * resource. A memory contract does not describe those effects.
+		 */
+		if (state->acquired_refs) {
+			verbose(env, "native prototype cannot transfer a modeled reference\n");
+			return -EACCES;
+		}
+		if (state->active_locks || state->active_preempt_locks ||
+		    state->active_irq_id || in_rcu_cs(env) ||
+		    env->subprog_info[owner].requires_rcu) {
+			verbose(env, "native call cannot establish a lock-held target contract\n");
+			return -EACCES;
+		}
+		err = check_native_prototype_call(env, meta.btf, meta.func_proto, true);
+		if (!err) {
+			verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+				owner, bpf_verifier_subprog_name(env, owner));
+			verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+				owner, bpf_verifier_subprog_name(env, owner));
+		}
+		return err;
+	}
 	desc_btf = meta.btf;
 	func_name = meta.func_name;
 	insn_aux = &env->insn_aux_data[insn_idx];
@@ -22712,11 +22800,11 @@ int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return -EFAULT;
 	}
 
-	/* Trusted kernel source calls the C function with all of its arguments.
+	/* Native source calls the C function with all of its arguments.
 	 * Public BPF kfunc specialization supplies implicit arguments and may
 	 * replace the callee; neither transformation describes that source call.
 	 */
-	if (env->prog->aux->trusted_kernel) {
+	if (env->prog->aux->trusted_kernel || desc->native_call) {
 		if (!bpf_jit_supports_far_kfunc_call())
 			insn->imm = BPF_CALL_IMM(desc->addr);
 		return 0;
