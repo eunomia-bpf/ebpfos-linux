@@ -432,14 +432,14 @@ struct ebpfos_operations *bpf_operations_find(struct bpf_operations_set *set,
  if (ops) bpf_map_inc(&ops->map);
  return ops;
 }
-struct ebpfos_operations *ebpfos_operations_current(const void *original,
- u32 type, size_t size, struct module *owner)
+struct ebpfos_operations *ebpfos_operations_for_object(const void *original,
+ u32 type, size_t size, struct module *owner, const void *object)
 {
  struct ebpfos_operations *ops = NULL;
  struct ebpfos_rule_decision *local = NULL, *decision = ebpfos_task_rule_decision();
  if (!decision && ebpfos_rule_active()) {
   struct bpf_kernel_rule_ctx context;
-  ebpfos_rule_context(&context, (u64)original, type);
+  ebpfos_rule_context(&context, (u64)object, type);
   local = ebpfos_rule_resolve(&context, in_task() ? GFP_KERNEL : GFP_ATOMIC);
   if (IS_ERR(local)) return ERR_CAST(local);
   decision = local;
@@ -449,6 +449,10 @@ struct ebpfos_operations *ebpfos_operations_current(const void *original,
  if (!ops) ops = bpf_operations_find(rcu_dereference(global_operations), original, type, size);
  rcu_read_unlock();ebpfos_rule_decision_put(local);return ops;
 }
+EXPORT_SYMBOL_GPL(ebpfos_operations_for_object);
+struct ebpfos_operations *ebpfos_operations_current(const void *original,
+ u32 type, size_t size, struct module *owner)
+{ return ebpfos_operations_for_object(original, type, size, owner, original); }
 EXPORT_SYMBOL_GPL(ebpfos_operations_current);
 struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *ops)
 { if (ops) bpf_map_inc(&ops->map);return ops; }
@@ -457,6 +461,8 @@ void ebpfos_operations_put(struct ebpfos_operations *ops) { if (ops) bpf_map_put
 EXPORT_SYMBOL_GPL(ebpfos_operations_put);
 const void *ebpfos_operations_table(const struct ebpfos_operations *ops) { return ops->table; }
 EXPORT_SYMBOL_GPL(ebpfos_operations_table);
+const void *ebpfos_operations_original(const struct ebpfos_operations *ops) { return ops->original; }
+EXPORT_SYMBOL_GPL(ebpfos_operations_original);
 u32 ebpfos_operations_bound(const struct ebpfos_operations *ops) { return ops->count; }
 EXPORT_SYMBOL_GPL(ebpfos_operations_bound);
 struct ebpfos_operations_owner {
@@ -543,7 +549,7 @@ int ebpfos_file_view_open(struct file *file)
 {
  struct ebpfos_operations *ops, *old = file->ebpfos_operations;
  if (old && file->f_op == old->table) return 0;
- ops = ebpfos_operations_current(file->f_op, operations_file_btf_id[0], sizeof(*file->f_op), file->f_op->owner);
+ ops = ebpfos_operations_for_object(file->f_op, operations_file_btf_id[0], sizeof(*file->f_op), file->f_op->owner, file);
  if (IS_ERR(ops)) return PTR_ERR(ops);
  file->ebpfos_operations = ops;
  if (ops) file->f_op = ops->table;

@@ -23,6 +23,8 @@ struct ebpfos_operations_table_source {
  */
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 const void *ebpfos_operations_table(const struct ebpfos_operations *operations);
+/* Creation of another handle starts from the source table, not a peer's choice. */
+const void *ebpfos_operations_original(const struct ebpfos_operations *operations);
 u32 ebpfos_operations_bound(const struct ebpfos_operations *operations);
 void ebpfos_operations_put(struct ebpfos_operations *operations);
 struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *operations);
@@ -31,6 +33,8 @@ struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *operat
  * rule allocation can fail with ERR_PTR; callers propagate that failure. */
 struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type_id, size_t size, struct module *original_owner);
+struct ebpfos_operations *ebpfos_operations_for_object(const void *original,
+ u32 type_id, size_t size, struct module *original_owner, const void *object);
 /* Reserve during fallible object allocation. Resolve later, without
  * allocation or sleeping, before the object is first published. The owner
  * serializes resolve with its existing publication lock. Put after the last
@@ -41,11 +45,14 @@ const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner,
 void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner);
 #else
 static inline const void *ebpfos_operations_table(const struct ebpfos_operations *ops) { return NULL; }
+static inline const void *ebpfos_operations_original(const struct ebpfos_operations *ops) { return NULL; }
 static inline u32 ebpfos_operations_bound(const struct ebpfos_operations *ops) { return 0; }
 static inline void ebpfos_operations_put(struct ebpfos_operations *ops) {}
 static inline struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *ops) { return NULL; }
 static inline struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type, size_t size, struct module *owner) { return NULL; }
+static inline struct ebpfos_operations *ebpfos_operations_for_object(const void *original,
+ u32 type, size_t size, struct module *owner, const void *object) { return NULL; }
 static inline struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp) { return NULL; }
 static inline const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner,
  const void *original) { return original; }

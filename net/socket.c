@@ -334,8 +334,8 @@ BTF_ID_LIST_SINGLE(ebpfos_proto_ops_btf_id, struct, proto_ops)
 static int socket_bind_operations(struct socket *sock)
 {
 	struct ebpfos_operations *bound;
-	bound = ebpfos_operations_current(sock->ops, ebpfos_proto_ops_btf_id[0],
-					 sizeof(*sock->ops), sock->ops->owner);
+	bound = ebpfos_operations_for_object(sock->ops, ebpfos_proto_ops_btf_id[0],
+					 sizeof(*sock->ops), sock->ops->owner, sock);
 	if (IS_ERR(bound))
 		return PTR_ERR(bound);
 	if (bound) {
@@ -345,14 +345,17 @@ static int socket_bind_operations(struct socket *sock)
 	return 0;
 }
 
-static void socket_inherit_operations(struct socket *next, struct socket *parent)
+static const struct proto_ops *socket_original_operations(struct socket *parent)
 {
-	SOCKFS_I(SOCK_INODE(next))->operations =
-		ebpfos_operations_get(SOCKFS_I(SOCK_INODE(parent))->operations);
+	struct ebpfos_operations *bound = SOCKFS_I(SOCK_INODE(parent))->operations;
+
+	/* A new handle belongs to the accepting operation. The shared listener
+	 * keeps its own table and lease. Never resolve against its copied table. */
+	return bound ? ebpfos_operations_original(bound) : parent->ops;
 }
 #else
 static inline int socket_bind_operations(struct socket *sock) { return 0; }
-static inline void socket_inherit_operations(struct socket *next, struct socket *parent) {}
+static inline const struct proto_ops *socket_original_operations(struct socket *parent) { return parent->ops; }
 #endif
 
 static struct inode *sock_alloc_inode(struct super_block *sb)
@@ -2059,9 +2062,7 @@ struct file *do_accept(struct file *file, struct proto_accept_arg *arg,
 	ops = READ_ONCE(sock->ops);
 
 	newsock->type = sock->type;
-	newsock->ops = ops;
-	socket_inherit_operations(newsock, sock);
-
+	newsock->ops = socket_original_operations(sock);
 	/*
 	 * We don't need try_module_get here, as the listening socket (sock)
 	 * has the protocol module (sock->ops->owner) held.
@@ -2079,6 +2080,9 @@ struct file *do_accept(struct file *file, struct proto_accept_arg *arg,
 	arg->flags |= sock->file->f_flags;
 	err = ops->accept(sock, newsock, arg);
 	if (err < 0)
+		goto out_fd;
+	err = socket_bind_operations(newsock);
+	if (err)
 		goto out_fd;
 
 	if (upeer_sockaddr) {
@@ -3742,9 +3746,13 @@ int kernel_accept(struct socket *sock, struct socket **newsock, int flags)
 		goto done;
 	}
 
-	(*newsock)->ops = ops;
-	socket_inherit_operations(*newsock, sock);
+	(*newsock)->ops = socket_original_operations(sock);
 	__module_get(ops->owner);
+	err = socket_bind_operations(*newsock);
+	if (err) {
+		sock_release(*newsock);
+		*newsock = NULL;
+	}
 
 done:
 	return err;

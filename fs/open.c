@@ -942,7 +942,9 @@ static int do_dentry_open(struct file *f,
 
 	/* normally all 3 are set; ->open() can clear them if needed */
 	f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
-	ebpfos_file_view_open(f);
+	error = ebpfos_file_view_open(f);
+	if (error)
+		goto cleanup_all;
 	if (!open)
 		open = f->f_op->open;
 	if (open) {
@@ -997,8 +999,7 @@ static int do_dentry_open(struct file *f,
 		}
 	}
 
-	ebpfos_file_view_open(f);
-	return 0;
+	return ebpfos_file_view_open(f);
 
 cleanup_all:
 	if (WARN_ON_ONCE(error > 0))
