@@ -14,6 +14,7 @@
 #include <linux/file.h>
 #include <linux/uaccess.h>
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/idr.h>
 #include <linux/sort.h>
 #include <linux/bpf_verifier.h>
@@ -9671,6 +9672,32 @@ u32 *btf_kfunc_flags(const struct btf *btf, u32 kfunc_btf_id, const struct bpf_p
 
 	hook = bpf_prog_type_to_kfunc_hook(prog_type);
 	return btf_kfunc_id_set_contains(btf, hook, kfunc_btf_id);
+}
+
+/* resolve_btfids omits implicit arguments from the public BPF prototype.
+ * Native C still passes them, using the retained _impl prototype.
+ */
+int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
+                             const struct bpf_prog *prog)
+{
+ const struct btf_type *function = btf_type_by_id(btf, func_id), *proto;
+ u32 *flags;
+ char name[KSYM_NAME_LEN];
+ int id, length;
+
+ if (!function || !btf_type_is_func(function)) return -EINVAL;
+ flags = btf_kfunc_flags(btf, func_id, prog);
+ if (flags && (*flags & KF_IMPLICIT_ARGS)) {
+  length = snprintf(name, sizeof(name), "%s_impl",
+                    btf_name_by_offset(btf, function->name_off));
+  if (length < 0 || length >= sizeof(name)) return -E2BIG;
+  id = btf_find_by_name_kind(btf, name, BTF_KIND_FUNC);
+  if (id <= 0) return id ?: -ENOENT;
+  function = btf_type_by_id(btf, id);
+ }
+ proto = btf_type_by_id(btf, function->type);
+ if (!proto || !btf_type_is_func_proto(proto)) return -EINVAL;
+ return function->type;
 }
 
 const struct bpf_kop *

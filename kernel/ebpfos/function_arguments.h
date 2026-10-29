@@ -27,14 +27,14 @@ static inline bool cell_argument_nullable(const struct btf *btf, const struct bt
         (length >= 10 && !strcmp(name + length - 10, "__nullable"));
 }
 static inline bool cell_argument_requirements(struct btf *native, const struct btf_type *nf,
- struct btf *compiled, u32 compiled_id)
+ const struct btf_type *np, struct btf *compiled, u32 compiled_id)
 {
  const struct btf_type *cf = btf_type_by_id(compiled, compiled_id);
- const struct btf_type *np, *cp;
+ const struct btf_type *cp;
  const struct btf_param *parameters;
  u32 id;
  if (!nf || !cf || !btf_type_is_func(nf) || !btf_type_is_func(cf)) return false;
- np = btf_type_by_id(native, nf->type);cp = btf_type_by_id(compiled, cf->type);
+ cp = btf_type_by_id(compiled, cf->type);
  if (!np || !cp || !btf_type_is_func_proto(np) || !btf_type_is_func_proto(cp) ||
      btf_type_vlen(np) < btf_type_vlen(cp)) return false;
  parameters = (const struct btf_param *)(np + 1);

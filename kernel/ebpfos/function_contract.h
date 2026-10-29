@@ -120,6 +120,25 @@ static bool cell_export_name(struct btf *native, const struct btf_type *target,
  }
  return false;
 }
+/* Trusted source calls an implicit-argument kfunc through its complete C
+ * interface. The retained prototype can express metadata as an opaque pointer.
+ * Compare scalar register/stack conventions without claiming pointer safety.
+ */
+static bool cell_trusted_native_scalar_proto(struct btf *native, const struct btf_type *n,
+ struct btf *compiled, const struct btf_type *c, bool framed)
+{
+ struct btf_func_model a, b;
+ unsigned int i;
+ if (btf_distill_native_func_proto(NULL, native, n, NULL, &a) ||
+     btf_distill_native_func_proto(NULL, compiled, c, NULL, &b) ||
+     a.nr_args != b.nr_args || a.ret_size != b.ret_size || a.ret_flags != b.ret_flags ||
+     a.native_stack != b.native_stack || (a.ret_flags & BTF_FMODEL_STRUCT_ARG) ||
+     (!framed && (a.native_stack || a.nr_args > MAX_BPF_FUNC_REG_ARGS))) return false;
+ for (i = 0; i < a.nr_args; i++)
+  if (a.arg_size[i] != b.arg_size[i] || a.arg_flags[i] != b.arg_flags[i] ||
+      (a.arg_flags[i] & BTF_FMODEL_STRUCT_ARG)) return false;
+ return true;
+}
 static bool cell_callable(struct btf *native, const struct btf_type *native_function,
  struct bpf_prog *parent, u32 id, unsigned long *address)
 {
@@ -128,12 +147,21 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  const struct btf_param *a, *b;
  struct bpf_prog_aux *aux = parent->aux;
  unsigned int i, index;
+ int native_proto_id = native_function->type;
  bool scalar_records, result2;
 #ifdef BPF_F_TRUSTED_KERNEL
  bool trusted = aux->trusted_kernel;
 #else
  bool trusted = false;
 #endif
+ if (trusted) {
+  int native_id = btf_find_by_name_kind(native,
+    btf_name_by_offset(native, native_function->name_off), BTF_KIND_FUNC);
+  if (native_id <= 0 || btf_type_by_id(native, native_id) != native_function) return false;
+  native_proto_id = btf_native_func_proto_id(native, native_id, parent);
+  if (native_proto_id < 0) return false;
+  n = btf_type_by_id(native, native_proto_id);
+ }
  if (!aux->btf || !aux->func || !aux->func_info_aux || !aux->func_info) return false;
  for (index = 1; index < aux->func_cnt && index < aux->func_info_cnt; ++index)
   if (aux->func_info[index].type_id == id) break;
@@ -144,6 +172,14 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      !aux->func[index]->jited || !cell_export_name(native, native_function, aux->btf, id)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
+ if (trusted && native_proto_id != native_function->type) {
+  if (!cell_trusted_native_scalar_proto(native, n, aux->btf, prototype,
+        aux->func[index]->aux->native_frame) ||
+      !cell_context_requirements(native, native_function, aux->btf, function) ||
+      !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
+  goto compatible;
+ }
+
  /* Framed functions retain their complete logical native value ABI. The
   * ordinary verifier checked that ABI independently; no wrapper executes.
   */
@@ -160,7 +196,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
         !btf_native_record_entry_contract(aux->btf, type)) return false;
    }
   if (!cell_context_requirements(native, native_function, aux->btf, function) ||
-      !cell_argument_requirements(native, native_function, aux->btf, id)) return false;
+      !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
   goto compatible;
  }
  result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
@@ -192,7 +228,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  /* Native callers bypass BPF's call-site argument checker. Keep bounds,
   * address spaces and context requirements in the common callable contract,
   * including exports resolved by name in a replacement generation. */
- if (!cell_argument_requirements(native, native_function, aux->btf, id)) return false;
+ if (!cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
 compatible:
  *address = (unsigned long)aux->func[index]->bpf_func;
  return true;

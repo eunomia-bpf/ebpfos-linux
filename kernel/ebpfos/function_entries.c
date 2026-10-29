@@ -116,7 +116,11 @@ int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
         program->expected_attach_type == BPF_TRACE_REPLACE) ||
        (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
         !program->expected_attach_type))) return -EOPNOTSUPP;
- if (!entry_export(btf, function, program, target)) return -EPROTOTYPE;
+ if (!entry_export(btf, function, program, target)) {
+  pr_warn("BPF entry '%s': compiled callable is incompatible\n",
+          btf_name_by_offset(btf, function->name_off));
+  return -EPROTOTYPE;
+ }
  return entry_context(program, *target) ? 0 : -EOPNOTSUPP;
 }
 
