@@ -787,6 +787,7 @@ struct bpf_subprog_info {
 	u32 exit_idx; /* Index of one of the BPF_EXIT instructions in this subprogram */
 	u32 readonly_result_size; /* independently checked stable byte buffer */
 	u32 readonly_record_result_size[2]; /* physical result registers */
+	bool readonly_stack_result; /* checked pointer fields in a hidden result */
 	u16 stack_depth; /* max. stack depth used by this function */
 	u16 stack_extra;
 	/* offsets in range [stack_depth .. fastcall_stack_off)

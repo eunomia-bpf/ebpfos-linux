@@ -10466,6 +10466,17 @@ DEFINE_FREE(native_arg, struct native_arg_scope,
 		_T.env->native_arg_temps &= ~BIT(_T.regno);
 	})
 
+/* Borrow a register only in verifier state, including for a returned field. */
+static void native_value_scope(struct bpf_verifier_env *env,
+                               struct native_arg_scope *scope, u32 regno)
+{
+ scope->env = env;
+ scope->reg = &cur_regs(env)[regno];
+ scope->regno = regno;
+ scope->saved = *scope->reg;
+ env->native_arg_temps |= BIT(regno);
+}
+
 static int native_stack_arg_at(struct bpf_verifier_env *env,
 				   const struct bpf_native_arg *arg,
 				   struct native_arg_scope *scope, u32 regno)
@@ -10493,10 +10504,7 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 		if (type != STACK_MISC && type != STACK_ZERO && type != STACK_SPILL)
 			return -EACCES;
 	}
-	scope->env = env;
-	scope->reg = &frame->regs[regno];
-	scope->regno = regno;
-	scope->saved = *scope->reg;
+	native_value_scope(env, scope, regno);
 	if (bpf_is_spilled_reg(slot))
 		*scope->reg = slot->spilled_ptr;
 	else if (zero)
@@ -10990,6 +10998,45 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 	return 0;
 }
 
+/* The callee's independently checked result contract describes exactly the
+ * words written by this call. Preserve pointer spills rather than converting
+ * them into unknown scalar bytes in the caller's existing result allocation.
+ */
+static int native_result_buffer_state(struct bpf_verifier_env *env, int insn_idx,
+                                      int subprog)
+{
+ const struct bpf_subprog_info *sub = &env->subprog_info[subprog];
+ struct btf *btf = env->prog->aux->btf;
+ const struct btf_type *fn = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
+ u32 size = sub->native_abi.args[0].size;
+ int err;
+
+ for (u32 byte = 0; byte < size;) {
+  struct native_arg_scope temporary __free(native_arg) = {};
+  u32 bytes = 0;
+  if (sub->readonly_stack_result && !(byte % 8)) {
+   err = btf_native_record_ro_size(btf, fn, byte / 8, &bytes, &env->log);
+   if (err) return err;
+  }
+  if (bytes) {
+   native_value_scope(env, &temporary, 13);
+   __mark_reg_known_zero(temporary.reg);
+   temporary.reg->type = PTR_TO_MEM | MEM_RDONLY;
+   temporary.reg->mem_size = bytes;
+   temporary.reg->mem_stable = BPF_MEM_KERNEL_STABLE;
+   err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
+                         BPF_DW, BPF_WRITE, 13, false, false);
+   byte += 8;
+  } else {
+   err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
+                         BPF_B, BPF_WRITE, -1, false, false);
+   byte++;
+  }
+  if (err) return err;
+ }
+ return 0;
+}
+
 /* Compare BTF of a function call with given bpf_reg_state.
  * Returns:
  * EFAULT - there is a verifier bug. Abort verification.
@@ -11158,11 +11205,8 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			clear_all_pkt_pointers(env);
 		if (sub->native_frame && sub->native_abi.result_buffer) {
 			/* All inputs were checked against their pre-call state. */
-			for (u32 byte = 0; byte < sub->native_abi.args[0].size; byte++) {
-				err = check_mem_access(env, *insn_idx, BPF_REG_1, byte,
-					BPF_B, BPF_WRITE, -1, false, false);
-				if (err) return err;
-			}
+			err = native_result_buffer_state(env, *insn_idx, subprog);
+			if (err) return err;
 		}
 		/* mark global subprog for verifying after main prog */
 		subprog_aux(env, subprog)->called = true;
@@ -19203,6 +19247,24 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			struct bpf_stack_state *slot = &frame->stack[byte / 8];
 			u8 type = slot->slot_type[byte % 8];
 
+			if (sub->readonly_stack_result && !(i % 8)) {
+				struct native_arg_scope temporary __free(native_arg) = {};
+				struct btf *btf = env->prog->aux->btf;
+				const struct btf_type *fn = btf_type_by_id(btf,
+					env->prog->aux->func_info[frame->subprogno].type_id);
+				u32 bytes;
+
+				err = btf_native_record_ro_size(btf, fn, i / 8, &bytes, &env->log);
+				if (err) return err;
+				if (bytes) {
+					if (size - i < 8 || !bpf_is_spilled_reg(slot)) return -EACCES;
+					native_value_scope(env, &temporary, 13);
+					*temporary.reg = slot->spilled_ptr;
+					err = check_stable_readonly_result(env, 13, bytes, true);
+					if (err) return err;
+					i += 7;continue;
+				}
+			}
 			if (type != STACK_MISC && type != STACK_ZERO &&
 			    !(type == STACK_SPILL && slot->spilled_ptr.type == SCALAR_VALUE)) {
 				verbose(env, "hidden result has an uninitialized or pointer byte\n");

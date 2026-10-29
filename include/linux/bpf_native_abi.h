@@ -25,6 +25,8 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
                            struct bpf_verifier_log *log);
 bool btf_native_value_storage(struct btf *btf, u32 id);
 bool btf_native_record_entry_contract(struct btf *btf, u32 id);
+int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
+                              u32 word, u32 *bytes, struct bpf_verifier_log *log);
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
                        struct bpf_native_abi *abi);
 #endif
