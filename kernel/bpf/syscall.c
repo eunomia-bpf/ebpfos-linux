@@ -3,6 +3,7 @@
  */
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
+#include <linux/bpf_kernel_rule.h>
 #include <linux/bpf_entry.h>
 #include <linux/bpf_aot.h>
 #include <linux/bpf_operations.h>
@@ -2988,6 +2989,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		if (uattr.is_kernel) return -EOPNOTSUPP;
 		return bpf_native_prog_load(attr);
 	}
+	if (type == BPF_PROG_TYPE_KERNEL_RULE &&
+	    (attr->prog_flags || attr->expected_attach_type != BPF_KERNEL_RULE))
+		return -EINVAL;
 	if (attr->prog_flags & BPF_F_TRUSTED_KERNEL) {
 		/* Like loading native modules, this grants kernel execution,
 		 * not a delegated BPF token privilege or a safety guarantee.
@@ -6000,6 +6004,9 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 
 	if (CHECK_ATTR(BPF_LINK_CREATE))
 		return -EINVAL;
+
+	if (attr->link_create.attach_type == BPF_KERNEL_RULE)
+		return uattr.is_kernel ? -EOPNOTSUPP : bpf_kernel_rule_link_create(attr);
 
 	if (attr->link_create.attach_type == BPF_TRACE_ENTRY ||
 	    attr->link_create.attach_type == BPF_CGROUP_ENTRY)

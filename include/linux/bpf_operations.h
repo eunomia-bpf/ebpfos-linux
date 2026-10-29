@@ -14,6 +14,7 @@ u32 bpf_operations_set_count(const struct bpf_operations_set *set);
 int bpf_operations_visit_programs(const struct bpf_operations_set *,int (*visit)(struct bpf_prog *,void *),void *);
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
 bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
+bool bpf_operations_overlap(const struct bpf_operations_set *, const struct bpf_operations_set *);
 bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bpf_operations_set *b);
 struct bpf_operations_set *bpf_operations_compose(struct bpf_operations_set *active,
  struct bpf_operations_set *next, struct bpf_operations_set *old);

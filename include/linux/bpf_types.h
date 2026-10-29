@@ -160,4 +160,6 @@ BPF_LINK_TYPE(BPF_LINK_TYPE_UPROBE_MULTI, uprobe_multi)
 BPF_MAP_TYPE(BPF_MAP_TYPE_OPERATIONS, bpf_operations_map_ops)
 BPF_PROG_TYPE(BPF_PROG_TYPE_NATIVE, bpf_native, void *, void *)
 BPF_LINK_TYPE(BPF_LINK_TYPE_ENTRY, entry)
+BPF_PROG_TYPE(BPF_PROG_TYPE_KERNEL_RULE, bpf_kernel_rule, struct bpf_kernel_rule_ctx, struct bpf_kernel_rule_ctx)
+BPF_LINK_TYPE(BPF_LINK_TYPE_KERNEL_RULE, kernel_rule)
 #endif

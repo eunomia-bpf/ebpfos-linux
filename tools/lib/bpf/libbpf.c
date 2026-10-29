@@ -140,6 +140,7 @@ static const char * const attach_type_name[] = {
 	[BPF_TRACE_UPROBE_SESSION]	= "trace_uprobe_session",
 	[BPF_TRACE_ENTRY] = "trace_entry",
 	[BPF_CGROUP_ENTRY] = "cgroup_entry",
+	[BPF_KERNEL_RULE] = "kernel_rule",
 };
 
 static const char * const link_type_name[] = {
@@ -159,6 +160,7 @@ static const char * const link_type_name[] = {
 	[BPF_LINK_TYPE_NETKIT]			= "netkit",
 	[BPF_LINK_TYPE_SOCKMAP]			= "sockmap",
 	[BPF_LINK_TYPE_ENTRY] = "entry",
+	[BPF_LINK_TYPE_KERNEL_RULE] = "kernel_rule",
 };
 
 static const char * const map_type_name[] = {
@@ -235,6 +237,7 @@ static const char * const prog_type_name[] = {
 	[BPF_PROG_TYPE_SYSCALL]			= "syscall",
 	[BPF_PROG_TYPE_NETFILTER]		= "netfilter",
 	[BPF_PROG_TYPE_NATIVE]			= "native",
+	[BPF_PROG_TYPE_KERNEL_RULE] = "kernel_rule",
 };
 
 static int __base_pr(enum libbpf_print_level level, const char *format,
@@ -10126,6 +10129,7 @@ static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("iter+",		TRACING, BPF_TRACE_ITER, SEC_ATTACH_BTF, attach_iter),
 	SEC_DEF("iter.s+",		TRACING, BPF_TRACE_ITER, SEC_ATTACH_BTF | SEC_SLEEPABLE, attach_iter),
 	SEC_DEF("syscall",		SYSCALL, 0, SEC_SLEEPABLE),
+	SEC_DEF("kernel_rule", KERNEL_RULE, BPF_KERNEL_RULE, SEC_NONE),
 	SEC_DEF("xdp.frags/devmap",	XDP, BPF_XDP_DEVMAP, SEC_XDP_FRAGS),
 	SEC_DEF("xdp/devmap",		XDP, BPF_XDP_DEVMAP, SEC_ATTACHABLE),
 	SEC_DEF("xdp.frags/cpumap",	XDP, BPF_XDP_CPUMAP, SEC_XDP_FRAGS),

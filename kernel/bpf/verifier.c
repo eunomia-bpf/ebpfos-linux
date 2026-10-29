@@ -15284,6 +15284,11 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
 
+	if (env->prog->type == BPF_PROG_TYPE_KERNEL_RULE) {
+		verbose(env, "kernel rule programs cannot call kfuncs\n");
+		return -EACCES;
+	}
+
 	/* skip for now, but return error when we find this in fixup_kfunc_call */
 	if (!insn->imm)
 		return 0;

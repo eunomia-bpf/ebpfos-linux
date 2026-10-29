@@ -579,6 +579,11 @@ static int show_link_close_json(int fd, struct bpf_link_info *info)
 	show_link_header_json(info, json_wtr);
 
 	switch (info->type) {
+	case BPF_LINK_TYPE_KERNEL_RULE:
+		jsonw_uint_field(json_wtr, "epoch", info->kernel_rule.epoch);
+		jsonw_uint_field(json_wtr, "versions", info->kernel_rule.versions);
+		jsonw_bool_field(json_wtr, "detached", info->kernel_rule.detached);
+		break;
 	case BPF_LINK_TYPE_ENTRY:
 		if (show_entry_members(fd, info, true)) return -1;
 		break;
@@ -981,6 +986,10 @@ static int show_link_close_plain(int fd, struct bpf_link_info *info)
 	show_link_header_plain(info);
 
 	switch (info->type) {
+	case BPF_LINK_TYPE_KERNEL_RULE:
+		printf("epoch %llu versions %u detached %u  ",
+		       info->kernel_rule.epoch, info->kernel_rule.versions, info->kernel_rule.detached);
+		break;
 	case BPF_LINK_TYPE_ENTRY:
 		if (show_entry_members(fd, info, false)) return -1;
 		break;

@@ -531,3 +531,16 @@ int ebpfos_file_view_open(struct file *file)
 EXPORT_SYMBOL(ebpfos_file_view_open);
 void ebpfos_file_view_free(struct file *file)
 { ebpfos_operations_put(file->ebpfos_operations); }
+
+/* A rule chooses one complete set. Independent rules must never supply two
+ * versions of the same table for one operation. Alternative sets within a
+ * single rule can replace that table, since only one set is returned. */
+bool bpf_operations_overlap(const struct bpf_operations_set *a, const struct bpf_operations_set *b)
+{
+ u32 i, j;
+ for (i = 0; a && i < a->count; ++i)
+  for (j = 0; b && j < b->count; ++j)
+   if (container_of(a->maps[i], struct ebpfos_operations, map)->original ==
+       container_of(b->maps[j], struct ebpfos_operations, map)->original) return true;
+ return false;
+}

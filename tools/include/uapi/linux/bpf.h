@@ -1094,6 +1094,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_NETFILTER,
 	/* Source-built, resident native body. Privileged staged exception. */
 	BPF_PROG_TYPE_NATIVE,
+	BPF_PROG_TYPE_KERNEL_RULE,
 	__MAX_BPF_PROG_TYPE
 };
 
@@ -1161,6 +1162,7 @@ enum bpf_attach_type {
 	BPF_TRACE_REPLACE,
 	BPF_TRACE_ENTRY,
 	BPF_CGROUP_ENTRY,
+	BPF_KERNEL_RULE,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1186,6 +1188,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_NETKIT = 13,
 	BPF_LINK_TYPE_SOCKMAP = 14,
 	BPF_LINK_TYPE_ENTRY = 15,
+	BPF_LINK_TYPE_KERNEL_RULE = 16,
 	__MAX_BPF_LINK_TYPE,
 };
 
@@ -1928,6 +1931,11 @@ union bpf_attr {
 				__u32 operations_reserved;
 				__aligned_u64 operations_fds;
 			} entry;
+			struct {
+				__u32 count;
+				__u32 reserved;
+				__aligned_u64 versions;
+			} kernel_rule;
 		};
 	} link_create;
 
@@ -6817,6 +6825,11 @@ struct bpf_link_info {
 	__u32 id;
 	__u32 prog_id;
 	union {
+		struct {
+			__u64 epoch;
+			__u32 versions;
+			__u32 detached;
+		} kernel_rule;
 		struct {
 			__u32 count;
 			__u32 target_btf_obj_id;

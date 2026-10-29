@@ -5,6 +5,7 @@
 #define _LINUX_BPF_H 1
 
 #include <uapi/linux/bpf.h>
+#include <uapi/linux/bpf_kernel_rule.h>
 #include <uapi/linux/filter.h>
 
 #include <crypto/sha2.h>

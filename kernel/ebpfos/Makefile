@@ -4,7 +4,7 @@ obj-y += native_set.o native_inline.o
 obj-y += views.o
 # Bare C-to-BPF entry linking currently uses x86-64 register ABI and no CFI
 # signature prefix. Never bypass another configuration's CFI entry contract.
-obj-$(CONFIG_EBPFOS_ENTRY_LINK) += function_entries.o code_quiescence.o operations.o
+obj-$(CONFIG_EBPFOS_ENTRY_LINK) += function_entries.o code_quiescence.o operations.o kernel_rule.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o pointer_tag.o fault_loads.o fault_rep.o fault_stores.o sfence.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += fault_movzx.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += buffer_stos.o buffer_mov.o
