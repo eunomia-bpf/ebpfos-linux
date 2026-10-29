@@ -540,6 +540,8 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
 	 */
 	if (rold->type != rcur->type)
 		return false;
+	if (rold->mem_stable != rcur->mem_stable)
+		return false;
 	if (!check_ids(rold->mem_size_id, rcur->mem_size_id, idmap))
 		return false;
 

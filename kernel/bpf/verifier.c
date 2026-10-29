@@ -11067,6 +11067,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
 			caller->regs[BPF_REG_0].mem_size = sub->readonly_result_size;
+			caller->regs[BPF_REG_0].mem_stable = true;
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
@@ -15864,6 +15865,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	 * The id may be overwritten later if we create a new variable offset.
 	 */
 	dst_reg->type = ptr_reg->type;
+	dst_reg->mem_stable = ptr_reg->mem_stable;
 	dst_reg->id = ptr_reg->id;
 
 	if (!check_reg_sane_offset_scalar(env, off_reg, ptr_reg->type) ||
@@ -19039,6 +19041,13 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
 			return err;
+		/* A prior independently checked result retains its array lifetime,
+		 * including through bounded offsets and spills. Ordinary memory
+		 * arguments and helper results acquire no such fact.
+		 */
+		if (result->type == (PTR_TO_MEM | MEM_RDONLY) && result->mem_stable)
+			return check_mem_region_access(env, BPF_REG_0, 0,
+				sub->readonly_result_size, result->mem_size, false);
 		/* Array-map storage is retained for the program's lifetime. Do not
 		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
 		 */

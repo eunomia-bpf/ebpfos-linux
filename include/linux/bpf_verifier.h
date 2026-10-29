@@ -117,6 +117,7 @@ struct bpf_reg_state {
 	 * with the same id as us.
 	 */
 	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
+	bool mem_stable; /* PTR_TO_MEM backed by program-held array storage */
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
