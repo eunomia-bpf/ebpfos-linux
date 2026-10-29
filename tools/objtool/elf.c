@@ -1102,6 +1102,11 @@ static int read_relocs(struct elf *elf)
 
 		/* nr_alloc_relocs=0: libelf owns d_buf */
 		rsec->nr_alloc_relocs = 0;
+		/* Empty relocation sections are valid ELF. Keep the iterator's
+		 * first entry NULL instead of exposing calloc(0)'s non-NULL token.
+		 */
+		if (!sec_num_entries(rsec))
+			continue;
 
 		rsec->relocs = calloc(sec_num_entries(rsec), sizeof(*reloc));
 		if (!rsec->relocs) {
