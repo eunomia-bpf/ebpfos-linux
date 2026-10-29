@@ -10573,6 +10573,93 @@ static struct bpf_reg_state *native_global_arg_state(struct bpf_subprog_info *su
 	return &frame->stack[bpf_get_spi(-(s64)end + arg->stack_offset)].spilled_ptr;
 }
 
+static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf *btf,
+                                       u32 type, u32 regno, bool global)
+{
+ struct bpf_reg_state *reg = &cur_regs(env)[regno];
+ struct bpf_subprog_arg_info arg;
+ int err = btf_native_pointer_arg(btf, type, &arg, &env->log);
+ if (err) return err;
+ if (bpf_register_is_null(reg) || type_may_be_null(reg->type)) return -EACCES;
+ if ((reg->type & (MEM_USER | MEM_PERCPU)) != (arg.arg_type & (MEM_USER | MEM_PERCPU))) return -EACCES;
+ if (global && (reg->ref_obj_id || (reg->type & (MEM_RCU | MEM_ALLOC | NON_OWN_REF)))) return -EACCES;
+ if (base_type(arg.arg_type) == ARG_PTR_TO_BTF_ID) {
+  if ((reg->type & MEM_RDONLY) && !(arg.arg_type & MEM_RDONLY)) return -EACCES;
+  if (base_type(reg->type) != PTR_TO_BTF_ID || !is_trusted_reg(reg) || !tnum_is_const(reg->var_off)) return -EACCES;
+  if (!btf_struct_ids_match(&env->log, reg->btf, reg->btf_id, reg->var_off.value,
+                           bpf_get_btf_vmlinux(), arg.btf_id, true)) return -EACCES;
+  return 0;
+ }
+ if (base_type(reg->type) == PTR_TO_BTF_ID) return -EACCES;
+ err = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
+ if (err) return err;
+ if (arg.arg_type & MEM_RDONLY)
+  return check_helper_mem_access(env, regno,
+          base_type(reg->type) == PTR_TO_STACK ? -(int)arg.mem_size : arg.mem_size,
+          BPF_READ, true, NULL);
+ return check_mem_reg(env, reg, regno, arg.mem_size);
+}
+
+static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
+                             const struct bpf_native_arg *arg, bool global)
+{
+ u32 reg_index = 0;
+ for (u32 offset = 0; offset < arg->size; offset += 8) {
+  struct native_arg_scope temporary __free(native_arg) = {};
+  struct bpf_native_arg word = *arg;
+  u32 pointer, regno;
+  int err = btf_native_pointer_word(btf, arg->type_id, offset, &pointer);
+  if (err) return err;
+  if (arg->reg >= 0) {
+   if (!(arg->word_mask & BIT(offset / 8))) continue;
+   regno = bpf_arg_regno(arg->reg + reg_index++);
+   err = check_reg_arg(env, regno, SRC_OP);
+  } else {
+   word.stack_offset += offset;word.size = min(8u, arg->size - offset);
+   err = native_stack_arg(env, &word, &temporary);regno = 13;
+  }
+  if (err) return err;
+  if (pointer) err = native_record_pointer_check(env, btf, pointer, regno, global);
+  else if (cur_regs(env)[regno].type != SCALAR_VALUE) err = -EACCES;
+  if (err) return err;
+ }
+ return 0;
+}
+
+static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subprog_info *sub,
+                                  struct bpf_func_state *frame, const struct bpf_native_arg *arg)
+{
+ u32 reg_index = 0;
+ for (u32 offset = 0; offset < arg->size; offset += 8) {
+  struct bpf_reg_state *reg;
+  struct bpf_subprog_arg_info info;
+  u32 pointer;
+  int err = btf_native_pointer_word(env->prog->aux->btf, arg->type_id, offset, &pointer);
+  if (err) return err;
+  if (arg->reg >= 0) {
+   if (!(arg->word_mask & BIT(offset / 8))) continue;
+   reg = &frame->regs[bpf_arg_regno(arg->reg + reg_index++)];
+  } else {
+   u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) + round_up(sub->native_arg_in, 8);
+   s64 off = -(s64)end + arg->stack_offset + offset;
+   reg = &frame->stack[bpf_get_spi(off)].spilled_ptr;
+  }
+  __mark_reg_unknown(env, reg);
+  reg->precise = true;
+  if (!pointer) continue;
+  err = btf_native_pointer_arg(env->prog->aux->btf, pointer, &info, &env->log);
+  if (err) return err;
+  __mark_reg_known_zero(reg);
+  reg->type = base_type(info.arg_type) == ARG_PTR_TO_BTF_ID ? PTR_TO_BTF_ID | PTR_TRUSTED : PTR_TO_MEM;
+  reg->type |= info.arg_type & (MEM_USER | MEM_PERCPU | MEM_RDONLY);
+  if (base_type(reg->type) == PTR_TO_BTF_ID) {
+   reg->btf = bpf_get_btf_vmlinux();reg->btf_id = info.btf_id;
+  } else reg->mem_size = info.mem_size;
+  reg->id = ++env->id_gen;
+ }
+ return 0;
+}
+
 /* Integer records carry bytes, not pointer capabilities. */
 static int native_scalar_record_arg(struct bpf_verifier_env *env,
 				    const struct bpf_native_arg *arg)
@@ -10637,6 +10724,12 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		struct native_arg_scope temporary __free(native_arg) = {};
 
 		if (location) {
+			if (!btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0) &&
+			    btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
+				ret = native_record_arg(env, env->prog->aux->btf, location, true);
+				if (ret) return ret;
+				continue;
+			}
 			if (location->reg < 0) {
 				struct bpf_subprog_info *caller = &env->subprog_info[cur_func(env)->subprogno];
 				u32 bytes = max(location->size, 8u);
@@ -13827,9 +13920,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			t = btf_type_skip_modifiers(btf, args[i].type, NULL);
 			if (btf_type_is_struct(t) || btf_type_is_array(t) ||
 			    (btf_type_is_scalar(t) && t->size > 8)) {
-				if (!btf_native_scalar_storage(meta->btf, args[i].type, 0))
-					return -EOPNOTSUPP;
-				ret = native_scalar_record_arg(env, location);
+				if (!btf_native_value_storage(meta->btf, args[i].type)) return -EOPNOTSUPP;
+				ret = btf_native_scalar_storage(meta->btf, args[i].type, 0) ?
+					native_scalar_record_arg(env, location) : native_record_arg(env, meta->btf, location, false);
 				if (ret) return ret;
 				continue;
 			}
@@ -21103,6 +21196,12 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {
 			const struct bpf_native_arg *location = sub->native_frame ? &sub->native_abi.args[ai + sub->native_abi.result_buffer] : NULL;
 
+			if (location && btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL)) &&
+			    !btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0)) {
+				ret = init_native_record_arg(env, sub, state->frame[0], location);
+				if (ret) goto out;
+				continue;
+			}
 			bool stacked = location && location->reg < 0;
 			struct bpf_reg_state saved_temp = regs[13];
 

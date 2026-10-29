@@ -10,6 +10,7 @@
 #include "../bpf/btf_record_return.h"
 #include "function_register_prefix.h"
 #include <linux/module.h>
+#include <linux/bpf_native_abi.h>
 /* Cold native-call contract shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
@@ -148,6 +149,16 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
   */
  if (IS_ENABLED(CONFIG_X86_64) && aux->func[index]->aux->native_frame &&
      cell_layout(native, native_function->type, aux->btf, function->type, 0, false)) {
+  /* Preserve field-level non-NULL and const requirements at bare native
+   * entries, which bypass the BPF call-site argument checker.
+   */
+  if (!trusted)
+   for (i = 0; i < btf_type_vlen(prototype); i++) {
+    u32 type = btf_params(prototype)[i].type;
+    const struct btf_type *value = btf_type_skip_modifiers(aux->btf, type, NULL);
+    if (btf_type_is_struct(value) && !btf_native_scalar_storage(aux->btf, type, 0) &&
+        !btf_native_record_entry_contract(aux->btf, type)) return false;
+   }
   if (!cell_context_requirements(native, native_function, aux->btf, function) ||
       !cell_argument_requirements(native, native_function, aux->btf, id)) return false;
   goto compatible;

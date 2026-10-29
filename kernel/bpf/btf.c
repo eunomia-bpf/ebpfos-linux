@@ -8569,7 +8569,7 @@ skip_pointer:
 			sub->args[i].arg_type = ARG_ANYTHING;
 			continue;
 		}
-		if (sub->native_frame && btf_native_scalar_storage(btf, args[i].type, 0)) {
+		if (sub->native_frame && btf_native_value_storage(btf, args[i].type)) {
 			sub->args[i].arg_type = ARG_ANYTHING;
 			continue;
 		}
@@ -8590,6 +8590,63 @@ int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog)
 {
 	return btf_prepare_func_arg_info(env->prog, subprog,
 					subprog_info(env, subprog), &env->log, env);
+}
+
+/* A record pointer word uses the ordinary fixed-size or trusted-BTF argument
+ * contract. Callers must establish non-NULL, extent, address space and lifetime.
+ */
+int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info *arg,
+                           struct bpf_verifier_log *log)
+{
+ const struct btf_type *p = btf_type_skip_modifiers(btf, id, NULL), *t;
+ enum bpf_type_flag flags = 0;
+ u32 size;
+ int kernel_id;
+ if (!p || !btf_type_is_ptr(p)) return -EINVAL;
+ memset(arg, 0, sizeof(*arg));
+ btf_pointer_flags(btf, p->type, &flags, NULL);
+ /* The C pointee's const qualifier restricts the callee's authority. */
+ for (const struct btf_type *q = btf_type_by_id(btf, p->type);
+      q && (btf_type_is_modifier(q) || btf_type_is_type_tag(q));
+      q = btf_type_by_id(btf, q->type))
+  if (BTF_INFO_KIND(q->info) == BTF_KIND_CONST) flags |= MEM_RDONLY;
+ if (flags & MEM_RCU) return -EOPNOTSUPP;
+ t = btf_type_skip_modifiers(btf, p->type, NULL);
+ if (btf_type_is_struct(t)) {
+  kernel_id = btf_get_ptr_to_btf_id(log, -1, btf, p);
+  if (kernel_id < 0) return kernel_id;
+  arg->arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | flags;
+  arg->btf_id = kernel_id;
+ } else {
+  if (IS_ERR(btf_resolve_size(btf, t, &size)) || !size) return -EOPNOTSUPP;
+  arg->arg_type = ARG_PTR_TO_MEM | flags;
+  arg->mem_size = size;
+ }
+ return 0;
+}
+
+/* A bare native caller has no BPF call-site checker. It can enter a
+ * record-pointer contract only when its BTF fields already declare non-NULL.
+ * Exact native/compiled layout matching preserves qualifiers and pointee types.
+ */
+bool btf_native_record_entry_contract(struct btf *btf, u32 id)
+{
+ const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
+ u32 size;
+ if (!t || IS_ERR(btf_resolve_size(btf, t, &size))) return false;
+ for (u32 off = 0; off < size; off += 8) {
+  struct bpf_subprog_arg_info arg;
+  struct bpf_verifier_log log = {};
+  enum bpf_type_flag flags = 0;
+  u32 pointer;
+  bool nullable;
+  if (btf_native_pointer_word(btf, id, off, &pointer)) return false;
+  if (!pointer) continue;
+  t = btf_type_skip_modifiers(btf, pointer, NULL);
+  btf_pointer_flags(btf, t->type, &flags, &nullable);
+  if (nullable || btf_native_pointer_arg(btf, pointer, &arg, &log)) return false;
+ }
+ return true;
 }
 
 /* Decode the same argument contract used at stock global verification.

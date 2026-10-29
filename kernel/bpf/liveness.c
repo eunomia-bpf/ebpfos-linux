@@ -1383,7 +1383,7 @@ static int record_call_access(struct bpf_verifier_env *env,
 			const struct btf_type *type = btf_type_skip_modifiers(env->prog->aux->btf,
 				sub->native_abi.args[arg].type_id, NULL);
 
-			if (!type || !btf_type_is_ptr(type)) continue;
+			if (!type || btf_native_scalar_storage(env->prog->aux->btf, sub->native_abi.args[arg].type_id, 0)) continue;
 			for (int frame = 0; frame <= depth; frame++) {
 				err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
 				if (err) return err;
@@ -1418,6 +1418,20 @@ static int record_call_access(struct bpf_verifier_env *env,
 
 	if (env->subprog_info[instance->subprog].native_frame)
 		num_params = MAX_BPF_NATIVE_REG_ARGS;
+	if (bpf_pseudo_kfunc_call(insn) && env->subprog_info[instance->subprog].native_frame) {
+		struct bpf_kfunc_call_arg_meta meta;
+		if (!bpf_fetch_kfunc_arg_meta(env, insn->imm, insn->off, &meta))
+			for (u32 arg = 0; arg < btf_type_vlen(meta.func_proto); arg++) {
+				const struct btf_type *type = btf_type_skip_modifiers(meta.btf, btf_params(meta.func_proto)[arg].type, NULL);
+				if (!btf_type_is_struct(type)) continue;
+				for (int frame = 0; frame <= depth; frame++) {
+					err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+					if (err) return err;
+				}
+				break;
+			}
+	}
+
 	if (bpf_get_call_summary(env, insn, &cs))
 		num_params = cs.num_params;
 
