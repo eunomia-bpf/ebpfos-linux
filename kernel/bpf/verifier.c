@@ -6834,6 +6834,13 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 		verbose(env, "pointer store: nullable value for nonnull field\n");
 		return -EACCES;
 	}
+	/* The field reader does not carry a stored value's read-only flag.
+	 * Publishing this capability would therefore recover write permission.
+	 */
+	if (value->type & MEM_RDONLY) {
+		verbose(env, "pointer store: read-only permission would be erased\n");
+		return -EACCES;
+	}
 	if ((value->type & (MEM_USER | MEM_PERCPU)) != (flags & (MEM_USER | MEM_PERCPU))) {
 		verbose(env, "pointer store: incompatible address space\n");
 		return -EACCES;
@@ -7057,6 +7064,14 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	bool owned_scalar = false;
 	struct bpf_reg_state source = *reg;
 	int ret;
+
+	/* A checked read-only result grants no write authority, including when
+	 * an owned-type contract or a component field declaration permits writes.
+	 */
+	if (atype == BPF_WRITE && reg->type & MEM_RDONLY) {
+		verbose(env, "write through a read-only BTF pointer\n");
+		return -EACCES;
+	}
 
 	if (!env->allow_ptr_leaks) {
 		verbose(env,
@@ -11349,6 +11364,13 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			caller->regs[BPF_REG_0] = result_buffer;
 		} else if (sub->null_result) {
 			__mark_reg_const_zero(env, &caller->regs[BPF_REG_0]);
+		} else if (sub->readonly_result_btf_id) {
+			err = mark_btf_ld_reg(env, caller->regs, BPF_REG_0, PTR_TO_BTF_ID,
+					      btf_vmlinux, sub->readonly_result_btf_id,
+					      MEM_RDONLY | PTR_MAYBE_NULL);
+			if (err)
+				return err;
+			caller->regs[BPF_REG_0].mem_stable = BPF_MEM_KERNEL_STABLE;
 		} else if (sub->readonly_result_size) {
 			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
@@ -19578,6 +19600,30 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
+	if (sub->readonly_result_btf_id) {
+		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
+		u32 id;
+
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		if (err)
+			return err;
+		if (bpf_register_is_null(result))
+			return mark_chain_precision(env, BPF_REG_0);
+		/* A tag is an obligation, never a cast. Only original permanent
+		 * core symbols and checked results carry this lifetime. Pointer
+		 * field loads, arbitrary casts, arguments, maps and helper results
+		 * do not inherit it. Offsets must still denote the complete object.
+		 */
+		if ((result->type & ~(MEM_RDONLY | PTR_MAYBE_NULL)) == PTR_TO_BTF_ID &&
+		    result->mem_stable == BPF_MEM_KERNEL_STABLE &&
+		    btf_is_vmlinux(result->btf) && !result->ref_obj_id &&
+		    tnum_equals_const(result->var_off, 0) &&
+		    btf_type_skip_modifiers(result->btf, result->btf_id, &id) &&
+		    id == sub->readonly_result_btf_id)
+			return 0;
+		verbose(env, "typed read-only result requires its permanent core object or NULL\n");
+		return -EACCES;
+	}
 	if (sub->null_result) {
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
@@ -19586,7 +19632,7 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			verbose(env, "global function must return NULL on every exit\n");
 			return -EACCES;
 		}
-		return 0;
+		return mark_chain_precision(env, BPF_REG_0);
 	}
 	if (sub->readonly_result_size)
 		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size,
@@ -21547,7 +21593,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				ret = -EOPNOTSUPP;
 				goto out;
 			}
-			if (sub->readonly_result_size) {
+			if (sub->readonly_result_size || sub->readonly_result_btf_id) {
 				verbose(env, "read-only result contracts are unsupported for callbacks\n");
 				ret = -EOPNOTSUPP;
 				goto out;

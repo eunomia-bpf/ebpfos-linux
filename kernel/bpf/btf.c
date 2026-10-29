@@ -8369,6 +8369,30 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			return PTR_ERR(tag);
 		}
 	}
+	{
+		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_kernel_btf");
+		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
+
+		if (!IS_ERR(tag)) {
+			int id;
+
+			if (*tag || !is_global || !btf_type_is_ptr(result) ||
+			    sub->null_result || sub->readonly_result_size ||
+			    !btf_type_is_struct(btf_type_skip_modifiers(btf, result->type, NULL))) {
+				bpf_log(log, "invalid typed read-only result contract\n");
+				return -EINVAL;
+			}
+			/* Reuse the stock global argument's unique core type resolution.
+			 * No module lifetime is borrowed by a permanent result.
+			 */
+			id = btf_get_ptr_to_btf_id(log, -1, btf, result, NULL);
+			if (id < 0)
+				return id;
+			sub->readonly_result_btf_id = id;
+		} else if (PTR_ERR(tag) != -ENOENT) {
+			return PTR_ERR(tag);
+		}
+	}
 	/* A record pointer result has the same checked stable-storage contract
 	 * as a scalar byte-pointer result, independently for each occupied word.
 	 */
@@ -8398,7 +8422,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	t = btf_type_by_id(btf, t->type);
 	while (btf_type_is_modifier(t))
 		t = btf_type_by_id(btf, t->type);
-	if (!sub->null_result && !sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
+	if (!sub->null_result && !sub->readonly_result_btf_id && !sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
 	    !sub->readonly_record_result_size[1] && !sub->readonly_stack_result && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||

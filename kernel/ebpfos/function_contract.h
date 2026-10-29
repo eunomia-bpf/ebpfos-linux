@@ -163,6 +163,20 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
       !cell_layout(native, result->type, compiled, source->type, 0, false)) return false;
  }
  if (!described) {
+  tag = btf_find_decl_tag_value(compiled, function, -1, "ret:ro_kernel_btf");
+  if (!IS_ERR(tag) && !*tag) {
+   const struct btf_type *source = btf_type_skip_modifiers(compiled, prototype->type, NULL);
+   const struct btf_type *object = result && btf_type_is_ptr(result) ?
+    btf_type_skip_modifiers(native, result->type, NULL) : NULL;
+   /* Compare the complete native pointee, rather than a pointer's nominal
+    * record name. The independently verified body proved core lifetime.
+    */
+   if (!object || !btf_type_is_struct(object) || !source || !btf_type_is_ptr(source) ||
+       !cell_layout(native, result->type, compiled, source->type, 0, false)) return false;
+   described = true;
+  }
+ }
+ if (!described) {
   tag = btf_find_decl_tag_value(compiled, function, -1, "ret:null");
   described = !IS_ERR(tag) && !*tag;
  }
