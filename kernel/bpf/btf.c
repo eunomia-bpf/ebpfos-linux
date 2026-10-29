@@ -9737,12 +9737,25 @@ int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
                              const struct bpf_prog *prog)
 {
  const struct btf_type *function = btf_type_by_id(btf, func_id), *proto;
+ enum btf_kfunc_hook hook;
  u32 *flags;
  char name[KSYM_NAME_LEN];
  int id, length;
 
  if (!function || !btf_type_is_func(function)) return -EINVAL;
  flags = btf_kfunc_flags(btf, func_id, prog);
+ /* Native C prototypes are independent of the load program's hook.
+  * Per-program BPF call permission keeps its ordinary flag/filter lookup.
+  */
+ if (!flags || !(*flags & KF_IMPLICIT_ARGS))
+  for (hook = 0; hook < BTF_KFUNC_HOOK_MAX; hook++) {
+   u32 *candidate = btf_kfunc_id_set_contains(btf, hook, func_id);
+
+   if (candidate && (*candidate & KF_IMPLICIT_ARGS)) {
+    flags = candidate;
+    break;
+   }
+  }
  if (flags && (*flags & KF_IMPLICIT_ARGS)) {
   length = snprintf(name, sizeof(name), "%s_impl",
                     btf_name_by_offset(btf, function->name_off));
