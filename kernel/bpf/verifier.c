@@ -21038,6 +21038,30 @@ static int check_insn_fields(struct bpf_verifier_env *env, struct bpf_insn *insn
 	}
 }
 
+/* A variadic function's fixed prefix determines its incoming named area.
+ * The trailing void parameter is an ellipsis, not a physical argument.
+ * Only trusted preparation may use this layout without proving the
+ * additional argument accesses; ordinary verification keeps the full proto.
+ */
+static int native_frame_abi_plan(struct bpf_verifier_env *env, struct btf *btf,
+				 const struct btf_type *proto, struct bpf_native_abi *abi)
+{
+	struct {
+		struct btf_type proto;
+		struct btf_param args[MAX_BPF_FUNC_ARGS];
+	} fixed;
+	u32 nargs = btf_type_vlen(proto);
+
+	if (!env->prog->aux->trusted_kernel || !nargs || btf_params(proto)[nargs - 1].type)
+		return bpf_native_abi_plan(btf, proto, abi);
+	if (nargs - 1 > ARRAY_SIZE(fixed.args))
+		return -E2BIG;
+	fixed.proto = *proto;
+	fixed.proto.info = (fixed.proto.info & ~BTF_INFO_VLEN(~0U)) | (nargs - 1);
+	memcpy(fixed.args, btf_params(proto), (nargs - 1) * sizeof(fixed.args[0]));
+	return bpf_native_abi_plan(btf, &fixed.proto, abi);
+}
+
 /*
  * Check that insns are sane and rewrite pseudo imm in ld_imm64 instructions:
  *
@@ -21074,7 +21098,7 @@ static int check_native_frames(struct bpf_verifier_env *env)
 			    local > MAX_BPF_STACK - round_up(outgoing, 8))
 				return -E2BIG;
 			proto = btf_type_by_id(btf, fn->type);
-			err = bpf_native_abi_plan(btf, proto, &sub->native_abi);
+			err = native_frame_abi_plan(env, btf, proto, &sub->native_abi);
 			if (err)
 				return err;
 			if (sub->native_abi.result_buffer &&
