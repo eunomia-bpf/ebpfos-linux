@@ -210,18 +210,41 @@ int ebpfos_rule_cache_resolve(struct ebpfos_rule_cache *cache,
  WRITE_ONCE(*cache->slot, entry);
  ebpfos_operations_put(cache->operations);ebpfos_rule_decision_put(cache->decision);
  cache->decision = decision;cache->operations = operations;cache->epoch = decision->epoch;
+ cache->inherited = inherited != NULL;
  return 0;
 }
 EXPORT_SYMBOL_GPL(ebpfos_rule_cache_resolve);
 void ebpfos_rule_cache_quiescent(struct ebpfos_rule_cache *cache)
 {
- if (cache->epoch == ebpfos_rule_epoch()) return;
+ if (!cache->inherited && cache->epoch == ebpfos_rule_epoch()) return;
  WRITE_ONCE(*cache->slot, (void *)cache->resolver);
  ebpfos_operations_put(cache->operations);cache->operations = NULL;
  ebpfos_rule_decision_put(cache->decision);cache->decision = NULL;
  cache->epoch = ebpfos_rule_epoch();
+ cache->inherited = false;
 }
 EXPORT_SYMBOL_GPL(ebpfos_rule_cache_quiescent);
+static bool rule_decision_same(const struct ebpfos_rule_decision *a,
+ const struct ebpfos_rule_decision *b)
+{
+ u32 i;
+ if (a == b) return true;
+ if (!a || !b || a->count != b->count) return false;
+ for (i = 0; i < a->count; ++i)
+  if (a->choices[i].generation != b->choices[i].generation ||
+      a->choices[i].selection != b->choices[i].selection) return false;
+ return true;
+}
+void ebpfos_rule_cache_quiescent_inherit(struct ebpfos_rule_cache *cache,
+ struct ebpfos_rule_decision *inherited)
+{
+ if (!inherited) {ebpfos_rule_cache_quiescent(cache);return;}
+ if (rule_decision_same(cache->decision, inherited)) {cache->inherited = true;return;}
+ /* Inheritance only acquires existing leases and copies a prepared address.
+  * It does not allocate or execute a program, including in interrupt context. */
+ ebpfos_rule_cache_resolve(cache, inherited, GFP_ATOMIC);
+}
+EXPORT_SYMBOL_GPL(ebpfos_rule_cache_quiescent_inherit);
 void ebpfos_rule_cache_destroy(struct ebpfos_rule_cache *cache)
 {
  ebpfos_operations_put(cache->operations);ebpfos_rule_decision_put(cache->decision);

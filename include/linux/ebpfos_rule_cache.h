@@ -14,6 +14,7 @@ struct ebpfos_rule_cache {
  struct ebpfos_operations *operations;
  u64 epoch;
  u32 type, size, member;
+ bool inherited;
 };
 
 void ebpfos_rule_cache_init(struct ebpfos_rule_cache *, void **slot,
@@ -33,5 +34,10 @@ int ebpfos_rule_cache_resolve(struct ebpfos_rule_cache *, struct ebpfos_rule_dec
 /* Call only when the owner has no operation in flight. Queued work retains
  * its separate decision until its callback and all work it queues finish. */
 void ebpfos_rule_cache_quiescent(struct ebpfos_rule_cache *);
+/* An owner which admits different originating operations performs this handoff
+ * at its existing quiet boundary, under its existing exclusion. It installs
+ * the inherited configuration without running a rule. No cached call checks
+ * this state. A NULL origin starts a new object-owned operation. */
+void ebpfos_rule_cache_quiescent_inherit(struct ebpfos_rule_cache *, struct ebpfos_rule_decision *);
 void ebpfos_rule_cache_destroy(struct ebpfos_rule_cache *);
 #endif
