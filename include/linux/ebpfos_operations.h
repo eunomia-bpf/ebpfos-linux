@@ -27,7 +27,8 @@ u32 ebpfos_operations_bound(const struct ebpfos_operations *operations);
 void ebpfos_operations_put(struct ebpfos_operations *operations);
 struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *operations);
 /* Resolve only tables admitted by the linker's complete-image address-use
- * analysis. NULL means the object keeps its global operations. */
+ * analysis. NULL means the object keeps its global operations. First-use
+ * rule allocation can fail with ERR_PTR; callers propagate that failure. */
 struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type_id, size_t size, struct module *original_owner);
 /* Reserve during fallible object allocation. Resolve later, without

@@ -1652,8 +1652,6 @@ struct task_struct {
 	/* Task-owned syscall and object-selection references. Objects retain
 	 * their own operations independently after creation. */
 	long (* const *ebpfos_syscalls)(const struct pt_regs *);
-	struct file *ebpfos_task_view;
-	struct ebpfos_task_view_request *ebpfos_task_view_request;
 	struct ebpfos_task_rule *ebpfos_task_rule;
 	bool ebpfos_task_rule_pending;
 #endif

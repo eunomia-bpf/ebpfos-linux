@@ -24,7 +24,6 @@
 #include <linux/uaccess.h>
 #include <linux/seq_file.h>
 #include <linux/bpf_entry.h>
-#include <linux/bpf_entry_cgroup.h>
 #include <linux/bpf_operations.h>
 #include <asm/text-patching.h>
 #include <linux/slab.h>
@@ -512,35 +511,18 @@ int bpf_native_prog_init(struct bpf_prog *prog, const union bpf_attr *attr)
 struct bpf_entry_link {
  struct bpf_link link;
  struct entry_set *set;
- struct ebpfos_cgroup_view *cgroup;
  bool detached;
 };
 static const struct bpf_link_ops entry_link_ops;
 
-static struct ebpfos_task_view_request *entry_task_prepare(struct entry_set *set, u64 revision)
-{
- struct bpf_entry_target *sources;
- struct ebpfos_task_view_request *request;
- unsigned int i;
- sources = kvmalloc_array(set->count, sizeof(*sources), GFP_KERNEL);
- if (!sources) return ERR_PTR(-ENOMEM);
- for (i = 0; i < set->count; ++i)
-  sources[i] = (struct bpf_entry_target){set->locations[set->count + i],
-   set->programs[i * 2], set->addresses[i]};
- request = ebpfos_cgroup_prepare(sources, set->count, revision, set->tables);
- kvfree(sources);return request;
-}
 static bool entry_link_active(struct bpf_entry_link *entry)
-{ return !entry->detached && (!entry->cgroup || ebpfos_cgroup_view_active(entry->cgroup)); }
+{ return !entry->detached; }
 static int entry_link_detach(struct bpf_link *link)
 {
  struct bpf_entry_link *entry = container_of(link, struct bpf_entry_link, link);
  int error;
  mutex_lock(&entry_lock);
- if (entry->cgroup) {
-  error = ebpfos_cgroup_view_detach(entry->cgroup);
-  if (!error) entry->set->active = 0;
- } else error = entry_switch(entry->set, entry->set->active, 0);
+ error = entry_switch(entry->set, entry->set->active, 0);
  if (!error) {
   ftrace_text_release(entry->set->ftrace);entry->set->ftrace = NULL;
   entry->detached = true;
@@ -556,11 +538,6 @@ static void entry_link_release(struct bpf_link *link)
  entry_link_detach(link);
  mutex_lock(&entry_lock);entry->set->closing = true;mutex_unlock(&entry_lock);
  cancel_delayed_work_sync(&entry->set->retire_work);
- ebpfos_cgroup_view_put(entry->cgroup);
- /* A cgroup owner retains its own complete program/table leases even if
-  * last-close must retry composition after an allocation failure. The
-  * entry journal never patches text for this private task selection. */
- if (entry->cgroup) entry->set->active = 0;
  schedule_delayed_work(&entry->set->release_work, 0);
 }
 static void entry_link_dealloc(struct bpf_link *link)
@@ -580,7 +557,7 @@ static void entry_link_fdinfo(const struct bpf_link *link, struct seq_file *seq)
   entry->set->epoch_mode ? BPF_F_ENTRY_EPOCH : 0,
   entry->set->migration ? entry->set->migration->aux->id : 0,
   entry->set->reverse ? entry->set->reverse->aux->id : 0);
- seq_printf(seq, "cgroup_id:\t%llu\n", ebpfos_cgroup_view_id(entry->cgroup));
+ seq_printf(seq, "cgroup_id:\t%llu\n", 0ULL);
  for (i = 0; i < entry->set->count; ++i)
   seq_printf(seq, "target:\t%lu\t%u\n", entry->set->locations[entry->set->count + i],
    generation ? generation->programs[i * 2 + slot]->aux->id : 0);
@@ -616,7 +593,7 @@ static int entry_link_info(const struct bpf_link *link, struct bpf_link_info *in
   entry->set->source_btf : bpf_get_btf_vmlinux());
  info->entry.revision = entry->set->active;
  info->entry.detached = !entry_link_active(entry);
- info->entry.cgroup_id = ebpfos_cgroup_view_id(entry->cgroup);
+ info->entry.cgroup_id = 0ULL;
  mutex_unlock(&entry_lock);
  return error;
 }
@@ -634,19 +611,16 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  struct entry_member *members;
  struct entry_set *set;
  struct btf *source = NULL;
- struct ebpfos_cgroup_view *group = NULL;
- struct ebpfos_task_view_request *request;
- bool task = attr->link_create.attach_type == BPF_CGROUP_ENTRY;
  u32 *targets, *programs, count = attr->link_create.entry.count, i;
  u32 operations_count = attr->link_create.entry.operations_count, *operations_fds;
  int error;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (kernel) return -EOPNOTSUPP;
+ if (kernel || attr->link_create.attach_type != BPF_TRACE_ENTRY) return -EOPNOTSUPP;
  if (attr->link_create.prog_fd || (attr->link_create.flags & ~BPF_F_ENTRY_EPOCH) ||
      attr->link_create.entry.reserved || attr->link_create.entry.operations_reserved ||
      (!count && !operations_count)) return -EINVAL;
  if ((attr->link_create.flags & BPF_F_ENTRY_EPOCH) &&
-     (task || operations_count || !count || !attr->link_create.target_fd)) return -EOPNOTSUPP;
+     (operations_count || !count || !attr->link_create.target_fd)) return -EOPNOTSUPP;
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
  if (IS_ERR(targets)) return PTR_ERR(targets);
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.prog_fds), count, sizeof(u32));
@@ -654,11 +628,11 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  members = kvmalloc_array(count, sizeof(*members), GFP_KERNEL);
  if (!members) {error = -ENOMEM;goto free_programs;}
  for (i = 0; i < count; ++i) members[i] = (struct entry_member){targets[i], programs[i]};
- if (!task && attr->link_create.target_fd) {
+ if (attr->link_create.target_fd) {
   source = btf_get_by_fd(attr->link_create.target_fd);
   if (IS_ERR(source)) {error = PTR_ERR(source);goto free_members;}
  }
- set = entry_prepare(members, count, source, task, NULL);
+ set = entry_prepare(members, count, source, false, NULL);
  if (source) btf_put(source);
  if (IS_ERR(set)) {error = PTR_ERR(set);goto free_members;}
  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.operations_fds), operations_count, sizeof(u32));
@@ -668,31 +642,19 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  kvfree(operations_fds);
  if (IS_ERR(set->tables)) {error = PTR_ERR(set->tables);set->tables = NULL;goto free_set;}
  set->epoch_mode = attr->link_create.flags & BPF_F_ENTRY_EPOCH;
- if (task) {
-  request = entry_task_prepare(set, 1);
-  if (IS_ERR(request)) {error = PTR_ERR(request);goto free_set;}
-  group = ebpfos_cgroup_view_create(attr->link_create.target_fd, request);
-  if (IS_ERR(group)) {
-   error = PTR_ERR(group);group = NULL;ebpfos_cgroup_request_put(request);goto free_set;
-  }
- }
  entry = kzalloc(sizeof(*entry), GFP_KERNEL);
  if (!entry) {error = -ENOMEM;goto free_set;}
- entry->set = set;entry->cgroup = group;
+ entry->set = set;
  bpf_link_init(&entry->link, BPF_LINK_TYPE_ENTRY, &entry_link_ops, NULL, attr->link_create.attach_type);
  error = bpf_link_prime(&entry->link, &primer);
  if (error) {kfree(entry);goto free_set;}
  mutex_lock(&entry_lock);
  error=entry_side_compatible(NULL,NULL,0,set,false);
- if (!error && group) {
-  error = ebpfos_cgroup_view_attach(group);
-  if (!error) set->active = 1;
- } else if (!error) error = entry_switch(set, 0, 1);
+ if (!error) error = entry_switch(set, 0, 1);
  if (!error) list_add_tail(&set->sharing,&entry_sharing_sets);
  mutex_unlock(&entry_lock);
  if (error) {
   bpf_link_cleanup(&primer);
-  ebpfos_cgroup_view_put(group);
   if (set->published) schedule_delayed_work(&set->release_work, 0);
   else entry_free(set);
   goto free_members;
@@ -700,7 +662,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  error = bpf_link_settle(&primer);
  goto free_members;
 free_set:
- ebpfos_cgroup_view_put(group);entry_free(set);
+ entry_free(set);
 free_members:
  kvfree(members);
 free_programs:
@@ -714,7 +676,6 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  struct bpf_entry_link *entry = container_of(link, struct bpf_entry_link, link);
  struct entry_set *set = entry->set, *prepared, *old;
  struct entry_member *members;
- struct ebpfos_task_view_request *request = NULL;
  struct bpf_prog **expected = NULL;
  struct bpf_prog *migration = NULL, *reverse = NULL;
  unsigned long migration_address = 0, reverse_address = 0;
@@ -734,7 +695,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
        (attr->link_update.entry.old_prog_fds || attr->link_update.entry.old_operations_fds))) return -EINVAL;
  if (!!attr->link_update.entry.migration_prog_fd != !!attr->link_update.entry.reverse_prog_fd) return -EINVAL;
  if (attr->link_update.entry.migration_prog_fd) {
-  if (!set->epoch_mode || entry->cgroup || operations_count) return -EOPNOTSUPP;
+  if (!set->epoch_mode || operations_count) return -EOPNOTSUPP;
   migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd, &migration_address);
   if (IS_ERR(migration)) return PTR_ERR(migration);
   reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd, &reverse_address);
@@ -757,7 +718,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  if (!members) {error = -ENOMEM;goto out;}
  for (i = 0; i < count; ++i)
   members[i] = (struct entry_member){set->locations[count + i], programs[i]};
- prepared = entry_prepare(members, count, set->source_btf, entry->cgroup != NULL, set);
+ prepared = entry_prepare(members, count, set->source_btf, false, set);
  kvfree(members);
  if (IS_ERR(prepared)) {error = PTR_ERR(prepared);goto out;}
  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.operations_fds), operations_count, sizeof(u32));
@@ -795,16 +756,9 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  error = -EOVERFLOW;
  if (set->next_generation > INT_MAX) goto unlock;
  id = set->next_generation;
- if (entry->cgroup) {
-  request = entry_task_prepare(prepared, id);
-  if (IS_ERR(request)) {error = PTR_ERR(request);request = NULL;goto unlock;}
- }
  prepared->generation_id = id;set->next_generation++;
  list_add_tail(&prepared->generation_node, &set->generations);
- if (entry->cgroup) {
-  error = ebpfos_cgroup_view_update(entry->cgroup, request);
-  if (!error) {request = NULL;set->active = id;}
- } else if (migration) {
+ if (migration) {
   error = entry_ownership(set);
   if (!error) error = entry_epoch_apply(set, set->active, id, migration_address);
   if (!error) {
@@ -824,7 +778,6 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  if (!error) schedule_delayed_work(&set->retire_work, 0);
 unlock:
  mutex_unlock(&entry_lock);
- ebpfos_cgroup_request_put(request);
  if (prepared) entry_free(prepared);
 out:
  if (expected)

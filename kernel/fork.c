@@ -20,7 +20,7 @@
 #include <linux/sched/numa_balancing.h>
 #include <linux/sched/stat.h>
 #include <linux/sched/task.h>
-#include <linux/ebpfos_task_view.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/cputime.h>
 #include <linux/sched/ext.h>
@@ -555,7 +555,7 @@ void free_task(struct task_struct *tsk)
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
-	ebpfos_task_view_free(tsk);
+	ebpfos_task_rule_free(tsk);
 	bpf_task_storage_free(tsk);
 	free_task_struct(tsk);
 }
@@ -1011,7 +1011,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	RCU_INIT_POINTER(tsk->bpf_storage, NULL);
 	tsk->bpf_ctx = NULL;
 #endif
-	ebpfos_task_view_fork(tsk);
+	ebpfos_task_rule_fork(tsk);
 	return tsk;
 
 free_stack:

@@ -27,11 +27,9 @@ void bpf_operations_global_publish(struct bpf_operations_global_update *);
 void bpf_operations_global_undo(struct bpf_operations_global_update *);
 void bpf_operations_global_release(struct bpf_operations_global_update *);
 struct ebpfos_operations *bpf_operations_find(struct bpf_operations_set *, const void *, u32, size_t);
-struct bpf_operations_set *ebpfos_task_operations(void);
 void bpf_operations_info(struct bpf_map *, struct bpf_map_info *);
 #else
 static inline long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flags) { return -EOPNOTSUPP; }
 static inline void bpf_operations_set_put(struct bpf_operations_set *set) {}
-static inline struct bpf_operations_set *ebpfos_task_operations(void) { return NULL; }
 #endif
 #endif

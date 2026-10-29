@@ -28,7 +28,7 @@
 #include "cgroup-internal.h"
 
 #include <linux/bpf-cgroup.h>
-#include <linux/ebpfos_task_view.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/init_task.h>
@@ -900,7 +900,7 @@ static void css_set_move_task(struct task_struct *task,
 		cgroup_move_task(task, to_cset);
 		list_add_tail(&task->cg_list, use_mg_tasks ? &to_cset->mg_tasks :
 							     &to_cset->tasks);
-		ebpfos_cgroup_task_move(task);
+		ebpfos_task_rule_mark(task);
 	}
 }
 

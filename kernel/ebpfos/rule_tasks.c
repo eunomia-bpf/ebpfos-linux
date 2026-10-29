@@ -15,22 +15,18 @@ struct ebpfos_task_rule {
  sys_call_ptr_t table[NR_syscalls];
 };
 static DEFINE_MUTEX(task_binding_mutex);
-static unsigned int task_rule_links, legacy_links;
+static unsigned int task_rule_links;
 
-int ebpfos_task_rule_claim(bool legacy)
+void ebpfos_task_rule_claim(void)
 {
- int error = 0;
  mutex_lock(&task_binding_mutex);
- if (legacy ? task_rule_links : legacy_links) error = -EBUSY;
- else if (legacy) ++legacy_links;
- else ++task_rule_links;
- mutex_unlock(&task_binding_mutex);return error;
+ ++task_rule_links;
+ mutex_unlock(&task_binding_mutex);
 }
-void ebpfos_task_rule_unclaim(bool legacy)
+void ebpfos_task_rule_unclaim(void)
 {
  mutex_lock(&task_binding_mutex);
- if (legacy) --legacy_links;
- else --task_rule_links;
+ --task_rule_links;
  mutex_unlock(&task_binding_mutex);
 }
 static void task_rule_put(struct ebpfos_task_rule *binding)
@@ -103,18 +99,17 @@ void ebpfos_task_rule_resume(void)
  if (current->ebpfos_task_rule_pending) {
   current->ebpfos_task_rule_pending = false;
   old = current->ebpfos_task_rule;current->ebpfos_task_rule = NULL;
-  /* The old L3 publisher is exclusive with syscall rule links. An object
-   * rule alone must not replace a task table still owned by L3. */
-  if (!current->ebpfos_task_view)
-   current->ebpfos_syscalls = READ_ONCE(task_rule_links) ? task_rule_resolvers : sys_call_table;
+  current->ebpfos_syscalls = READ_ONCE(task_rule_links) ? task_rule_resolvers : sys_call_table;
  }
  task_unlock(current);task_rule_put(old);
 }
 void ebpfos_task_rule_fork(struct task_struct *task)
 {
  task->ebpfos_task_rule = NULL;task->ebpfos_task_rule_pending = false;
- if (READ_ONCE(task_rule_links)) task->ebpfos_syscalls = task_rule_resolvers;
- else if (!task->ebpfos_task_view) task->ebpfos_syscalls = sys_call_table;
+ /* A child can be between allocation and the process list while a link is
+  * published. Its first entry therefore resolves even when the allocation
+  * saw no rule; publication cannot miss it through the process-list scan. */
+ task->ebpfos_syscalls = task_rule_resolvers;
 }
 void ebpfos_task_rule_free(struct task_struct *task)
 { task_rule_put(task->ebpfos_task_rule); }

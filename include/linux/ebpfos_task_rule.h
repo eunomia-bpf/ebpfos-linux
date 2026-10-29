@@ -6,10 +6,8 @@ struct task_struct;
 struct ebpfos_rule_decision;
 struct ebpfos_task_view_request;
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
-/* These claims serialize the transition from the old cgroup owner. There
- * cannot be two independent publishers of a task's complete syscall table. */
-int ebpfos_task_rule_claim(bool legacy);
-void ebpfos_task_rule_unclaim(bool legacy);
+void ebpfos_task_rule_claim(void);
+void ebpfos_task_rule_unclaim(void);
 void ebpfos_task_rule_mark(struct task_struct *);
 void ebpfos_task_rules_changed(void);
 void ebpfos_task_rule_resume(void);

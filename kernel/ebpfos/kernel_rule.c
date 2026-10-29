@@ -77,6 +77,7 @@ static void generation_put(struct rule_generation *generation)
 }
 u64 ebpfos_rule_epoch(void) { return atomic64_read(&rule_epoch); }
 EXPORT_SYMBOL_GPL(ebpfos_rule_epoch);
+bool ebpfos_rule_active(void) { return READ_ONCE(rule_count) != 0; }
 void ebpfos_rule_context(struct bpf_kernel_rule_ctx *ctx, u64 object, u64 binding)
 {
  memset(ctx, 0, sizeof(*ctx));
@@ -180,19 +181,33 @@ void ebpfos_rule_cache_init(struct ebpfos_rule_cache *cache, void **slot,
  memset(cache, 0, sizeof(*cache));
  cache->slot = slot;cache->original = original;cache->resolver = resolver;
  cache->type = type;cache->size = size;cache->context = *context;
+ cache->member = U32_MAX;
  cache->epoch = ebpfos_rule_epoch();
  WRITE_ONCE(*slot, (void *)resolver);
 }
 EXPORT_SYMBOL_GPL(ebpfos_rule_cache_init);
+void ebpfos_rule_cache_init_member(struct ebpfos_rule_cache *cache, void **slot,
+ const void *original, const void *resolver, u32 type, u32 size, u32 member,
+ const struct bpf_kernel_rule_ctx *context)
+{
+ ebpfos_rule_cache_init(cache, slot, original, resolver, type, size, context);
+ cache->member = member;
+}
+EXPORT_SYMBOL_GPL(ebpfos_rule_cache_init_member);
 int ebpfos_rule_cache_resolve(struct ebpfos_rule_cache *cache,
  struct ebpfos_rule_decision *inherited, gfp_t gfp)
 {
  struct ebpfos_rule_decision *decision;
  struct ebpfos_operations *operations;
+ const void *table;
+ void *entry;
  decision = inherited ? ebpfos_rule_decision_get(inherited) : ebpfos_rule_resolve(&cache->context, gfp);
  if (IS_ERR(decision)) return PTR_ERR(decision);
  operations = ebpfos_rule_operations(decision, cache->original, cache->type, cache->size);
- WRITE_ONCE(*cache->slot, (void *)(operations ? ebpfos_operations_table(operations) : cache->original));
+ table = operations ? ebpfos_operations_table(operations) : cache->original;
+ if (cache->member == U32_MAX) entry = (void *)table;
+ else memcpy(&entry, table + cache->member, sizeof(entry));
+ WRITE_ONCE(*cache->slot, entry);
  ebpfos_operations_put(cache->operations);ebpfos_rule_decision_put(cache->decision);
  cache->decision = decision;cache->operations = operations;cache->epoch = decision->epoch;
  return 0;
@@ -225,7 +240,7 @@ static int rule_detach(struct bpf_link *base)
  write_unlock_irqrestore(&rule_lock, flags);
  mutex_unlock(&rule_mutex);
  if (detached) {
-  if (link->generation->has_tasks) ebpfos_task_rule_unclaim(false);
+  if (link->generation->has_tasks) ebpfos_task_rule_unclaim();
   ebpfos_task_rules_changed();
  }
  return 0;
@@ -358,11 +373,8 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  mutex_lock(&rule_mutex);
  if (rule_targets_overlap(generation)) error = -EBUSY;
  else {
-  error = generation->has_tasks ? ebpfos_task_rule_claim(false) : 0;
-  if (!error) {
-   error = bpf_link_prime(&link->link, &primer);
-   if (error && generation->has_tasks) ebpfos_task_rule_unclaim(false);
-  }
+  error = bpf_link_prime(&link->link, &primer);
+  if (!error && generation->has_tasks) ebpfos_task_rule_claim();
  }
  if (error) {
   mutex_unlock(&rule_mutex);bpf_prog_put(program);kfree(link);goto fail;

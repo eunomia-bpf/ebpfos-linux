@@ -6008,8 +6008,10 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 	if (attr->link_create.attach_type == BPF_KERNEL_RULE)
 		return uattr.is_kernel ? -EOPNOTSUPP : bpf_kernel_rule_link_create(attr);
 
-	if (attr->link_create.attach_type == BPF_TRACE_ENTRY ||
-	    attr->link_create.attach_type == BPF_CGROUP_ENTRY)
+	if (attr->link_create.attach_type == BPF_CGROUP_ENTRY)
+		return -EOPNOTSUPP;
+
+	if (attr->link_create.attach_type == BPF_TRACE_ENTRY)
 		return bpf_entry_link_create(attr, uattr.is_kernel);
 
 	if (attr->link_create.attach_type == BPF_STRUCT_OPS)

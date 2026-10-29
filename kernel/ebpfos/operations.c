@@ -436,12 +436,18 @@ struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type, size_t size, struct module *owner)
 {
  struct ebpfos_operations *ops = NULL;
- if (in_task() && current->mm)
-  ops = ebpfos_rule_operations(ebpfos_task_rule_decision(), original, type, size);
+ struct ebpfos_rule_decision *local = NULL, *decision = ebpfos_task_rule_decision();
+ if (!decision && ebpfos_rule_active()) {
+  struct bpf_kernel_rule_ctx context;
+  ebpfos_rule_context(&context, (u64)original, type);
+  local = ebpfos_rule_resolve(&context, in_task() ? GFP_KERNEL : GFP_ATOMIC);
+  if (IS_ERR(local)) return ERR_CAST(local);
+  decision = local;
+ }
+ ops = ebpfos_rule_operations(decision, original, type, size);
  rcu_read_lock();
- if (!ops && in_task() && current->mm) ops = bpf_operations_find(ebpfos_task_operations(), original, type, size);
  if (!ops) ops = bpf_operations_find(rcu_dereference(global_operations), original, type, size);
- rcu_read_unlock();return ops;
+ rcu_read_unlock();ebpfos_rule_decision_put(local);return ops;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_current);
 struct ebpfos_operations *ebpfos_operations_get(struct ebpfos_operations *ops)
@@ -454,7 +460,7 @@ EXPORT_SYMBOL_GPL(ebpfos_operations_table);
 u32 ebpfos_operations_bound(const struct ebpfos_operations *ops) { return ops->count; }
 EXPORT_SYMBOL_GPL(ebpfos_operations_bound);
 struct ebpfos_operations_owner {
- struct bpf_operations_set *selected, *global;
+ struct bpf_operations_set *global;
  struct ebpfos_rule_decision *decision;
  struct ebpfos_operations *bound;
  struct rcu_head rcu;
@@ -470,16 +476,14 @@ static bool operations_type(struct bpf_operations_set *set, u32 type)
 }
 struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
 {
- struct bpf_operations_set *selected, *global;
+ struct bpf_operations_set *global;
  struct ebpfos_operations_owner *owner;
  struct ebpfos_rule_decision *decision = in_task() && current->mm ? ebpfos_task_rule_decision() : NULL;
  rcu_read_lock();
- selected = in_task() && current->mm ? ebpfos_task_operations() : NULL;
  global = rcu_dereference(global_operations);
- if (!decision && !operations_type(selected, type) && !operations_type(global, type)) {
+ if (!decision && !ebpfos_rule_active() && !operations_type(global, type)) {
   rcu_read_unlock();return NULL;
  }
- selected = bpf_operations_set_get(selected);
  /* A removed RCU selection may already have reached zero refs while its
   * memory awaits the grace period. Acquire only a live snapshot, retrying
   * the published pointer before leaving the creation-time RCU section. */
@@ -488,9 +492,17 @@ struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
  } while (global && !refcount_inc_not_zero(&global->refs));
  rcu_read_unlock();
  owner = kzalloc(sizeof(*owner), gfp);
- if (!owner) {bpf_operations_set_put(selected);bpf_operations_set_put(global);return ERR_PTR(-ENOMEM);}
- owner->decision = ebpfos_rule_decision_get(decision);
- owner->selected = selected;owner->global = global;owner->type = type;return owner;
+ if (!owner) {bpf_operations_set_put(global);return ERR_PTR(-ENOMEM);}
+ if (decision) owner->decision = ebpfos_rule_decision_get(decision);
+ else if (ebpfos_rule_active()) {
+  struct bpf_kernel_rule_ctx context;
+  ebpfos_rule_context(&context, (u64)owner, type);
+  owner->decision = ebpfos_rule_resolve(&context, gfp);
+  if (IS_ERR(owner->decision)) {
+   int error = PTR_ERR(owner->decision);kfree(owner);bpf_operations_set_put(global);return ERR_PTR(error);
+  }
+ }
+ owner->global = global;owner->type = type;return owner;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_reserve);
 const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner, const void *original)
@@ -500,8 +512,7 @@ const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner, con
  owner->resolved = true;
  ops = ebpfos_rule_operations(owner->decision, original, owner->type, 0);
  if (!ops) {
-  ops = operations_find(owner->selected, original, owner->type, 0);
-  if (!ops) ops = operations_find(owner->global, original, owner->type, 0);
+  ops = operations_find(owner->global, original, owner->type, 0);
   ops = ebpfos_operations_get(ops);
  }
  /* Selection sets are needed only until the actual table is known. Retain
@@ -511,7 +522,6 @@ const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner, con
   */
  owner->bound = ops;
  ebpfos_rule_decision_put(owner->decision);owner->decision = NULL;
- bpf_operations_set_put(owner->selected);owner->selected = NULL;
  bpf_operations_set_put(owner->global);owner->global = NULL;
  return ops ? ops->table : original;
 }
@@ -521,7 +531,7 @@ static void operations_owner_rcu(struct rcu_head *rcu)
  struct ebpfos_operations_owner *owner = container_of(rcu, struct ebpfos_operations_owner, rcu);
  ebpfos_operations_put(owner->bound);
  ebpfos_rule_decision_put(owner->decision);
- bpf_operations_set_put(owner->selected);bpf_operations_set_put(owner->global);kfree(owner);
+ bpf_operations_set_put(owner->global);kfree(owner);
 }
 void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
 { if (owner) call_rcu(&owner->rcu, operations_owner_rcu); }
@@ -534,6 +544,7 @@ int ebpfos_file_view_open(struct file *file)
  struct ebpfos_operations *ops, *old = file->ebpfos_operations;
  if (old && file->f_op == old->table) return 0;
  ops = ebpfos_operations_current(file->f_op, operations_file_btf_id[0], sizeof(*file->f_op), file->f_op->owner);
+ if (IS_ERR(ops)) return PTR_ERR(ops);
  file->ebpfos_operations = ops;
  if (ops) file->f_op = ops->table;
  /* An open callback may replace its table before delegating. The old map's

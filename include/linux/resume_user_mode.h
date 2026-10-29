@@ -8,7 +8,7 @@
 #include <linux/memcontrol.h>
 #include <linux/rseq.h>
 #include <linux/blk-cgroup.h>
-#include <linux/ebpfos_task_view.h>
+#include <linux/ebpfos_task_rule.h>
 
 /**
  * set_notify_resume - cause resume_user_mode_work() to be called
@@ -61,7 +61,7 @@ static inline void resume_user_mode_work(struct pt_regs *regs)
 	blkcg_maybe_throttle_current();
 
 	rseq_handle_slowpath(regs);
-	ebpfos_task_view_resume();
+	ebpfos_task_rule_resume();
 }
 
 #endif /* LINUX_RESUME_USER_MODE_H */

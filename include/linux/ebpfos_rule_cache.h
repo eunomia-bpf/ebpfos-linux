@@ -13,11 +13,18 @@ struct ebpfos_rule_cache {
  struct ebpfos_rule_decision *decision;
  struct ebpfos_operations *operations;
  u64 epoch;
- u32 type, size;
+ u32 type, size, member;
 };
 
 void ebpfos_rule_cache_init(struct ebpfos_rule_cache *, void **slot,
  const void *original, const void *resolver, u32 type, u32 size,
+ const struct bpf_kernel_rule_ctx *);
+/* A generated binding can instead cache one typed function-pointer member
+ * directly in work->func, timer->function, bi_end_io or another existing slot.
+ * member is the compiler's constant offsetof in the admitted original table.
+ * The owner supplies a resolver with that member's exact C prototype. */
+void ebpfos_rule_cache_init_member(struct ebpfos_rule_cache *, void **slot,
+ const void *original, const void *resolver, u32 type, u32 size, u32 member,
  const struct bpf_kernel_rule_ctx *);
 /* Only the typed first-use resolver calls this, under the owner's lock.
  * An inherited decision belongs to the outer operation, even if rules have

@@ -19,6 +19,7 @@ void ebpfos_rule_decision_put(struct ebpfos_rule_decision *);
 struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *,
  const void *original, u32 type, size_t size);
 u64 ebpfos_rule_epoch(void);
+bool ebpfos_rule_active(void);
 void ebpfos_rule_context(struct bpf_kernel_rule_ctx *, u64 object, u64 binding);
 #else
 static inline int bpf_kernel_rule_link_create(const union bpf_attr *attr) { return -EOPNOTSUPP; }

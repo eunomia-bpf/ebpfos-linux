@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
-#include <linux/ebpfos_task_view.h>
 #include <linux/pid.h>
 #include <linux/resume_user_mode.h>
 #include <linux/bitmap.h>
@@ -41,9 +40,8 @@ struct task_view {
  struct ebpfos_function_binding bindings[];
 };
 
-/* Immutable requests can be shared by every task in a cgroup. The owner
- * and each pending task hold a reference; publication acquires a separate
- * file reference for the task's complete active syscall version. */
+/* Unbound syscall graphs are immutable. Decisions retain them independently
+ * of the rule link and of the process which loaded the programs. */
 #include <linux/refcount.h>
 struct ebpfos_task_view_request {
  refcount_t references;
@@ -61,39 +59,6 @@ static void task_view_request_free(struct ebpfos_task_view_request *request)
  if (request && refcount_dec_and_test(&request->references))
   call_rcu(&request->rcu, task_view_request_rcu);
 }
-
-/* This runs ONLY at return to user mode, never at a general task_work_run()
- * site inside a syscall. The entire syscall graph, including inline copies
- * and nested/sleeping callees, has returned before this boundary. No test or
- * trampoline is added to ordinary selected calls. */
-void ebpfos_task_view_resume(void)
-{
- struct ebpfos_task_view_request *request;
- struct file *old = NULL;
- task_lock(current);
- request = current->ebpfos_task_view_request;
- if (request) {
-  current->ebpfos_task_view_request = NULL;
-  old = current->ebpfos_task_view;
-  current->ebpfos_task_view = request->next ? get_file(request->next) : NULL;
-  current->ebpfos_syscalls = request->next ?
-   ((struct task_view *)request->next->private_data)->table : sys_call_table;
- }
- task_unlock(current);
- if (old) fput(old);
- task_view_request_free(request);
- ebpfos_task_rule_resume();
-}
-
-
-#ifdef CONFIG_EBPFOS_ENTRY_LINK
-struct bpf_operations_set *ebpfos_task_operations(void)
-{
- struct file *file = current->ebpfos_task_view;
- return file ? ((struct task_view *)file->private_data)->operations : NULL;
-}
-
-#endif
 
 static void task_view_free(struct task_view *view)
 {
@@ -146,21 +111,6 @@ static const struct file_operations task_view_ops = {
  .show_fdinfo = task_view_fdinfo, .llseek = noop_llseek,
 };
 
-void ebpfos_task_view_fork(struct task_struct *task)
-{
- /* A request names one task, not future children. A fork within its old
-  * syscall inherits the old complete view and its independent code lease. */
- task->ebpfos_task_view_request = NULL;
- if (task->ebpfos_task_view) get_file(task->ebpfos_task_view);
- ebpfos_task_rule_fork(task);
-}
-void ebpfos_task_view_free(struct task_struct *task)
-{
- task_view_request_free(task->ebpfos_task_view_request);
- if (task->ebpfos_task_view) fput(task->ebpfos_task_view);
- ebpfos_task_rule_free(task);
-}
-
 /* Bind only actual syscall exports, never a caller-provided address or ordinal.
  * The source descriptor and loaded export supply the complete checked ABI.
  * A native bpf control entry guarantees self-selection has no old-view frame
@@ -182,8 +132,12 @@ static inline int task_view_slot(struct btf *native, u32 id, unsigned long *used
  if (test_and_set_bit(nr, used)) return -ENOTUNIQ;
  return nr;
 }
-#include <linux/cgroup.h>
-#include <linux/bpf_entry_cgroup.h>
+#include <linux/bpf_operations.h>
+struct bpf_entry_target {
+ u32 function;
+ struct bpf_prog *program;
+ unsigned long address;
+};
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 static struct ebpfos_task_view_request *task_view_prepare(
  const struct bpf_entry_target *sources, u32 count, u64 generation,
@@ -224,7 +178,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
  request = kzalloc(sizeof(*request), GFP_KERNEL);
  if (!request) {error = -ENOMEM;goto fail;}
- file = anon_inode_getfile("bpf-entry-cgroup-table", &task_view_ops, view, O_RDONLY);
+ file = anon_inode_getfile("bpf-rule-syscall-table", &task_view_ops, view, O_RDONLY);
  if (IS_ERR(file)) {error = PTR_ERR(file);kfree(request);goto fail;}
  refcount_set(&request->references, 1);
  request->next = file;
@@ -275,262 +229,5 @@ void ebpfos_rule_task_copy(struct ebpfos_task_view_request *request, void *table
  for_each_set_bit(nr, view->selected, NR_syscalls) ((sys_call_ptr_t *)table)[nr] = view->table[nr];
 }
 #endif
-#if defined(CONFIG_EBPFOS_ENTRY_LINK) && defined(CONFIG_CGROUP_BPF)
-struct ebpfos_cgroup_view {
- struct cgroup *group;
- struct ebpfos_task_view_request *request, *effective;
- struct ebpfos_cgroup_view *next;
- struct delayed_work release_work;
- bool attached;
-};
-/* A permanent owner reference makes restoration allocation-free. */
-static struct ebpfos_task_view_request global_request = {
- .references = REFCOUNT_INIT(1),
-};
-void ebpfos_cgroup_request_put(struct ebpfos_task_view_request *request)
-{ task_view_request_free(request); }
-struct ebpfos_task_view_request *ebpfos_cgroup_prepare(
- const struct bpf_entry_target *sources, u32 count, u64 generation,
- struct bpf_operations_set *operations)
-{ return task_view_prepare(sources, count, generation, operations); }
-/* Keep one flat syscall/table selection for the whole cgroup. This work is
- * cold under cgroup_mutex; syscall dispatch and object methods are unchanged.
- * A child with any links still selects its complete view, as before. */
-static struct ebpfos_task_view_request *cgroup_compose(struct ebpfos_cgroup_view *head,
- struct ebpfos_cgroup_view *replace, struct ebpfos_task_view_request *replacement)
-{
- struct ebpfos_cgroup_view *member;
- struct ebpfos_task_view_request *request;
- struct task_view *view, *part;
- struct file *file;
- unsigned int count = 0, at = 0, i, nr;
- int error;
- for (member = head; member; member = member->next) {
-  request = member == replace ? replacement : member->request;
-  if (!request) continue;
-  part = request->next->private_data;
-  if (part->count > U32_MAX - count) return ERR_PTR(-E2BIG);
-  count += part->count;
- }
- view = kvzalloc(struct_size(view, bindings, count), GFP_KERNEL);
- if (!view) return ERR_PTR(-ENOMEM);
- view->revocable = true;
- INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
- memcpy(view->table, sys_call_table, sizeof(view->table));
- for (member = head; member; member = member->next) {
-  struct bpf_operations_set *operations;
-  request = member == replace ? replacement : member->request;
-  if (!request) continue;
-  part = request->next->private_data;
-  if (bitmap_intersects(view->selected, part->selected, NR_syscalls)) {
-   error = -EBUSY;goto fail;
-  }
-  operations = bpf_operations_compose(view->operations, part->operations, NULL);
-  if (IS_ERR(operations)) {error = PTR_ERR(operations);goto fail;}
-  bpf_operations_set_put(view->operations);view->operations = operations;
-  bitmap_or(view->selected, view->selected, part->selected, NR_syscalls);
-  for_each_set_bit(nr, part->selected, NR_syscalls) view->table[nr] = part->table[nr];
-  for (i = 0; i < part->count; ++i) {
-   view->bindings[at] = part->bindings[i];
-   bpf_prog_inc(view->bindings[at].program);
-   if (view->bindings[at].module) __module_get(view->bindings[at].module);
-   ++at;view->count = at;
-  }
-  view->generation = max(view->generation, part->generation);
- }
- request = kzalloc(sizeof(*request), GFP_KERNEL);
- if (!request) {error = -ENOMEM;goto fail;}
- file = anon_inode_getfile("bpf-entry-cgroup-table", &task_view_ops, view, O_RDONLY);
- if (IS_ERR(file)) {error = PTR_ERR(file);kfree(request);goto fail;}
- refcount_set(&request->references, 1);request->next = file;
- return request;
-fail:
- task_view_free(view);return ERR_PTR(error);
-}
-/* All owner publication, membership movement and fork selection serialize on
- * css_set_lock. Lookup and queueing therefore cannot install an older request
- * after an update has already queued a newer version for the same task. */
-static struct ebpfos_task_view_request *cgroup_request_locked(struct task_struct *task)
-{
- struct cgroup *group;
- struct ebpfos_cgroup_view *view;
- lockdep_assert_held(&css_set_lock);
- for (group = task_dfl_cgroup(task); group; group = cgroup_parent(group)) {
-  view = group->bpf.entry_view;
-  if (view) return view->effective;
- }
- return &global_request;
-}
-void ebpfos_cgroup_task_move(struct task_struct *task)
-{
- struct ebpfos_task_view_request *request, *old;
- lockdep_assert_held(&css_set_lock);
- if (task->flags & (PF_KTHREAD | PF_EXITING)) return;
- ebpfos_task_rule_mark(task);
- request = cgroup_request_locked(task);
- task_lock(task);
- if (!task->ebpfos_task_view_request && task->ebpfos_task_view == request->next) {
-  task_unlock(task);return;
- }
- refcount_inc(&request->references);
- old = task->ebpfos_task_view_request;
- task->ebpfos_task_view_request = request;
- task_unlock(task);
- task_view_request_free(old);
- set_notify_resume(task);
-}
-void ebpfos_cgroup_exec(void)
-{
- unsigned long flags;
- spin_lock_irqsave(&css_set_lock, flags);
- ebpfos_cgroup_task_move(current);
- spin_unlock_irqrestore(&css_set_lock, flags);
-}
-static void cgroup_refresh_locked(void)
-{
- struct task_struct *leader, *task;
- lockdep_assert_held(&css_set_lock);
- rcu_read_lock();
- for_each_process_thread(leader, task) ebpfos_cgroup_task_move(task);
- rcu_read_unlock();
-}
-struct ebpfos_cgroup_view *ebpfos_cgroup_view_create(int fd,
- struct ebpfos_task_view_request *request)
-{
- struct ebpfos_cgroup_view *view;
- struct cgroup *group = cgroup_get_from_fd(fd);
- if (IS_ERR(group)) return ERR_CAST(group);
- if (group->root != &cgrp_dfl_root) {cgroup_put(group);return ERR_PTR(-EOPNOTSUPP);}
- view = kzalloc(sizeof(*view), GFP_KERNEL);
- if (!view) {cgroup_put(group);return ERR_PTR(-ENOMEM);}
- view->group = group;view->request = request;
- return view;
-}
-int ebpfos_cgroup_view_attach(struct ebpfos_cgroup_view *view)
-{
- struct ebpfos_cgroup_view *head;
- struct ebpfos_task_view_request *merged, *old = NULL;
- unsigned long flags;
- int error = ebpfos_task_rule_claim(true);
- if (error) return error;
- cgroup_lock();
- if (cgroup_is_dead(view->group)) {error = -ENOENT;goto out;}
- head = view->group->bpf.entry_view;view->next = head;
- merged = cgroup_compose(view, NULL, NULL);
- if (IS_ERR(merged)) {error = PTR_ERR(merged);view->next = NULL;goto out;}
- spin_lock_irqsave(&css_set_lock, flags);
- if (head) {old = head->effective;head->effective = NULL;}
- view->effective = merged;view->group->bpf.entry_view = view;
- WRITE_ONCE(view->attached, true);
- cgroup_refresh_locked();
- spin_unlock_irqrestore(&css_set_lock, flags);
-out:
- cgroup_unlock();task_view_request_free(old);
- if (error) ebpfos_task_rule_unclaim(true);
- return error;
-}
-int ebpfos_cgroup_view_update(struct ebpfos_cgroup_view *view,
- struct ebpfos_task_view_request *next)
-{
- struct ebpfos_cgroup_view *head;
- struct ebpfos_task_view_request *merged, *old = NULL, *effective = NULL;
- unsigned long flags;
- int error = 0;
- cgroup_lock();
- if (!view->attached) {error = -ENOLINK;goto out;}
- head = view->group->bpf.entry_view;
- merged = cgroup_compose(head, view, next);
- if (IS_ERR(merged)) {error = PTR_ERR(merged);goto out;}
- spin_lock_irqsave(&css_set_lock, flags);
- old = view->request;view->request = next;
- effective = head->effective;head->effective = merged;
- cgroup_refresh_locked();
- spin_unlock_irqrestore(&css_set_lock, flags);
-out:
- cgroup_unlock();task_view_request_free(old);task_view_request_free(effective);
- return error;
-}
-int ebpfos_cgroup_view_detach(struct ebpfos_cgroup_view *view)
-{
- struct ebpfos_cgroup_view *head, *member, *next;
- struct ebpfos_task_view_request *merged = NULL, *old = NULL;
- unsigned long flags;
- int error = 0;
- bool detached = false;
- cgroup_lock();
- if (!view->attached) goto out;
- head = view->group->bpf.entry_view;
- next = head == view ? view->next : head;
- if (next) {
-  merged = cgroup_compose(head, view, NULL);
-  if (IS_ERR(merged)) {error = PTR_ERR(merged);goto out;}
- }
- spin_lock_irqsave(&css_set_lock, flags);
- old = head->effective;head->effective = NULL;
- if (head != view) {
-  for (member = head; member->next != view; member = member->next) {}
-  member->next = view->next;
- }
- if (next) next->effective = merged;
- view->group->bpf.entry_view = next;view->next = NULL;
- WRITE_ONCE(view->attached, false);
- detached = true;
- cgroup_refresh_locked();
- spin_unlock_irqrestore(&css_set_lock, flags);
-out:
- cgroup_unlock();task_view_request_free(old);
- if (detached) ebpfos_task_rule_unclaim(true);
- return error;
-}
-void ebpfos_cgroup_offline(struct cgroup *group)
-{
- struct ebpfos_cgroup_view *view, *next;
- struct ebpfos_task_view_request *old = NULL;
- unsigned long flags;
- unsigned int detached = 0;
- /* The cgroup lifetime notifier already holds cgroup_mutex. Removing the
-  * entire selection needs no allocation, including under memory pressure. */
- spin_lock_irqsave(&css_set_lock, flags);
- view = group->bpf.entry_view;
- if (view) {
-  old = view->effective;view->effective = NULL;
-  group->bpf.entry_view = NULL;
-  for (; view; view = next) {
-   next = view->next;view->next = NULL;WRITE_ONCE(view->attached, false);++detached;
-  }
-  cgroup_refresh_locked();
- }
- spin_unlock_irqrestore(&css_set_lock, flags);
- task_view_request_free(old);
- while (detached--) ebpfos_task_rule_unclaim(true);
-}
-static void cgroup_view_free(struct ebpfos_cgroup_view *view)
-{
- task_view_request_free(view->request);
- cgroup_put(view->group);kfree(view);
-}
-static void cgroup_view_release_work(struct work_struct *work)
-{
- struct ebpfos_cgroup_view *view = container_of(to_delayed_work(work), struct ebpfos_cgroup_view, release_work);
- /* Last-close cannot return an allocation error. Keep the owner and its
-  * independent program leases until a complete replacement can be prepared. */
- if (!ebpfos_cgroup_view_detach(view)) cgroup_view_free(view);
- else schedule_delayed_work(&view->release_work, HZ / 10);
-}
-void ebpfos_cgroup_view_put(struct ebpfos_cgroup_view *view)
-{
- if (!view) return;
- if (!ebpfos_cgroup_view_detach(view)) cgroup_view_free(view);
- else {
-  INIT_DELAYED_WORK(&view->release_work, cgroup_view_release_work);
-  schedule_delayed_work(&view->release_work, HZ / 10);
- }
-}
-u64 ebpfos_cgroup_view_id(const struct ebpfos_cgroup_view *view)
-{ return view ? cgroup_id(view->group) : 0; }
-bool ebpfos_cgroup_view_active(const struct ebpfos_cgroup_view *view)
-{ return view && READ_ONCE(view->attached); }
-#endif
-
 
 #endif /* CONFIG_EBPFOS && CONFIG_X86_64 */

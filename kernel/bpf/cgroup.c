@@ -13,7 +13,6 @@
 #include <linux/sysctl.h>
 #include <linux/string.h>
 #include <linux/bpf.h>
-#include <linux/ebpfos_task_view.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/bpf_lsm.h>
 #include <linux/bpf_verifier.h>
@@ -242,7 +241,6 @@ bpf_cgroup_atype_find(enum bpf_attach_type attach_type, u32 attach_btf_id)
 
 static void cgroup_bpf_offline(struct cgroup *cgrp)
 {
-	ebpfos_cgroup_offline(cgrp);
 	cgroup_get(cgrp);
 	percpu_ref_kill(&cgrp->bpf.refcnt);
 }
