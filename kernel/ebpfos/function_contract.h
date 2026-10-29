@@ -148,8 +148,20 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
  const struct btf_type *prototype = btf_type_by_id(compiled, function->type);
  const struct btf_type *result = btf_type_skip_modifiers(native, n->type, NULL);
  const char *tag = btf_find_decl_tag_value(compiled, function, -1, "ret:ro_kernel_mem:");
- u32 bytes;
+ u32 bytes, size;
  bool described = !IS_ERR(tag) && !kstrtou32(tag, 10, &bytes) && bytes;
+ if (described) {
+  const struct btf_type *source = btf_type_skip_modifiers(compiled, prototype->type, NULL);
+  const struct btf_type *pointee;
+  if (!result || !btf_type_is_ptr(result) || !source || !btf_type_is_ptr(source)) return false;
+  pointee = btf_type_skip_modifiers(native, result->type, NULL);
+  /* Native callers use the complete declared object. A source pointer's
+   * nominal record name alone cannot justify its size or pointer fields.
+   */
+  if (!pointee || IS_ERR(btf_resolve_size(native, pointee, &size)) || !size || size > bytes ||
+      !btf_type_is_scalar_region(native, result->type, 0, size) ||
+      !cell_layout(native, result->type, compiled, source->type, 0, false)) return false;
+ }
  if (!described) {
   tag = btf_find_decl_tag_value(compiled, function, -1, "ret:null");
   described = !IS_ERR(tag) && !*tag;

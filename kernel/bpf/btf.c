@@ -8342,9 +8342,12 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				bpf_log(log, "invalid read-only result contract\n");
 				return -EINVAL;
 			}
-			result = btf_type_skip_modifiers(btf, result->type, NULL);
-			if (!btf_type_is_int(result) || result->size != 1) {
-				bpf_log(log, "read-only result requires a byte pointer\n");
+			u32 pointee = result->type, size;
+
+			result = btf_type_skip_modifiers(btf, pointee, NULL);
+			if (!result || IS_ERR(btf_resolve_size(btf, result, &size)) ||
+			    !size || size > bytes || !btf_type_is_scalar_region(btf, pointee, 0, size)) {
+				bpf_log(log, "read-only result requires a complete scalar object\n");
 				return -EINVAL;
 			}
 			sub->readonly_result_size = bytes;
