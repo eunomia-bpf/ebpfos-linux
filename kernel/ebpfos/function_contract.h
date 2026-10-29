@@ -179,11 +179,17 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  if (!trusted && !cell_context_requirements(native, native_function, aux->btf, function))
   return false;
 
- if (trusted && native_proto_id != native_function->type) {
-  if (!cell_trusted_native_scalar_proto(native, n, aux->btf, prototype,
-        aux->func[index]->aux->native_frame) ||
-      !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
-  goto compatible;
+ /* Source contract preparation can refine an opaque pointer to its
+  * source record. Trusted code carries no pointer proof: preserve its native
+  * value ABI without treating verifier-only pointer assumptions as native
+  * caller requirements, or requiring the old
+  * and refined pointee layouts to be identical. Verified exports continue
+  * through the full pointer/record checks below.
+  */
+ if (trusted) {
+  if (cell_trusted_native_scalar_proto(native, n, aux->btf, prototype,
+        aux->func[index]->aux->native_frame)) goto compatible;
+  if (native_proto_id != native_function->type) return false;
  }
 
  /* Framed functions retain their complete logical native value ABI. The
@@ -201,7 +207,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
     if (btf_type_is_struct(value) && !btf_native_scalar_storage(aux->btf, type, 0) &&
         !btf_native_record_entry_contract(aux->btf, type)) return false;
    }
-  if (!cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
+  if (!trusted && !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
   goto compatible;
  }
  result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
@@ -232,7 +238,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  /* Native callers bypass BPF's call-site argument checker. Keep bounds,
   * address spaces and context requirements in the common callable contract,
   * including exports resolved by name in a replacement generation. */
- if (!cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
+ if (!trusted && !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
 compatible:
  *address = (unsigned long)aux->func[index]->bpf_func;
  return true;

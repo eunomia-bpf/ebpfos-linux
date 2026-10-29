@@ -436,7 +436,11 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    }
    set->programs[i * 2 + j] = program;
    error = bpf_entry_program_address(btf, entry->native_function, program, task, &target);
-   if (error) goto fail;
+   if (error) {
+    pr_warn("BPF entry '%s': callable binding refused (%d)\n",
+            btf_name_by_offset(btf, function->name_off), error);
+    goto fail;
+   }
    if (!task && target == address) {error = -EINVAL;goto fail;}
    set->addresses[i] = target;
    if (call_sites && entry_module_noinstr(set->source_module, address)) {

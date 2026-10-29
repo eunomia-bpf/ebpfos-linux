@@ -22,7 +22,9 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
   * discharged by its actual caller; only the selected entry needs an
   * independently supplied native scope, which this interface cannot prove.
   */
- if (aux->func[i]->aux->requires_rcu) goto out;
+ if (aux->func[i]->aux->requires_rcu) {
+  pr_warn("BPF native context: export requires an external RCU scope\n");goto out;
+ }
  seen[i] = true;queue[tail++] = i;
  /* jit_subprogs retains the stock-resolved subprogram index in off for
   * both pseudo calls and function addresses. Walk those immutable edges,
@@ -53,7 +55,9 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     * context contracts are available at load time.
     */
    if (insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
-    if (pure || !aux->trusted_kernel) goto out;
+    if (pure || !aux->trusted_kernel) {
+     pr_warn("BPF native context: indirect call has no native-context summary\n");goto out;
+    }
     continue;
    }
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
@@ -72,7 +76,9 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     const struct bpf_func_proto *prototype = bpf_base_func_proto(helpers[k], parent);
     if (prototype && target == (unsigned long)prototype->func) break;
    }
-   if (k == ARRAY_SIZE(helpers)) goto out;
+   if (k == ARRAY_SIZE(helpers)) {
+    pr_warn("BPF native context: helper %ps is not context-free\n", (void *)target);goto out;
+   }
   }
  }
  allowed = true;
