@@ -57,6 +57,11 @@ void __weak arch_handle_alternative(struct special_alt *alt)
 {
 }
 
+bool __weak arch_handle_exception(struct special_alt *alt, const void *entry)
+{
+	return false;
+}
+
 static void reloc_to_sec_off(struct reloc *reloc, struct section **sec,
 			     unsigned long *off)
 {
@@ -94,6 +99,9 @@ static int get_alt_entry(struct elf *elf, const struct special_entry *entry,
 	reloc_to_sec_off(orig_reloc, &alt->orig_sec, &alt->orig_off);
 
 	arch_handle_alternative(alt);
+	if (!strcmp(entry->sec, "__ex_table") &&
+	    arch_handle_exception(alt, sec->data->d_buf + offset))
+		return 0;
 
 	if (!entry->group || alt->new_len) {
 		new_reloc = find_reloc_by_dest(elf, sec, offset + entry->new);

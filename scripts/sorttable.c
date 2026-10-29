@@ -33,6 +33,7 @@
 #include <pthread.h>
 
 #include "elf-parse.h"
+#include "../arch/x86/include/asm/extable_fixup_types.h"
 
 #ifndef EM_ARCOMPACT
 #define EM_ARCOMPACT	93
@@ -857,7 +858,7 @@ static void sort_relative_table(char *extab_image, int image_size)
 	}
 }
 
-static void sort_relative_table_with_data(char *extab_image, int image_size)
+static void sort_relative_data(char *extab_image, int image_size, bool x86)
 {
 	int i = 0;
 
@@ -865,7 +866,8 @@ static void sort_relative_table_with_data(char *extab_image, int image_size)
 		uint32_t *loc = (uint32_t *)(extab_image + i);
 
 		elf_parser.w(elf_parser.r(loc) + i, loc);
-		elf_parser.w(elf_parser.r(loc + 1) + i + 4, loc + 1);
+		if (!x86 || (elf_parser.r(loc + 2) & EX_DATA_TYPE_MASK) != EX_TYPE_BPF)
+			elf_parser.w(elf_parser.r(loc + 1) + i + 4, loc + 1);
 		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
@@ -878,11 +880,22 @@ static void sort_relative_table_with_data(char *extab_image, int image_size)
 		uint32_t *loc = (uint32_t *)(extab_image + i);
 
 		elf_parser.w(elf_parser.r(loc) - i, loc);
-		elf_parser.w(elf_parser.r(loc + 1) - (i + 4), loc + 1);
+		if (!x86 || (elf_parser.r(loc + 2) & EX_DATA_TYPE_MASK) != EX_TYPE_BPF)
+			elf_parser.w(elf_parser.r(loc + 1) - (i + 4), loc + 1);
 		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
 	}
+}
+
+static void sort_relative_table_with_data(char *extab_image, int image_size)
+{
+	sort_relative_data(extab_image, image_size, false);
+}
+
+static void sort_x86_table(char *extab_image, int image_size)
+{
+	sort_relative_data(extab_image, image_size, true);
 }
 
 static int do_file(char const *const fname, void *addr)
@@ -903,8 +916,10 @@ static int do_file(char const *const fname, void *addr)
 	case EM_LOONGARCH:
 	case EM_RISCV:
 	case EM_S390:
-	case EM_X86_64:
 		custom_sort = sort_relative_table_with_data;
+		break;
+	case EM_X86_64:
+		custom_sort = sort_x86_table;
 		break;
 	case EM_PARISC:
 	case EM_PPC:

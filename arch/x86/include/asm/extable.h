@@ -29,8 +29,10 @@ struct pt_regs;
 
 #define swap_ex_entry_fixup(a, b, tmp, delta)			\
 	do {							\
-		(a)->fixup = (b)->fixup + (delta);		\
-		(b)->fixup = (tmp).fixup - (delta);		\
+		(a)->fixup = (b)->fixup +			\
+			(((b)->data & EX_DATA_TYPE_MASK) == EX_TYPE_BPF ? 0 : (delta)); \
+		(b)->fixup = (tmp).fixup -			\
+			(((tmp).data & EX_DATA_TYPE_MASK) == EX_TYPE_BPF ? 0 : (delta)); \
 		(a)->data = (b)->data;				\
 		(b)->data = (tmp).data;				\
 	} while (0)

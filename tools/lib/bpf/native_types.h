@@ -59,6 +59,34 @@ static inline bool btf_native_array_storage_match(const struct btf *local, __u32
 }
 
 /* Physical scalar C ABI only; this supplies no pointer safety contract. */
+static inline int btf_native_scalar_type(const struct btf *btf, __u32 id)
+{
+	const struct btf_type *type;
+	const struct btf_member *member;
+	int resolved, depth;
+
+	for (depth = 0; depth < 16; depth++) {
+		resolved = btf__resolve_type(btf, id);
+		if (resolved <= 0)
+			return -1;
+		type = btf__type_by_id(btf, resolved);
+		if (!type || !btf_is_struct(type))
+			return resolved;
+		/* A transparent INTEGER wrapper has exactly its member's native
+		 * register representation. Padding, bitfields and empty records
+		 * cannot establish that identity.
+		 */
+		if (btf_vlen(type) != 1 || !type->size || type->size > 8)
+			return -1;
+		member = btf_members(type);
+		if (btf_member_bit_offset(type, 0) || btf_member_bitfield_size(type, 0) ||
+		    btf__resolve_size(btf, member->type) != type->size)
+			return -1;
+		id = member->type;
+	}
+	return -1;
+}
+
 static inline bool btf_native_scalar_abi_match(const struct btf *local, __u32 local_id,
 				 const struct btf *kern, __u32 kern_id)
 {
@@ -68,15 +96,26 @@ static inline bool btf_native_scalar_abi_match(const struct btf *local, __u32 lo
 
 	if (!local_id || !kern_id)
 		return local_id == kern_id;
-	lid = btf__resolve_type(local, local_id);
-	kid = btf__resolve_type(kern, kern_id);
+	lid = btf_native_scalar_type(local, local_id);
+	kid = btf_native_scalar_type(kern, kern_id);
 	if (lid < 0 || kid < 0)
 		return false;
 	l = btf__type_by_id(local, lid);
 	k = btf__type_by_id(kern, kid);
-	if (btf_is_ptr(l) || btf_is_ptr(k))
-		return btf_is_ptr(l) && btf_is_ptr(k) &&
-		       btf__pointer_size(local) == btf__pointer_size(kern);
+	if (btf_is_ptr(l) || btf_is_ptr(k)) {
+		const struct btf_type *word = btf_is_ptr(l) ? k : l;
+
+		if (btf__pointer_size(local) != btf__pointer_size(kern))
+			return false;
+		if (btf_is_ptr(l) && btf_is_ptr(k))
+			return true;
+		/* Source lowering can describe an address as integer bits. The
+		 * actual kernel prototype still determines every pointer check
+		 * and result capability in the verifier; this is ABI matching.
+		 */
+		return (btf_is_int(word) || btf_is_any_enum(word)) &&
+		       word->size == 8 && btf__pointer_size(local) == 8;
+	}
 	if (!(btf_is_int(l) || btf_is_any_enum(l)) ||
 	    !(btf_is_int(k) || btf_is_any_enum(k)))
 		return false;

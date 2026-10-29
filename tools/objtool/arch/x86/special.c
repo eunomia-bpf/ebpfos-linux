@@ -5,9 +5,24 @@
 #include <objtool/builtin.h>
 #include <objtool/warn.h>
 #include <asm/cpufeatures.h>
+#include "../../../../arch/x86/include/asm/extable_fixup_types.h"
 
 /* cpu feature name array generated from cpufeatures.h */
 #include "cpu-feature-names.c"
+
+bool arch_handle_exception(struct special_alt *alt, const void *entry)
+{
+	const int *fields = entry;
+
+	if ((fields[2] & EX_DATA_TYPE_MASK) != EX_TYPE_BPF)
+		return false;
+	/* BPF fixup is instruction length plus destination-register offset,
+	 * not a relocated code address. Its handler resumes after the load.
+	 */
+	alt->new_sec = alt->orig_sec;
+	alt->new_off = alt->orig_off + (fields[1] & 0xff);
+	return true;
+}
 
 void arch_handle_alternative(struct special_alt *alt)
 {
