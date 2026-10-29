@@ -41,6 +41,55 @@ static const char *aot_function_name(const struct bpf_prog *prog)
 	return type && btf_type_is_func(type) ? btf_name_by_offset(aux->btf, type->name_off) : NULL;
 }
 
+/* Frozen, read-only source constants receive final-image section bindings.
+ * Mutable storage and map objects retain their load-instance identity and
+ * cannot be exported as constants. This runs only during AOT export.
+ */
+static int aot_map_name(struct bpf_aot_context *aot, u64 address,
+                        char *name, s64 *addend)
+{
+	struct bpf_prog_aux *aux = aot->root->aux;
+	struct bpf_prog_aux *source = aot->source->aux;
+	const struct btf_type *fn;
+	u32 i;
+
+	for (i = 0; i < aux->used_map_cnt; i++) {
+		struct bpf_map *map = aux->used_maps[i];
+		const struct btf_type *type;
+		const char *section, *symbol;
+		char prefix[BPF_AOT_SYMBOL_LEN];
+		u64 base;
+
+		if (address == (unsigned long)map)
+			return -EOPNOTSUPP;
+		if (!map->ops->map_direct_value_addr ||
+		    map->ops->map_direct_value_addr(map, &base, 0) ||
+		    address < base || address - base > map->value_size * (u64)map->max_entries)
+			continue;
+		if (!map->frozen || !(map->map_flags & BPF_F_RDONLY_PROG) ||
+		    map->max_entries != 1 || !map->btf || !source->btf ||
+		    !source->func_info || source->func_idx >= source->func_info_cnt)
+			return -EOPNOTSUPP;
+		type = btf_type_by_id(map->btf, map->btf_value_type_id);
+		if (!type || btf_kind(type) != BTF_KIND_DATASEC)
+			return -EOPNOTSUPP;
+		section = btf_name_by_offset(map->btf, type->name_off);
+		if (snprintf(prefix, sizeof(prefix), "aot:constant-pool:%s:", section) >= sizeof(prefix))
+			return -ENAMETOOLONG;
+		fn = btf_type_by_id(source->btf, source->func_info[source->func_idx].type_id);
+		if (!fn || !btf_type_is_func(fn))
+			return -EINVAL;
+		symbol = btf_find_decl_tag_value(source->btf, fn, -1, prefix);
+		if (IS_ERR(symbol))
+			return PTR_ERR(symbol);
+		if (!*symbol || strscpy(name, symbol, BPF_AOT_SYMBOL_LEN) < 0)
+			return -ENAMETOOLONG;
+		*addend = address - base;
+		return 0;
+	}
+	return -ENOENT;
+}
+
 static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 			    char *name, s64 *addend)
 {
@@ -50,7 +99,10 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 	char buffer[KSYM_NAME_LEN];
 	char *module;
 	u32 i;
+	int err = aot_map_name(aot, address, name, addend);
 
+	if (err != -ENOENT)
+		return err;
 	for (i = 0; i < (root->aux->func_cnt ?: 1); i++) {
 		struct bpf_prog *func = root->aux->func_cnt ? root->aux->func[i] : root;
 
@@ -126,27 +178,6 @@ static int aot_validate_operand(const struct bpf_aot_reloc *operand,
 	return -EINVAL;
 }
 
-/* Allocated map addresses belong to a load instance. They need a named
- * final-image definition, never a copied address from the build guest.
- */
-static bool aot_map_address(struct bpf_aot_context *aot, u64 address)
-{
-	struct bpf_prog_aux *aux = aot->root->aux;
-	u32 i;
-
-	for (i = 0; i < aux->used_map_cnt; i++) {
-		struct bpf_map *map = aux->used_maps[i];
-		u64 base;
-
-		if (address == (unsigned long)map)
-			return true;
-		if (map->ops->map_direct_value_addr &&
-		    !map->ops->map_direct_value_addr(map, &base, 0) &&
-		    address >= base && address - base < map->value_size * (u64)map->max_entries)
-			return true;
-	}
-	return false;
-}
 
 static int aot_record(struct bpf_aot_context *aot, u32 offset, u32 type,
 		      const char *name, s64 addend)

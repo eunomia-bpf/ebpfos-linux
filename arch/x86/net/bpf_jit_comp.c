@@ -1194,8 +1194,6 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 			emit_mov_imm64(pprog, dst_reg, value >> 32, value);
 			return 0;
 		}
-		if (aot_map_address(aot, value))
-			return -EOPNOTSUPP;
 		err = aot_address_name(aot, value, name, &addend);
 		if (err)
 			return err;
