@@ -7004,6 +7004,8 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	return 0;
 }
 
+#include "btf_global_access.h"
+
 static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
@@ -7033,6 +7035,9 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			tname);
 		return -EINVAL;
 	}
+
+	if (btf_type_is_var(t))
+		return check_btf_global_access(env, regs, regno, off, size, atype, value_regno);
 
 	if (atype == BPF_WRITE) {
 		ret = check_btf_field_ranges(env, regs, regno, off, size, atype, value_regno, NULL);
@@ -20513,6 +20518,11 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		aux->btf_var.reg_type = PTR_TO_BTF_ID | MEM_PERCPU;
 		aux->btf_var.btf = btf;
 		aux->btf_var.btf_id = type;
+	} else if (env->prog->aux->ebpfos_component &&
+		   btf_writable_scalar_global(btf, id, addr)) {
+		aux->btf_var.reg_type = PTR_TO_BTF_ID | PTR_TRUSTED;
+		aux->btf_var.btf = btf;
+		aux->btf_var.btf_id = id;
 	} else if (!btf_type_is_struct(t)) {
 		const struct btf_type *ret;
 		const char *tname;
