@@ -8,6 +8,7 @@
  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
  */
 #define INSTANTIATE_EXPORTED_MIGRATE_DISABLE
+#include <linux/ebpfos_ptview.h>
 #include <linux/sched.h>
 #include <linux/highmem.h>
 #include <linux/hrtimer_api.h>
@@ -5353,7 +5354,17 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * kernel ->   user   switch + mmdrop_lazy_tlb() active
 	 *   user ->   user   switch
 	 */
-	if (!next->mm) {				// to kernel
+	if (!next->mm && ebpfos_ptview_mm(prev->active_mm)) {
+		/* Unresolved kernel threads must not borrow a task's private
+		 * kernel half. Resolved work explicitly uses kthread_use_mm(). */
+		switch_mm_irqs_off(prev->active_mm, &init_mm, next);
+		next->active_mm = &init_mm;
+		mmgrab_lazy_tlb(&init_mm);
+		if (!prev->mm) {
+			rq->prev_mm = prev->active_mm;
+			prev->active_mm = NULL;
+		}
+	} else if (!next->mm) {			// to kernel
 		enter_lazy_tlb(prev->active_mm, next);
 
 		next->active_mm = prev->active_mm;

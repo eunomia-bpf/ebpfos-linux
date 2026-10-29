@@ -12,6 +12,7 @@
  * Handle hardware traps and faults.
  */
 #include <linux/spinlock.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
 #include <linux/sched/debug.h>
@@ -536,6 +537,7 @@ static DEFINE_PER_CPU(unsigned long, nmi_dr7);
 DEFINE_IDTENTRY_RAW(exc_nmi)
 {
 	irqentry_state_t irq_state;
+	struct ebpfos_ptview_nmi_state ptview_state;
 	struct nmi_stats *nsp = this_cpu_ptr(&nmi_stats);
 
 	/*
@@ -575,6 +577,7 @@ nmi_restart:
 	this_cpu_write(nmi_dr7, local_db_save());
 
 	irq_state = irqentry_nmi_enter(regs);
+	ebpfos_ptview_nmi_enter(&ptview_state);
 
 	inc_irq_stat(__nmi_count);
 
@@ -592,6 +595,7 @@ nmi_restart:
 		}
 	}
 
+	ebpfos_ptview_nmi_exit(&ptview_state);
 	irqentry_nmi_exit(regs, irq_state);
 
 	local_db_restore(this_cpu_read(nmi_dr7));
@@ -707,6 +711,7 @@ void nmi_backtrace_stall_check(const struct cpumask *btp)
 DEFINE_FREDENTRY_NMI(exc_nmi)
 {
 	irqentry_state_t irq_state;
+	struct ebpfos_ptview_nmi_state ptview_state;
 
 	if (arch_cpu_is_offline(smp_processor_id())) {
 		if (microcode_nmi_handler_enabled())
@@ -723,10 +728,12 @@ DEFINE_FREDENTRY_NMI(exc_nmi)
 	this_cpu_write(nmi_cr2, read_cr2());
 
 	irq_state = irqentry_nmi_enter(regs);
+	ebpfos_ptview_nmi_enter(&ptview_state);
 
 	inc_irq_stat(__nmi_count);
 	default_do_nmi(regs);
 
+	ebpfos_ptview_nmi_exit(&ptview_state);
 	irqentry_nmi_exit(regs, irq_state);
 
 	if (unlikely(this_cpu_read(nmi_cr2) != read_cr2()))

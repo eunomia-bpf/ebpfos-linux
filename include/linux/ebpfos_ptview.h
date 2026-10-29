@@ -1,0 +1,44 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef _LINUX_EBPFOS_PTVIEW_H
+#define _LINUX_EBPFOS_PTVIEW_H
+#include <linux/types.h>
+struct mm_struct;
+struct ebpfos_ptview;
+struct module;
+struct ebpfos_ptview_nmi_state { unsigned long cr3; struct mm_struct *loaded; };
+struct ebpfos_ptview_change {
+ unsigned long address;
+ const void *bytes;
+ size_t size;
+};
+#ifdef CONFIG_EBPFOS_PTVIEW
+/* Cold preparation and owner-serialized binding. No entry dispatch helper.
+ * This prototype requires four-level paging, no PTI/PCID, and one mm user.
+ * The caller retains referenced code and serializes changes against its work.
+ * Original mappings and text on copied paths stay fixed while attached. */
+struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *, unsigned int, struct module *);
+void ebpfos_ptview_put(struct ebpfos_ptview *);
+int ebpfos_ptview_bind(struct ebpfos_ptview *);
+void ebpfos_ptview_mm_free(struct mm_struct *);
+bool ebpfos_ptview_mm(const struct mm_struct *);
+unsigned long ebpfos_ptview_symbol(const char *);
+unsigned long ebpfos_ptview_entry(unsigned long);
+u64 ebpfos_ptview_leaf(struct mm_struct *, unsigned long);
+void ebpfos_ptview_nmi_enter(struct ebpfos_ptview_nmi_state *);
+void ebpfos_ptview_nmi_exit(const struct ebpfos_ptview_nmi_state *);
+unsigned long ebpfos_ptview_work_enter(struct mm_struct *);
+unsigned long ebpfos_ptview_global_enter(void);
+void ebpfos_ptview_global_exit(unsigned long);
+void ebpfos_ptview_irq_enter(void);
+void ebpfos_ptview_irq_exit(void);
+#else
+static inline bool ebpfos_ptview_mm(const struct mm_struct *mm) { return false; }
+static inline void ebpfos_ptview_mm_free(struct mm_struct *mm) {}
+static inline void ebpfos_ptview_nmi_enter(struct ebpfos_ptview_nmi_state *state) {}
+static inline void ebpfos_ptview_nmi_exit(const struct ebpfos_ptview_nmi_state *state) {}
+static inline unsigned long ebpfos_ptview_global_enter(void) { return 0; }
+static inline void ebpfos_ptview_global_exit(unsigned long cr3) {}
+static inline void ebpfos_ptview_irq_enter(void) {}
+static inline void ebpfos_ptview_irq_exit(void) {}
+#endif
+#endif

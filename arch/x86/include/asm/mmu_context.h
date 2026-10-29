@@ -147,6 +147,10 @@ extern void mm_free_global_asid(struct mm_struct *mm);
 static inline int init_new_context(struct task_struct *tsk,
 				   struct mm_struct *mm)
 {
+#ifdef CONFIG_EBPFOS_PTVIEW
+	mm->context.ptview = NULL;
+#endif
+
 	mutex_init(&mm->context.lock);
 
 	mm->context.ctx_id = atomic64_inc_return(&last_mm_ctx_id);

@@ -29,3 +29,12 @@ config EBPFOS_ENTRY_LINK
    Replace reserved or inactive ftrace entries and module-local callers
    through BPF program and link objects using one text transaction.
    Native programs are source-built staged exceptions requiring CAP_SYS_ADMIN.
+
+config EBPFOS_PTVIEW
+ bool "Prototype per-mm kernel view mappings"
+ depends on EBPFOS_ENTRY_LINK && X86_64 && !X86_5LEVEL
+ depends on !MITIGATION_PAGE_TABLE_ISOLATION
+ default n
+ help
+   Opt-in four-level, non-PCID prototype. Private copies cover only changed
+   table and entry pages. Owners resolve L6 rules at their quiet boundaries.

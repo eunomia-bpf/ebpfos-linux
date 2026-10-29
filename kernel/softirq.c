@@ -9,6 +9,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/ebpfos_ptview.h>
 #include <linux/export.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
@@ -578,6 +579,7 @@ static inline void lockdep_softirq_end(bool in_hardirq) { }
 
 static void handle_softirqs(bool ksirqd)
 {
+	unsigned long ptview_root = ebpfos_ptview_global_enter();
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
 	unsigned long old_flags = current->flags;
 	int max_restart = MAX_SOFTIRQ_RESTART;
@@ -649,6 +651,7 @@ restart:
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end();
 	current_restore_flags(old_flags, PF_MEMALLOC);
+	ebpfos_ptview_global_exit(ptview_root);
 }
 
 asmlinkage __visible void __softirq_entry __do_softirq(void)
@@ -662,6 +665,7 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 void irq_enter_rcu(void)
 {
 	__irq_enter_raw();
+	ebpfos_ptview_irq_enter();
 
 	/*
 	 * If this is a nested interrupt that hits the exit_to_user_mode_loop
@@ -740,6 +744,7 @@ static inline void __irq_exit_rcu(void)
 		wake_timersd();
 
 	tick_irq_exit();
+	ebpfos_ptview_irq_exit();
 }
 
 /**

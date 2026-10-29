@@ -23,6 +23,9 @@
  * x86 has arch-specific MMU state beyond what lives in mm_struct.
  */
 typedef struct {
+#ifdef CONFIG_EBPFOS_PTVIEW
+	struct ptview_mm *ptview;
+#endif
 	/*
 	 * ctx_id uniquely identifies this mm_struct.  A ctx_id will never
 	 * be reused, and zero is not a valid ctx_id.

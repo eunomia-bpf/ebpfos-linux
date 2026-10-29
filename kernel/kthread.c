@@ -14,6 +14,7 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/kthread.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/cgroup.h>
@@ -1678,9 +1679,16 @@ void kthread_unuse_mm(struct mm_struct *mm)
 	local_irq_disable();
 	tsk->mm = NULL;
 	membarrier_update_current_mm(NULL);
-	mmgrab_lazy_tlb(mm);
-	/* active_mm is still 'mm' */
-	enter_lazy_tlb(mm, tsk);
+	if (ebpfos_ptview_mm(mm)) {
+		/* Restore the global view before the worker accepts another item. */
+		mmgrab_lazy_tlb(&init_mm);
+		tsk->active_mm = &init_mm;
+		switch_mm_irqs_off(mm, &init_mm, tsk);
+		enter_lazy_tlb(&init_mm, tsk);
+	} else {
+		mmgrab_lazy_tlb(mm);
+		enter_lazy_tlb(mm, tsk);
+	}
 	local_irq_enable();
 	task_unlock(tsk);
 

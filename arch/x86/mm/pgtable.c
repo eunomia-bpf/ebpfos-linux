@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/mm.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/gfp.h>
 #include <linux/hugetlb.h>
 #include <asm/pgalloc.h>
@@ -325,6 +326,9 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	pmd_t *u_pmds[MAX_PREALLOCATED_USER_PMDS];
 	pmd_t *pmds[PREALLOCATED_PMDS];
 
+#ifdef CONFIG_EBPFOS_PTVIEW
+	mm->context.ptview = NULL;
+#endif
 	pgd = _pgd_alloc(mm);
 
 	if (pgd == NULL)
@@ -375,6 +379,7 @@ out:
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
+	ebpfos_ptview_mm_free(mm);
 	pgd_mop_up_pmds(mm, pgd);
 	pgd_dtor(pgd);
 	paravirt_pgd_free(mm, pgd);
