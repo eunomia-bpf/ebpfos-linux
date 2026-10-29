@@ -373,7 +373,7 @@ static bool subprog_returns_void(struct bpf_verifier_env *env, int subprog)
 	return btf_type_is_void(type);
 }
 
-static bool subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog)
+bool bpf_subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog)
 {
 	struct btf *btf = env->prog->aux->btf;
 	const struct btf_type *func, *proto;
@@ -383,6 +383,8 @@ static bool subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog)
 		return false;
 	func = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
 	proto = func ? btf_type_by_id(btf, func->type) : NULL;
+	if (env->subprog_info[subprog].native_frame)
+		return env->subprog_info[subprog].native_abi.result_words == 2;
 	return proto && btf_type_is_func_proto(proto) &&
 	       btf_record_return_words(btf, proto->type) == 2;
 }
@@ -11121,7 +11123,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			sub->native_abi.args[0].size, BPF_WRITE);
 		if (err) return err;
 	}
-	env->insn_aux_data[*insn_idx].returns_two_regs = subprog_returns_two_regs(env, subprog);
+	env->insn_aux_data[*insn_idx].returns_two_regs = bpf_subprog_returns_two_regs(env, subprog);
 	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
 	if (!state->active_rcu_locks && !state->active_locks)
 		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
@@ -11172,13 +11174,22 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
 			caller->regs[BPF_REG_0].mem_size = sub->readonly_result_size;
-			caller->regs[BPF_REG_0].mem_stable = true;
+			caller->regs[BPF_REG_0].mem_stable = BPF_MEM_PROGRAM_STABLE;
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
-			if (subprog_returns_two_regs(env, subprog)) {
+			if (bpf_subprog_returns_two_regs(env, subprog)) {
 				mark_reg_unknown(env, caller->regs, BPF_REG_3);
 				caller->regs[BPF_REG_3].subreg_def = DEF_NOT_SUBREG;
+			}
+			for (u32 word = 0; word < 2; word++) {
+				u32 regno = word ? BPF_REG_3 : BPF_REG_0;
+				u32 bytes = sub->readonly_record_result_size[word];
+				if (!bytes) continue;
+				mark_reg_known_zero(env, caller->regs, regno);
+				caller->regs[regno].type = PTR_TO_MEM | MEM_RDONLY;
+				caller->regs[regno].mem_size = bytes;
+				caller->regs[regno].mem_stable = BPF_MEM_KERNEL_STABLE;
 			}
 		}
 
@@ -11532,7 +11543,7 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 	} else {
 		/* return to the caller whatever r0 had in the callee */
 		caller->regs[BPF_REG_0] = *r0;
-		if (subprog_returns_two_regs(env, callee->subprogno)) {
+		if (bpf_subprog_returns_two_regs(env, callee->subprogno)) {
 			err = check_reg_arg(env, BPF_REG_3, SRC_OP);
 			if (err)
 				return err;
@@ -19116,10 +19127,61 @@ enforce_retval:
 	return 0;
 }
 
+static int check_stable_readonly_result(struct bpf_verifier_env *env, u32 regno,
+                                        u32 bytes_required, bool kernel_only)
+{
+ int err;
+		struct bpf_reg_state *result = &cur_regs(env)[regno];
+
+		err = check_reg_arg(env, regno, SRC_OP);
+		if (err)
+			return err;
+		if (kernel_only && result->mem_stable != BPF_MEM_KERNEL_STABLE) {
+			verbose(env, "record pointer result requires permanent native storage\n");
+			return -EACCES;
+		}
+		/* Permanent read-only data and checked results retain their lifetime,
+		 * including through bounded offsets and spills. Ordinary memory
+		 * arguments and helper results acquire no such fact.
+		 */
+		if (result->type == (PTR_TO_MEM | MEM_RDONLY) && result->mem_stable)
+			return check_mem_region_access(env, regno, 0,
+				bytes_required, result->mem_size, false);
+		if (result->type == PTR_TO_BTF_ID && result->mem_stable) {
+			const struct btf_type *type;
+			u32 bytes;
+
+			type = btf_type_skip_modifiers(result->btf, result->btf_id, NULL);
+			if (!type || IS_ERR(btf_resolve_size(result->btf, type, &bytes)) ||
+			    !btf_type_is_scalar_region(result->btf, result->btf_id, 0, bytes)) {
+				verbose(env, "read-only result overlaps typed or managed fields\n");
+				return -EACCES;
+			}
+			return check_mem_region_access(env, regno, 0,
+				bytes_required, bytes, false);
+		}
+		/* Array-map storage is retained for the program's lifetime. Do not
+		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
+		 */
+		if (result->type != PTR_TO_MAP_VALUE ||
+		    result->map_ptr->map_type != BPF_MAP_TYPE_ARRAY ||
+		    !IS_ERR_OR_NULL(result->map_ptr->record) ||
+		    result->ref_obj_id) {
+			verbose(env, "read-only result requires stable unmanaged array storage\n");
+			return -EACCES;
+		}
+		err = check_map_access_type(env, regno, 0,
+			bytes_required, BPF_READ);
+		if (err)
+			return err;
+		return check_map_access(env, regno, 0,
+			bytes_required, false, ACCESS_DIRECT);
+}
+
 static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 {
 	struct bpf_func_state *frame = cur_func(env);
-	unsigned int i, count = subprog_returns_two_regs(env, frame->subprogno) ? 2 : 1;
+	unsigned int i, count = bpf_subprog_returns_two_regs(env, frame->subprogno) ? 2 : 1;
 	int err;
 
 	const struct bpf_subprog_info *sub = &env->subprog_info[frame->subprogno];
@@ -19149,49 +19211,8 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
-	if (sub->readonly_result_size) {
-		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-
-		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
-		if (err)
-			return err;
-		/* Permanent read-only data and checked results retain their lifetime,
-		 * including through bounded offsets and spills. Ordinary memory
-		 * arguments and helper results acquire no such fact.
-		 */
-		if (result->type == (PTR_TO_MEM | MEM_RDONLY) && result->mem_stable)
-			return check_mem_region_access(env, BPF_REG_0, 0,
-				sub->readonly_result_size, result->mem_size, false);
-		if (result->type == PTR_TO_BTF_ID && result->mem_stable) {
-			const struct btf_type *type;
-			u32 bytes;
-
-			type = btf_type_skip_modifiers(result->btf, result->btf_id, NULL);
-			if (!type || IS_ERR(btf_resolve_size(result->btf, type, &bytes)) ||
-			    !btf_type_is_scalar_region(result->btf, result->btf_id, 0, bytes)) {
-				verbose(env, "read-only result overlaps typed or managed fields\n");
-				return -EACCES;
-			}
-			return check_mem_region_access(env, BPF_REG_0, 0,
-				sub->readonly_result_size, bytes, false);
-		}
-		/* Array-map storage is retained for the program's lifetime. Do not
-		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
-		 */
-		if (result->type != PTR_TO_MAP_VALUE ||
-		    result->map_ptr->map_type != BPF_MAP_TYPE_ARRAY ||
-		    !IS_ERR_OR_NULL(result->map_ptr->record) ||
-		    result->ref_obj_id) {
-			verbose(env, "read-only result requires stable unmanaged array storage\n");
-			return -EACCES;
-		}
-		err = check_map_access_type(env, BPF_REG_0, 0,
-			sub->readonly_result_size, BPF_READ);
-		if (err)
-			return err;
-		return check_map_access(env, BPF_REG_0, 0,
-			sub->readonly_result_size, false, ACCESS_DIRECT);
-	}
+	if (sub->readonly_result_size)
+		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size, false);
 	if (subprog_returns_void(env, frame->subprogno))
 		return 0;
 	for (i = 0; i < count; i++) {
@@ -19201,6 +19222,11 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = check_reg_arg(env, regno, SRC_OP);
 		if (err)
 			return err;
+		if (sub->readonly_record_result_size[i]) {
+			err = check_stable_readonly_result(env, regno, sub->readonly_record_result_size[i], true);
+			if (err) return err;
+			continue;
+		}
 		if (reg->type != SCALAR_VALUE) {
 			verbose(env, "At subprogram exit R%u is not a scalar result (%s)\n",
 				regno, reg_type_str(env, reg->type));
@@ -20240,7 +20266,7 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 
 		if (!IS_ERR(btf_resolve_size(btf, t, &bytes)) &&
 		    bytes <= (unsigned long)__end_rodata - addr)
-			aux->btf_var.mem_stable = true;
+			aux->btf_var.mem_stable = BPF_MEM_KERNEL_STABLE;
 	}
 	if (percpu) {
 		aux->btf_var.reg_type = PTR_TO_BTF_ID | MEM_PERCPU;
@@ -21908,7 +21934,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			 * same result register. Two complete integer words use the
 			 * entry service's checked RAX/RDX result operation; direct
 			 * trampolines reject that form. Trusted pointer results use RAX
-			 * without a verifier safety claim; other aggregates still refuse.
+			 * without a verifier safety claim. Component records retain their
+			 * native value layout; global exit contracts check pointer words.
 			 * Existing tracing/error-injection policy is unchanged.
 			 */
 			if (tgt_prog || prog->sleepable ||
@@ -21920,6 +21947,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    !cell_native_result2_type(btf, t->type) &&
+			    !(btf_type_is_struct(result) && btf_native_value_storage(btf, t->type)) &&
 			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||
 			     !result->size || result->size > 8)) {
 				bpf_log(log, "replacement requires a scalar or void result\n");

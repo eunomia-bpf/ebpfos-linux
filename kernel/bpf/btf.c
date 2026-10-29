@@ -8261,11 +8261,49 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			return PTR_ERR(tag);
 		}
 	}
+	/* A record pointer result has the same checked stable-storage contract
+	 * as a scalar byte-pointer result, independently for each occupied word.
+	 */
+	if (sub->native_frame && !sub->native_abi.result_buffer) {
+		const struct btf_type *proto = btf_type_by_id(btf, fn_t->type);
+		const struct btf_type *record = btf_type_skip_modifiers(btf, proto->type, NULL);
+		u32 physical = 0;
+
+		if (btf_type_is_struct(record) && !btf_native_scalar_storage(btf, proto->type, 0)) {
+			for (u32 word = 0; word < 2; word++) {
+				const char *tag;
+				struct bpf_subprog_arg_info pointer_arg;
+				const struct btf_type *pointer_type, *element;
+				char prefix[32];
+				u32 pointer, bytes;
+				int err;
+
+				if (!(sub->native_abi.result_word_mask & BIT(word))) continue;
+				err = btf_native_pointer_word(btf, proto->type, word * 8, &pointer);
+				if (err) return err;
+				snprintf(prefix, sizeof(prefix), "ret:record-ro:%u:", word);
+				tag = btf_find_decl_tag_value(btf, fn_t, -1, prefix);
+				if (!pointer) {
+					if (!IS_ERR(tag) || PTR_ERR(tag) != -ENOENT) return -EINVAL;
+					physical++;continue;
+				}
+				if (IS_ERR(tag) || !is_global || kstrtou32(tag, 10, &bytes) ||
+				    !bytes || bytes >= BPF_MAX_VAR_SIZ) return -EINVAL;
+				err = btf_native_pointer_arg(btf, pointer, &pointer_arg, log);
+				pointer_type = btf_type_skip_modifiers(btf, pointer, NULL);
+				element = btf_type_skip_modifiers(btf, pointer_type->type, NULL);
+				if (err || pointer_arg.arg_type != (ARG_PTR_TO_MEM | MEM_RDONLY) ||
+				    !btf_type_is_int(element) || element->size != 1) return -EINVAL;
+				sub->readonly_record_result_size[physical++] = bytes;
+			}
+		}
+	}
 	/* check that function is void or returns int, exception cb also requires this */
 	t = btf_type_by_id(btf, t->type);
 	while (btf_type_is_modifier(t))
 		t = btf_type_by_id(btf, t->type);
-	if (!sub->readonly_result_size && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
+	if (!sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
+	    !sub->readonly_record_result_size[1] && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||
 	       (sub->native_frame && sub->native_abi.result_buffer &&

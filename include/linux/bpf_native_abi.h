@@ -11,7 +11,7 @@ struct bpf_native_arg {
 };
 struct bpf_native_abi {
  u32 stack_size;
- u8 nr_args;
+ u8 nr_args, result_words, result_word_mask;
  bool result_buffer;
  struct bpf_native_arg args[MAX_BPF_FUNC_ARGS + 1];
 };

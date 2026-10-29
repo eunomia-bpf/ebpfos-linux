@@ -172,6 +172,9 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
     .type_id = proto->type, .size = size, .reg = 0, .words = 1, .result_buffer = true,
    };
    next_reg = 1;
+  } else {
+   abi->result_words = words;
+   abi->result_word_mask = native_word_mask(btf, proto->type);
   }
  }
  params = btf_params(proto);

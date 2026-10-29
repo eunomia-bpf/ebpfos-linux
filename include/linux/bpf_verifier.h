@@ -36,6 +36,8 @@ enum bpf_iter_state {
 	BPF_ITER_STATE_DRAINED,
 };
 
+enum bpf_mem_stability { BPF_MEM_UNSTABLE, BPF_MEM_PROGRAM_STABLE, BPF_MEM_KERNEL_STABLE };
+
 struct bpf_reg_state {
 	/* Ordering of fields matters.  See states_equal() */
 	enum bpf_reg_type type;
@@ -117,7 +119,7 @@ struct bpf_reg_state {
 	 * with the same id as us.
 	 */
 	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
-	bool mem_stable; /* read-only memory with proven stable storage */
+	u8 mem_stable; /* enum bpf_mem_stability */
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
@@ -629,7 +631,7 @@ struct bpf_insn_aux_data {
 				};
 				u32 mem_size;	/* mem_size for non-struct typed var */
 			};
-			bool mem_stable;
+			u8 mem_stable;
 		} btf_var;
 		/* if instruction is a call to bpf_loop this field tracks
 		 * the state of the relevant registers to make decision about inlining
@@ -784,6 +786,7 @@ struct bpf_subprog_info {
 	u32 postorder_start; /* The idx to the env->cfg.insn_postorder */
 	u32 exit_idx; /* Index of one of the BPF_EXIT instructions in this subprogram */
 	u32 readonly_result_size; /* independently checked stable byte buffer */
+	u32 readonly_record_result_size[2]; /* physical result registers */
 	u16 stack_depth; /* max. stack depth used by this function */
 	u16 stack_extra;
 	/* offsets in range [stack_depth .. fastcall_stack_off)
@@ -1406,6 +1409,7 @@ void print_insn_state(struct bpf_verifier_env *env, const struct bpf_verifier_st
 u32 bpf_vlog_alignment(u32 pos);
 
 struct bpf_subprog_info *bpf_find_containing_subprog(struct bpf_verifier_env *env, int off);
+bool bpf_subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog);
 int bpf_jmp_offset(struct bpf_insn *insn);
 struct bpf_iarray *bpf_insn_successors(struct bpf_verifier_env *env, u32 idx);
 void bpf_fmt_stack_mask(char *buf, ssize_t buf_sz, const unsigned long *stack_mask);

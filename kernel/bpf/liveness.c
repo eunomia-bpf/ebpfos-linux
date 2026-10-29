@@ -2171,10 +2171,16 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 			def = 0;
 			use = 0;
 			break;
-		case BPF_EXIT:
+		case BPF_EXIT: {
+			struct bpf_subprog_info *sub = bpf_find_containing_subprog(env,
+				insn - env->prog->insnsi);
+
 			def = 0;
 			use = r0;
+			if (sub && bpf_subprog_returns_two_regs(env, sub - env->subprog_info))
+				use |= BIT(BPF_REG_3);
 			break;
+		}
 		case BPF_CALL:
 			def = ALL_CALLER_SAVED_REGS;
 			use |= BIT(BPF_REG_ARG_SP);
