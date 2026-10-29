@@ -8100,7 +8100,8 @@ static struct bpf_cand_cache *
 bpf_core_find_cands(struct bpf_core_ctx *ctx, u32 local_type_id);
 
 static int btf_get_ptr_to_btf_id(struct bpf_verifier_log *log, int arg_idx,
-				 const struct btf *btf, const struct btf_type *t)
+				 const struct btf *btf, const struct btf_type *t,
+				 struct btf **kernel_btf)
 {
 	struct bpf_cand_cache *cc;
 	struct bpf_core_ctx ctx = {
@@ -8134,13 +8135,17 @@ static int btf_get_ptr_to_btf_id(struct bpf_verifier_log *log, int arg_idx,
 		err = cc->cnt == 0 ? -ENOENT : -ESRCH;
 		goto cand_cache_unlock;
 	}
-	if (btf_is_module(cc->cands[0].btf)) {
+	if (!kernel_btf && btf_is_module(cc->cands[0].btf)) {
 		bpf_log(log, "arg#%d reference type('%s %s') points to kernel module type (unsupported)\n",
 			arg_idx, btf_type_str(t), __btf_name_by_offset(btf, t->name_off));
 		err = -EOPNOTSUPP;
 		goto cand_cache_unlock;
 	}
 	kern_type_id = cc->cands[0].id;
+	if (kernel_btf) {
+		*kernel_btf = (struct btf *)cc->cands[0].btf;
+		btf_get(*kernel_btf);
+	}
 
 cand_cache_unlock:
 	mutex_unlock(&cand_cache_mutex);
@@ -8148,6 +8153,38 @@ cand_cache_unlock:
 		return err;
 
 	return kern_type_id;
+}
+
+/* Direct global arguments retain the matched BTF object, not a vmlinux ID.
+ * The verifier owns its BTF/module reference. Link-time contract readback may
+ * only borrow a module namespace already retained by the loaded program.
+ */
+static int btf_global_arg_type(struct bpf_prog *prog, struct bpf_verifier_env *env,
+                              struct bpf_verifier_log *log, int index,
+                              const struct btf *btf, const struct btf_type *type,
+                              struct bpf_subprog_arg_info *arg)
+{
+ struct btf *kernel_btf;
+ int id, error = 0;
+ u32 i;
+
+ id = btf_get_ptr_to_btf_id(log, index, btf, type, &kernel_btf);
+ if (id < 0) return id;
+ if (!btf_is_module(kernel_btf)) {
+  /* Built-in BTF is permanent and needs no used-module array slot. */
+  btf_put(kernel_btf);
+ } else if (env) {
+  error = bpf_verifier_add_used_btf(env, kernel_btf);
+ } else {
+  for (i = 0; i < prog->aux->used_btf_cnt; i++)
+   if (prog->aux->used_btfs[i].btf == kernel_btf) break;
+  if (i == prog->aux->used_btf_cnt) error = -ENXIO;
+  btf_put(kernel_btf);
+ }
+ if (error) return error;
+ arg->btf = kernel_btf;
+ arg->btf_id = id;
+ return id;
 }
 
 enum btf_arg_tag {
@@ -8518,11 +8555,11 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EINVAL;
 			}
 
-			kern_type_id = btf_get_ptr_to_btf_id(log, i, btf, t);
+			kern_type_id = btf_global_arg_type(prog, env, log, i, btf, t, &sub->args[i]);
 			if (kern_type_id < 0)
 				return kern_type_id;
 			if (has_btf_offset) {
-				ref_t = btf_type_by_id(bpf_get_btf_vmlinux(), kern_type_id);
+				ref_t = btf_type_by_id(sub->args[i].btf, kern_type_id);
 				if (!btf_type_is_struct(ref_t) || btf_offset >= ref_t->size)
 					return -EINVAL;
 			}
@@ -8534,7 +8571,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			continue;
 		}
 		if (tags & ARG_TAG_UNTRUSTED) {
-			struct btf *vmlinux_btf;
+			struct btf *kernel_btf;
 			int kern_type_id;
 
 			if (tags & ~(ARG_TAG_UNTRUSTED | ARG_TAG_NONNULL)) {
@@ -8555,14 +8592,14 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				continue;
 			}
 
-			kern_type_id = btf_get_ptr_to_btf_id(log, i, btf, t);
+			kern_type_id = btf_global_arg_type(prog, env, log, i, btf, t, &sub->args[i]);
 			if (kern_type_id < 0)
 				return kern_type_id;
 
-			vmlinux_btf = bpf_get_btf_vmlinux();
-			ref_t = btf_type_by_id(vmlinux_btf, kern_type_id);
+			kernel_btf = sub->args[i].btf;
+			ref_t = btf_type_by_id(kernel_btf, kern_type_id);
 			if (!btf_type_is_struct(ref_t)) {
-				tname = __btf_name_by_offset(vmlinux_btf, t->name_off);
+				tname = __btf_name_by_offset(kernel_btf, ref_t->name_off);
 				bpf_log(log, "arg#%d has type %s '%s', but only struct or primitive types are allowed\n",
 					i, btf_type_str(ref_t), tname);
 				return -EINVAL;
@@ -8670,7 +8707,7 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
  if (flags & MEM_RCU) return -EOPNOTSUPP;
  t = btf_type_skip_modifiers(btf, p->type, NULL);
  if (btf_type_is_struct(t)) {
-  kernel_id = btf_get_ptr_to_btf_id(log, -1, btf, p);
+  kernel_id = btf_get_ptr_to_btf_id(log, -1, btf, p, NULL);
   if (kernel_id < 0) return kernel_id;
   arg->arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | flags;
   arg->btf_id = kernel_id;
@@ -8711,7 +8748,7 @@ bool btf_native_record_entry_contract(struct btf *btf, u32 id)
  */
 int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 {
-	struct bpf_subprog_info info = {};
+	struct bpf_subprog_info *info;
 	struct bpf_verifier_log log = {};
 	int error;
 	u32 i;
@@ -8720,24 +8757,29 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 	if (!prog->aux->func_info || !prog->aux->func_info_aux ||
 	    subprog >= prog->aux->func_info_cnt)
 		return -EINVAL;
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
 	if (prog->aux->func && subprog < prog->aux->func_cnt &&
 	    prog->aux->func[subprog]->aux->native_frame) {
 		const struct btf_type *fn = btf_type_by_id(prog->aux->btf, prog->aux->func_info[subprog].type_id);
 
-		info.native_frame = true;
+		info->native_frame = true;
 		error = bpf_native_abi_plan(prog->aux->btf,
-			btf_type_by_id(prog->aux->btf, fn->type), &info.native_abi);
+			btf_type_by_id(prog->aux->btf, fn->type), &info->native_abi);
 		if (error)
-			return error;
+			goto out;
 	}
-	error = btf_prepare_func_arg_info(prog, subprog, &info, &log, NULL);
+	error = btf_prepare_func_arg_info(prog, subprog, info, &log, NULL);
 	if (error)
-		return error;
-	for (i = 0; i < info.arg_cnt; i++)
-		if ((info.args[i].arg_type & PTR_MAYBE_NULL) ||
-		    ((info.args[i].arg_type & PTR_UNTRUSTED) && !info.args[i].nonnull))
+		goto out;
+	for (i = 0; i < info->arg_cnt; i++)
+		if ((info->args[i].arg_type & PTR_MAYBE_NULL) ||
+		    ((info->args[i].arg_type & PTR_UNTRUSTED) && !info->args[i].nonnull))
 			*mask |= BIT_ULL(i);
-	return 0;
+out:
+	kfree(info);
+	return error;
 }
 
 static void btf_type_show(const struct btf *btf, u32 type_id, void *obj,

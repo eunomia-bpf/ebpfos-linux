@@ -9205,8 +9205,10 @@ static int check_reg_type_with_state(struct bpf_verifier_env *env,
 			  struct bpf_reg_state *reg, u32 regno,
 			  enum bpf_arg_type arg_type,
 			  const u32 *arg_btf_id,
-			  struct bpf_call_arg_meta *meta, bool global)
+			  struct bpf_call_arg_meta *meta, bool global,
+			  const struct btf *arg_btf)
 {
+	const struct btf *expected_btf = arg_btf ?: btf_vmlinux;
 	enum bpf_reg_type expected, type = reg->type;
 	enum bpf_reg_type btf_type = reg->type;
 	const struct bpf_reg_types *compatible;
@@ -9329,11 +9331,11 @@ found:
 				return err;
 
 			if (!btf_struct_ids_match(&env->log, reg->btf, reg->btf_id,
-						  reg->var_off.value, btf_vmlinux, *arg_btf_id,
+						  reg->var_off.value, expected_btf, *arg_btf_id,
 						  strict_type_match)) {
 				verbose(env, "R%d is of type %s but %s is expected\n",
 					regno, btf_type_name(reg->btf, reg->btf_id),
-					btf_type_name(btf_vmlinux, *arg_btf_id));
+					btf_type_name(expected_btf, *arg_btf_id));
 				return -EACCES;
 			}
 		}
@@ -9372,7 +9374,7 @@ static int check_reg_type(struct bpf_verifier_env *env, u32 regno,
 			  struct bpf_call_arg_meta *meta, bool global)
 {
 	return check_reg_type_with_state(env, reg_state(env, regno), regno,
-					 arg_type, arg_btf_id, meta, global);
+					 arg_type, arg_btf_id, meta, global, NULL);
 }
 
 static struct btf_field *
@@ -10909,7 +10911,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 					    !tnum_is_const(reg->var_off) ||
 					    reg->var_off.value ||
 					    !btf_struct_ids_match(log, reg->btf, reg->btf_id, 0,
-							  btf_vmlinux, arg->btf_id, true)) {
+							  arg->btf ?: btf_vmlinux, arg->btf_id, true)) {
 						bpf_log(log, "arg#%d untrusted nonnull requires the matching BTF pointee at offset zero\n", i);
 						return -EINVAL;
 					}
@@ -11015,7 +11017,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				checked = &object;
 			}
 			err = check_reg_type_with_state(env, checked, regno, arg->arg_type,
-					     &arg->btf_id, &meta, true);
+					     &arg->btf_id, &meta, true, arg->btf);
 			err = err ?: check_func_arg_reg_off(env, checked, regno, arg->arg_type);
 			if (err)
 				return err;
@@ -20365,6 +20367,12 @@ ret_put:
 	return ret;
 }
 
+/* Consumes the caller's BTF reference, including on failure. */
+int bpf_verifier_add_used_btf(struct bpf_verifier_env *env, struct btf *btf)
+{
+	return __add_used_btf(env, btf);
+}
+
 /* replace pseudo btf_id with kernel symbol address */
 static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 				 struct bpf_insn *insn,
@@ -21440,7 +21448,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				if (arg->arg_type & PTR_TRUSTED)
 					reg->type |= PTR_TRUSTED;
 				mark_reg_known_zero(env, regs, i);
-				reg->btf = bpf_get_btf_vmlinux(); /* can't fail at this point */
+				reg->btf = arg->btf ?: bpf_get_btf_vmlinux();
 				reg->btf_id = arg->btf_id;
 				if (arg->has_btf_offset)
 					___mark_reg_known(reg, arg->btf_offset);

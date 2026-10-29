@@ -750,8 +750,13 @@ static inline bool bpf_verifier_log_needed(const struct bpf_verifier_log *log)
 
 #define BPF_MAX_SUBPROGS 2048
 
+struct bpf_verifier_env;
+int bpf_verifier_add_used_btf(struct bpf_verifier_env *env, struct btf *btf);
+
 struct bpf_subprog_arg_info {
 	enum bpf_arg_type arg_type;
+	/* Namespace for btf_id; held by the program's used-BTF references. */
+	struct btf *btf;
 	/* One-based physical register containing this buffer's byte count. */
 	u8 mem_size_reg;
 	/* One-based source argument index, before native ABI placement. */
