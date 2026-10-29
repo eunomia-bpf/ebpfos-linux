@@ -22077,7 +22077,8 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	} else if ((prog->expected_attach_type == BPF_TRACE_FEXIT ||
 		   prog->expected_attach_type == BPF_TRACE_FSESSION ||
 		   prog->expected_attach_type == BPF_MODIFY_RETURN ||
-		   prog->expected_attach_type == BPF_TRACE_REPLACE) &&
+		   (prog->expected_attach_type == BPF_TRACE_REPLACE &&
+		    !prog->aux->trusted_kernel)) &&
 		   btf_id_set_contains(&noreturn_deny, btf_id)) {
 		verbose(env, "Attaching fexit/fsession/fmod_ret to __noreturn function '%s' is rejected.\n",
 			tgt_info.tgt_name);
