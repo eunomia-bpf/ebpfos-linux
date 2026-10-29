@@ -9,7 +9,7 @@
 #include "pointer_tag.generated.h"
 
 __bpf_kfunc_start_defs();
-__bpf_kfunc void *bpf_ebpfos_kop_ptr_tag_parts(void *pointer, u64 flags,
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) void *bpf_ebpfos_kop_ptr_tag_parts(void *pointer, u64 flags,
 					    u64 *flags_out)
 {
 	return NULL; /* Only the verified proof or its bound JIT sequence executes. */

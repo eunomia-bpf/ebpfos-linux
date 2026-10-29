@@ -20,7 +20,7 @@
 
 __bpf_kfunc_start_defs();
 #define LOCKED_DECL(op, upper, width, size, type) \
-__bpf_kfunc u32 bpf_ebpfos_kop_locked_##op##width(type *ptr, u32 mask) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_locked_##op##width(type *ptr, u32 mask) { return 0; }
 LOCKED_BITS_ROWS(LOCKED_DECL)
 #undef LOCKED_DECL
 __bpf_kfunc_end_defs();

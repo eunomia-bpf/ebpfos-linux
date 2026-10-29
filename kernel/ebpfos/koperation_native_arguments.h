@@ -11,7 +11,7 @@
 __bpf_kfunc_start_defs();
 #define EBPFOS_NATIVE_ARGUMENT_DECL(name, upper, value) \
 __bpf_kfunc u64 bpf_ebpfos_x86_##name(void) { return (u64)(value); } \
-__bpf_kfunc u64 bpf_ebpfos_kop_##name(void) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_##name(void) { return 0; }
 EBPFOS_NATIVE_ARGUMENT_ROWS(EBPFOS_NATIVE_ARGUMENT_DECL)
 #undef EBPFOS_NATIVE_ARGUMENT_DECL
 __bpf_kfunc_end_defs();

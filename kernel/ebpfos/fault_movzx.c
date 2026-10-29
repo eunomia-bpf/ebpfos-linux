@@ -25,7 +25,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_fault_##name(u##width *source, u32 *status) \
               : "+r"(value), "+r"(fault) : "m"(*source) : "memory"); \
  *status = fault; return value; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_fault_##name(u64 ignored, void *source, u32 *status) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_fault_##name(u64 ignored, void *source, u32 *status) \
 { return 0; /* Only checked proof or instruction emission executes. */ }
 MOVZX_ROWS(MOVZX_FUNCTIONS)
 __bpf_kfunc_end_defs();

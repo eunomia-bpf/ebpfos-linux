@@ -22,7 +22,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdmsr(u32 index, u32 *status)
  *status = error;
  return ((u64)high << 32) | low;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdmsr(u32 index, u32 *status)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdmsr(u32 index, u32 *status)
 {
  return 0; /* Only checked proof or instruction emission executes. */
 }
@@ -38,7 +38,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdmsr_unchecked(u32 index, u32 *status)
  *status = fault;
  return ((u64)high << 32) | low;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdmsr_unchecked(u32 index, u32 *status)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdmsr_unchecked(u32 index, u32 *status)
 {
  return 0; /* Only checked proof or instruction emission executes. */
 }

@@ -636,7 +636,7 @@ static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
 			      const u8 *final_ip, u8 *image, u8 *rw_image,
-			      unsigned int *excnt)
+			      unsigned int *excnt, struct jit_context *ctx)
 {
 	const struct bpf_kop *kop;
 	u8 scratch[BPF_MAX_INSN_SIZE];
@@ -695,6 +695,31 @@ static int emit_kop_desc_call(u8 **pprog,
 	}
 	if (emit)
 		memcpy(prog, scratch, off);
+	if (ctx->aot && ctx->aot->final) {
+		for (unsigned int i = 0; i < kop->num_x86_relocs; i++) {
+			struct bpf_kop_reloc reloc;
+			u32 type;
+
+			if (!kop->x86_reloc)
+				return -EINVAL;
+			ret = kop->x86_reloc(payload, i, &reloc);
+			if (ret)
+				return ret;
+			if (reloc.offset > off || reloc.size > off - reloc.offset)
+				return -EINVAL;
+			if (reloc.size == 8)
+				type = R_X86_64_64;
+			else if (reloc.size == 4)
+				type = reloc.is_signed ? R_X86_64_32S : R_X86_64_32;
+			else
+				return -EOPNOTSUPP;
+			ret = aot_record(ctx->aot, final_ip - ctx->aot->image + reloc.offset,
+					 type, reloc.symbol, reloc.addend);
+			if (ret)
+				return ret;
+			memset(*pprog + reloc.offset, 0, reloc.size);
+		}
+	}
 
 	*pprog = prog + off;
 	return 0;
@@ -2815,12 +2840,10 @@ populate_extable:
 
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
-				if (ctx->aot)
-					return -EOPNOTSUPP;
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
 							 image ? ip : NULL,
-							 image, rw_image, &excnt);
+							 image, rw_image, &excnt, ctx);
 				if (err)
 					return err;
 				break;

@@ -30,7 +30,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_buffer_fault_load##bits##tail( \
               : "+r"(value), "+r"(fault) : "m"(*selected) : "memory"); \
  *status = fault; return value; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_buffer_fault_load##bits##tail( \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_buffer_fault_load##bits##tail( \
  const void *source, u64 size, u64 offset, u32 *status) \
 { return 0; }
 #define SERVICES(bits, suffix, part, bytes) \
@@ -47,7 +47,7 @@ __bpf_kfunc u64 bpf_ebpfos_kop_buffer_fault_load##bits##tail( \
   asm volatile("mov" #suffix " %" #part "1,%0" : "=m"(*selected) : "r"(value) : "memory"); \
   return 0; \
  } \
- __bpf_kfunc u64 bpf_ebpfos_kop_buffer_store##bits( \
+ __bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_buffer_store##bits( \
  void *destination, u64 size, u64 offset, u64 value) { return 0; }
 WIDTHS(SERVICES)
 #undef SERVICES

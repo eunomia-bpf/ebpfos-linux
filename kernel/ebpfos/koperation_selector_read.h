@@ -10,7 +10,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_read_selector_##segment(void) \
 	asm volatile("movl %%" #segment ", %0" : "=r" (value)); \
 	return value; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_read_selector_##segment(void) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_read_selector_##segment(void) \
 { \
 	return 0; /* Only the checked proof or bound instruction executes. */ \
 }

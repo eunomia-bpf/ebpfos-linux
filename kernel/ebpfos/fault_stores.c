@@ -26,7 +26,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_fault_##family##width##_##kind(u64 value, u##widt
 #define STORE_FUNCTIONS(family, stem, width, opcode, part) \
  STORE_SERVICE(family, stem, width, opcode, part, 1) \
  STORE_SERVICE(family, stem, width, opcode, part, 3) \
- __bpf_kfunc u64 bpf_ebpfos_kop_fault_##family##width(u64 value, void *destination, u32 *status) \
+ __bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_fault_##family##width(u64 value, void *destination, u32 *status) \
  { return 0; /* Only the checked proof or bound instruction emission runs. */ }
 STORE_ROWS(STORE_FUNCTIONS)
 __bpf_kfunc_end_defs();

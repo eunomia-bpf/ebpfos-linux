@@ -1073,6 +1073,14 @@ struct bpf_kop_exception {
 	u32 data;
 };
 
+struct bpf_kop_reloc {
+	u16 offset;
+	u8 size;
+	bool is_signed;
+	const char *symbol;
+	s64 addend;
+};
+
 struct bpf_kop {
 	struct module *owner; /* NULL for built-in/vmlinux descriptors */
 	/* Decorate an adjacent verifier-visible MAY_GOTO / direct BPF CALL.
@@ -1118,6 +1126,10 @@ struct bpf_kop {
 	int (*emit_x86)(u8 *image, u32 *off, bool emit,
 			u64 payload, const struct bpf_prog *prog,
 			const u8 *final_ip);
+	/* Link-time symbolic operands of the same native instruction recipe. */
+	u16 num_x86_relocs;
+	int (*x86_reloc)(u64 payload, unsigned int index,
+			 struct bpf_kop_reloc *reloc);
 	int (*emit_arm64)(u32 *image, int *idx, bool emit,
 			  u64 payload, const struct bpf_prog *prog,
 			  const u32 *final_ip);

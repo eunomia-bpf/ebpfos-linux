@@ -12,7 +12,7 @@
 #if defined(CONFIG_X86_64) && !defined(CONFIG_BUG) && !defined(CONFIG_CFI) && \
     !defined(CONFIG_X86_FRED)
 __bpf_kfunc_start_defs();
-__bpf_kfunc void bpf_ebpfos_kop_ud2_terminal(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) void bpf_ebpfos_kop_ud2_terminal(void)
 {
 	/* Only the checked proof or exact instruction emission executes. */
 }

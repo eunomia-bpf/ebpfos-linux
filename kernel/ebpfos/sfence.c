@@ -13,7 +13,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_sfence(void)
 	asm volatile("sfence" : : : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_sfence(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_sfence(void)
 {
 	return 0; /* Only the checked proof or bound instruction emission runs. */
 }

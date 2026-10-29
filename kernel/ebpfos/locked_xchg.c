@@ -19,7 +19,7 @@
 
 __bpf_kfunc_start_defs();
 #define XCHG_DECL(width, size, type) \
-__bpf_kfunc u32 bpf_ebpfos_kop_locked_xchg##width(type *ptr, u32 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_locked_xchg##width(type *ptr, u32 value) { return 0; }
 XCHG_ROWS(XCHG_DECL)
 #undef XCHG_DECL
 __bpf_kfunc_end_defs();

@@ -13,7 +13,7 @@
 
 __bpf_kfunc_start_defs();
 #define EBPFOS_LOCAL_BITS_DECL(op, upper, width, span, alu, type, mask_type) \
-__bpf_kfunc u32 bpf_ebpfos_kop_local_##op##width(type *ptr, mask_type mask) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_local_##op##width(type *ptr, mask_type mask) \
 { return 0; /* Only the proof or bound single memory instruction executes. */ }
 EBPFOS_LOCAL_BITS_ROWS(EBPFOS_LOCAL_BITS_DECL)
 #undef EBPFOS_LOCAL_BITS_DECL

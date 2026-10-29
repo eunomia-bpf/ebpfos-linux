@@ -6,7 +6,7 @@
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc u64 bpf_ebpfos_x86_native_result2(u64 value, u64 first) { return 0; }
-__bpf_kfunc u64 bpf_ebpfos_kop_native_result2(u64 value, u64 first) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_native_result2(u64 value, u64 first) { return 0; }
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(ebpfos_kprog_native_result2_ids)

@@ -8,7 +8,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_write_cr##number(u64 value) \
  asm volatile("mov %0,%%cr" #number : : "r"((unsigned long)value) : "memory"); \
  return 0; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_write_cr##number(u64 value) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_write_cr##number(u64 value) \
 { return 0; /* Only the typed proof or bound instruction executes. */ }
 EBPFOS_CONTROL_WRITE(0)
 EBPFOS_CONTROL_WRITE(4)

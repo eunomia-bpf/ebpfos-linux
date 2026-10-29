@@ -26,7 +26,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_buffer_stosb(
               : "+D"(selected), "+c"(count) : "a"(value) : "memory");
  return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_buffer_stosb(void *destination, u64 size,
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_buffer_stosb(void *destination, u64 size,
                                          u64 offset, u64 count, u64 value)
 {
  return 0; /* The checked proof or bound instruction emission runs. */

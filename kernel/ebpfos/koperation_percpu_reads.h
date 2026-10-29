@@ -13,10 +13,10 @@
 
 __bpf_kfunc_start_defs();
 #define EBPFOS_PERCPU_READ_DECL(width, size, opcode, second, wide) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_read##width(void *template) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:16"))) u64 bpf_ebpfos_kop_percpu_read##width(void *template) { return 0; }
 EBPFOS_PERCPU_READ_ROWS(EBPFOS_PERCPU_READ_DECL)
 #define AREA_READ_DECL(width, size, opcode, second, wide) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_read##width(void *template) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:24"))) u64 bpf_ebpfos_kop_percpu_area_read##width(void *template) { return 0; }
 EBPFOS_PERCPU_READ_ROWS(AREA_READ_DECL)
 #undef AREA_READ_DECL
 #undef EBPFOS_PERCPU_READ_DECL

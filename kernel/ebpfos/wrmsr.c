@@ -20,7 +20,7 @@ __bpf_kfunc u32 bpf_ebpfos_x86_wrmsr(u32 index, u64 value)
               : "=r"(error) : "c"(index), "a"((u32)value), "d"((u32)(value >> 32)));
  return error;
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_wrmsr(u32 index, u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_wrmsr(u32 index, u64 value)
 {
  return 0; /* Only checked proof or instruction emission executes. */
 }
@@ -33,7 +33,7 @@ __bpf_kfunc u32 bpf_ebpfos_x86_wrmsr_unchecked(u32 index, u64 value)
               : "memory");
  return fault;
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_wrmsr_unchecked(u32 index, u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_wrmsr_unchecked(u32 index, u64 value)
 {
  return 0; /* Private scalar fault status; never a source error register. */
 }

@@ -8,7 +8,7 @@
 #include "koperation_irq_restore_if.generated.h"
 
 __bpf_kfunc_start_defs();
-__bpf_kfunc void bpf_ebpfos_kop_irq_restore_if(unsigned long *flags)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) void bpf_ebpfos_kop_irq_restore_if(unsigned long *flags)
 {
 	/* Only the stock IRQ-token proof or bound instruction emission runs. */
 }

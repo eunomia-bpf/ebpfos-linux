@@ -8,7 +8,7 @@
 #include <asm/extable_fixup_types.h>
 
 __bpf_kfunc_start_defs();
-__bpf_kfunc void bpf_ebpfos_kop_fault_call(u64 carrier)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) void bpf_ebpfos_kop_fault_call(u64 carrier)
 {
 	/* Non-callable descriptor; only its proof and adjacent real CALL run. */
 }

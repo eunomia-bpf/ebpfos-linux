@@ -24,7 +24,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_fault_mov##width(u##width *source, u32 *status) \
               : "+r"(value), "+r"(fault) : "m"(*source) : "memory"); \
  *status = fault; return value; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_fault_mov##width(u64 address, u64 *source, u32 *status) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_fault_mov##width(u64 address, u64 *source, u32 *status) \
 { \
  return 0; /* Only the checked proof or bound instruction emission runs. */ \
 }

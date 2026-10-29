@@ -9,7 +9,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdfsbase32(void)
 	asm volatile("rdfsbase %0" : "=r" (value));
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdfsbase32(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdfsbase32(void)
 {
 	return 0; /* Only the checked proof or bound instruction executes. */
 }
@@ -19,7 +19,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdfsbase64(void)
 	asm volatile("rdfsbase %0" : "=r" (value));
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdfsbase64(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdfsbase64(void)
 {
 	return 0; /* Only the checked proof or bound instruction executes. */
 }

@@ -25,11 +25,11 @@ __bpf_kfunc void bpf_ebpfos_x86_user_access_close(
 {
 	asm volatile("clac" : : : "memory");
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_user_access_open(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_user_access_open(void)
 {
 	return 0; /* Replaced by the checked proof or single-instruction emission. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_user_access_close(
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_user_access_close(
 		void *window)
 {
 	return 0;

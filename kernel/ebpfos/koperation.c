@@ -33,65 +33,65 @@
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
-__bpf_kfunc u64 bpf_ebpfos_kop_xadd64(u64 *ptr, u64 delta)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_xadd64(u64 *ptr, u64 delta)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_atomic64(u64 *ptr, u64 value, u64 expected)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_atomic64(u64 *ptr, u64 value, u64 expected)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_atomic32(u32 *ptr, u32 value, u32 expected)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u32 bpf_ebpfos_kop_atomic32(u32 *ptr, u32 value, u32 expected)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_local_add32(u32 *ptr, u32 delta)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_local_add32(u32 *ptr, u32 delta)
 {
 	return 0; /* Only the typed proof or its bound unlocked XADD executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_local_add64(u64 *ptr, u64 delta)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_local_add64(u64 *ptr, u64 delta)
 {
 	return 0; /* Only the typed proof or its bound unlocked XADD executes. */
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_local_cmpxchg32(u32 *ptr, u32 desired, u32 expected)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_local_cmpxchg32(u32 *ptr, u32 desired, u32 expected)
 {
 	return 0; /* Only the proof or bound unlocked CMPXCHG executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_local_cmpxchg64(u64 *ptr, u64 desired, u64 expected)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_local_cmpxchg64(u64 *ptr, u64 desired, u64 expected)
 {
 	return 0; /* Only the proof or bound unlocked CMPXCHG executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_bit64(u64 *base, u64 index)
 {
 	return 0; /* KOperation calls require JIT emission after proof checking. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_local_bit64_carry(u64 *base, u64 index)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_local_bit64_carry(u64 *base, u64 index)
 {
 	return 0; /* One unlocked BTS/BTR, returning its old bit through CF. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_local_btc64(u64 *base, u64 index)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_local_btc64(u64 *base, u64 index)
 {
 	return 0; /* One unlocked BTC, returning its old bit through CF. */
 }
-__bpf_kfunc void bpf_ebpfos_kop_compiler_barrier(void) { }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) void bpf_ebpfos_kop_compiler_barrier(void) { }
 #include "koperation_cache_control.h"
 #include "koperation_control_write.h"
 #include "koperation_idtr.h"
 #include "koperation_fsbase_read.h"
 #include "koperation_selector_read.h"
-__bpf_kfunc u64 bpf_ebpfos_kop_tzcnt64(u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_tzcnt64(u64 value)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc u32 bpf_ebpfos_kop_load32(u32 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_load32(u32 *ptr)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc struct task_struct *bpf_ebpfos_kop_current_task(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) struct task_struct *bpf_ebpfos_kop_current_task(void)
 {
 	return NULL; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_cmp_mask(u64 left, u64 right)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_cmp_mask(u64 left, u64 right)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
@@ -103,20 +103,20 @@ __bpf_kfunc u64 bpf_ebpfos_x86_pushf64(void)
 	return 0;
 #endif
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_pushf64(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_pushf64(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
 #ifdef CONFIG_X86
-__bpf_kfunc void bpf_ebpfos_kop_cli_save(unsigned long *flags)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) void bpf_ebpfos_kop_cli_save(unsigned long *flags)
 {
 	/* Only the stock IRQ-save proof or bound JIT emission executes. */
 }
-__bpf_kfunc void bpf_ebpfos_kop_popf64_restore(unsigned long *flags)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) void bpf_ebpfos_kop_popf64_restore(unsigned long *flags)
 {
 	/* Only the stock IRQ-restore proof or bound JIT emission executes. */
 }
-__bpf_kfunc void bpf_ebpfos_kop_sti_restore(unsigned long *flags)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) void bpf_ebpfos_kop_sti_restore(unsigned long *flags)
 {
 	/* Only the stock IRQ-restore proof or bound JIT emission executes. */
 }
@@ -124,7 +124,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_read_cr0(void)
 {
 	return native_read_cr0();
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_read_cr0(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_read_cr0(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -132,7 +132,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_read_cr2(void)
 {
 	return native_read_cr2();
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_read_cr2(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_read_cr2(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -140,7 +140,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_read_cr3(void)
 {
 	return __read_cr3();
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_read_cr3(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_read_cr3(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -148,7 +148,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_read_cr4(void)
 {
 	return native_read_cr4();
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_read_cr4(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_read_cr4(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -158,7 +158,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_reload_cr3(void)
 	asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" : : : "rax", "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_reload_cr3(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_reload_cr3(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -171,7 +171,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_lfence(void)
 	asm volatile("lfence" : : : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_lfence(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_lfence(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -184,7 +184,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdtsc(void)
 	return 0;
 #endif
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdtsc(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdtsc(void)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -203,7 +203,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdtscp(u32 *aux)
 	return 0;
 #endif
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdtscp(u32 *aux)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdtscp(u32 *aux)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -223,7 +223,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdseed64(u8 *success)
 	return 0;
 #endif
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdseed64(u8 *success)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdseed64(u8 *success)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -239,7 +239,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_rdrand64(u8 *success)
 	asm volatile("rdrand %0; setc %1" : "=r"(value), "=m"(*success) : : "cc");
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_rdrand64(u8 *success)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_rdrand64(u8 *success)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -256,7 +256,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_cpuid(u32 leaf, u32 subleaf, u64 *out)
 	return 0;
 #endif
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_cpuid(u32 leaf, u32 subleaf, u64 *out)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_cpuid(u32 leaf, u32 subleaf, u64 *out)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -269,7 +269,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_clflush(u8 *ptr)
 #endif
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_clflush(u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_clflush(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -282,7 +282,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_clflushopt(u8 *ptr)
 #endif
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_clflushopt(u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_clflushopt(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -295,7 +295,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_clwb(u8 *ptr)
 #endif
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_clwb(u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_clwb(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -306,7 +306,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_invlpg(u64 addr)
 #endif
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_invlpg(u64 addr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_invlpg(u64 addr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -317,7 +317,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_ntstore##width(u64 value, u##width *destination__
  asm volatile("movnti %" part "1,%0" : "=m"(*destination__uninit) : "r"(value) : "memory"); \
  return 0; \
 } \
-__bpf_kfunc u64 bpf_ebpfos_kop_ntstore##width(u64 value, u##width *destination) \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_ntstore##width(u64 value, u##width *destination) \
 { return 0; /* Only the typed proof or bound instruction emission executes. */ }
 NTSTORE_FUNCTIONS(32, "k")
 NTSTORE_FUNCTIONS(64, "q")
@@ -327,7 +327,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_prefetcht0(u8 *ptr)
 	asm volatile("prefetcht0 (%0)" : : "r"(ptr) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_prefetcht0(u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_prefetcht0(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -338,7 +338,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_prefetchw(u8 *ptr)
 	asm volatile("prefetchw (%0)" : : "r"(ptr) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_prefetchw(u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_prefetchw(u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -351,7 +351,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_in8(u64 port)
 	asm volatile("inb %w1, %0" : "=a"(value) : "d"((u16)port));
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_in8(u64 port)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_in8(u64 port)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -360,7 +360,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_out8(u64 port, u64 value)
 	asm volatile("outb %0, %w1" : : "a"((u8)value), "d"((u16)port));
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_out8(u64 port, u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_out8(u64 port, u64 value)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -371,7 +371,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_in16(u64 port)
 	asm volatile("inw %w1, %0" : "=a"(value) : "d"((u16)port));
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_in16(u64 port)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_in16(u64 port)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -380,7 +380,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_out16(u64 port, u64 value)
 	asm volatile("outw %0, %w1" : : "a"((u16)value), "d"((u16)port));
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_out16(u64 port, u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_out16(u64 port, u64 value)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -391,7 +391,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_in32(u64 port)
 	asm volatile("inl %w1, %0" : "=a"(value) : "d"((u16)port));
 	return value;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_in32(u64 port)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_in32(u64 port)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -400,7 +400,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_out32(u64 port, u64 value)
 	asm volatile("outl %0, %w1" : : "a"((u32)value), "d"((u16)port));
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_out32(u64 port, u64 value)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_out32(u64 port, u64 value)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -411,7 +411,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_ins8(u64 port, u8 *ptr__uninit)
 	asm volatile("insb" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_ins8(u64 port, u8 *ptr__uninit)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_ins8(u64 port, u8 *ptr__uninit)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -420,7 +420,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_ins16(u64 port, u16 *ptr__uninit)
 	asm volatile("insw" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_ins16(u64 port, u16 *ptr__uninit)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_ins16(u64 port, u16 *ptr__uninit)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -429,7 +429,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_ins32(u64 port, u32 *ptr__uninit)
 	asm volatile("insl" : "+D"(ptr__uninit) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_ins32(u64 port, u32 *ptr__uninit)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_ins32(u64 port, u32 *ptr__uninit)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -438,7 +438,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_outs8(u64 port, const u8 *ptr)
 	asm volatile("outsb" : "+S"(ptr) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_outs8(u64 port, const u8 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_outs8(u64 port, const u8 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -447,7 +447,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_outs16(u64 port, const u16 *ptr)
 	asm volatile("outsw" : "+S"(ptr) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_outs16(u64 port, const u16 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_outs16(u64 port, const u16 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -456,7 +456,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_outs32(u64 port, const u32 *ptr)
 	asm volatile("outsl" : "+S"(ptr) : "d"((u16)port) : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_outs32(u64 port, const u32 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_outs32(u64 port, const u32 *ptr)
 {
 	return 0; /* Only the typed proof or its bound JIT emission executes. */
 }
@@ -1019,7 +1019,21 @@ static int ebpfos_kop_current_task_emit_x86(u8 *image, u32 *offset,
 	return sizeof(prefix) + sizeof(u32);
 }
 
+static int ebpfos_kop_current_task_reloc(u64 payload, unsigned int index,
+				       struct bpf_kop_reloc *reloc)
+{
+	if (index)
+		return -EINVAL;
+	*reloc = (struct bpf_kop_reloc) {
+		.offset = sizeof((u8[])EBPFOS_KOP_CURRENT_TASK_NATIVE_PREFIX),
+		.size = 4, .is_signed = true, .symbol = "current_task",
+	};
+	return 0;
+}
+
 static struct bpf_kop ebpfos_kop_current_task = {
+	.num_x86_relocs = 1,
+	.x86_reloc = ebpfos_kop_current_task_reloc,
 	.max_insn_cnt = 1,
 	.max_emit_bytes = 9,
 	.requirements = ebpfos_kop_current_task_requirements,

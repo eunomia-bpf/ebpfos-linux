@@ -6,7 +6,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_wbinvd(void)
 	asm volatile("wbinvd" : : : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_wbinvd(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_wbinvd(void)
 {
 	return 0; /* Only the checked proof or bound instruction executes. */
 }
@@ -17,7 +17,7 @@ __bpf_kfunc u64 bpf_ebpfos_x86_wbnoinvd(void)
 	asm volatile("wbnoinvd" : : : "memory");
 	return 0;
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_wbnoinvd(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_wbnoinvd(void)
 {
 	return 0; /* Only the checked proof or bound instruction executes. */
 }

@@ -26,11 +26,11 @@ REP_SERVICE(bpf_ebpfos_x86_fault_rep_movsb_mc, EX_TYPE_DEFAULT_MCE_SAFE, "rep mo
 REP_SERVICE(bpf_ebpfos_x86_fault_rep_movsq, EX_TYPE_UACCESS, "rep movsq", 3)
 REP_SERVICE(bpf_ebpfos_x86_fault_rep_movsq_mc, EX_TYPE_DEFAULT_MCE_SAFE, "rep movsq", 3)
 #undef REP_SERVICE
-__bpf_kfunc u64 bpf_ebpfos_kop_fault_rep_movsb(void *destination, u64 count, void *source)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_fault_rep_movsb(void *destination, u64 count, void *source)
 {
  return 0; /* Only the checked proof or bound instruction emission runs. */
 }
-__bpf_kfunc u64 bpf_ebpfos_kop_fault_rep_movsq(void *destination, u64 byte_count, void *source)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:8"))) u64 bpf_ebpfos_kop_fault_rep_movsq(void *destination, u64 byte_count, void *source)
 {
  return 0; /* Checked byte ranges; instruction returns remaining qwords. */
 }
