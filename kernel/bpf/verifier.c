@@ -3008,6 +3008,35 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 	return 0;
 }
 
+/* Trusted native calls already carry their complete register/stack operands.
+ * Distill the fixed prefix of a variadic prototype for the x86 backend only;
+ * this supplies no argument proof and is never used by normal verification.
+ */
+static int distill_trusted_variadic(struct bpf_verifier_env *env,
+				    const struct bpf_kfunc_meta *meta,
+				    struct btf_func_model *model)
+{
+	struct {
+		struct btf_type proto;
+		struct btf_param args[MAX_BPF_FUNC_ARGS];
+	} fixed;
+	u32 nargs = btf_type_vlen(meta->proto);
+	int err;
+
+	if (!IS_ENABLED(CONFIG_X86_64) || !env->prog->aux->trusted_kernel ||
+	    !nargs || nargs > MAX_BPF_FUNC_ARGS || btf_params(meta->proto)[nargs - 1].type)
+		return -EOPNOTSUPP;
+	fixed.proto = *meta->proto;
+	fixed.proto.info = (fixed.proto.info & ~BTF_INFO_VLEN(~0U)) | (nargs - 1);
+	memcpy(fixed.args, btf_params(meta->proto), (nargs - 1) * sizeof(fixed.args[0]));
+	err = btf_distill_native_func_proto(&env->log, meta->btf, &fixed.proto,
+					    meta->name, model);
+	/* A variadic target cannot supply a fixed tracing trampoline model. */
+	if (!err)
+		model->native_stack = true;
+	return err;
+}
+
 static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 			      u16 offset, bool kop_call)
 {
@@ -3134,6 +3163,10 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		if (err && bpf_jit_supports_native_args() && env->prog->jit_requested)
 			err = btf_distill_native_func_proto(&env->log, kfunc.btf, kfunc.proto,
 						    kfunc.name, &func_model);
+		if (err && IS_ENABLED(CONFIG_X86_64) && prog_aux->trusted_kernel &&
+		    env->prog->jit_requested && btf_type_vlen(kfunc.proto) &&
+		    !btf_params(kfunc.proto)[btf_type_vlen(kfunc.proto) - 1].type)
+			err = distill_trusted_variadic(env, &kfunc, &func_model);
 		if (err)
 			goto err_remove_desc;
 		desc->addr = addr;
