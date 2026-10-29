@@ -139,18 +139,22 @@ static bool cell_trusted_native_scalar_proto(struct btf *native, const struct bt
       (a.arg_flags[i] & BTF_FMODEL_STRUCT_ARG)) return false;
  return true;
 }
-/* Only an independently checked permanent read-only result may cross the
+/* Independently checked NULL or permanent read-only results may cross the
  * native pointer-result boundary. Program-held map storage is too short-lived.
  */
-static bool cell_kernel_readonly_result(struct btf *native, const struct btf_type *n,
+static bool cell_checked_pointer_result(struct btf *native, const struct btf_type *n,
  struct btf *compiled, const struct btf_type *function)
 {
  const struct btf_type *prototype = btf_type_by_id(compiled, function->type);
  const struct btf_type *result = btf_type_skip_modifiers(native, n->type, NULL);
  const char *tag = btf_find_decl_tag_value(compiled, function, -1, "ret:ro_kernel_mem:");
  u32 bytes;
- return result && btf_type_is_ptr(result) && !IS_ERR(tag) &&
-  !kstrtou32(tag, 10, &bytes) && bytes &&
+ bool described = !IS_ERR(tag) && !kstrtou32(tag, 10, &bytes) && bytes;
+ if (!described) {
+  tag = btf_find_decl_tag_value(compiled, function, -1, "ret:null");
+  described = !IS_ERR(tag) && !*tag;
+ }
+ return result && btf_type_is_ptr(result) && described &&
   cell_layout(native, n->type, compiled, prototype->type, 0, false);
 }
 static bool cell_callable(struct btf *native, const struct btf_type *native_function,
@@ -209,7 +213,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  if (!trusted) {
   const struct btf_type *result = btf_type_skip_modifiers(native, n->type, NULL);
   if (result && btf_type_is_ptr(result)) {
-   kernel_result = cell_kernel_readonly_result(native, n, aux->btf, function);
+   kernel_result = cell_checked_pointer_result(native, n, aux->btf, function);
    if (!kernel_result) return false;
   }
  }

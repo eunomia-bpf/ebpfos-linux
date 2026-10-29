@@ -8352,6 +8352,20 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			return PTR_ERR(tag);
 		}
 	}
+	{
+		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:null");
+		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
+
+		if (!IS_ERR(tag)) {
+			if (*tag || !is_global || !btf_type_is_ptr(result) || sub->readonly_result_size) {
+				bpf_log(log, "invalid NULL result contract\n");
+				return -EINVAL;
+			}
+			sub->null_result = true;
+		} else if (PTR_ERR(tag) != -ENOENT) {
+			return PTR_ERR(tag);
+		}
+	}
 	/* A record pointer result has the same checked stable-storage contract
 	 * as a scalar byte-pointer result, independently for each occupied word.
 	 */
@@ -8381,7 +8395,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	t = btf_type_by_id(btf, t->type);
 	while (btf_type_is_modifier(t))
 		t = btf_type_by_id(btf, t->type);
-	if (!sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
+	if (!sub->null_result && !sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
 	    !sub->readonly_record_result_size[1] && !sub->readonly_stack_result && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||

@@ -11345,6 +11345,8 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 		if (sub->native_frame && sub->native_abi.result_buffer) {
 			caller->regs[BPF_REG_0] = result_buffer;
+		} else if (sub->null_result) {
+			__mark_reg_const_zero(env, &caller->regs[BPF_REG_0]);
 		} else if (sub->readonly_result_size) {
 			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
@@ -19488,6 +19490,16 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
+	if (sub->null_result) {
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		if (err)
+			return err;
+		if (!bpf_register_is_null(&frame->regs[BPF_REG_0])) {
+			verbose(env, "global function must return NULL on every exit\n");
+			return -EACCES;
+		}
+		return 0;
+	}
 	if (sub->readonly_result_size)
 		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size,
 					    sub->readonly_kernel_result);
@@ -21418,6 +21430,11 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		 * which do not establish this ordinary global-call precondition.
 		 */
 		if (sub->is_cb || subprog_is_exc_cb(env, subprog)) {
+			if (sub->null_result) {
+				verbose(env, "NULL result contracts are unsupported for callbacks\n");
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
 			if (sub->readonly_result_size) {
 				verbose(env, "read-only result contracts are unsupported for callbacks\n");
 				ret = -EOPNOTSUPP;
@@ -22227,8 +22244,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			return ret;
 
 		if (prog->expected_attach_type == BPF_TRACE_REPLACE) {
-			const struct btf_type *result, *pointee;
-			bool byte_pointer;
+			const struct btf_type *result;
 
 			/* This interface returns a scalar or void in the ordinary
 			 * native ABI. A padding-free single INTEGER record has the
@@ -22244,15 +22260,13 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    !IS_ENABLED(CONFIG_X86_64))
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
-			pointee = btf_is_ptr(result) ? btf_type_skip_modifiers(btf, result->type, NULL) : NULL;
 			/* The source global proves its permanent read-only result at
 			 * every exit. Cold entry publication checks that contract and
 			 * the native prototype before exporting its address.
 			 */
-			byte_pointer = pointee && btf_is_int(pointee) && pointee->size == 1;
 			if (!tgt_info->fmodel.native_stack && t->type &&
 			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
-			    !byte_pointer &&
+			    !btf_is_ptr(result) &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    !cell_native_result2_type(btf, t->type) &&
 			    !(btf_type_is_struct(result) && btf_native_value_storage(btf, t->type)) &&
