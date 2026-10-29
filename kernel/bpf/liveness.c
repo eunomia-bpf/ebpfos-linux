@@ -1838,14 +1838,29 @@ static void free_instance(struct func_instance *instance)
 	kvfree(instance);
 }
 
+struct subprog_walk_frame {
+	struct func_instance *instance;
+	struct func_instance *previous;
+	struct func_instance *callee;
+	struct arg_track *entry_args;
+	struct arg_track callee_args[MAX_BPF_REG];
+	int subprog;
+	int start;
+	int cursor;
+	int end;
+	int callsite;
+};
+
 /*
- * Recursively analyze a subprog with specific 'entry_args'.
+ * Analyze a subprog with specific 'entry_args'.
  * Each callee is analyzed with the exact args from its call site.
  *
  * Args are recomputed for each call because the dataflow result at_in[]
  * depends on the entry args and frame depth. Consider: A->C->D and B->C->D
  * Callsites in A and B pass different args into C, so C is recomputed.
- * Then within C the same callsite passes different args into D.
+ * Then within C the same callsite passes different args into D. Keep the
+ * depth-first activations on the heap: stack-mask values are large when the
+ * BPF frame budget grows, and native C recursion must not exhaust THREAD_SIZE.
  */
 static int analyze_subprog(struct bpf_verifier_env *env,
 			   struct arg_track *entry_args,
@@ -1853,19 +1868,29 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 			   struct func_instance *instance,
 			   u32 *callsites)
 {
-	int subprog = instance->subprog;
-	int depth = instance->depth;
+	struct subprog_walk_frame *walk, *frame, *child;
 	struct bpf_insn *insns = env->prog->insnsi;
-	int start = env->subprog_info[subprog].start;
-	int po_start = env->subprog_info[subprog].postorder_start;
-	int po_end = env->subprog_info[subprog + 1].postorder_start;
-	struct func_instance *prev_instance = NULL;
-	int j, err;
+	int level = 0, err;
+
+	walk = kvzalloc_objs(*walk, MAX_CALL_FRAMES, GFP_KERNEL_ACCOUNT);
+	if (!walk)
+		return -ENOMEM;
+	walk[0].instance = instance;
+	walk[0].entry_args = entry_args;
+
+enter:
+	frame = &walk[level];
+	instance = frame->instance;
+	frame->subprog = instance->subprog;
+	frame->start = env->subprog_info[frame->subprog].start;
+	frame->cursor = env->subprog_info[frame->subprog].postorder_start;
+	frame->end = env->subprog_info[frame->subprog + 1].postorder_start;
 
 	if (++env->liveness->subprog_calls > 10000) {
 		verbose(env, "liveness analysis exceeded complexity limit (%d calls)\n",
 			env->liveness->subprog_calls);
-		return -E2BIG;
+		err = -E2BIG;
+		goto out_free;
 	}
 
 	if (need_resched())
@@ -1880,31 +1905,36 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 	if (instance->must_write_initialized) {
 		struct func_instance *fresh = fresh_instance(instance);
 
-		if (IS_ERR(fresh))
-			return PTR_ERR(fresh);
-		prev_instance = instance;
-		instance = fresh;
+		if (IS_ERR(fresh)) {
+			err = PTR_ERR(fresh);
+			goto out_free;
+		}
+		frame->previous = instance;
+		frame->instance = instance = fresh;
 	}
 
 	/* Free prior analysis if this subprog was already visited */
-	kvfree(info[subprog].at_in);
-	info[subprog].at_in = NULL;
+	kvfree(info[frame->subprog].at_in);
+	info[frame->subprog].at_in = NULL;
 
-	err = compute_subprog_args(env, &info[subprog], entry_args, instance, callsites);
+	err = compute_subprog_args(env, &info[frame->subprog], frame->entry_args,
+				   instance, callsites);
 	if (err)
 		goto out_free;
 
-	/* For each reachable call site in the subprog, recurse into callees */
-	for (int p = po_start; p < po_end; p++) {
-		int idx = env->cfg.insn_postorder[p];
-		struct arg_track callee_args[MAX_BPF_REG];
+	/* For each reachable call site, descend before visiting its successor. */
+scan:
+	frame = &walk[level];
+	instance = frame->instance;
+	while (frame->cursor < frame->end) {
+		int idx = env->cfg.insn_postorder[frame->cursor++];
+		struct arg_track *callee_args = frame->callee_args;
 		struct arg_track none = { .frame = ARG_NONE };
 		struct bpf_insn *insn = &insns[idx];
 		struct func_instance *callee_instance;
-		int callee, target;
+		int callee, target, j = idx - frame->start;
+		int depth = instance->depth;
 		int caller_reg, cb_callee_reg;
-
-		j = idx - start; /* relative index within this subprog */
 
 		if (bpf_pseudo_call(insn)) {
 			target = idx + insn->imm + 1;
@@ -1914,7 +1944,7 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 
 			/* Build entry args: R1-R5 from at_in at call site */
 			for (int arg = 0; arg < MAX_BPF_NATIVE_REG_ARGS; arg++)
-				callee_args[bpf_arg_regno(arg)] = info[subprog].at_in[j][bpf_arg_regno(arg)];
+				callee_args[bpf_arg_regno(arg)] = info[frame->subprog].at_in[j][bpf_arg_regno(arg)];
 		} else if (bpf_calls_callback(env, idx)) {
 			callee = find_callback_subprog(env, insn, idx, &caller_reg, &cb_callee_reg);
 			if (callee == -2) {
@@ -1922,7 +1952,7 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 				 * same bpf_loop() calls two different callbacks and passes
 				 * stack pointer to them
 				 */
-				if (info[subprog].at_in[j][caller_reg].frame == ARG_NONE)
+				if (info[frame->subprog].at_in[j][caller_reg].frame == ARG_NONE)
 					continue;
 				for (int f = 0; f <= depth; f++) {
 					err = mark_stack_read(instance, f, idx, SPIS_ALL);
@@ -1936,7 +1966,7 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 
 			for (int arg = 0; arg < MAX_BPF_NATIVE_REG_ARGS; arg++)
 				callee_args[bpf_arg_regno(arg)] = none;
-			callee_args[cb_callee_reg] = info[subprog].at_in[j][caller_reg];
+			callee_args[cb_callee_reg] = info[frame->subprog].at_in[j][caller_reg];
 		} else {
 			continue;
 		}
@@ -1955,37 +1985,46 @@ static int analyze_subprog(struct bpf_verifier_env *env,
 			goto out_free;
 		}
 		callsites[depth] = idx;
-		err = analyze_subprog(env, callee_args, info, callee_instance, callsites);
-		if (err)
-			goto out_free;
-
-		/* Pull callee's entry liveness back to caller's callsite */
-		{
-			u32 callee_start = callee_instance->subprog_start;
-			struct per_frame_masks *entry;
-
-			for (int f = 0; f < callee_instance->depth; f++) {
-				entry = get_frame_masks(callee_instance, f, callee_start);
-				if (!entry)
-					continue;
-				err = mark_stack_read(instance, f, idx, entry->live_before);
-				if (err)
-					goto out_free;
-			}
-		}
+		frame->callee = callee_instance;
+		frame->callsite = idx;
+		child = &walk[++level];
+		memset(child, 0, sizeof(*child));
+		child->instance = callee_instance;
+		child->entry_args = callee_args;
+		goto enter;
 	}
 
-	if (prev_instance) {
-		merge_instances(prev_instance, instance);
+	if (frame->previous) {
+		merge_instances(frame->previous, instance);
 		free_instance(instance);
-		instance = prev_instance;
+		instance = frame->previous;
 	}
 	update_instance(env, instance);
-	return 0;
+	if (!level) {
+		kvfree(walk);
+		return 0;
+	}
+
+	/* Pull the completed callee's entry liveness into its suspended caller. */
+	frame = &walk[--level];
+	instance = frame->instance;
+	for (int f = 0; f < frame->callee->depth; f++) {
+		struct per_frame_masks *entry;
+
+		entry = get_frame_masks(frame->callee, f, frame->callee->subprog_start);
+		if (!entry)
+			continue;
+		err = mark_stack_read(instance, f, frame->callsite, entry->live_before);
+		if (err)
+			goto out_free;
+	}
+	goto scan;
 
 out_free:
-	if (prev_instance)
-		free_instance(instance);
+	for (; level >= 0; level--)
+		if (walk[level].previous)
+			free_instance(walk[level].instance);
+	kvfree(walk);
 	return err;
 }
 
