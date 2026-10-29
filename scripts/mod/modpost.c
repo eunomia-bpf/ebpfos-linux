@@ -803,14 +803,14 @@ static void check_section(const char *modname, struct elf_info *elf,
 #define ALL_EXIT_SECTIONS ".exit.*"
 
 #define DATA_SECTIONS ".data", ".data.rel"
-#define TEXT_SECTIONS ".text", ".text.*", ".sched.text", \
-		".kprobes.text", ".cpuidle.text", ".noinstr.text", \
+#define TEXT_SECTIONS ".text", ".text.*", ".sched.text", ".sched.text.*", \
+		".kprobes.text", ".kprobes.text.*", ".cpuidle.text", ".cpuidle.text.*", ".noinstr.text", ".noinstr.text.*", \
 		".ltext", ".ltext.*"
-#define OTHER_TEXT_SECTIONS ".ref.text", ".ref.text.*", ".head.text", ".spinlock.text", \
-		".fixup", ".entry.text", ".exception.text", \
-		".coldtext", ".softirqentry.text", ".irqentry.text"
+#define OTHER_TEXT_SECTIONS ".ref.text", ".ref.text.*", ".head.text", ".spinlock.text", ".spinlock.text.*", \
+		".fixup", ".entry.text", ".entry.text.*", ".exception.text", \
+		".coldtext", ".softirqentry.text", ".softirqentry.text.*", ".irqentry.text", ".irqentry.text.*"
 
-#define ALL_TEXT_SECTIONS  ".init.text", ".init.text.*", ".exit.text", \
+#define ALL_TEXT_SECTIONS  ".init.text", ".init.text.*", ".exit.text", ".exit.text.*", \
 		TEXT_SECTIONS, OTHER_TEXT_SECTIONS
 
 enum mismatch {

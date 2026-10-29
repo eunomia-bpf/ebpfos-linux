@@ -565,9 +565,9 @@
 #define NOINSTR_TEXT							\
 		ALIGN_FUNCTION();					\
 		__noinstr_text_start = .;				\
-		*(.noinstr.text)					\
+		*(.noinstr.text .noinstr.text.*)					\
 		__cpuidle_text_start = .;				\
-		*(.cpuidle.text)					\
+		*(.cpuidle.text .cpuidle.text.*)					\
 		__cpuidle_text_end = .;					\
 		__noinstr_text_end = .;
 
@@ -614,7 +614,7 @@
 #define SCHED_TEXT							\
 		ALIGN_FUNCTION();					\
 		__sched_text_start = .;					\
-		*(.sched.text)						\
+		*(.sched.text .sched.text.*)						\
 		__sched_text_end = .;
 
 /* spinlock.text is aling to function alignment to secure we have same
@@ -622,7 +622,7 @@
 #define LOCK_TEXT							\
 		ALIGN_FUNCTION();					\
 		__lock_text_start = .;					\
-		*(.spinlock.text)					\
+		*(.spinlock.text .spinlock.text.*)					\
 		__lock_text_end = .;
 
 #define KPROBES_TEXT							\
@@ -634,19 +634,19 @@
 #define ENTRY_TEXT							\
 		ALIGN_FUNCTION();					\
 		__entry_text_start = .;					\
-		*(.entry.text)						\
+		*(.entry.text .entry.text.*)						\
 		__entry_text_end = .;
 
 #define IRQENTRY_TEXT							\
 		ALIGN_FUNCTION();					\
 		__irqentry_text_start = .;				\
-		*(.irqentry.text)					\
+		*(.irqentry.text .irqentry.text.*)					\
 		__irqentry_text_end = .;
 
 #define SOFTIRQENTRY_TEXT						\
 		ALIGN_FUNCTION();					\
 		__softirqentry_text_start = .;				\
-		*(.softirqentry.text)					\
+		*(.softirqentry.text .softirqentry.text.*)					\
 		__softirqentry_text_end = .;
 
 #define STATIC_CALL_TEXT						\
@@ -746,7 +746,7 @@
 	*(.dtors .dtors.*)
 
 #define EXIT_TEXT							\
-	*(.exit.text)							\
+	*(.exit.text .exit.text.*)							\
 	*(.text.exit .text.exit.*)
 
 #define EXIT_CALL							\

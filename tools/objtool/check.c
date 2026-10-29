@@ -405,6 +405,22 @@ static void *cfi_hash_alloc(unsigned long size)
 static unsigned long nr_insns;
 static unsigned long nr_insns_visited;
 
+static bool is_noinstr_text_section(const char *name)
+{
+	static const char * const families[] = {
+		".noinstr.text", ".entry.text", ".cpuidle.text",
+	};
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(families); i++) {
+		size_t length = strlen(families[i]);
+
+		if (!strncmp(name, families[i], length) &&
+		    (!name[length] || name[length] == '.'))
+			return true;
+	}
+	return false;
+}
+
 /*
  * Call the arch-specific instruction decoder for all the instructions and add
  * them to the global instruction list.
@@ -429,9 +445,7 @@ static int decode_instructions(struct objtool_file *file)
 		    strncmp(sec->name, ".discard.", 9))
 			sec->text = true;
 
-		if (!strcmp(sec->name, ".noinstr.text") ||
-		    !strcmp(sec->name, ".entry.text") ||
-		    !strcmp(sec->name, ".cpuidle.text") ||
+		if (is_noinstr_text_section(sec->name) ||
 		    !strncmp(sec->name, ".text..__x86.", 13))
 			sec->noinstr = true;
 
@@ -4585,20 +4599,9 @@ static int validate_noinstr_sections(struct objtool_file *file)
 	struct section *sec;
 	int warnings = 0;
 
-	sec = find_section_by_name(file->elf, ".noinstr.text");
-	if (sec) {
-		warnings += validate_section(file, sec);
-		warnings += validate_unwind_hints(file, sec);
-	}
-
-	sec = find_section_by_name(file->elf, ".entry.text");
-	if (sec) {
-		warnings += validate_section(file, sec);
-		warnings += validate_unwind_hints(file, sec);
-	}
-
-	sec = find_section_by_name(file->elf, ".cpuidle.text");
-	if (sec) {
+	for_each_sec(file->elf, sec) {
+		if (!is_noinstr_text_section(sec->name))
+			continue;
 		warnings += validate_section(file, sec);
 		warnings += validate_unwind_hints(file, sec);
 	}
