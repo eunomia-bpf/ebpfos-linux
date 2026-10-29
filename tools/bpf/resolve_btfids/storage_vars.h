@@ -7,9 +7,9 @@
  * larger allocation to a later compiler or linker. */
 struct storage_allocation {
  const char *section, *name;
- unsigned long long offset, size;
+ unsigned long long offset, size, section_size;
 };
-struct storage_section { unsigned int count; struct btf_var_secinfo *cells; };
+struct storage_section { unsigned int count, size; struct btf_var_secinfo *cells; };
 static int storage_allocation_compare(const void *left, const void *right)
 {
  const struct storage_allocation *a = left, *b = right;
@@ -44,6 +44,45 @@ static bool storage_type_refs(struct btf_type *type, const unsigned int *ids, un
   for (i = 0; i < btf_vlen(type); ++i) if (!storage_type_id(&parameters[i].type, ids, count)) return false;
  }
  return true;
+}
+/* A flexible initializer enlarges the allocation, not its nominal C type.
+ * Every by-value element must have a complete fixed stride. Pointees do not
+ * contribute to that stride; an embedded incomplete array does. */
+static bool storage_fixed_element(const struct btf *btf, unsigned int id, unsigned int depth)
+{
+ const struct btf_type *type;
+ int resolved = btf__resolve_type(btf, id);
+ unsigned int i;
+ if (resolved <= 0 || depth > 64 || btf__resolve_size(btf, resolved) <= 0) return false;
+ type = btf__type_by_id(btf, resolved);
+ if (btf_is_ptr(type) || btf_is_int(type) || btf_is_enum(type) || btf_is_enum64(type)) return true;
+ if (btf_is_array(type))
+  return btf_array(type)->nelems && storage_fixed_element(btf, btf_array(type)->type, depth + 1);
+ if (!btf_is_struct(type) && !btf_is_union(type)) return false;
+ for (i = 0; i < btf_vlen(type); ++i)
+  if (!storage_fixed_element(btf, btf_members(type)[i].type, depth + 1)) return false;
+ return true;
+}
+static bool storage_flexible_extent(const struct btf *btf, unsigned int id,
+                                    unsigned long long bytes)
+{
+ const struct btf_type *record, *tail;
+ unsigned int last, element;
+ long long width;
+ int resolved = btf__resolve_type(btf, id);
+ if (resolved <= 0) return false;
+ record = btf__type_by_id(btf, resolved);
+ if (!btf_is_struct(record) || !record->size || !btf_vlen(record) || bytes <= record->size) return false;
+ last = btf_vlen(record) - 1;
+ if (btf_member_bitfield_size(record, last) ||
+     btf_member_bit_offset(record, last) != (unsigned long long)record->size * 8) return false;
+ resolved = btf__resolve_type(btf, btf_members(record)[last].type);
+ if (resolved <= 0) return false;
+ tail = btf__type_by_id(btf, resolved);
+ if (!btf_is_array(tail) || btf_array(tail)->nelems) return false;
+ element = btf_array(tail)->type;width = btf__resolve_size(btf, element);
+ return width > 0 && storage_fixed_element(btf, element, 0) &&
+        !((bytes - record->size) % (unsigned long long)width);
 }
 static int normalize_storage_vars(struct object *obj)
 {
@@ -84,7 +123,7 @@ static int normalize_storage_vars(struct object *obj)
       symbol.st_value - area.sh_addr > area.sh_size ||
       symbol.st_size > area.sh_size - (symbol.st_value - area.sh_addr)) continue;
   allocations[count++] = (struct storage_allocation){section, name,
-   symbol.st_value - area.sh_addr, symbol.st_size};
+   symbol.st_value - area.sh_addr, symbol.st_size, area.sh_size};
  }
  qsort(allocations, count, sizeof(*allocations), storage_allocation_compare);
  for (id = first; id < types; ++id) {
@@ -96,23 +135,46 @@ static int normalize_storage_vars(struct object *obj)
   if (!btf_is_datasec(type)) continue;
   sections[id].cells = calloc(btf_vlen(type) ?: 1, sizeof(*cells));
   if (!sections[id].cells) {error = -ENOMEM;goto out;}
-  cells = btf_var_secinfos(type);
+  cells = btf_var_secinfos(type);sections[id].size = type->size;
   for (j = 0; j < btf_vlen(type); ++j) {
-   const struct btf_var_secinfo *cell = &cells[j];
+   struct btf_var_secinfo extent = cells[j];
+   const struct btf_var_secinfo *cell = &extent;
    const struct btf_type *variable = btf__type_by_id(input, cell->type);
    struct storage_allocation key, *allocation;
    long long bytes;
    bool valid;
    if (!variable || !btf_is_var(variable) || cell->type >= types) goto out;
    key = (struct storage_allocation){section,
-    btf__name_by_offset(input, variable->name_off), cell->offset, cell->size};
+    btf__name_by_offset(input, variable->name_off), cell->offset, cell->size, type->size};
    allocation = bsearch(&key, allocations, count, sizeof(*allocations), storage_allocation_compare);
    bytes = btf__resolve_size(input, variable->type);
+   /* Pahole reports sizeof(C record), while ELF includes its initialized
+    * flexible tail. Expand only this exact object's span, without changing
+    * the type, inventing storage or accepting aliases of the extra bytes. */
+   if (allocation && bytes > 0 && (unsigned long long)bytes == cell->size &&
+       allocation->size > cell->size && allocation->size <= UINT_MAX &&
+       allocation->section_size <= UINT_MAX && type->size <= allocation->section_size &&
+       (btf_var(variable)->linkage == BTF_VAR_STATIC ||
+        btf_var(variable)->linkage == BTF_VAR_GLOBAL_ALLOCATED) &&
+       storage_flexible_extent(input, variable->type, allocation->size)) {
+    size_t k;
+    bool distinct = true;
+    for (k = 0; k < count; ++k) {
+     const struct storage_allocation *other = &allocations[k];
+     if (other == allocation || strcmp(other->section, allocation->section)) continue;
+     if (other->offset < allocation->offset + allocation->size &&
+         allocation->offset < other->offset + other->size) {distinct = false;break;}
+    }
+    if (distinct) {
+     extent.size = allocation->size;
+     sections[id].size = allocation->section_size;
+    }
+   }
    /* The existing per-CPU pass owns its whole-section allocation alias. */
    valid = !strcmp(section, ".data..percpu") ||
     (allocation && allocation->size == cell->size && bytes >= 0 &&
      (unsigned long long)bytes <= cell->size && cell->size && cell->offset >= end &&
-     cell->offset < type->size && cell->size <= type->size - cell->offset);
+     cell->offset < sections[id].size && cell->size <= sections[id].size - cell->offset);
    if (!valid) {
     pr_debug("storage BTF: omit %s:%s offset=%u size=%u; no distinct matching ELF allocation\n",
      section, key.name, cell->offset, cell->size);
@@ -142,7 +204,7 @@ static int normalize_storage_vars(struct object *obj)
   if (remove[id]) continue;
   if (btf_is_datasec(type)) {
    unsigned int j;
-   added = btf__add_datasec(output, btf__name_by_offset(input, type->name_off), type->size);
+   added = btf__add_datasec(output, btf__name_by_offset(input, type->name_off), sections[id].size);
    for (j = 0; added >= 0 && j < sections[id].count; ++j) {
     struct btf_var_secinfo cell = sections[id].cells[j];
     if (!storage_type_id(&cell.type, ids, types) ||
