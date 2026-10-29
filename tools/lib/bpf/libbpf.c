@@ -28,6 +28,7 @@
 #include <asm/unistd.h>
 #include <linux/err.h>
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/filter.h>
@@ -50,6 +51,7 @@
 #include "libbpf.h"
 #include "bpf.h"
 #include "btf.h"
+#include "native_types.h"
 #include "libbpf_internal.h"
 #include "hashmap.h"
 #include "bpf_gen_internal.h"
@@ -8704,6 +8706,27 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 	return 0;
 }
 
+/* Trusted source has no pointer/type safety claim. Its native calls still
+ * need the same register widths and argument count as the C definition.
+ * Keep the ordinary type matcher for every object containing a verified
+ * program. Aggregate native ABIs remain with that matcher as well.
+ */
+static bool trusted_native_proto(struct bpf_object *obj, int local_id,
+				 struct btf *kern, int kern_id)
+{
+	struct bpf_program *prog;
+	bool trusted = false;
+
+	bpf_object__for_each_program(prog, obj) {
+		if (!prog->autoload)
+			continue;
+		if (!(prog->prog_flags & BPF_F_TRUSTED_KERNEL))
+			return false;
+		trusted = true;
+	}
+	return trusted && btf_native_scalar_proto_match(obj->btf, local_id, kern, kern_id);
+}
+
 static int bpf_object__resolve_ksym_func_btf_id(struct bpf_object *obj,
 						struct extern_desc *ext)
 {
@@ -8733,6 +8756,24 @@ static int bpf_object__resolve_ksym_func_btf_id(struct bpf_object *obj,
 	if (!ret)
 		ret = bpf_core_types_match(obj->btf, local_func_proto_id,
 					  kern_btf, kfunc_proto_id);
+	if (ret == 0 && trusted_native_proto(obj, local_func_proto_id, kern_btf, kfunc_proto_id))
+		ret = 1;
+	if (ret == 0) {
+		/* resolve_btfids retains the full C prototype in the _impl
+		 * counterpart when it removes public BPF implicit arguments.
+		 * The relocation must still name the original C function.
+		 */
+		char impl_name[KSYM_NAME_LEN];
+		int impl_id;
+
+		if (snprintf(impl_name, sizeof(impl_name), "%s_impl",
+			     ext->essent_name ?: ext->name) < sizeof(impl_name)) {
+			impl_id = btf__find_by_name_kind(kern_btf, impl_name, BTF_KIND_FUNC);
+			if (impl_id > 0 && trusted_native_proto(obj, local_func_proto_id,
+					kern_btf, btf__type_by_id(kern_btf, impl_id)->type))
+				ret = 1;
+		}
+	}
 	if (ret <= 0) {
 		if (ext->is_weak)
 			return 0;

@@ -20290,17 +20290,20 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 	return 0;
 }
 
-/* Plain integer array cells carry no pointer, lifetime or field-range fact.
+/* Plain integer cells and frozen untyped arrays carry no pointer, lifetime
+ * or field-range fact.
  * They keep stock map-value semantics and can be shared by independently
  * checked component entries and retained generations. Provider records keep
  * their existing exclusive-owner rule.
  */
-static bool plain_scalar_map(const struct bpf_map *map)
+static bool plain_data_map(const struct bpf_map *map)
 {
  const struct btf_type *type;
  const struct btf_var_secinfo *cell;
- if (map->map_type != BPF_MAP_TYPE_ARRAY || map->record || !map->btf)
+ if (map->map_type != BPF_MAP_TYPE_ARRAY || map->record)
   return false;
+ if (!map->btf)
+  return bpf_map_is_rdonly(map);
  type = btf_type_by_id(map->btf, map->btf_value_type_id);
  if (type && BTF_INFO_KIND(type->info) == BTF_KIND_DATASEC) {
   if (btf_type_vlen(type) != 1) return false;
@@ -20315,7 +20318,7 @@ static bool plain_scalar_map(const struct bpf_map *map)
 }
 static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 {
- bool component = env->prog->aux->ebpfos_component && !plain_scalar_map(map);
+ bool component = env->prog->aux->ebpfos_component && !plain_data_map(map);
 	int i, err;
 
 	/* check whether we recorded this map already */
@@ -22180,6 +22183,16 @@ int bpf_fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		verifier_bug(env, "kernel function descriptor not found for func_id %u",
 			     insn->imm);
 		return -EFAULT;
+	}
+
+	/* Trusted kernel source calls the C function with all of its arguments.
+	 * Public BPF kfunc specialization supplies implicit arguments and may
+	 * replace the callee; neither transformation describes that source call.
+	 */
+	if (env->prog->aux->trusted_kernel) {
+		if (!bpf_jit_supports_far_kfunc_call())
+			insn->imm = BPF_CALL_IMM(desc->addr);
+		return 0;
 	}
 
 	err = specialize_kfunc(env, desc, insn_idx);
