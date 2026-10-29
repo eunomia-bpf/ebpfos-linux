@@ -6994,6 +6994,8 @@ static const struct bpf_raw_tp_null_args raw_tp_null_args[] = {
 	{ "amdtp_packet", 0x100 },
 };
 
+#include "btf_scalar_context.h"
+
 bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 		    const struct bpf_prog *prog,
 		    struct bpf_insn_access_aux *info)
@@ -7104,6 +7106,16 @@ bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 		bpf_log(log, "func '%s' size %d must be 8\n",
 			tname, size);
 		return false;
+	}
+
+	if (arg < nr_args && !btf_param_match_suffix(btf, &args[arg], "__nullable")) {
+		u32 bytes = btf_scalar_context_size(prog, btf, args[arg].type, off);
+
+		if (bytes) {
+			info->reg_type = PTR_TO_MEM;
+			info->mem_size = bytes;
+			return true;
+		}
 	}
 
 	/* check for PTR_TO_RDONLY_BUF_OR_NULL or PTR_TO_RDWR_BUF_OR_NULL */

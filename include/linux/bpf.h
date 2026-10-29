@@ -1244,6 +1244,7 @@ static_assert(__BPF_REG_TYPE_MAX <= BPF_BASE_TYPE_LIMIT);
  */
 struct bpf_insn_access_aux {
 	enum bpf_reg_type reg_type;
+	u32 mem_size; /* bounded native scalar context object, when nonzero */
 	bool is_ldsx;
 	union {
 		int ctx_field_size;

@@ -7660,6 +7660,11 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 					regs[value_regno].btf_id = info.btf_id;
 					regs[value_regno].ref_obj_id = info.ref_obj_id;
 				}
+				if (base_type(info.reg_type) == PTR_TO_MEM) {
+					regs[value_regno].mem_size = info.mem_size;
+					verbose(env, "func '%s' relies on verifier option B: native scalar context object (%u bytes)\n",
+						env->prog->aux->attach_func_name, info.mem_size);
+				}
 			}
 			regs[value_regno].type = info.reg_type;
 		}
