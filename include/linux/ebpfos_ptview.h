@@ -13,7 +13,7 @@ struct ebpfos_ptview_change {
 };
 #ifdef CONFIG_EBPFOS_PTVIEW
 /* Cold preparation and owner-serialized binding. No entry dispatch helper.
- * This prototype requires four-level paging, no PTI/PCID, and one mm user.
+ * This prototype requires four-level paging, no PCID, and one mm user.
  * The caller retains referenced code and serializes changes against its work.
  * Original mappings and text on copied paths stay fixed while attached. */
 struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *, unsigned int, struct module *);

@@ -52,7 +52,7 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
  int error = -EINVAL;
  /* These are admission restrictions, not checks in the replaced code. */
  if (!count || count > 64 || pgtable_l5_enabled() ||
-     boot_cpu_has(X86_FEATURE_PCID) || boot_cpu_has(X86_FEATURE_PTI)) return ERR_PTR(-EOPNOTSUPP);
+     boot_cpu_has(X86_FEATURE_PCID)) return ERR_PTR(-EOPNOTSUPP);
  view = kzalloc(struct_size(view, pages, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
  refcount_set(&view->refs, 1);view->owner = owner;
