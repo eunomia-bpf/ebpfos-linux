@@ -3279,6 +3279,24 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (err < 0)
 		goto free_used_maps;
 
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
+	/* Component entry loading already names its native target. Reuse the
+	 * publication contract after JIT preparation, so an incompatible whole
+	 * component can remain native without aborting independent components.
+	 * Publication repeats the same contract; no call-path check is added.
+	 */
+	if (prog->aux->ebpfos_component && type == BPF_PROG_TYPE_TRACING &&
+	    prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	    prog->aux->attach_btf && prog->aux->attach_btf_id) {
+		unsigned long address;
+
+		err = bpf_entry_program_address(prog->aux->attach_btf,
+			prog->aux->attach_btf_id, prog, false, &address);
+		if (err)
+			goto free_used_maps;
+	}
+#endif
+
 	err = bpf_prog_mark_insn_arrays_ready(prog);
 	if (err < 0)
 		goto free_used_maps;
