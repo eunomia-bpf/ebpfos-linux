@@ -6218,6 +6218,45 @@ continue_func:
 	goto continue_func;
 }
 
+/* Trusted source uses ordinary kernel stack frames, including recursion.
+ * The stack/termination proof is deliberately absent in this tier. Keep the
+ * JIT's tail-call reachability facts, computed to a fixed point so a call
+ * cycle never causes an unbounded verifier walk.
+ */
+static int prepare_trusted_call_stack(struct bpf_verifier_env *env)
+{
+	struct bpf_subprog_info *si = env->subprog_info;
+	struct bpf_insn *insn = env->prog->insnsi;
+	bool changed;
+	int sub, i, callee;
+
+	for (sub = 0; sub < env->subprog_cnt; sub++) {
+		si[sub].priv_stack_mode = NO_PRIV_STACK;
+		si[sub].tail_call_reachable = si[sub].has_tail_call;
+	}
+	do {
+		changed = false;
+		for (sub = 0; sub < env->subprog_cnt; sub++) {
+			if (si[sub].tail_call_reachable)
+				continue;
+			for (i = si[sub].start; i < si[sub + 1].start; i++) {
+				if (!bpf_pseudo_call(insn + i) && !bpf_pseudo_func(insn + i))
+					continue;
+				callee = bpf_find_subprog(env, i + insn[i].imm + 1);
+				if (callee < 0)
+					return -EFAULT;
+				if (si[callee].tail_call_reachable) {
+					si[sub].tail_call_reachable = true;
+					changed = true;
+					break;
+				}
+			}
+		}
+	} while (changed);
+	env->prog->aux->tail_call_reachable = si[0].tail_call_reachable;
+	return 0;
+}
+
 static int check_max_stack_depth(struct bpf_verifier_env *env)
 {
 	enum priv_stack_mode priv_stack_mode = PRIV_STACK_UNKNOWN;
@@ -22890,8 +22929,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	if (ret)
 		goto skip_full_check;
 	if (env->prog->aux->trusted_kernel) {
-		ret = sort_subprogs_topo(env);
-		ret = ret ?: prepare_trusted_kernel(env, attr, uattr);
+		ret = prepare_trusted_kernel(env, attr, uattr);
 		goto skip_full_check;
 	}
 
@@ -22951,7 +22989,8 @@ skip_full_check:
 		ret = bpf_remove_fastcall_spills_fills(env);
 
 	if (ret == 0)
-		ret = check_max_stack_depth(env);
+		ret = env->prog->aux->trusted_kernel ?
+			prepare_trusted_call_stack(env) : check_max_stack_depth(env);
 
 	/* instruction rewrites happen after this point */
 	if (ret == 0 && !env->prog->aux->trusted_kernel)

@@ -8685,6 +8685,8 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 	 */
 	if (!err)
 		err = bpf_core_types_match(obj->btf, local_type_id, btf, targ_type_id);
+	if (!err && btf_native_array_storage_match(obj->btf, local_type_id, btf, targ_type_id))
+		err = 1;
 	if (err <= 0) {
 		const struct btf_type *local_type;
 		const char *targ_name, *local_name;
