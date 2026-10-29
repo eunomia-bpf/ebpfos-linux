@@ -8733,12 +8733,13 @@ static bool trusted_native_proto(struct bpf_object *obj, int local_id,
 	return trusted && btf_native_scalar_proto_match(obj->btf, local_id, kern, kern_id);
 }
 
-/* Privileged trusted compilation retains the compiler's physical call ABI.
- * Kernel BTF can retain source formals erased by whole-program optimization.
- * The trusted tier deliberately supplies no argument or pointer proof; normal
- * loads continue to require their original prototype comparison and verifier.
+/* Source components retain the compiler's physical call ABI. Kernel BTF
+ * can retain source formals erased by whole-program optimization. Resolve
+ * the actual target and let the kernel check the normal call's arguments;
+ * an earlier libbpf prototype comparison must not suppress that decision.
+ * Trusted loads retain their existing exemption from the safety proof.
  */
-static bool trusted_source_calls(struct bpf_object *obj)
+static bool source_component_calls(struct bpf_object *obj)
 {
 	struct bpf_program *prog;
 	bool found = false;
@@ -8746,7 +8747,7 @@ static bool trusted_source_calls(struct bpf_object *obj)
 	bpf_object__for_each_program(prog, obj) {
 		if (!prog->autoload)
 			continue;
-		if (!(prog->prog_flags & BPF_F_TRUSTED_KERNEL))
+		if (!(prog->prog_flags & (BPF_F_TRUSTED_KERNEL | BPF_F_EBPFOS_COMPONENT)))
 			return false;
 		found = true;
 	}
@@ -8800,8 +8801,8 @@ static int bpf_object__resolve_ksym_func_btf_id(struct bpf_object *obj,
 				ret = 1;
 		}
 	}
-	if (!ret && trusted_source_calls(obj)) {
-		pr_debug("trusted native import '%s': compiler ABI retained; no prototype proof\n",
+	if (!ret && source_component_calls(obj)) {
+		pr_debug("source native import '%s': kernel load decides prototype compatibility\n",
 			 ext->name);
 		ret = 1;
 	}
