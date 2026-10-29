@@ -11306,7 +11306,8 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			mark_reg_known_zero(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].type = PTR_TO_MEM | MEM_RDONLY;
 			caller->regs[BPF_REG_0].mem_size = sub->readonly_result_size;
-			caller->regs[BPF_REG_0].mem_stable = BPF_MEM_PROGRAM_STABLE;
+			caller->regs[BPF_REG_0].mem_stable = sub->readonly_kernel_result ?
+				BPF_MEM_KERNEL_STABLE : BPF_MEM_PROGRAM_STABLE;
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
@@ -19445,7 +19446,8 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		return 0;
 	}
 	if (sub->readonly_result_size)
-		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size, false);
+		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size,
+					    sub->readonly_kernel_result);
 	if (subprog_returns_void(env, frame->subprogno))
 		return 0;
 	for (i = 0; i < count; i++) {
@@ -22177,7 +22179,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			return ret;
 
 		if (prog->expected_attach_type == BPF_TRACE_REPLACE) {
-			const struct btf_type *result;
+			const struct btf_type *result, *pointee;
+			bool byte_pointer;
 
 			/* This interface returns a scalar or void in the ordinary
 			 * native ABI. A padding-free single INTEGER record has the
@@ -22193,8 +22196,15 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			    !IS_ENABLED(CONFIG_X86_64))
 				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
+			pointee = btf_is_ptr(result) ? btf_type_skip_modifiers(btf, result->type, NULL) : NULL;
+			/* The source global proves its permanent read-only result at
+			 * every exit. Cold entry publication checks that contract and
+			 * the native prototype before exporting its address.
+			 */
+			byte_pointer = pointee && btf_is_int(pointee) && pointee->size == 1;
 			if (!tgt_info->fmodel.native_stack && t->type &&
 			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
+			    !byte_pointer &&
 			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
 			    !cell_native_result2_type(btf, t->type) &&
 			    !(btf_type_is_struct(result) && btf_native_value_storage(btf, t->type)) &&

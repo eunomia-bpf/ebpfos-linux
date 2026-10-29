@@ -183,7 +183,8 @@ static int mark_stack_read(struct func_instance *instance, u32 frame, u32 insn_i
 	masks = alloc_frame_masks(instance, frame, insn_idx);
 	if (IS_ERR(masks))
 		return PTR_ERR(masks);
-	masks->may_read = spis_or(masks->may_read, mask);
+	for (u32 word = 0; word < STACK_MASK_WORDS; word++)
+		masks->may_read.v[word] |= mask.v[word];
 	return 0;
 }
 
@@ -194,7 +195,8 @@ static int mark_stack_write(struct func_instance *instance, u32 frame, u32 insn_
 	masks = alloc_frame_masks(instance, frame, insn_idx);
 	if (IS_ERR(masks))
 		return PTR_ERR(masks);
-	masks->must_write = spis_or(masks->must_write, mask);
+	for (u32 word = 0; word < STACK_MASK_WORDS; word++)
+		masks->must_write.v[word] |= mask.v[word];
 	return 0;
 }
 
@@ -1804,12 +1806,15 @@ static void merge_instances(struct func_instance *dst, struct func_instance *src
 			continue;
 		}
 		for (i = 0; i < dst->insn_cnt; i++) {
-			dst->frames[f][i].may_read =
-				spis_or(dst->frames[f][i].may_read,
-					src->frames[f][i].may_read);
-			dst->frames[f][i].must_write =
-				spis_and(dst->frames[f][i].must_write,
-					 src->frames[f][i].must_write);
+			/* Combine large stack masks in place, without native-stack
+			 * copies of whole bitmap values at the raised BPF budget.
+			 */
+			for (u32 word = 0; word < STACK_MASK_WORDS; word++) {
+				dst->frames[f][i].may_read.v[word] |=
+					src->frames[f][i].may_read.v[word];
+				dst->frames[f][i].must_write.v[word] &=
+					src->frames[f][i].must_write.v[word];
+			}
 		}
 	}
 }

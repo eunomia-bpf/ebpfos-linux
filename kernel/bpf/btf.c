@@ -8309,8 +8309,19 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	 */
 	{
 		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_mem:");
+		const char *kernel = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_kernel_mem:");
 		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
 
+		if (!IS_ERR(kernel)) {
+			if (!IS_ERR(tag) || PTR_ERR(tag) != -ENOENT) {
+				bpf_log(log, "conflicting read-only result lifetime contracts\n");
+				return -EINVAL;
+			}
+			tag = kernel;
+			sub->readonly_kernel_result = true;
+		} else if (PTR_ERR(kernel) != -ENOENT) {
+			return PTR_ERR(kernel);
+		}
 		if (!IS_ERR(tag)) {
 			u32 bytes;
 

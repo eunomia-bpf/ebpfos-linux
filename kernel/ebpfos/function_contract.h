@@ -139,6 +139,20 @@ static bool cell_trusted_native_scalar_proto(struct btf *native, const struct bt
       (a.arg_flags[i] & BTF_FMODEL_STRUCT_ARG)) return false;
  return true;
 }
+/* Only an independently checked permanent read-only result may cross the
+ * native pointer-result boundary. Program-held map storage is too short-lived.
+ */
+static bool cell_kernel_readonly_result(struct btf *native, const struct btf_type *n,
+ struct btf *compiled, const struct btf_type *function)
+{
+ const struct btf_type *prototype = btf_type_by_id(compiled, function->type);
+ const struct btf_type *result = btf_type_skip_modifiers(native, n->type, NULL);
+ const char *tag = btf_find_decl_tag_value(compiled, function, -1, "ret:ro_kernel_mem:");
+ u32 bytes;
+ return result && btf_type_is_ptr(result) && !IS_ERR(tag) &&
+  !kstrtou32(tag, 10, &bytes) && bytes &&
+  cell_layout(native, n->type, compiled, prototype->type, 0, false);
+}
 static bool cell_callable(struct btf *native, const struct btf_type *native_function,
  struct bpf_prog *parent, u32 id, unsigned long *address)
 {
@@ -148,7 +162,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  struct bpf_prog_aux *aux = parent->aux;
  unsigned int i, index;
  int native_proto_id = native_function->type;
- bool scalar_records, result2;
+ bool scalar_records, result2, kernel_result = false;
 #ifdef BPF_F_TRUSTED_KERNEL
  bool trusted = aux->trusted_kernel;
 #else
@@ -192,6 +206,14 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
   if (native_proto_id != native_function->type) return false;
  }
 
+ if (!trusted) {
+  const struct btf_type *result = btf_type_skip_modifiers(native, n->type, NULL);
+  if (result && btf_type_is_ptr(result)) {
+   kernel_result = cell_kernel_readonly_result(native, n, aux->btf, function);
+   if (!kernel_result) return false;
+  }
+ }
+
  /* Framed functions retain their complete logical native value ABI. The
   * ordinary verifier checked that ABI independently; no wrapper executes.
   */
@@ -214,7 +236,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
            !cell_record_type_tags(aux->btf, prototype->type) &&
            cell_record_word(cell_record_type(aux->btf, prototype->type)) &&
            ebpfos_prog_native_result2(aux->func[index]);
- if (!result2 && !cell_register_type(native, n->type, aux->btf, prototype->type, false)) {
+ if (!result2 && !kernel_result && !cell_register_type(native, n->type, aux->btf, prototype->type, false)) {
   const struct btf_type *x = btf_type_skip_modifiers(native, n->type, NULL);
   const struct btf_type *y = btf_type_skip_modifiers(aux->btf, prototype->type, NULL);
   /* A trusted source body may return a native address in RAX. This is ABI
