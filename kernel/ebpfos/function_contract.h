@@ -172,10 +172,16 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      !aux->func[index]->jited || !cell_export_name(native, native_function, aux->btf, id)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
+ /* Trusted unmodified source retains Linux's context transfers under its
+  * source/compiler assumption. Its annotations do not provide independently
+  * verified transfer summaries. Keep that requirement in the verified tier.
+  */
+ if (!trusted && !cell_context_requirements(native, native_function, aux->btf, function))
+  return false;
+
  if (trusted && native_proto_id != native_function->type) {
   if (!cell_trusted_native_scalar_proto(native, n, aux->btf, prototype,
         aux->func[index]->aux->native_frame) ||
-      !cell_context_requirements(native, native_function, aux->btf, function) ||
       !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
   goto compatible;
  }
@@ -195,8 +201,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
     if (btf_type_is_struct(value) && !btf_native_scalar_storage(aux->btf, type, 0) &&
         !btf_native_record_entry_contract(aux->btf, type)) return false;
    }
-  if (!cell_context_requirements(native, native_function, aux->btf, function) ||
-      !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
+  if (!cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;
   goto compatible;
  }
  result2 = IS_ENABLED(CONFIG_X86_64) && cell_native_result2_type(native, n->type) &&
@@ -212,7 +217,6 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
       !((btf_type_is_ptr(y) && cell_layout(native, x->type, aux->btf, y->type, 0, false)) ||
         (btf_type_is_int(y) && y->size == sizeof(void *)))) return false;
  }
- if (!cell_context_requirements(native, native_function, aux->btf, function)) return false;
  scalar_records = IS_ENABLED(CONFIG_X86_64) &&
                   cell_scalar_record_inputs(native, native_function, aux->btf, function, result2);
  /* This form carries scalar bits only and rejects every parameter contract. */
