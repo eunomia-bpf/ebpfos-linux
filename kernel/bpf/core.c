@@ -197,8 +197,11 @@ void bpf_prog_jit_attempt_done(struct bpf_prog *prog)
 		prog->aux->jited_linfo = NULL;
 	}
 
-	kfree(prog->aux->kfunc_tab);
-	prog->aux->kfunc_tab = NULL;
+	/* AOT re-emits the rewritten instructions through the same backend.
+	 * Split functions share these call descriptors with their root, so
+	 * freeing them here leaves dangling pointers in those functions.
+	 * The root releases the table in __bpf_prog_put_noref().
+	 */
 }
 
 /* The jit engine is responsible to provide an array
