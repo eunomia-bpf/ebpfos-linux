@@ -2017,14 +2017,21 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	 */
 	if (bpf_prog->aux->native_frame) {
 		if (native_realign) {
+			u32 private_depth = round_up(stack_depth, 8) +
+					    round_up(bpf_prog->aux->native_arg_out, 8);
+
+			/* Keep unwind-visible saves at fixed incoming-frame offsets.
+			 * Only locals and outgoing arguments use the aligned frame.
+			 */
 			emit_stx(&prog, BPF_DW, BPF_REG_ARG_FP, X86_REG_R12, -8);
-			/* Native stack realignment, preserving the incoming argument base. */
+			emit_native_frame_regs(&prog, callee_regs_used, 8, BPF_REG_ARG_FP, false);
 			EMIT3_off32(0x48, 0x81, 0xE4, -(s32)bpf_prog->aux->native_stack_align);
 			EMIT_mov(X86_REG_R12, BPF_REG_ARG_SP);
-			if (native_depth)
-				EMIT3_off32(0x49, 0x81, 0xC4, native_depth);
+			if (private_depth)
+				EMIT3_off32(0x49, 0x81, 0xC4, private_depth);
+		} else {
+			emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, false);
 		}
-		emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, false);
 	} else if (bpf_prog->aux->exception_boundary) {
 		/* We also need to save r12, which is not mapped to any BPF
 		 * register, as we throw after entry into the kernel, which may
@@ -3190,9 +3197,12 @@ emit_jmp:
 					return -EINVAL;
 			}
 			if (bpf_prog->aux->native_frame) {
-				emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, true);
-				if (native_realign)
+				if (native_realign) {
+					emit_native_frame_regs(&prog, callee_regs_used, 8, BPF_REG_ARG_FP, true);
 					emit_ldx(&prog, BPF_DW, X86_REG_R12, BPF_REG_ARG_FP, -8);
+				} else {
+					emit_native_frame_regs(&prog, callee_regs_used, stack_depth, native_fp, true);
+				}
 			} else if (bpf_prog->aux->exception_boundary) {
 				pop_callee_regs(&prog, all_callee_regs_used);
 				pop_r12(&prog);
