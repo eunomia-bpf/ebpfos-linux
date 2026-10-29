@@ -21148,19 +21148,30 @@ static void release_btfs(struct bpf_verifier_env *env)
 }
 
 /* convert pseudo BPF_LD_IMM64 into generic BPF_LD_IMM64 */
-static void convert_pseudo_ld_imm64(struct bpf_verifier_env *env)
+static int convert_pseudo_ld_imm64(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *insn = env->prog->insnsi;
 	int insn_cnt = env->prog->len;
+	unsigned long *addresses = NULL;
 	int i;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
 		if (insn->code != (BPF_LD | BPF_IMM | BPF_DW))
 			continue;
+		if (insn->src_reg) {
+			if (!addresses) {
+				addresses = kvcalloc(BITS_TO_LONGS(insn_cnt), sizeof(*addresses), GFP_KERNEL_ACCOUNT);
+				if (!addresses)
+					return -ENOMEM;
+				env->prog->aux->jit_addr_insns = addresses;
+			}
+			__set_bit(i, addresses);
+		}
 		if (insn->src_reg == BPF_PSEUDO_FUNC)
 			continue;
 		insn->src_reg = 0;
 	}
+	return 0;
 }
 
 static void release_insn_arrays(struct bpf_verifier_env *env)
@@ -23023,7 +23034,9 @@ skip_full_check:
 		/* program is valid. Convert pseudo bpf_ld_imm64 into generic
 		 * bpf_ld_imm64 instructions
 		 */
-		convert_pseudo_ld_imm64(env);
+		ret = convert_pseudo_ld_imm64(env);
+		if (ret)
+			goto err_release_maps;
 	}
 
 	adjust_btf_func(env);

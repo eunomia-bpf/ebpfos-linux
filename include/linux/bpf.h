@@ -2030,6 +2030,8 @@ struct bpf_prog_aux {
 	struct bpf_stream stream[2];
 	struct mutex st_ops_assoc_mutex;
 	struct bpf_map __rcu *st_ops_assoc;
+	/* Resolved ldimm64 operands which came from symbolic references. */
+	unsigned long *jit_addr_insns;
 };
 
 #define BPF_NR_CONTEXTS        4       /* normal, softirq, hardirq, NMI */

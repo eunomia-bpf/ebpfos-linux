@@ -17,6 +17,7 @@ struct bpf_aot_record {
 
 struct bpf_aot_context {
 	struct bpf_prog *root;
+	struct bpf_prog *source;
 	struct bpf_aot_reloc *operands;
 	u32 nr_operands;
 	struct bpf_aot_record *records;

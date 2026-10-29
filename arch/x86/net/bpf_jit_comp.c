@@ -1154,11 +1154,26 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 				break;
 			}
 	}
-	if (!aot || (!operand && aot_address_name(aot, value, name, &addend))) {
-		if (aot && aot_map_address(aot, value))
+	if (!operand) {
+		bool symbolic = false;
+
+		if (aot) {
+			u32 index = insn + aot->source->aux->subprog_start;
+			const struct bpf_insn *original = &aot->source->insnsi[insn];
+
+			symbolic = original->src_reg == BPF_PSEUDO_FUNC ||
+				(aot->root->aux->jit_addr_insns && index < aot->root->len &&
+				 test_bit(index, aot->root->aux->jit_addr_insns));
+		}
+		if (!symbolic) {
+			emit_mov_imm64(pprog, dst_reg, value >> 32, value);
+			return 0;
+		}
+		if (aot_map_address(aot, value))
 			return -EOPNOTSUPP;
-		emit_mov_imm64(pprog, dst_reg, value >> 32, value);
-		return 0;
+		err = aot_address_name(aot, value, name, &addend);
+		if (err)
+			return err;
 	}
 	if (operand) {
 		strscpy(name, operand->symbol, sizeof(name));
@@ -3241,6 +3256,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		return -EINVAL;
 	aot.patchable_jumps = request->flags & BPF_AOT_F_PATCHABLE_JUMPS;
 	source = root->aux->func_cnt ? root->aux->func[request->func_index] : root;
+	aot.source = source;
 	name = aot_function_name(source);
 	if (!name || !*name)
 		return -ENOENT;
