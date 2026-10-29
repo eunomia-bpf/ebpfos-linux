@@ -20,6 +20,8 @@
 #include <asm/unwind.h>
 #include <asm/cfi.h>
 
+#include "bpf_jit_aot.h"
+
 static bool all_callee_regs_used[4] = {true, true, true, true};
 
 static u8 *emit_code(u8 *ptr, u32 bytes, unsigned int len)
@@ -312,6 +314,8 @@ int bpf_arch_text_invalidate(void *dst, size_t len)
 }
 
 struct jit_context {
+	struct bpf_aot_context *aot;
+
 	int cleanup_addr; /* Epilogue code offset */
 
 	/*
@@ -580,6 +584,54 @@ static int emit_call(u8 **pprog, void *func, void *ip)
 	return emit_patch(pprog, func, ip, 0xE8);
 }
 
+static int emit_aot_named_branch(u8 **pprog, u8 *ip, const char *name,
+				 u8 opcode, s64 addend, struct jit_context *ctx)
+{
+	u8 *prog = *pprog;
+	int err;
+
+	err = aot_record(ctx->aot, ip - ctx->aot->image + 1,
+			opcode == 0xe8 ? R_X86_64_PLT32 : R_X86_64_PC32,
+			name, addend - 4);
+	if (err)
+		return err;
+	EMIT1_off32(opcode, 0);
+	*pprog = prog;
+	return 0;
+}
+
+static int emit_aot_indirect(u8 **pprog, u8 *ip, unsigned int reg, u8 opcode,
+			     struct jit_context *ctx)
+{
+	static const char * const registers[] = {
+		"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+		"r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+	};
+	char symbol[64];
+
+	snprintf(symbol, sizeof(symbol), "__x86_indirect_thunk_%s", registers[reg]);
+	return emit_aot_named_branch(pprog, ip, symbol, opcode, 0, ctx);
+}
+
+/* AOT uses the same encoders, with link-time displacement operands. */
+static int emit_aot_branch(u8 **pprog, void *func, void *ip, u8 opcode,
+			  struct jit_context *ctx)
+{
+	u8 *prog = *pprog;
+	int err;
+
+	if (!ctx->aot)
+		return emit_patch(pprog, func, ip, opcode);
+	err = aot_record_address(ctx->aot, (u8 *)ip - ctx->aot->image + 1,
+			opcode == 0xe8 ? R_X86_64_PLT32 : R_X86_64_PC32,
+			(unsigned long)func, -4);
+	if (err)
+		return err;
+	EMIT1_off32(opcode, 0);
+	*pprog = prog;
+	return 0;
+}
+
 static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
@@ -737,24 +789,28 @@ static void __emit_indirect_jump(u8 **pprog, int reg, bool ereg)
 	*pprog = prog;
 }
 
-static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
+static void emit_indirect_jump_ctx(u8 **pprog, int bpf_reg, u8 *ip,
+				   struct jit_context *ctx)
 {
 	u8 *prog = *pprog;
 	int reg = reg2hex[bpf_reg];
 	bool ereg = is_ereg(bpf_reg);
 
-	if (cpu_feature_enabled(X86_FEATURE_INDIRECT_THUNK_ITS)) {
+	if (ctx->aot && IS_ENABLED(CONFIG_MITIGATION_RETPOLINE)) {
+		emit_aot_indirect(&prog, ip, reg + 8 * ereg, 0xe9, ctx);
+	} else if (!ctx->aot && cpu_feature_enabled(X86_FEATURE_INDIRECT_THUNK_ITS)) {
 		OPTIMIZER_HIDE_VAR(reg);
-		emit_jump(&prog, its_static_thunk(reg + 8*ereg), ip);
-	} else if (cpu_feature_enabled(X86_FEATURE_RETPOLINE_LFENCE)) {
+		emit_aot_branch(&prog, its_static_thunk(reg + 8*ereg), ip, 0xe9, ctx);
+	} else if (!ctx->aot && cpu_feature_enabled(X86_FEATURE_RETPOLINE_LFENCE)) {
 		EMIT_LFENCE();
 		__emit_indirect_jump(&prog, reg, ereg);
-	} else if (cpu_feature_enabled(X86_FEATURE_RETPOLINE)) {
+	} else if (cpu_feature_enabled(X86_FEATURE_RETPOLINE) ||
+		   (ctx->aot && IS_ENABLED(CONFIG_MITIGATION_RETPOLINE))) {
 		OPTIMIZER_HIDE_VAR(reg);
 		if (cpu_feature_enabled(X86_FEATURE_CALL_DEPTH))
-			emit_jump(&prog, &__x86_indirect_jump_thunk_array[reg + 8*ereg], ip);
+			emit_aot_branch(&prog, &__x86_indirect_jump_thunk_array[reg + 8*ereg], ip, 0xe9, ctx);
 		else
-			emit_jump(&prog, &__x86_indirect_thunk_array[reg + 8*ereg], ip);
+			emit_aot_branch(&prog, &__x86_indirect_thunk_array[reg + 8*ereg], ip, 0xe9, ctx);
 	} else {
 		__emit_indirect_jump(&prog, reg, ereg);
 		if (IS_ENABLED(CONFIG_MITIGATION_RETPOLINE) || IS_ENABLED(CONFIG_MITIGATION_SLS))
@@ -764,11 +820,20 @@ static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
 	*pprog = prog;
 }
 
-static void emit_return(u8 **pprog, u8 *ip)
+static void emit_indirect_jump(u8 **pprog, int bpf_reg, u8 *ip)
+{
+	struct jit_context ctx = {};
+
+	emit_indirect_jump_ctx(pprog, bpf_reg, ip, &ctx);
+}
+
+static void emit_return_ctx(u8 **pprog, u8 *ip, struct jit_context *ctx)
 {
 	u8 *prog = *pprog;
 
-	if (cpu_wants_rethunk()) {
+	if (ctx->aot && IS_ENABLED(CONFIG_MITIGATION_RETHUNK)) {
+		emit_aot_named_branch(&prog, ip, "__x86_return_thunk", 0xe9, 0, ctx);
+	} else if (cpu_wants_rethunk()) {
 		emit_jump(&prog, x86_return_thunk, ip);
 	} else {
 		EMIT1(0xC3);		/* ret */
@@ -777,6 +842,13 @@ static void emit_return(u8 **pprog, u8 *ip)
 	}
 
 	*pprog = prog;
+}
+
+static void emit_return(u8 **pprog, u8 *ip)
+{
+	struct jit_context ctx = {};
+
+	emit_return_ctx(pprog, ip, &ctx);
 }
 
 #define BPF_TAIL_CALL_CNT_PTR_STACK_OFF(stack)	(-16 - round_up(stack, 8))
@@ -876,7 +948,7 @@ static void emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
 	 * rdi == ctx (1st arg)
 	 * rcx == prog->bpf_func + X86_TAIL_CALL_OFFSET
 	 */
-	emit_indirect_jump(&prog, BPF_REG_4 /* R4 -> rcx */, ip + (prog - start));
+	emit_indirect_jump_ctx(&prog, BPF_REG_4 /* R4 -> rcx */, ip + (prog - start), ctx);
 
 	/* out: */
 	ctx->tail_call_indirect_label = prog - start;
@@ -908,8 +980,11 @@ static void emit_bpf_tail_call_direct(struct bpf_prog *bpf_prog,
 	poke->tailcall_target = ip + ctx->tail_call_direct_label - X86_PATCH_SIZE;
 	poke->bypass_addr = (u8 *)poke->tailcall_target + X86_PATCH_SIZE;
 
-	emit_jump(&prog, (u8 *)poke->tailcall_target + X86_PATCH_SIZE,
-		  poke->tailcall_bypass);
+	if (ctx->aot)
+		emit_nops(&prog, X86_PATCH_SIZE);
+	else
+		emit_jump(&prog, (u8 *)poke->tailcall_target + X86_PATCH_SIZE,
+			  poke->tailcall_bypass);
 
 	/* Inc tail_call_cnt if the slot is populated. */
 	EMIT4(0x48, 0x83, 0x00, 0x01);                /* add qword ptr [rax], 1 */
@@ -932,7 +1007,24 @@ static void emit_bpf_tail_call_direct(struct bpf_prog *bpf_prog,
 	if (stack_depth)
 		EMIT3_off32(0x48, 0x81, 0xC4, round_up(stack_depth, 8));
 
-	emit_nops(&prog, X86_PATCH_SIZE);
+	if (ctx->aot) {
+		struct bpf_array *array = container_of(poke->tail_call.map, struct bpf_array, map);
+		struct bpf_prog *target;
+
+		rcu_read_lock();
+		target = READ_ONCE(array->ptrs[poke->tail_call.key]);
+		if (target && aot_function_name(target))
+			emit_aot_named_branch(&prog, ip + (prog - start),
+					      aot_function_name(target), 0xe9,
+					      X86_TAIL_CALL_OFFSET, ctx);
+		else
+			ctx->aot->error = -ENODATA;
+		rcu_read_unlock();
+		if (!target)
+			emit_nops(&prog, X86_PATCH_SIZE);
+	} else {
+		emit_nops(&prog, X86_PATCH_SIZE);
+	}
 
 	/* out: */
 	ctx->tail_call_direct_label = prog - start;
@@ -1043,6 +1135,51 @@ static void emit_mov_imm64(u8 **pprog, u32 dst_reg,
 
 	*pprog = prog;
 }
+
+static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
+			 struct jit_context *ctx, u8 *ip, u32 insn)
+{
+	struct bpf_aot_context *aot = ctx->aot;
+	const struct bpf_aot_reloc *operand = NULL;
+	char name[BPF_AOT_SYMBOL_LEN];
+	s64 addend = 0;
+	u8 *prog = *pprog;
+	u32 type = R_X86_64_64, i;
+	int err;
+
+	if (aot) {
+		for (i = 0; i < aot->nr_operands; i++)
+			if (aot->operands[i].insn == insn) {
+				operand = &aot->operands[i];
+				break;
+			}
+	}
+	if (!aot || (!operand && aot_address_name(aot, value, name, &addend))) {
+		if (aot && aot_map_address(aot, value))
+			return -EOPNOTSUPP;
+		emit_mov_imm64(pprog, dst_reg, value >> 32, value);
+		return 0;
+	}
+	if (operand) {
+		strscpy(name, operand->symbol, sizeof(name));
+		addend = operand->addend;
+		type = operand->type;
+	}
+	if (type != R_X86_64_64 && type != R_X86_64_32)
+		return -EOPNOTSUPP;
+	err = aot_record(aot, ip - aot->image + 2, type, name, addend);
+	if (err)
+		return err;
+	/* movabs avoids sizing an unresolved address as a signed immediate. A
+	 * 32-bit ID has its own relocation over the low word and a zero high word.
+	 */
+	EMIT2(add_1mod(0x48, dst_reg), add_1reg(0xB8, dst_reg));
+	EMIT(0, 4);
+	EMIT(0, 4);
+	*pprog = prog;
+	return 0;
+}
+
 
 static void emit_mov_reg(u8 **pprog, bool is64, u32 dst_reg, u32 src_reg)
 {
@@ -1964,7 +2101,15 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 				/* add <dst>, gs:[<off>] */
 				EMIT2(0x65, add_1mod(0x48, dst_reg));
 				EMIT3(0x03, add_2reg(0x04, 0, dst_reg), 0x25);
-				EMIT((u32)(unsigned long)&this_cpu_off, 4);
+				if (ctx->aot) {
+					err = aot_record(ctx->aot, addrs[i - 1] + (prog - temp),
+							 R_X86_64_32S, "this_cpu_off", 0);
+					if (err)
+						return err;
+					EMIT(0, 4);
+				} else {
+					EMIT((u32)(unsigned long)&this_cpu_off, 4);
+				}
 #endif
 				break;
 			}
@@ -2040,12 +2185,30 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 		case BPF_ALU | BPF_MOV | BPF_K:
 			if (bpf_kop_is_sidecar_insn(insn))
 				break;
+			if (ctx->aot) {
+				u32 index;
+				bool symbolic = false;
+
+				for (index = 0; index < ctx->aot->nr_operands; index++)
+					if (ctx->aot->operands[index].insn == i - 1)
+						symbolic = true;
+				if (symbolic) {
+					err = emit_aot_imm64(&prog, dst_reg, (s64)imm32, ctx, ip, i - 1);
+					if (err)
+						return err;
+					break;
+				}
+			}
 			emit_mov_imm32(&prog, BPF_CLASS(insn->code) == BPF_ALU64,
 				       dst_reg, imm32);
 			break;
 
 		case BPF_LD | BPF_IMM | BPF_DW:
-			emit_mov_imm64(&prog, dst_reg, insn[1].imm, insn[0].imm);
+			err = emit_aot_imm64(&prog, dst_reg,
+				((u64)(u32)insn[1].imm << 32) | (u32)insn[0].imm,
+				ctx, ip, i - 1);
+			if (err)
+				return err;
 			insn++;
 			i++;
 			break;
@@ -2169,7 +2332,7 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 		case BPF_ALU64 | BPF_RSH | BPF_X:
 		case BPF_ALU64 | BPF_ARSH | BPF_X:
 			/* BMI2 shifts aren't better when shift count is already in rcx */
-			if (boot_cpu_has(X86_FEATURE_BMI2) && src_reg != BPF_REG_4) {
+			if (!ctx->aot && boot_cpu_has(X86_FEATURE_BMI2) && src_reg != BPF_REG_4) {
 				/* shrx/sarx/shlx dst_reg, dst_reg, src_reg */
 				bool w = (BPF_CLASS(insn->code) == BPF_ALU64);
 				u8 op;
@@ -2619,9 +2782,17 @@ populate_extable:
 			 */
 			if (priv_frame_ptr || imm32 < BPF_REG_0 || (imm32 >= BPF_REG_FP && imm32 != BPF_REG_ARG6))
 				return -EOPNOTSUPP;
-			if (is_ereg(imm32))
-				EMIT1(0x41);
-			EMIT2(0xFF, 0xD0 + reg2hex[imm32]);
+			if (ctx->aot && IS_ENABLED(CONFIG_MITIGATION_RETPOLINE)) {
+				u32 reg = reg2hex[imm32] + 8 * is_ereg(imm32);
+
+				err = emit_aot_indirect(&prog, ip, reg, 0xe8, ctx);
+				if (err)
+					return err;
+			} else {
+				if (is_ereg(imm32))
+					EMIT1(0x41);
+				EMIT2(0xFF, 0xD0 + reg2hex[imm32]);
+			}
 			break;
 		case BPF_JMP | BPF_CALL: {
 			u32 recovery = 0, exception_data = 0;
@@ -2629,6 +2800,8 @@ populate_extable:
 
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				if (ctx->aot)
+					return -EOPNOTSUPP;
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
 							 image ? ip : NULL,
@@ -2660,8 +2833,13 @@ populate_extable:
 				push_r9(&prog);
 				ip += 2;
 			}
-			ip += x86_call_depth_emit_accounting(&prog, func, ip);
-			if (emit_call(&prog, func, ip))
+			/* Boot's normal __call_sites pass redirects calls into
+			 * native prefix padding; load-time JIT allocations instead
+			 * need their inline accounting after boot has completed.
+			 */
+			if (!ctx->aot)
+				ip += x86_call_depth_emit_accounting(&prog, func, ip);
+			if (emit_aot_branch(&prog, func, ip, 0xe8, ctx))
 				return -EINVAL;
 			if (fault_call && image && bpf_prog->aux->extable) {
 				struct exception_table_entry *ex, *rw_ex;
@@ -2876,7 +3054,9 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 			break;
 
 		case BPF_JMP | BPF_JA | BPF_X:
-			emit_indirect_jump(&prog, insn->dst_reg, ip);
+			if (ctx->aot)
+				return -EOPNOTSUPP;
+			emit_indirect_jump_ctx(&prog, insn->dst_reg, ip, ctx);
 			break;
 		case BPF_JMP | BPF_JA:
 		case BPF_JMP32 | BPF_JA:
@@ -2888,16 +3068,20 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 					 * when there are long sequences of replaced
 					 * dead code.
 					 */
-					jmp_offset = -2;
+					jmp_offset = ctx->aot && ctx->aot->patchable_jumps ? -5 : -2;
 				else
 					jmp_offset = addrs[i + insn->off] - addrs[i];
 			} else {
 				if (insn->imm == -1)
-					jmp_offset = -2;
+					jmp_offset = ctx->aot && ctx->aot->patchable_jumps ? -5 : -2;
 				else
 					jmp_offset = addrs[i + insn->imm] - addrs[i];
 			}
 
+			if (!jmp_offset && ctx->aot && ctx->aot->patchable_jumps) {
+				emit_nops(&prog, X86_PATCH_SIZE);
+				break;
+			}
 			if (!jmp_offset) {
 				/*
 				 * If jmp_padding is enabled, the extra nops will
@@ -2925,7 +3109,7 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 				break;
 			}
 emit_jmp:
-			if (is_imm8_jmp_offset(jmp_offset)) {
+			if (!(ctx->aot && ctx->aot->patchable_jumps) && is_imm8_jmp_offset(jmp_offset)) {
 				if (jmp_padding) {
 					/* To avoid breaking jmp_offset, the extra bytes
 					 * are padded before the actual jmp insn, so
@@ -2984,7 +3168,7 @@ emit_jmp:
 			EMIT1(0xC9);         /* leave */
 			bpf_prog->aux->ksym.fp_end = prog - temp;
 
-			emit_return(&prog, image + addrs[i - 1] + (prog - temp));
+			emit_return_ctx(&prog, image + addrs[i - 1] + (prog - temp), ctx);
 			break;
 
 		default:
@@ -2998,6 +3182,8 @@ emit_jmp:
 			return -EINVAL;
 		}
 
+		if (ctx->aot && ctx->aot->error)
+			return ctx->aot->error;
 		ilen = prog - temp;
 		if (ilen > BPF_MAX_INSN_SIZE) {
 			pr_err("bpf_jit: fatal insn size error\n");
@@ -3030,6 +3216,131 @@ emit_jmp:
 		return -EFAULT;
 	}
 	return proglen;
+}
+
+/* Produce a new, unplaced image from the already rewritten program. All
+ * transient emission state belongs to this request, never to the live program.
+ */
+int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
+	       void **object, u32 *size)
+{
+	struct bpf_aot_context aot = { .root = root };
+	struct jit_context ctx = { .aot = &aot };
+	struct bpf_prog_aux *aux = NULL;
+	struct bpf_prog *source, *prog = NULL;
+	const char *name;
+	u8 *image = NULL;
+	int *addrs = NULL;
+	int pass, oldlen = 0, len = 0, err = -ENOMEM;
+	u32 i, count = root->aux->func_cnt ?: 1;
+
+	*object = NULL;
+	*size = 0;
+	if (request->func_index >= count || request->nr_relocs > root->len ||
+	    request->reserved || request->flags & ~BPF_AOT_F_PATCHABLE_JUMPS)
+		return -EINVAL;
+	aot.patchable_jumps = request->flags & BPF_AOT_F_PATCHABLE_JUMPS;
+	source = root->aux->func_cnt ? root->aux->func[request->func_index] : root;
+	name = aot_function_name(source);
+	if (!name || !*name)
+		return -ENOENT;
+	if (!source->jited || source->blinded || source->aux->priv_stack_ptr ||
+	    source->aux->exception_boundary || source->aux->exception_cb ||
+	    bpf_arena_get_kern_vm_start(source->aux->arena) ||
+	    cfi_mode != CFI_OFF)
+		return -EOPNOTSUPP;
+	if (request->nr_relocs) {
+		aot.operands = memdup_user(u64_to_user_ptr(request->relocs),
+					  array_size(request->nr_relocs, sizeof(*aot.operands)));
+		if (IS_ERR(aot.operands))
+			return PTR_ERR(aot.operands);
+		aot.nr_operands = request->nr_relocs;
+	}
+	for (i = 0; i < aot.nr_operands; i++) {
+		struct bpf_aot_reloc *operand = &aot.operands[i];
+		u32 j;
+
+		if (operand->insn >= source->len || !operand->symbol[0] ||
+		    !memchr(operand->symbol, 0, sizeof(operand->symbol)) ||
+		    (operand->type != R_X86_64_64 && operand->type != R_X86_64_32) ||
+		    (source->insnsi[operand->insn].code != (BPF_LD | BPF_IMM | BPF_DW) &&
+		     source->insnsi[operand->insn].code != (BPF_ALU | BPF_MOV | BPF_K) &&
+		     source->insnsi[operand->insn].code != (BPF_ALU64 | BPF_MOV | BPF_K))) {
+			err = -EINVAL;
+			goto out;
+		}
+		err = aot_validate_operand(operand, &source->insnsi[operand->insn]);
+		if (err)
+			goto out;
+		for (j = 0; j < i; j++)
+			if (aot.operands[j].insn == operand->insn) {
+				err = -EINVAL;
+				goto out;
+			}
+	}
+	prog = kmemdup(source, bpf_prog_size(source->len), GFP_KERNEL);
+	aux = kmemdup(source->aux, sizeof(*aux), GFP_KERNEL);
+	if (aux)
+		aux->poke_tab = NULL;
+	addrs = kvmalloc_array(source->len + 1, sizeof(*addrs), GFP_KERNEL);
+	if (!prog || !aux || !addrs)
+		goto out;
+	prog->aux = aux;
+	aux->extable = NULL;
+	aux->poke_tab = NULL;
+	if (source->aux->size_poke_tab) {
+		aux->poke_tab = kmemdup(source->aux->poke_tab,
+			array_size(source->aux->size_poke_tab, sizeof(*aux->poke_tab)), GFP_KERNEL);
+		if (!aux->poke_tab)
+			goto out;
+	}
+	for (i = 0; i <= source->len; i++)
+		addrs[i] = (i + 1) * 64;
+	ctx.cleanup_addr = addrs[source->len];
+	/* Address-dependent instructions are fixed-width in AOT mode. */
+	for (pass = 0; pass < 20; pass++) {
+		len = do_jit(NULL, prog, addrs, NULL, NULL, oldlen, &ctx, pass >= 15);
+		if (len <= 0) {
+			err = len ?: -EINVAL;
+			goto out;
+		}
+		if (len == oldlen)
+			break;
+		oldlen = len;
+		cond_resched();
+	}
+	if (pass == 20) {
+		err = -EAGAIN;
+		goto out;
+	}
+	image = kvzalloc(ALIGN(len, 4) + aux->num_exentries * sizeof(*aux->extable), GFP_KERNEL);
+	if (!image)
+		goto out;
+	aot.image = image;
+	aot.final = true;
+	if (aux->num_exentries)
+		aux->extable = (void *)(image + ALIGN(len, 4));
+	err = do_jit(NULL, prog, addrs, image, image, len, &ctx, pass >= 15);
+	if (err <= 0 || err != len || aot.error) {
+		err = aot.error ?: (err < 0 ? err : -EFAULT);
+		goto out;
+	}
+	for (i = 0; i < source->len; i++)
+		if (source->insnsi[i].code == (BPF_LD | BPF_IMM | BPF_DW))
+			addrs[++i] = -1;
+	aot.extable = aux->extable;
+	aot.nr_exentries = aux->num_exentries;
+	err = aot_build_elf(&aot, name, image, len, addrs, source->len + 1, object, size);
+out:
+	kvfree(image);
+	kvfree(addrs);
+	if (aux)
+		kfree(aux->poke_tab);
+	kfree(aux);
+	kfree(prog);
+	kvfree(aot.records);
+	kfree(aot.operands);
+	return err;
 }
 
 static void clean_stack_garbage(u8 **pprog, int nr_stack_slots,

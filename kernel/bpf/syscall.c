@@ -4,6 +4,7 @@
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/bpf_entry.h>
+#include <linux/bpf_aot.h>
 #include <linux/bpf_operations.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/bpf_trace.h>
@@ -5281,7 +5282,7 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	u32 ulen, len;
 	int err;
 
-	len = offsetofend(struct bpf_prog_info, tier);
+	len = offsetofend(struct bpf_prog_info, aot_request);
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), len, info_len);
 	if (err)
 		return err;
@@ -5290,6 +5291,33 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	memset(&info, 0, sizeof(info));
 	if (copy_from_user(&info, uinfo, info_len))
 		return -EFAULT;
+
+	if (info.aot_request) {
+		struct bpf_aot_request request;
+		void *object = NULL;
+		u32 size = 0;
+
+		if (!bpf_dump_raw_ok(file->f_cred))
+			return -EPERM;
+		if (copy_from_user(&request, u64_to_user_ptr(info.aot_request), sizeof(request)))
+			return -EFAULT;
+#if defined(CONFIG_X86_64) && defined(CONFIG_BPF_JIT)
+		err = bpf_jit_aot(prog, &request, &object, &size);
+#else
+		err = -EOPNOTSUPP;
+#endif
+		if (err)
+			return err;
+		ulen = info.aot_size;
+		info.aot_size = size;
+		if (info.aot_elf && ulen < size)
+			err = -ENOSPC;
+		else if (info.aot_elf && copy_to_user(u64_to_user_ptr(info.aot_elf), object, size))
+			err = -EFAULT;
+		kvfree(object);
+		if (err)
+			return err;
+	}
 
 	info.type = prog->type;
 	info.tier = prog->type == BPF_PROG_TYPE_NATIVE ? BPF_PROG_TIER_NATIVE :
