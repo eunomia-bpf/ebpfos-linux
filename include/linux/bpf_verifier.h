@@ -117,7 +117,7 @@ struct bpf_reg_state {
 	 * with the same id as us.
 	 */
 	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
-	bool mem_stable; /* PTR_TO_MEM backed by program-held array storage */
+	bool mem_stable; /* read-only memory with proven stable storage */
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
@@ -629,6 +629,7 @@ struct bpf_insn_aux_data {
 				};
 				u32 mem_size;	/* mem_size for non-struct typed var */
 			};
+			bool mem_stable;
 		} btf_var;
 		/* if instruction is a call to bpf_loop this field tracks
 		 * the state of the relevant registers to make decision about inlining

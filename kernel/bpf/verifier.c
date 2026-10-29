@@ -18660,6 +18660,7 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 	if (insn->src_reg == BPF_PSEUDO_BTF_ID) {
 		dst_reg->type = aux->btf_var.reg_type;
+		dst_reg->mem_stable = aux->btf_var.mem_stable;
 		switch (base_type(dst_reg->type)) {
 		case PTR_TO_MEM:
 			dst_reg->mem_size = aux->btf_var.mem_size;
@@ -19094,13 +19095,26 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
 			return err;
-		/* A prior independently checked result retains its array lifetime,
+		/* Permanent read-only data and checked results retain their lifetime,
 		 * including through bounded offsets and spills. Ordinary memory
 		 * arguments and helper results acquire no such fact.
 		 */
 		if (result->type == (PTR_TO_MEM | MEM_RDONLY) && result->mem_stable)
 			return check_mem_region_access(env, BPF_REG_0, 0,
 				sub->readonly_result_size, result->mem_size, false);
+		if (result->type == PTR_TO_BTF_ID && result->mem_stable) {
+			const struct btf_type *type;
+			u32 bytes;
+
+			type = btf_type_skip_modifiers(result->btf, result->btf_id, NULL);
+			if (!type || IS_ERR(btf_resolve_size(result->btf, type, &bytes)) ||
+			    !btf_type_is_scalar_region(result->btf, result->btf_id, 0, bytes)) {
+				verbose(env, "read-only result overlaps typed or managed fields\n");
+				return -EACCES;
+			}
+			return check_mem_region_access(env, BPF_REG_0, 0,
+				sub->readonly_result_size, bytes, false);
+		}
 		/* Array-map storage is retained for the program's lifetime. Do not
 		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
 		 */
@@ -20157,6 +20171,17 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 
 	type = t->type;
 	t = btf_type_skip_modifiers(btf, type, NULL);
+	/* A type qualifier cannot prove lifetime. The complete resolved native
+	 * extent must be in permanent core read-only storage. Keep typed symbol
+	 * pointers typed; result conversion separately checks scalar fields.
+	 */
+	if (!percpu && btf_is_vmlinux(btf) && is_kernel_rodata(addr)) {
+		u32 bytes;
+
+		if (!IS_ERR(btf_resolve_size(btf, t, &bytes)) &&
+		    bytes <= (unsigned long)__end_rodata - addr)
+			aux->btf_var.mem_stable = true;
+	}
 	if (percpu) {
 		aux->btf_var.reg_type = PTR_TO_BTF_ID | MEM_PERCPU;
 		aux->btf_var.btf = btf;
