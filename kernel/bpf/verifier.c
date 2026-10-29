@@ -2975,6 +2975,18 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 
 	func_name = btf_name_by_offset(btf, func->name_off);
 
+	/* A source component supplies the original C arguments. The public BPF
+	 * API deliberately omits implicit arguments and rewrites these calls.
+	 * Keep that pre-existing ABI refusal inside the normal verifier, before
+	 * any specialization could change a source call. Trusted preparation
+	 * retains the full C ABI without claiming this proof.
+	 */
+	if (env->prog->aux->ebpfos_component && !env->prog->aux->trusted_kernel &&
+	    kfunc_flags && (*kfunc_flags & KF_IMPLICIT_ARGS)) {
+		verbose(env, "source C call %s requires an implicit-argument contract\n", func_name);
+		return -EACCES;
+	}
+
 	proto_id = btf_native_func_proto_id(btf, func_id, env->prog);
 	func_proto = proto_id > 0 ? btf_type_by_id(btf, proto_id) : NULL;
 

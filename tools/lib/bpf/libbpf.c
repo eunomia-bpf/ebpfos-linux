@@ -8706,10 +8706,11 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 	return 0;
 }
 
-/* Trusted source has no pointer/type safety claim. Its native calls still
- * need the same register widths and argument count as the C definition.
- * Keep the ordinary type matcher for every object containing a verified
- * program. Aggregate native ABIs remain with that matcher as well.
+/* Source components call the original C ABI, including public kfuncs whose
+ * BPF API omits implicit arguments. Resolve that ABI before either proof or
+ * trusted preparation. This comparison grants no pointer safety: normal
+ * program loads still pass through the kernel verifier. Aggregate native
+ * ABIs remain with the ordinary matcher.
  */
 static bool trusted_native_proto(struct bpf_object *obj, int local_id,
 				 struct btf *kern, int kern_id)
@@ -8720,7 +8721,7 @@ static bool trusted_native_proto(struct bpf_object *obj, int local_id,
 	bpf_object__for_each_program(prog, obj) {
 		if (!prog->autoload)
 			continue;
-		if (!(prog->prog_flags & BPF_F_TRUSTED_KERNEL))
+		if (!(prog->prog_flags & (BPF_F_TRUSTED_KERNEL | BPF_F_EBPFOS_COMPONENT)))
 			return false;
 		trusted = true;
 	}
