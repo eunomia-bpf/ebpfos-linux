@@ -8508,8 +8508,14 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				sub->args[i].mem_size_arg = size_arg + 1;
 				continue;
 			}
-			if (read_only) {
-				bpf_log(log, "arg#%d readonly requires a byte-count pairing\n", i);
+			/* A fixed read-only object uses the same bounded-memory
+			 * contract as a byte-count pair. Do not combine it with a
+			 * different pointer role or erase an address-space qualifier.
+			 */
+			if (read_only && (pointer_flags ||
+					  (tags & ~ARG_TAG_NONNULL) ||
+					  prog->type == BPF_PROG_TYPE_EXT)) {
+				bpf_log(log, "arg#%d fixed readonly has incompatible qualifiers\n", i);
 				return -EINVAL;
 			}
 			/* An independent global has no caller RCU scope to inherit.
@@ -8637,6 +8643,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			if (tags & ARG_TAG_NONNULL)
 				sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
 			sub->args[i].mem_size = mem_size;
+			if (read_only)
+				sub->args[i].arg_type |= MEM_RDONLY;
 			continue;
 		}
 

@@ -8296,12 +8296,19 @@ static int check_mem_size_reg(struct bpf_verifier_env *env,
 }
 
 static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
-			 u32 regno, u32 mem_size)
+			 u32 regno, u32 mem_size, bool read_only)
 {
 	bool may_be_null = type_may_be_null(reg->type);
 	struct bpf_reg_state saved_reg;
 	int err;
 
+	/* Helper access sizes are signed. Never let a large BTF object wrap
+	 * into a smaller stack access (or the negative poison convention).
+	 */
+	if (mem_size > INT_MAX) {
+		bpf_log(&env->log, "fixed memory object exceeds signed access size\n");
+		return -EINVAL;
+	}
 	if (bpf_register_is_null(reg))
 		return 0;
 
@@ -8317,7 +8324,8 @@ static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg
 	int size = base_type(reg->type) == PTR_TO_STACK ? -(int)mem_size : mem_size;
 
 	err = check_helper_mem_access(env, regno, size, BPF_READ, true, NULL);
-	err = err ?: check_helper_mem_access(env, regno, size, BPF_WRITE, true, NULL);
+	if (!err && !read_only)
+		err = check_helper_mem_access(env, regno, size, BPF_WRITE, true, NULL);
 
 	if (may_be_null)
 		*reg = saved_reg;
@@ -10645,7 +10653,7 @@ static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf 
   return check_helper_mem_access(env, regno,
           base_type(reg->type) == PTR_TO_STACK ? -(int)arg.mem_size : arg.mem_size,
           BPF_READ, true, NULL);
- return check_mem_reg(env, reg, regno, arg.mem_size);
+ return check_mem_reg(env, reg, regno, arg.mem_size, false);
 }
 
 static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
@@ -10990,7 +10998,12 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
 			if (ret < 0)
 				return ret;
-			if (check_mem_reg(env, reg, regno, arg->mem_size))
+			if (reg->type & PTR_UNTRUSTED) {
+				bpf_log(log, "arg#%d fixed memory cannot erase untrusted provenance\n", i);
+				return -EACCES;
+			}
+			if (check_mem_reg(env, reg, regno, arg->mem_size,
+					  arg->arg_type & MEM_RDONLY))
 				return -EINVAL;
 			if (!(arg->arg_type & PTR_MAYBE_NULL) &&
 			    (bpf_register_is_null(reg) || (reg->type & PTR_MAYBE_NULL))) {
@@ -14608,7 +14621,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 					i, btf_type_str(ref_t), ref_tname, PTR_ERR(resolve_ret));
 				return -EINVAL;
 			}
-			ret = check_mem_reg(env, reg, regno, type_size);
+			ret = check_mem_reg(env, reg, regno, type_size, false);
 			if (ret < 0)
 				return ret;
 			break;
