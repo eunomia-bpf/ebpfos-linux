@@ -607,7 +607,7 @@
 		TEXT_HOT						\
 		*(TEXT_MAIN .text.fixup)				\
 		NOINSTR_TEXT						\
-		*(.ref.text)
+		*(.ref.text .ref.text.*)
 
 /* sched.text is aling to function alignment to secure we have same
  * address even at second ld pass when generating System.map */
