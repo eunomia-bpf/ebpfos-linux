@@ -11346,6 +11346,10 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			return err;
 		}
 
+		if (state->acquired_refs || state->active_locks || state->active_rcu_locks ||
+		    state->active_preempt_locks || state->active_irq_id)
+			env->insn_aux_data[*insn_idx].native_call_resource_held = true;
+
 		if (env->log.level & BPF_LOG_LEVEL)
 			verbose(env, "Func#%d ('%s') is global and assumed valid.\n",
 				subprog, sub_name);
@@ -15506,6 +15510,7 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		}
 		err = check_native_prototype_call(env, meta.btf, meta.func_proto, true);
 		if (!err) {
+			env->subprog_info[owner].has_native_call = true;
 			verbose(env, "func#%u relies on verifier option C; name='%s'\n",
 				owner, bpf_verifier_subprog_name(env, owner));
 			verbose(env, "func#%u relies on verifier option D; name='%s'\n",
@@ -21882,6 +21887,8 @@ again:
 	return 0;
 }
 
+#include "native_call_resources.h"
+
 static int do_check_main(struct bpf_verifier_env *env)
 {
 	int ret;
@@ -23219,6 +23226,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 
 	ret = do_check_main(env);
 	ret = ret ?: do_check_subprogs(env);
+	ret = ret ?: check_native_call_resources(env);
 
 	if (ret == 0 && bpf_prog_is_offloaded(env->prog->aux))
 		ret = bpf_prog_offload_finalize(env);
