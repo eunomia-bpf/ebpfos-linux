@@ -6806,6 +6806,20 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 	return 0;
 }
 
+/* Probe reads are option A, not a proof of object lifetime. Attribute the
+ * actual use to its function independently of the caller's scope records.
+ */
+static void note_probe_read_scope(struct bpf_verifier_env *env)
+{
+	u32 owner = cur_func(env)->subprogno;
+
+	if (!env->subprog_info[owner].probe_read_scope) {
+		env->subprog_info[owner].probe_read_scope = true;
+		verbose(env, "func#%u relies on verifier option A; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+	}
+}
+
 static int check_component_field_authority(struct bpf_verifier_env *env,
 					  const struct bpf_reg_state *dst,
 					  int off, int size)
@@ -7171,6 +7185,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		}
 	}
 
+	if (atype == BPF_READ && source.type & PTR_UNTRUSTED)
+		note_probe_read_scope(env);
 	return 0;
 }
 
@@ -7498,6 +7514,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		 * Accesses to untrusted PTR_TO_MEM are done through probe
 		 * instructions, hence no need to check bounds in that case.
 		 */
+		if (rdonly_untrusted && t == BPF_READ)
+			note_probe_read_scope(env);
 		if (!rdonly_untrusted)
 			err = check_mem_region_access(env, regno, off, size,
 						      reg->mem_size, false);
@@ -13860,6 +13878,92 @@ static enum bpf_type_flag kfunc_pointer_flags(const struct btf *btf,
 	return flags;
 }
 
+/* Use the existing callx pointer result contract for record fields as well.
+ * A field prototype supplies a type, not ownership, nonnull or lifetime.
+ */
+static int native_prototype_pointer_result(struct bpf_verifier_env *env,
+					   struct btf *btf, u32 pointer, u32 regno)
+{
+	struct bpf_reg_state *regs = cur_regs(env);
+	const struct btf_type *type = btf_type_skip_modifiers(btf, pointer, NULL), *pointee;
+	enum bpf_type_flag flags = PTR_MAYBE_NULL | PTR_UNTRUSTED;
+	u32 id;
+	int err;
+
+	pointee = btf_type_skip_modifiers(btf, type->type, &id);
+	if (btf_type_is_void(pointee)) {
+		mark_reg_unknown(env, regs, regno);
+		return 0;
+	}
+	flags |= kfunc_pointer_flags(btf, type);
+	if (btf_type_is_struct(pointee)) {
+		err = mark_btf_ld_reg(env, regs, regno, PTR_TO_BTF_ID, btf, id, flags);
+	} else {
+		err = mark_btf_ld_reg(env, regs, regno, PTR_TO_MEM, btf, id, flags | MEM_RDONLY);
+		regs[regno].id = ++env->id_gen;
+	}
+	return err;
+}
+
+static int native_prototype_record_result(struct bpf_verifier_env *env,
+					  struct btf *btf, const struct btf_type *proto,
+					  bool buffer)
+{
+	struct bpf_native_abi abi;
+	const struct btf_type *type = btf_type_skip_modifiers(btf, proto->type, NULL);
+	u32 physical = 0;
+	int err = bpf_native_abi_plan(btf, proto, &abi);
+
+	if (err)
+		return err;
+	if (!btf_native_value_storage(btf, proto->type))
+		return -EOPNOTSUPP;
+	for (u32 offset = 0; offset < type->size;) {
+		struct native_arg_scope temporary __free(native_arg) = {};
+		u32 pointer = 0, regno;
+
+		if (!(offset % 8)) {
+			err = btf_native_pointer_word(btf, proto->type, offset, &pointer);
+			if (err)
+				return err;
+		}
+		if (buffer) {
+			if (pointer) {
+				native_value_scope(env, &temporary, 13);
+				err = native_prototype_pointer_result(env, btf, pointer, 13);
+				if (err)
+					return err;
+				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
+						       BPF_DW, BPF_WRITE, 13, false, false);
+				offset += 8;
+			} else {
+				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
+						       BPF_B, BPF_WRITE, -1, false, false);
+				offset++;
+			}
+			if (err)
+				return err;
+		} else {
+			if (!(abi.result_word_mask & BIT(offset / 8))) {
+				offset += 8;
+				continue;
+			}
+			regno = physical++ ? BPF_REG_3 : BPF_REG_0;
+			if (pointer)
+				err = native_prototype_pointer_result(env, btf, pointer, regno);
+			else
+				mark_reg_unknown(env, cur_regs(env), regno);
+			if (err)
+				return err;
+			mark_btf_func_reg_size(env, regno, min(8u, type->size - offset));
+			offset += 8;
+		}
+	}
+	if (!buffer && abi.result_words == 2)
+		cur_aux(env)->returns_two_regs = true;
+	return 0;
+}
+
 /* Only a fault-protected native consumer may declare an address input.
  * This checks representation and address space; it never makes the value
  * dereferenceable or changes the register's trust, lifetime or null facts.
@@ -13909,7 +14013,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
-			if (!btf_native_scalar_storage(meta->btf, meta->func_proto->type, 0) ||
+			if (!btf_native_value_storage(meta->btf, meta->func_proto->type) ||
 			    buffer->type != PTR_TO_STACK || !tnum_is_const(buffer->var_off))
 				return -EOPNOTSUPP;
 			ret = check_stack_access_within_bounds(env, BPF_REG_1, 0, abi.args[0].size, BPF_WRITE);
@@ -14616,12 +14720,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		return -EINVAL;
 	}
 
-	/* All inputs have been checked before the native result overwrites them. */
-	for (u32 byte = 0; byte < *native_result_size; byte++) {
-		ret = check_mem_access(env, insn_idx, BPF_REG_1, byte,
-			BPF_B, BPF_WRITE, -1, false, false);
-		if (ret) return ret;
-	}
+	/* The native callee writes the same typed result layout as the caller. */
+	if (*native_result_size)
+		return native_prototype_record_result(env, meta->btf, meta->func_proto, true);
 	return 0;
 }
 
@@ -14634,9 +14735,9 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	struct bpf_kfunc_call_arg_meta meta = {};
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
-	const struct btf_type *type, *pointee;
+	const struct btf_type *type;
 	struct btf *btf;
-	u32 id, i, nargs;
+	u32 i, nargs;
 	int err;
 
 	/* Unlike a registered kfunc, a field prototype does not carry a
@@ -14719,6 +14820,9 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 		regs[BPF_REG_0] = native_result;
 	} else if (btf_type_is_void(type)) {
 		/* R0 is not readable after a void call. */
+	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame && btf_type_is_struct(type)) {
+		err = native_prototype_record_result(env, btf, meta.func_proto, false);
+		if (err) return err;
 	} else if ((btf_type_is_scalar(type) && type->size <= sizeof(u64)) ||
 		   btf_scalar_record_return(btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
@@ -14729,20 +14833,8 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 			cur_aux(env)->returns_two_regs = true;
 		}
 	} else if (btf_type_is_ptr(type)) {
-		pointee = btf_type_skip_modifiers(btf, type->type, &id);
-		if (btf_type_is_struct(pointee)) {
-			/* A prototype supplies no acquire, lifetime or nonnull promise. */
-			err = mark_btf_ld_reg(env, regs, BPF_REG_0, PTR_TO_BTF_ID,
-					      btf, id, PTR_MAYBE_NULL | PTR_UNTRUSTED |
-					      kfunc_pointer_flags(btf, type));
-		} else {
-			err = mark_btf_ld_reg(env, regs, BPF_REG_0, PTR_TO_MEM,
-					      btf, id, PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_RDONLY |
-					      kfunc_pointer_flags(btf, type));
-			regs[BPF_REG_0].id = ++env->id_gen;
-		}
-		if (err)
-			return err;
+		err = native_prototype_pointer_result(env, btf, meta.func_proto->type, BPF_REG_0);
+		if (err) return err;
 		mark_btf_func_reg_size(env, BPF_REG_0, sizeof(void *));
 	} else {
 		verbose(env, "callx return type is not a scalar or pointer\n");
@@ -15408,6 +15500,9 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 	if (native_result_size) {
 		regs[BPF_REG_0] = native_result;
+	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame && btf_type_is_struct(t)) {
+		err = native_prototype_record_result(env, desc_btf, meta.func_proto, false);
+		if (err) return err;
 	} else if (btf_type_is_scalar(t) ||
 	    btf_scalar_record_return(desc_btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);

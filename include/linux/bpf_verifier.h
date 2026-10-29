@@ -813,6 +813,7 @@ struct bpf_subprog_info {
 	bool protocol_bounded: 1;
 	bool protocol_used: 1;
 	bool type_authority: 1;
+	bool probe_read_scope: 1;
 
 	enum priv_stack_mode priv_stack_mode;
 	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_ARGS + 1];
