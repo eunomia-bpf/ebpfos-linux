@@ -751,6 +751,8 @@ struct bpf_subprog_arg_info {
 	enum bpf_arg_type arg_type;
 	/* One-based physical register containing this buffer's byte count. */
 	u8 mem_size_reg;
+	/* One-based source argument index, before native ABI placement. */
+	u8 mem_size_arg;
 	bool user_address;
 	/* Explicit non-NULL obligation on an otherwise probe-safe argument. */
 	bool nonnull;

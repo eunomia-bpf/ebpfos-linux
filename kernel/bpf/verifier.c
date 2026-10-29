@@ -8296,7 +8296,8 @@ static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg
 	struct bpf_call_arg_meta meta;
 	int err;
 
-	WARN_ON_ONCE(!bpf_is_arg_reg(regno) || !bpf_is_arg_reg(pointer_regno));
+	WARN_ON_ONCE((!bpf_is_arg_reg(regno) && !(env->native_arg_temps & BIT(regno))) ||
+		     (!bpf_is_arg_reg(pointer_regno) && !(env->native_arg_temps & BIT(pointer_regno))));
 
 	memset(&meta, 0, sizeof(meta));
 
@@ -10488,16 +10489,17 @@ struct native_arg_scope {
 	struct bpf_verifier_env *env;
 	struct bpf_reg_state saved;
 	struct bpf_reg_state *reg;
+	u8 regno;
 };
 DEFINE_FREE(native_arg, struct native_arg_scope,
 	if (_T.reg) {
 		*_T.reg = _T.saved;
-		_T.env->native_arg_temps &= ~BIT(13);
+		_T.env->native_arg_temps &= ~BIT(_T.regno);
 	})
 
-static int native_stack_arg(struct bpf_verifier_env *env,
+static int native_stack_arg_at(struct bpf_verifier_env *env,
 				   const struct bpf_native_arg *arg,
-				   struct native_arg_scope *scope)
+				   struct native_arg_scope *scope, u32 regno)
 {
 	struct bpf_func_state *frame = cur_func(env);
 	struct bpf_subprog_info *sub = &env->subprog_info[frame->subprogno];
@@ -10523,7 +10525,8 @@ static int native_stack_arg(struct bpf_verifier_env *env,
 			return -EACCES;
 	}
 	scope->env = env;
-	scope->reg = &frame->regs[13];
+	scope->reg = &frame->regs[regno];
+	scope->regno = regno;
 	scope->saved = *scope->reg;
 	if (bpf_is_spilled_reg(slot))
 		*scope->reg = slot->spilled_ptr;
@@ -10531,8 +10534,43 @@ static int native_stack_arg(struct bpf_verifier_env *env,
 		__mark_reg_const_zero(env, scope->reg);
 	else
 		__mark_reg_unknown(env, scope->reg);
-	env->native_arg_temps |= BIT(13);
+	env->native_arg_temps |= BIT(regno);
 	return 0;
+}
+
+static int native_stack_arg(struct bpf_verifier_env *env,
+			    const struct bpf_native_arg *arg, struct native_arg_scope *scope)
+{
+	return native_stack_arg_at(env, arg, scope, 13);
+}
+
+/* R0 is caller-clobbered and is not an argument register. Borrow its verifier
+ * state for a second stack value, restoring it before leaving the checker.
+ * No BPF instruction or JIT register move is inserted.
+ */
+static int native_call_arg_reg(struct bpf_verifier_env *env, const struct bpf_native_abi *abi,
+			       u32 index, struct native_arg_scope *scope)
+{
+	const struct bpf_native_arg *arg = &abi->args[index + abi->result_buffer];
+	int err;
+
+	if (arg->words != 1) return -EOPNOTSUPP;
+	if (arg->reg >= 0) return bpf_arg_regno(arg->reg);
+	err = native_stack_arg_at(env, arg, scope, BPF_REG_0);
+	return err ?: BPF_REG_0;
+}
+
+static struct bpf_reg_state *native_global_arg_state(struct bpf_subprog_info *sub,
+						    struct bpf_func_state *frame, u32 index)
+{
+	const struct bpf_native_arg *arg;
+	u32 end;
+
+	if (!sub->native_frame) return &frame->regs[bpf_arg_regno(index)];
+	arg = &sub->native_abi.args[index + sub->native_abi.result_buffer];
+	if (arg->reg >= 0) return &frame->regs[bpf_arg_regno(arg->reg)];
+	end = sub->native_local_stack + round_up(sub->native_arg_out, 8) + round_up(sub->native_arg_in, 8);
+	return &frame->stack[bpf_get_spi(-(s64)end + arg->stack_offset)].spilled_ptr;
 }
 
 /* Integer records carry bytes, not pointer capabilities. */
@@ -10607,7 +10645,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				    bytes > caller->native_arg_out - location->stack_offset)
 					return -EINVAL;
 				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max) {
-					if (location->size > 8 || arg->mem_size_reg)
+					if (location->size > 8)
 						return -EOPNOTSUPP;
 					ret = native_stack_arg(env, location, &temporary);
 					if (ret) return ret;
@@ -10690,8 +10728,15 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return -EINVAL;
 			}
 		} else if (arg->mem_size_reg) {
-			struct bpf_reg_state *count = &regs[arg->mem_size_reg];
+			struct native_arg_scope count_scope __free(native_arg) = {};
+			int count_regno = sub->native_frame ?
+				native_call_arg_reg(env, &sub->native_abi, arg->mem_size_arg - 1, &count_scope) :
+				arg->mem_size_reg;
+			struct bpf_reg_state *count;
 			struct bpf_call_arg_meta meta = {};
+
+			if (count_regno < 0) return count_regno;
+			count = &regs[count_regno];
 
 			if (reg->type & PTR_UNTRUSTED) {
 				bpf_log(log, "arg#%d byte buffer cannot erase untrusted provenance\n", i);
@@ -10711,10 +10756,10 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				bpf_log(log, "arg#%d byte buffer cannot erase typed write authority\n", i);
 				return -EINVAL;
 			}
-			ret = check_buffer_size_reg(env, count, arg->mem_size_reg,
+			ret = check_buffer_size_reg(env, count, count_regno,
 						    regno, BPF_READ, true, &meta, true);
 			if (!ret && !(arg->arg_type & MEM_RDONLY))
-				ret = check_buffer_size_reg(env, count, arg->mem_size_reg,
+				ret = check_buffer_size_reg(env, count, count_regno,
 							    regno, BPF_WRITE, true, &meta, true);
 			if (ret)
 				return ret;
@@ -13825,10 +13870,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 		t = btf_type_skip_modifiers(btf, args[i].type, NULL);
 		size_arg = kfunc_arg_size_index(meta, i, nargs);
-		if (native && size_arg >= 0 &&
-		    (abi.result_buffer || abi.args[size_arg].reg != size_arg ||
-		     abi.args[i].reg != i))
-			return -EOPNOTSUPP;
 		nullable = kfunc_mem_arg_tag(meta, i, "arg:nullable");
 		address = kfunc_mem_arg_tag(meta, i, "arg:address");
 		if (size_arg < -1 || nullable < 0 || address < 0)
@@ -13965,7 +14006,13 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (size_arg >= 0) {
 			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
 							args[size_arg].type, NULL);
-			struct bpf_reg_state *count = &regs[bpf_arg_regno(size_arg)];
+			struct native_arg_scope count_scope __free(native_arg) = {};
+			int count_regno = native ? native_call_arg_reg(env, &abi, size_arg, &count_scope) :
+				bpf_arg_regno(size_arg);
+			struct bpf_reg_state *count;
+
+			if (count_regno < 0) return count_regno;
+			count = &regs[count_regno];
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
 			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
 
@@ -13993,7 +14040,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			 * unsigned maximum for span checks, and marks precision. NULL
 			 * does not skip those scalar checks either.
 			 */
-			ret = check_kfunc_mem_size_reg(env, count, bpf_arg_regno(size_arg),
+			ret = check_kfunc_mem_size_reg(env, count, count_regno,
 						    regno, read_only);
 			if (ret)
 				return ret;
@@ -14297,7 +14344,13 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		{
 			struct bpf_reg_state *buff_reg = &regs[regno];
 			const struct btf_param *buff_arg = &args[i];
-			struct bpf_reg_state *size_reg = &regs[bpf_arg_regno(i + 1)];
+			struct native_arg_scope count_scope __free(native_arg) = {};
+			int count_regno = native ? native_call_arg_reg(env, &abi, i + 1, &count_scope) :
+				bpf_arg_regno(i + 1);
+			struct bpf_reg_state *size_reg;
+
+			if (count_regno < 0) return count_regno;
+			size_reg = &regs[count_regno];
 			const struct btf_param *size_arg = &args[i + 1];
 
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
@@ -14317,7 +14370,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				return -EACCES;
 			}
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
-				ret = check_kfunc_mem_size_reg(env, size_reg, bpf_arg_regno(i + 1),
+				ret = check_kfunc_mem_size_reg(env, size_reg, count_regno,
 							    regno, read_only);
 
 				if (ret < 0) {
@@ -21031,7 +21084,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			if (stacked && sub->args[ai].arg_type == ARG_ANYTHING &&
 			    !sub->args[ai].has_scalar_max)
 				continue;
-			if (stacked && (location->size > 8 || sub->args[ai].mem_size_reg)) {
+			if (stacked && location->size > 8) {
 				ret = -EOPNOTSUPP;
 				goto out;
 			}
@@ -21113,13 +21166,13 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		}
 		/* All arguments exist before a pointer is related to its count. */
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {
-			i = bpf_arg_regno(ai);
-			struct bpf_reg_state *count;
+			struct bpf_reg_state *count, *pointer;
 
 			arg = &sub->args[ai];
 			if (!arg->mem_size_reg)
 				continue;
-			count = &regs[arg->mem_size_reg];
+			count = native_global_arg_state(sub, state->frame[0], arg->mem_size_arg - 1);
+			pointer = native_global_arg_state(sub, state->frame[0], ai);
 			if (count->type != SCALAR_VALUE) {
 				ret = -EINVAL;
 				goto out;
@@ -21134,7 +21187,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				count->umax_value = count->u32_max_value = BPF_MAX_VAR_SIZ - 1;
 				count->precise = true;
 			}
-			regs[i].mem_size_id = count->id;
+			pointer->mem_size_id = count->id;
 		}
 	} else {
 		/* if main BPF program has associated BTF info, validate that

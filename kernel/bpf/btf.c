@@ -8411,6 +8411,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				if (read_only)
 					sub->args[i].arg_type |= MEM_RDONLY;
 				sub->args[i].mem_size_reg = bpf_arg_regno(size_arg);
+				sub->args[i].mem_size_arg = size_arg + 1;
 				continue;
 			}
 			if (read_only) {
