@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/ns/ns_common_types.h>
 #include <linux/init_task.h>
 #include <linux/mnt_namespace.h>
@@ -255,6 +256,7 @@ void switch_task_namespaces(struct task_struct *p, struct nsproxy *new)
 	ns = p->nsproxy;
 	p->nsproxy = new;
 	task_unlock(p);
+	ebpfos_task_rule_mark(p);
 
 	if (ns)
 		put_nsproxy(ns);

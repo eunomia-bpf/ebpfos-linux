@@ -9,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/bpf.h>
+#include <linux/bpf_kernel_rule_context.h>
 #include <linux/btf.h>
 #include "btf_record_return.h"
 #include <linux/bpf_verifier.h>
@@ -15338,8 +15339,9 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
 
-	if (env->prog->type == BPF_PROG_TYPE_KERNEL_RULE) {
-		verbose(env, "kernel rule programs cannot call kfuncs\n");
+	if (env->prog->type == BPF_PROG_TYPE_KERNEL_RULE &&
+	    !bpf_kernel_rule_context_kfunc(insn->imm, insn->off)) {
+		verbose(env, "kernel rule programs cannot call kfuncs outside context queries\n");
 		return -EACCES;
 	}
 

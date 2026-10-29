@@ -6,6 +6,7 @@
 #include <linux/cgroup.h>
 #include <linux/ebpfos_operations.h>
 #include <linux/ebpfos_rule_cache.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/filter.h>
 #include <linux/hash.h>
 #include <linux/mutex.h>
@@ -19,6 +20,8 @@ struct rule_generation {
  struct bpf_prog *program;
  u32 count;
  struct bpf_operations_set *versions[BPF_KERNEL_RULE_MAX_VERSIONS];
+ struct ebpfos_task_view_request *tasks[BPF_KERNEL_RULE_MAX_VERSIONS];
+ bool has_tasks;
 };
 struct kernel_rule_link {
  struct bpf_link link;
@@ -67,7 +70,9 @@ static void generation_put(struct rule_generation *generation)
 {
  u32 i;
  if (!generation || !refcount_dec_and_test(&generation->refs)) return;
- for (i = 0; i < generation->count; ++i) bpf_operations_set_put(generation->versions[i]);
+ for (i = 0; i < generation->count; ++i) {
+  bpf_operations_set_put(generation->versions[i]);ebpfos_rule_task_put(generation->tasks[i]);
+ }
  bpf_prog_put(generation->program);kfree(generation);
 }
 u64 ebpfos_rule_epoch(void) { return atomic64_read(&rule_epoch); }
@@ -150,6 +155,24 @@ struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *de
 }
 EXPORT_SYMBOL_GPL(ebpfos_rule_operations);
 
+bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *decision)
+{
+ u32 i;
+ for (i = 0; decision && i < decision->count; ++i)
+  if (decision->choices[i].generation->has_tasks) return true;
+ return false;
+}
+void ebpfos_rule_task_table(struct ebpfos_rule_decision *decision, void *table)
+{
+ u32 i;
+ for (i = 0; decision && i < decision->count; ++i) {
+  struct rule_choice *choice = &decision->choices[i];
+  u32 selected = choice->selection;
+  if (selected && selected <= choice->generation->count)
+   ebpfos_rule_task_copy(choice->generation->tasks[selected - 1], table);
+ }
+}
+
 void ebpfos_rule_cache_init(struct ebpfos_rule_cache *cache, void **slot,
  const void *original, const void *resolver, u32 type, u32 size,
  const struct bpf_kernel_rule_ctx *context)
@@ -195,11 +218,17 @@ static int rule_detach(struct bpf_link *base)
 {
  struct kernel_rule_link *link = container_of(base, struct kernel_rule_link, link);
  unsigned long flags;
+ bool detached = false;
  mutex_lock(&rule_mutex);
  write_lock_irqsave(&rule_lock, flags);
- if (link->attached) {list_del(&link->node);--rule_count;link->attached = false;atomic64_inc(&rule_epoch);}
+ if (link->attached) {list_del(&link->node);--rule_count;link->attached = false;detached = true;atomic64_inc(&rule_epoch);}
  write_unlock_irqrestore(&rule_lock, flags);
- mutex_unlock(&rule_mutex);return 0;
+ mutex_unlock(&rule_mutex);
+ if (detached) {
+  if (link->generation->has_tasks) ebpfos_task_rule_unclaim(false);
+  ebpfos_task_rules_changed();
+ }
+ return 0;
 }
 static void rule_release(struct bpf_link *base) { rule_detach(base); }
 static void rule_dealloc(struct bpf_link *base)
@@ -223,14 +252,18 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  if (!link->attached) {error = -ENOLINK;goto fail;}
  if (old && old != before->program) {error = -EPERM;goto fail;}
  next->program = program;next->count = before->count;
- for (i = 0; i < next->count; ++i) next->versions[i] = bpf_operations_set_get(before->versions[i]);
+ next->has_tasks = before->has_tasks;
+ for (i = 0; i < next->count; ++i) {
+  next->versions[i] = bpf_operations_set_get(before->versions[i]);
+  next->tasks[i] = ebpfos_rule_task_get(before->tasks[i]);
+ }
  write_lock_irqsave(&rule_lock, flags);
  link->generation = next;
  /* bpf_link owns its own program reference independently of decisions. */
  bpf_prog_inc(program);link->link.prog = program;atomic64_inc(&rule_epoch);
  write_unlock_irqrestore(&rule_lock, flags);
  mutex_unlock(&rule_mutex);
- bpf_prog_put(before->program);generation_put(before);return 0;
+ bpf_prog_put(before->program);generation_put(before);ebpfos_task_rules_changed();return 0;
 fail:
  mutex_unlock(&rule_mutex);kfree(next);return error;
 }
@@ -262,12 +295,13 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
  list_for_each_entry(owner, &rule_links, node)
   for (i = 0; i < generation->count; ++i)
    for (j = 0; j < owner->generation->count; ++j)
-    if (bpf_operations_overlap(generation->versions[i], owner->generation->versions[j])) return true;
+    if (bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
+        ebpfos_rule_task_overlap(generation->tasks[i], owner->generation->tasks[j])) return true;
  return false;
 }
 int bpf_kernel_rule_link_create(const union bpf_attr *attr)
 {
- struct bpf_kernel_rule_version versions[BPF_KERNEL_RULE_MAX_VERSIONS];
+ struct bpf_kernel_rule_version *versions;
  struct rule_generation *generation;
  struct kernel_rule_link *link;
  struct bpf_link_primer primer;
@@ -278,18 +312,34 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (attr->link_create.target_fd || attr->link_create.flags || !count ||
      count > BPF_KERNEL_RULE_MAX_VERSIONS || attr->link_create.kernel_rule.reserved) return -EINVAL;
- if (copy_from_user(versions, u64_to_user_ptr(attr->link_create.kernel_rule.versions),
-                    sizeof(versions[0]) * count)) return -EFAULT;
+ versions = memdup_array_user(u64_to_user_ptr(attr->link_create.kernel_rule.versions),
+                             count, sizeof(*versions));
+ if (IS_ERR(versions)) return PTR_ERR(versions);
  program = bpf_prog_get_type(attr->link_create.prog_fd, BPF_PROG_TYPE_KERNEL_RULE);
- if (IS_ERR(program)) return PTR_ERR(program);
- if (!rule_program_allowed(program)) {bpf_prog_put(program);return -EINVAL;}
+ if (IS_ERR(program)) {error = PTR_ERR(program);kfree(versions);return error;}
+ if (!rule_program_allowed(program)) {bpf_prog_put(program);kfree(versions);return -EINVAL;}
  generation = kzalloc(sizeof(*generation), GFP_KERNEL);
- if (!generation) {bpf_prog_put(program);return -ENOMEM;}
+ if (!generation) {bpf_prog_put(program);kfree(versions);return -ENOMEM;}
  refcount_set(&generation->refs, 1);generation->program = program;generation->count = count;
  for (i = 0; i < count; ++i) {
   u32 *fds;
-  if (versions[i].reserved) {
+  if (versions[i].reserved || versions[i].reserved2) {
    error = -EINVAL;goto fail;
+  }
+  if (versions[i].function_count) {
+   u32 *ids, *programs;
+   ids = memdup_array_user(u64_to_user_ptr(versions[i].function_btf_ids),
+                          versions[i].function_count, sizeof(u32));
+   if (IS_ERR(ids)) {error = PTR_ERR(ids);goto fail;}
+   programs = memdup_array_user(u64_to_user_ptr(versions[i].function_prog_fds),
+                               versions[i].function_count, sizeof(u32));
+   if (IS_ERR(programs)) {error = PTR_ERR(programs);kfree(ids);goto fail;}
+   generation->tasks[i] = ebpfos_rule_task_prepare(ids, programs, versions[i].function_count);
+   kfree(ids);kfree(programs);
+   if (IS_ERR(generation->tasks[i])) {
+    error = PTR_ERR(generation->tasks[i]);generation->tasks[i] = NULL;goto fail;
+   }
+   generation->has_tasks = true;
   }
   if (!versions[i].operations_count) continue;
   fds = memdup_user(u64_to_user_ptr(versions[i].operations_fds), versions[i].operations_count * sizeof(u32));
@@ -299,6 +349,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
    error = PTR_ERR(generation->versions[i]);generation->versions[i] = NULL;goto fail;
   }
  }
+ kfree(versions);versions = NULL;
  link = kzalloc(sizeof(*link), GFP_KERNEL);
  if (!link) {error = -ENOMEM;goto fail;}
  link->generation = generation;
@@ -306,7 +357,13 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  bpf_link_init(&link->link, BPF_LINK_TYPE_KERNEL_RULE, &kernel_rule_link_ops, program, BPF_KERNEL_RULE);
  mutex_lock(&rule_mutex);
  if (rule_targets_overlap(generation)) error = -EBUSY;
- else error = bpf_link_prime(&link->link, &primer);
+ else {
+  error = generation->has_tasks ? ebpfos_task_rule_claim(false) : 0;
+  if (!error) {
+   error = bpf_link_prime(&link->link, &primer);
+   if (error && generation->has_tasks) ebpfos_task_rule_unclaim(false);
+  }
+ }
  if (error) {
   mutex_unlock(&rule_mutex);bpf_prog_put(program);kfree(link);goto fail;
  }
@@ -314,7 +371,8 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  list_add_tail(&link->node, &rule_links);++rule_count;link->attached = true;atomic64_inc(&rule_epoch);
  write_unlock_irqrestore(&rule_lock, flags);
  mutex_unlock(&rule_mutex);
+ ebpfos_task_rules_changed();
  return bpf_link_settle(&primer);
 fail:
- generation_put(generation);return error;
+ generation_put(generation);kfree(versions);return error;
 }

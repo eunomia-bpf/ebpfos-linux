@@ -28,6 +28,7 @@
 #include <linux/freezer.h>
 #include <linux/binfmts.h>
 #include <linux/nsproxy.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/pid_namespace.h>
 #include <linux/ptrace.h>
 #include <linux/profile.h>
@@ -734,6 +735,8 @@ static void forget_original_parent(struct task_struct *father,
 			reparent_leader(father, p, dead);
 	}
 	list_splice_tail_init(&father->children, &reaper->children);
+	/* A reparented process changes the ancestry of all its descendants. */
+	ebpfos_task_rules_changed();
 }
 
 /*

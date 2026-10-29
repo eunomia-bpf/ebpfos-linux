@@ -4,6 +4,8 @@
 #include <linux/btf.h>
 #include <linux/bpf_entry.h>
 #include <linux/bpf_operations.h>
+#include <linux/bpf_kernel_rule.h>
+#include <linux/ebpfos_task_rule.h>
 #include <linux/ebpfos_operations.h>
 #include <linux/ebpfos_file_view.h>
 #include <linux/filter.h>
@@ -434,8 +436,10 @@ struct ebpfos_operations *ebpfos_operations_current(const void *original,
  u32 type, size_t size, struct module *owner)
 {
  struct ebpfos_operations *ops = NULL;
+ if (in_task() && current->mm)
+  ops = ebpfos_rule_operations(ebpfos_task_rule_decision(), original, type, size);
  rcu_read_lock();
- if (in_task() && current->mm) ops = bpf_operations_find(ebpfos_task_operations(), original, type, size);
+ if (!ops && in_task() && current->mm) ops = bpf_operations_find(ebpfos_task_operations(), original, type, size);
  if (!ops) ops = bpf_operations_find(rcu_dereference(global_operations), original, type, size);
  rcu_read_unlock();return ops;
 }
@@ -451,6 +455,7 @@ u32 ebpfos_operations_bound(const struct ebpfos_operations *ops) { return ops->c
 EXPORT_SYMBOL_GPL(ebpfos_operations_bound);
 struct ebpfos_operations_owner {
  struct bpf_operations_set *selected, *global;
+ struct ebpfos_rule_decision *decision;
  struct ebpfos_operations *bound;
  struct rcu_head rcu;
  u32 type;
@@ -467,10 +472,11 @@ struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
 {
  struct bpf_operations_set *selected, *global;
  struct ebpfos_operations_owner *owner;
+ struct ebpfos_rule_decision *decision = in_task() && current->mm ? ebpfos_task_rule_decision() : NULL;
  rcu_read_lock();
  selected = in_task() && current->mm ? ebpfos_task_operations() : NULL;
  global = rcu_dereference(global_operations);
- if (!operations_type(selected, type) && !operations_type(global, type)) {
+ if (!decision && !operations_type(selected, type) && !operations_type(global, type)) {
   rcu_read_unlock();return NULL;
  }
  selected = bpf_operations_set_get(selected);
@@ -483,6 +489,7 @@ struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
  rcu_read_unlock();
  owner = kzalloc(sizeof(*owner), gfp);
  if (!owner) {bpf_operations_set_put(selected);bpf_operations_set_put(global);return ERR_PTR(-ENOMEM);}
+ owner->decision = ebpfos_rule_decision_get(decision);
  owner->selected = selected;owner->global = global;owner->type = type;return owner;
 }
 EXPORT_SYMBOL_GPL(ebpfos_operations_reserve);
@@ -491,14 +498,19 @@ const void *ebpfos_operations_resolve(struct ebpfos_operations_owner *owner, con
  struct ebpfos_operations *ops;
  if (!owner || owner->resolved) return original;
  owner->resolved = true;
- ops = operations_find(owner->selected, original, owner->type, 0);
- if (!ops) ops = operations_find(owner->global, original, owner->type, 0);
+ ops = ebpfos_rule_operations(owner->decision, original, owner->type, 0);
+ if (!ops) {
+  ops = operations_find(owner->selected, original, owner->type, 0);
+  if (!ops) ops = operations_find(owner->global, original, owner->type, 0);
+  ops = ebpfos_operations_get(ops);
+ }
  /* Selection sets are needed only until the actual table is known. Retain
   * the matching map before dropping them; unrelated inodes must not keep
   * every selected module alive until their own eventual destruction.
   * The caller's publication lock serializes resolution with owner release.
   */
- owner->bound = ebpfos_operations_get(ops);
+ owner->bound = ops;
+ ebpfos_rule_decision_put(owner->decision);owner->decision = NULL;
  bpf_operations_set_put(owner->selected);owner->selected = NULL;
  bpf_operations_set_put(owner->global);owner->global = NULL;
  return ops ? ops->table : original;
@@ -508,6 +520,7 @@ static void operations_owner_rcu(struct rcu_head *rcu)
 {
  struct ebpfos_operations_owner *owner = container_of(rcu, struct ebpfos_operations_owner, rcu);
  ebpfos_operations_put(owner->bound);
+ ebpfos_rule_decision_put(owner->decision);
  bpf_operations_set_put(owner->selected);bpf_operations_set_put(owner->global);kfree(owner);
 }
 void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
