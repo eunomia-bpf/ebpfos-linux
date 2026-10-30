@@ -2091,20 +2091,6 @@ static struct extern_desc *find_extern_by_name(const struct bpf_object *obj,
 	return NULL;
 }
 
-static struct extern_desc *find_extern_by_name_with_len(const struct bpf_object *obj,
-							const void *name, int len)
-{
-	const char *ext_name;
-	int i;
-
-	for (i = 0; i < obj->nr_extern; i++) {
-		ext_name = obj->externs[i].name;
-		if (strlen(ext_name) == len && strncmp(ext_name, name, len) == 0)
-			return &obj->externs[i];
-	}
-	return NULL;
-}
-
 static int set_kcfg_value_tri(struct extern_desc *ext, void *ext_val,
 			      char value)
 {
@@ -8626,15 +8612,11 @@ static int kallsyms_cb(unsigned long long sym_addr, char sym_type,
 	struct bpf_object *obj = ctx;
 	const struct btf_type *t;
 	struct extern_desc *ext;
-	const char *res;
 
-	/* Source components retain the complete native ELF spelling, including
-	 * LTO suffixes. Prefer that identity before the legacy unsuffixed form.
+	/* Bind the complete ELF spelling. Stripping an LTO suffix can bind a
+	 * different declaration even when an exact public symbol exists.
 	 */
 	ext = find_extern_by_name(obj, sym_name);
-	res = strstr(sym_name, ".llvm.");
-	if (!ext && sym_type == 'd' && res)
-		ext = find_extern_by_name_with_len(obj, sym_name, res - sym_name);
 	if (!ext || ext->type != EXT_KSYM)
 		return 0;
 
