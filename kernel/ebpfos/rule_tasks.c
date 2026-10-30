@@ -55,13 +55,15 @@ static long task_rule_resolve(const struct pt_regs *regs, unsigned int nr)
  ebpfos_rule_context(&context, 0, 0);
  decision = ebpfos_rule_resolve(&context, GFP_KERNEL);
  if (IS_ERR(decision)) {kfree(binding);return PTR_ERR(decision);}
- memcpy(binding->table, sys_call_table, sizeof(binding->table));
 #ifdef CONFIG_EBPFOS_AUTOBIND
  {
   int error = ebpfos_rule_bind_view(decision);
   if (error) {ebpfos_rule_decision_put(decision);kfree(binding);return error;}
  }
 #endif
+ /* sys_call_table is binding data too. Read the newly selected view, never
+  * the previous epoch cached before its mappings were installed. */
+ memcpy(binding->table, sys_call_table, sizeof(binding->table));
  ebpfos_rule_task_table(decision, binding->table);
  /* An object-only rule has no enclosing syscall version. Its first object
   * binding still resolves with that object's identity and sampling hash. */

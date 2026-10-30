@@ -192,17 +192,13 @@ static struct ebpfos_ptview *rule_prepare_view(struct bpf_operations_set *operat
  struct ebpfos_task_view_request *tasks)
 {
  struct binding_changes changes = {};
- struct ebpfos_ptview *view = NULL, *inputs[2], *result;
- int error = bpf_operations_visit_changes(operations, collect_change, &changes);
+ struct ebpfos_ptview *view = NULL;
+ int error = ebpfos_rule_task_operations_check(tasks, operations);
+ if (!error) error = bpf_operations_visit_changes(operations, collect_change, &changes);
  if (!error && changes.count)
   view = ebpfos_ptview_prepare(changes.changes, changes.count, NULL);
  kfree(changes.changes);
- if (error || IS_ERR(view)) return error ? ERR_PTR(error) : view;
- inputs[0] = ebpfos_rule_task_mapping(tasks);inputs[1] = view;
- if (!inputs[0]) return view;
- result = ebpfos_ptview_compose(inputs, view ? 2 : 1);
- ebpfos_ptview_put(inputs[0]);ebpfos_ptview_put(view);
- return result;
+ return error ? ERR_PTR(error) : view;
 }
 
 static int rule_views(struct ebpfos_rule_decision *decision, struct ebpfos_ptview ***result)
@@ -419,6 +415,8 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
     if (
 #ifdef CONFIG_EBPFOS_AUTOBIND
         ebpfos_ptview_overlap(generation->views[i], owner->generation->views[j]) ||
+        ebpfos_rule_task_operations_check(generation->tasks[i], owner->generation->versions[j]) ||
+        ebpfos_rule_task_operations_check(owner->generation->tasks[j], generation->versions[i]) ||
 #endif
         bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
         ebpfos_rule_task_overlap(generation->tasks[i], owner->generation->tasks[j])) return true;
