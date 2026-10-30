@@ -1332,6 +1332,11 @@ int bpf_jit_get_func_addr(const struct bpf_prog *prog,
 	u8 *addr;
 	int err;
 
+	/* A backend must consume native bytes itself, never call a helper at the
+	 * record offset. Unsupported architectures must report a JIT failure.
+	 */
+	if (bpf_native_seq_insn(insn))
+		return -EOPNOTSUPP;
 	*func_addr_fixed = insn->src_reg != BPF_PSEUDO_CALL;
 	if (!*func_addr_fixed) {
 		/* Place-holder address till the last pass has collected

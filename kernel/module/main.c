@@ -3034,7 +3034,7 @@ struct module_section_image {
 #endif
 	void (*release)(void *);
 	void *owner;
-	bool finalized, registered, published;
+	bool finalized, registered, published, ftrace;
 };
 
 static LIST_HEAD(module_section_images);
@@ -3124,7 +3124,12 @@ int module_section_image_finalize(struct module_section_image *image)
 	percpu_modcopy(mod, (void *)image->info.sechdrs[image->info.index.pcpu].sh_addr,
 		      image->info.sechdrs[image->info.index.pcpu].sh_size);
 	image->finalized = true;
-	return module_finalize(image->info.hdr, image->info.sechdrs, mod);
+	err = module_finalize(image->info.hdr, image->info.sechdrs, mod);
+	if (!err) {
+		ftrace_module_init(mod);
+		image->ftrace = true;
+	}
+	return err;
 }
 
 int module_section_image_register(struct module_section_image *image)
@@ -3143,6 +3148,7 @@ int module_section_image_register(struct module_section_image *image)
 	list_add_rcu(&image->list, &module_section_images);
 	image->published = true;
 	mutex_unlock(&module_mutex);
+	ftrace_module_enable(mod);
 	err = notifier_to_errno(blocking_notifier_call_chain_robust(&module_notify_list,
 			MODULE_STATE_COMING, MODULE_STATE_GOING, mod));
 	if (err)
@@ -3173,6 +3179,8 @@ static void module_section_image_free_work(struct work_struct *work)
 		return;
 	}
 #endif
+	if (image->ftrace)
+		ftrace_release_mod(&image->mod);
 	if (image->published) {
 		mutex_lock(&module_mutex);
 		mod_tree_remove(&image->mod);

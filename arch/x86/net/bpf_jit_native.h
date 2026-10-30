@@ -474,6 +474,15 @@ static int native_relocate(const struct native_sequence *seq, const struct bpf_p
 		const Elf64_Shdr *section = &seq->sections[i];
 		const Elf64_Rela *relocs;
 
+		if (section->sh_type == SHT_REL) {
+			if (section->sh_info >= seq->elf->e_shnum)
+				return -ENOEXEC;
+			if (seq->sections[section->sh_info].sh_flags & SHF_ALLOC) {
+				pr_err("bpf_jit: x86 native sequence needs explicit RELA addends\n");
+				return -EOPNOTSUPP;
+			}
+			continue;
+		}
 		if (section->sh_type != SHT_RELA)
 			continue;
 		if (section->sh_info >= seq->elf->e_shnum || section->sh_entsize != sizeof(*relocs) ||
