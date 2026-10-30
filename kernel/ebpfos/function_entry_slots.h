@@ -12,7 +12,7 @@ extern const void *const *const ebpfos_native_entry_functions __weak;
 extern const u8 *const ebpfos_native_entry_offsets __weak;
 extern const u32 ebpfos_native_entry_function_count __weak;
 
-static unsigned long entry_native_location(unsigned long address)
+static unsigned long entry_native_location(unsigned long address, bool *canonical_nop)
 {
  static const u8 endbr[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
  u8 actual[4];
@@ -28,6 +28,8 @@ static unsigned long entry_native_location(unsigned long address)
  if (&ebpfos_native_entry_offsets) {
   if (!ebpfos_native_entry_offsets) return 0;
   offset = ebpfos_native_entry_offsets[i];
+  *canonical_nop = offset & ENTRY_NATIVE_CANONICAL_NOP;
+  offset &= ENTRY_NATIVE_OFFSET_MASK;
   if (offset && offset != sizeof(endbr)) return 0;
  }
  if (offset && (copy_from_kernel_nofault(actual, (void *)address, sizeof(actual)) ||
@@ -45,7 +47,8 @@ static bool entry_module_readonly(struct module *module, unsigned long begin, si
   within_module_mem_type(begin, module, MOD_RODATA) &&
   within_module_mem_type(begin + size - 1, module, MOD_RODATA);
 }
-static unsigned long entry_module_native_location(struct module *module, unsigned long address)
+static unsigned long entry_module_native_location(struct module *module, unsigned long address,
+ bool *canonical_nop)
 {
  unsigned long table_symbol, count_symbol, offsets_symbol;
  const void *const *table;
@@ -67,6 +70,8 @@ static unsigned long entry_module_native_location(struct module *module, unsigne
  for (i = 0; i < count; ++i) if ((unsigned long)table[i] == address) break;
  if (i == count) return 0;
  offset = offsets[i];
+ *canonical_nop = offset & ENTRY_NATIVE_CANONICAL_NOP;
+ offset &= ENTRY_NATIVE_OFFSET_MASK;
  if (offset && offset != sizeof(expected)) return 0;
  if (offset && (copy_from_kernel_nofault(endbr, (void *)address, sizeof(endbr)) ||
                 memcmp(endbr, expected, sizeof(endbr)))) return 0;

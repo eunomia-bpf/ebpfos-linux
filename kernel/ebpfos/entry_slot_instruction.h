@@ -8,9 +8,14 @@
  */
 static const unsigned char entry_native_nop[5] = { 0x0f, 0x1f, 0x44, 0, 8 };
 static const unsigned char entry_native_emulation[5] = { 0x0f, 0x1f, 0x44, 0, 0 };
+/* The immutable offset byte also records which original NOP to restore.
+ * It must survive updates, when live text already contains a jump.
+ */
+#define ENTRY_NATIVE_CANONICAL_NOP 0x80
+#define ENTRY_NATIVE_OFFSET_MASK 0x7f
 struct entry_native_slot {
  unsigned long ip, target[2], original;
- bool call, ftrace;
+ bool call, ftrace, canonical_nop;
 };
 
 static inline bool entry_native_jump(unsigned long ip, unsigned long target,
@@ -35,7 +40,7 @@ static inline bool entry_native_instruction(const struct entry_native_slot *slot
   if (slot->call) instruction[0] = 0xe8;
   return true;
  }
- for (i = 0; i < 5; ++i) instruction[i] = slot->ftrace ? entry_native_emulation[i] : entry_native_nop[i];
+ for (i = 0; i < 5; ++i) instruction[i] = slot->ftrace || slot->canonical_nop ? entry_native_emulation[i] : entry_native_nop[i];
  return true;
 }
 #endif

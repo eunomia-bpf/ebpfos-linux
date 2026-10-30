@@ -386,7 +386,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   const struct entry_member *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
-  bool call_sites = false;
+  bool call_sites = false, canonical_nop = false;
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
@@ -410,8 +410,8 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) ip = 0;
 #endif
   if (!ip) {
-   ip = source ? entry_module_native_location(set->source_module, address) :
-    entry_native_location(address);
+   ip = source ? entry_module_native_location(set->source_module, address, &canonical_nop) :
+    entry_native_location(address, &canonical_nop);
    if (!ip) {
     if (!source) {error = -ENOENT;goto fail;}
     /* An unpadded module entry uses the same closed direct-caller
@@ -419,6 +419,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     call_sites = true;ip = address;
    } else {
     slot = &set->slots[set->slot_count++];slot->ip = ip;
+    slot->canonical_nop = canonical_nop;
    }
   } else {slot = &set->slots[set->slot_count++];slot->ip = ip;slot->ftrace = true;}
   }

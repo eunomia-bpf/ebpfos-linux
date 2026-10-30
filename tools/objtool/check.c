@@ -4769,6 +4769,13 @@ static int validate_ibt_data_reloc(struct objtool_file *file,
 		return 0;
 	}
 
+	/* Entry reservations identify patch sites, not indirect-call targets.
+	 * Retain an existing landing pad, but do not require one for functions
+	 * which the compiler emitted without it.
+	 */
+	if (!strcmp(reloc->sec->base->name, ".ref.rodata.entry_reservations"))
+		return 0;
+
 	if (dest->noendbr)
 		return 0;
 
