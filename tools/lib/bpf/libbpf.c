@@ -14550,7 +14550,17 @@ int bpf_program__set_attach_target(struct bpf_program *prog,
 		err = find_kernel_btf_id(prog->obj, attach_func_name,
 					 prog->expected_attach_type,
 					 &btf_obj_fd, &btf_id);
-		if (err)
+		/* A compiled source member need not have a resident native entry
+		 * (init code and generated members are ordinary examples). Keep its
+		 * native program context and let BPF_PROG_LOAD decide the tier.
+		 * A live attachment still requires its actual target.
+		 */
+		if (err == -ESRCH && prog->type == BPF_PROG_TYPE_TRACING &&
+		    prog->expected_attach_type == BPF_TRACE_REPLACE &&
+		    (prog->prog_flags & BPF_F_EBPFOS_COMPONENT)) {
+			btf_obj_fd = 0;
+			btf_id = 0;
+		} else if (err)
 			return libbpf_err(err);
 	}
 
