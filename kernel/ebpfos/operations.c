@@ -221,8 +221,7 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   name = original ? kallsyms_lookup(original, &bytes, &offset, NULL, symbol) : NULL;
   if (!name || offset) {error = -ENOENT;goto free;}
   id = btf_find_by_name_kind(ops->types, name, BTF_KIND_FUNC);
-  if (id <= 0) {error = -ENOENT;goto free;}
-  {
+  if (id > 0) {
    const struct btf_type *function = btf_type_by_id(ops->types, id);
    if (!cell_layout(ops->types, function->type, ops->types, pointer->type, 0, false)) {
     /* Union alternatives share storage. Only the alternative matching the
@@ -232,7 +231,11 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   }
   programs[i] = bpf_prog_get(fd);
   if (IS_ERR(programs[i])) {error = PTR_ERR(programs[i]);programs[i] = NULL;goto free;}
-  error = bpf_entry_program_address(ops->types, id, programs[i], false, &addresses[i]);
+  error = bpf_method_program_address(ops->types, pointer->type, name, programs[i], &addresses[i]);
+  if (error == -EPROTOTYPE) {
+   bpf_prog_put(programs[i]);programs[i] = NULL;
+   incompatible = true;continue;
+  }
   if (error) goto free;
   if (ebpfos_program_addresses(programs[i])) {error = -EOPNOTSUPP;goto free;}
   memcpy(checked + at, &fd, sizeof(fd));

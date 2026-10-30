@@ -3297,7 +3297,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	 */
 	if (prog->aux->ebpfos_component && type == BPF_PROG_TYPE_TRACING &&
 	    prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	    prog->aux->attach_btf && prog->aux->attach_btf_id) {
+	    prog->aux->attach_btf && prog->aux->attach_btf_id &&
+	    btf_type_is_func(btf_type_by_id(prog->aux->attach_btf,
+					   prog->aux->attach_btf_id))) {
 		unsigned long address;
 
 		err = bpf_entry_program_address(prog->aux->attach_btf,
@@ -3832,6 +3834,17 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 	struct bpf_tracing_link *link;
 	u64 key = 0;
 	int err;
+
+	/* A field prototype describes an unbound load context, never a text
+	 * address. Operations publication resolves and checks its actual callback.
+	 */
+	if (prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	    prog->aux->attach_btf && prog->aux->attach_btf_id &&
+	    btf_type_is_func_proto(btf_type_by_id(prog->aux->attach_btf,
+						prog->aux->attach_btf_id))) {
+		err = -EINVAL;
+		goto out_put_prog;
+	}
 
 	switch (prog->type) {
 	case BPF_PROG_TYPE_TRACING:

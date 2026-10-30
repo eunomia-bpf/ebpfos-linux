@@ -103,11 +103,9 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
 }
 /* A compiler-selected source entry can have a different final native name.
  * This selects an export only; its ABI/context/proof checks remain below. */
-static bool cell_export_name(struct btf *native, const struct btf_type *target,
- struct btf *compiled, u32 id)
+static bool cell_export_name(const char *name, struct btf *compiled, u32 id)
 {
  const struct btf_type *function = btf_type_by_id(compiled, id), *tag;
- const char *name = btf_name_by_offset(native, target->name_off);
  u32 at;
  if (!function || !btf_type_is_func(function)) return false;
  if (!strcmp(name, btf_name_by_offset(compiled, function->name_off))) return true;
@@ -183,24 +181,26 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
  return result && btf_type_is_ptr(result) && described &&
   cell_layout(native, n->type, compiled, prototype->type, 0, false);
 }
-static bool cell_callable(struct btf *native, const struct btf_type *native_function,
+static bool cell_callable_proto(struct btf *native, u32 native_type,
+ const struct btf_type *native_function, const char *native_name,
  struct bpf_prog *parent, u32 id, unsigned long *address)
 {
  const struct btf_type *function, *prototype;
- const struct btf_type *n = btf_type_by_id(native, native_function->type);
+ const struct btf_type *n = btf_type_by_id(native, native_type);
  const struct btf_param *a, *b;
  struct bpf_prog_aux *aux = parent->aux;
  unsigned int i, index;
- int native_proto_id = native_function->type;
+ int native_proto_id = native_type;
  bool scalar_records, result2, kernel_result = false;
 #ifdef BPF_F_TRUSTED_KERNEL
  bool trusted = aux->trusted_kernel;
 #else
  bool trusted = false;
 #endif
- if (trusted) {
+ if (!n || !btf_type_is_func_proto(n)) return false;
+ if (trusted && native_function) {
   int native_id = btf_find_by_name_kind(native,
-    btf_name_by_offset(native, native_function->name_off), BTF_KIND_FUNC);
+    native_name, BTF_KIND_FUNC);
   if (native_id <= 0 || btf_type_by_id(native, native_id) != native_function) return false;
   native_proto_id = btf_native_func_proto_id(native, native_id, parent);
   if (native_proto_id < 0) return false;
@@ -213,7 +213,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
      (!trusted && (!aux->func_info_aux[index].verified || aux->func_info_aux[index].unreliable))) return false;
  function = btf_type_by_id(aux->btf, id);
  if (!function || !btf_type_is_func(function) || btf_func_linkage(function) != BTF_FUNC_GLOBAL ||
-     !aux->func[index]->jited || !cell_export_name(native, native_function, aux->btf, id)) return false;
+     !aux->func[index]->jited || !cell_export_name(native_name, aux->btf, id)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
  /* Trusted unmodified source retains Linux's context transfers under its
@@ -233,7 +233,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
  if (trusted) {
   if (cell_trusted_native_scalar_proto(native, n, aux->btf, prototype,
         aux->func[index]->aux->native_frame)) goto compatible;
-  if (native_proto_id != native_function->type) return false;
+  if (native_proto_id != native_type) return false;
  }
 
  if (!trusted) {
@@ -248,7 +248,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
   * ordinary verifier checked that ABI independently; no wrapper executes.
   */
  if (IS_ENABLED(CONFIG_X86_64) && aux->func[index]->aux->native_frame &&
-     cell_layout(native, native_function->type, aux->btf, function->type, 0, false)) {
+     cell_layout(native, native_type, aux->btf, function->type, 0, false)) {
   /* Preserve field-level non-NULL and const requirements at bare native
    * entries, which bypass the BPF call-site argument checker.
    */
@@ -276,7 +276,7 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
         (btf_type_is_int(y) && y->size == sizeof(void *)))) return false;
  }
  scalar_records = IS_ENABLED(CONFIG_X86_64) &&
-                  cell_scalar_record_inputs(native, native_function, aux->btf, function, result2);
+                  cell_scalar_record_inputs(native, native_function, n, aux->btf, function, result2);
  /* This form carries scalar bits only and rejects every parameter contract. */
  if (scalar_records) goto compatible;
  if (btf_type_vlen(prototype) != btf_type_vlen(n)) {
@@ -294,6 +294,13 @@ static bool cell_callable(struct btf *native, const struct btf_type *native_func
 compatible:
  *address = (unsigned long)aux->func[index]->bpf_func;
  return true;
+}
+
+static bool cell_callable(struct btf *native, const struct btf_type *function,
+ struct bpf_prog *parent, u32 id, unsigned long *address)
+{
+ return cell_callable_proto(native, function->type, function,
+  btf_name_by_offset(native, function->name_off), parent, id, address);
 }
 
 

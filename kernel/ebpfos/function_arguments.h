@@ -33,7 +33,7 @@ static inline bool cell_argument_requirements(struct btf *native, const struct b
  const struct btf_type *cp;
  const struct btf_param *parameters;
  u32 id;
- if (!nf || !cf || !btf_type_is_func(nf) || !btf_type_is_func(cf)) return false;
+ if ((nf && !btf_type_is_func(nf)) || !cf || !btf_type_is_func(cf)) return false;
  cp = btf_type_by_id(compiled, cf->type);
  if (!np || !cp || !btf_type_is_func_proto(np) || !btf_type_is_func_proto(cp) ||
      btf_type_vlen(np) < btf_type_vlen(cp)) return false;

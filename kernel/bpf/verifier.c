@@ -22299,6 +22299,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 {
 	bool prog_extension = prog->type == BPF_PROG_TYPE_EXT;
 	bool prog_tracing = prog->type == BPF_PROG_TYPE_TRACING;
+	bool field_proto = false;
 	char trace_symbol[KSYM_SYMBOL_LEN];
 	const char prefix[] = "btf_trace_";
 	struct bpf_raw_event_map *btp;
@@ -22331,6 +22332,13 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 		bpf_log(log, "attach_btf_id %u doesn't have a name\n", btf_id);
 		return -EINVAL;
 	}
+	/* Unbound component load callers may use the real operations-field
+	 * prototype without inventing a resident function. Publication still
+	 * checks the actual table address, export name and complete call contract.
+	 * Other tracing attachment modes continue to require a FUNC record.
+	 */
+	field_proto = prog_tracing && !tgt_prog && prog->aux->ebpfos_component &&
+		prog->expected_attach_type == BPF_TRACE_REPLACE && btf_type_is_func_proto(t);
 	if (tgt_prog) {
 		struct bpf_prog_aux *aux = tgt_prog->aux;
 		bool tgt_changes_pkt_data;
@@ -22526,7 +22534,7 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			bpf_log(log, "JIT does not support fsession\n");
 			return -EOPNOTSUPP;
 		}
-		if (!btf_type_is_func(t)) {
+		if (!btf_type_is_func(t) && !field_proto) {
 			bpf_log(log, "attach_btf_id %u is not a function\n",
 				btf_id);
 			return -EINVAL;
@@ -22534,7 +22542,9 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 		if (prog_extension &&
 		    btf_check_type_match(log, prog, btf, t))
 			return -EINVAL;
-		if (!tgt_prog && prog->expected_attach_type == BPF_TRACE_REPLACE &&
+		if (field_proto) {
+			/* t already is the native field's FUNC_PROTO. */
+		} else if (!tgt_prog && prog->expected_attach_type == BPF_TRACE_REPLACE &&
 		    prog->aux->trusted_kernel) {
 			ret = btf_native_func_proto_id(btf, btf_id, prog);
 			if (ret < 0)
@@ -22594,6 +22604,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 				return -EINVAL;
 			}
 		}
+		if (field_proto)
+			break;
 		if (tgt_prog) {
 			if (subprog == 0)
 				addr = (long) tgt_prog->bpf_func;

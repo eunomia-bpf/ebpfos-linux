@@ -145,16 +145,16 @@ static inline bool cell_single_scalar_record_register(const struct btf *native, 
         !BTF_INT_OFFSET(value) && !(BTF_INT_ENCODING(value) & BTF_INT_BOOL);
 }
 static inline bool cell_scalar_record_inputs(struct btf *native, const struct btf_type *nf,
- struct btf *compiled, const struct btf_type *cf, bool result2)
+ const struct btf_type *np, struct btf *compiled, const struct btf_type *cf, bool result2)
 {
- const struct btf_type *np, *cp, *result;
+ const struct btf_type *cp, *result;
  const struct btf_param *args, *actual;
  unsigned int i, j, word = 0;
  bool record = false;
- if (!nf || !cf || BTF_INFO_KIND(nf->info) != BTF_KIND_FUNC ||
+ if ((nf && BTF_INFO_KIND(nf->info) != BTF_KIND_FUNC) || !cf ||
      BTF_INFO_KIND(cf->info) != BTF_KIND_FUNC ||
      cell_record_tags(native, nf, true) || cell_record_tags(compiled, cf, true)) return false;
- np = btf_type_by_id(native, nf->type);cp = btf_type_by_id(compiled, cf->type);
+ cp = btf_type_by_id(compiled, cf->type);
  if (!np || !cp || BTF_INFO_KIND(np->info) != BTF_KIND_FUNC_PROTO ||
      BTF_INFO_KIND(cp->info) != BTF_KIND_FUNC_PROTO || BTF_INFO_VLEN(cp->info) > 5) return false;
  result = cell_record_type(native, np->type);
