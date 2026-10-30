@@ -204,7 +204,7 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
    abi->stack_size = round_up(abi->stack_size, size == 16 && !err ? 16 : 8);
    arg->stack_offset = abi->stack_size;
    if (size > MAX_BPF_STACK - abi->stack_size) return -E2BIG;
-   abi->stack_size += max(size, 8u);
+   abi->stack_size += round_up(size, 8u);
   }
  }
  return 0;

@@ -21330,7 +21330,10 @@ static int check_native_frames(struct bpf_verifier_env *env)
 			     round_up(sub->native_abi.args[0].size, 8) >
 			     BPF_TRACKED_STACK - local - round_up(outgoing, 8) - round_up(incoming, 8)))
 				return -E2BIG;
-			if (incoming != sub->native_abi.stack_size) {
+			/* Trusted code carries the compiler's physical frame. BTF
+			 * source types need not retain its calling convention or padding.
+			 */
+			if (incoming != sub->native_abi.stack_size && !aux->trusted_kernel) {
 				verbose(env, "native incoming argument area differs from BTF prototype\n");
 				return -EINVAL;
 			}
