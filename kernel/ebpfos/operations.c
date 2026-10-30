@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/kallsyms.h>
 #include <linux/module.h>
+#include <linux/moduleloader.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -145,6 +146,13 @@ static unsigned long operations_storage(struct btf *btf, u32 variable, struct mo
   for (j = 0; j < btf_type_vlen(section); ++j) if (entries[j].type == variable) {
    u32 k, offset = entries[j].offset;
    if (entries[j].size < size || offset > section->size || size > section->size - offset) return 0;
+   if (module) {
+    unsigned long base = module_section_address(module, btf_name_by_offset(btf, section->name_off));
+    if (base) {
+     unsigned long address = base + offset;
+     return address >= base && operations_storage_range(module, address, size) ? address : 0;
+    }
+   }
    for (k = 0; k < btf_type_vlen(section); ++k) {
     const struct btf_type *anchor = btf_type_by_id(btf, entries[k].type);
     unsigned long address, base;

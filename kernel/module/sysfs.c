@@ -6,6 +6,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/moduleloader.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/sysfs.h>
@@ -50,6 +51,23 @@ static ssize_t module_sect_read(struct file *file, struct kobject *kobj,
 	memcpy(buf, bounce, count);
 
 	return count;
+}
+
+/* Loaded ELF sections already retain their relocated addresses for sysfs.
+ * A module lease protects this metadata from removal. No symbol spelling
+ * or object owner needs to supply an anchor for a BTF data section. */
+unsigned long module_section_address(const struct module *mod, const char *name)
+{
+ const struct bin_attribute *const *attr;
+ unsigned long address = 0;
+
+ if (!mod->sect_attrs) return 0;
+ for (attr = mod->sect_attrs->grp.bin_attrs; *attr; ++attr) {
+  if (strcmp((*attr)->attr.name, name)) continue;
+  if (address) return 0;
+  address = (unsigned long)(*attr)->private;
+ }
+ return address;
 }
 
 static void free_sect_attrs(struct module_sect_attrs *sect_attrs)

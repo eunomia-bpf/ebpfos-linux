@@ -13,6 +13,14 @@
  * must be implemented by each architecture.
  */
 
+/* The caller retains the module while using its loaded section metadata. */
+#if defined(CONFIG_MODULES) && defined(CONFIG_SYSFS) && defined(CONFIG_KALLSYMS)
+unsigned long module_section_address(const struct module *mod, const char *name);
+#else
+static inline unsigned long module_section_address(const struct module *mod,
+                                                   const char *name) { return 0; }
+#endif
+
 /* arch may override to do additional checking of ELF header architecture */
 bool module_elf_check_arch(Elf_Ehdr *hdr);
 
