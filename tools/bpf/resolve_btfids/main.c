@@ -827,6 +827,20 @@ static int sets_patch(struct object *obj)
 			 * struct, otherwise the below qsort would not work.
 			 */
 			BUILD_BUG_ON((u32 *)set8->pairs != &set8->pairs[0].id);
+			if (set8->flags & BTF_SET8_OPTIONAL) {
+				u32 source, retained = 0;
+
+				/* A missing optional function has no callable body.
+				 * Keep all resolved IDs and their flags, compacting
+				 * only this explicitly optional catalogue at link time.
+				 */
+				for (source = 0; source < set8->cnt; source++)
+					if (set8->pairs[source].id)
+						set8->pairs[retained++] = set8->pairs[source];
+				memset(&set8->pairs[retained], 0,
+				       (set8->cnt - retained) * sizeof(set8->pairs[0]));
+				set8->cnt = retained;
+			}
 			qsort(set8->pairs, set8->cnt, sizeof(set8->pairs[0]), cmp_id);
 			break;
 		default:

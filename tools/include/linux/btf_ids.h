@@ -10,6 +10,12 @@ struct btf_id_set {
 	u32 ids[];
 };
 
+/* This flag implies BTF_SET8 holds kfunc(s). */
+#define BTF_SET8_KFUNCS (1 << 0)
+
+/* Resolve only available entries in a configuration-dependent catalogue. */
+#define BTF_SET8_OPTIONAL (1 << 1)
+
 struct btf_id_set8 {
 	u32 cnt;
 	u32 flags;

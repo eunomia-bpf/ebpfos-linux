@@ -276,9 +276,12 @@ static int native_set_btf(struct object *obj)
 		return -EINVAL;
 	for (i = 0; i < sizeof(native_set_entries) / sizeof(native_set_entries[0]); i++) {
 		const struct native_set_entry *e = &native_set_entries[i];
-		int func, proto;
+		int func, proto, err;
 
-		if (native_code_symbol(obj, e->native)) {
+		err = native_code_symbol(obj, e->native);
+		if (err == -ENOENT)
+			continue;
+		if (err) {
 			fprintf(stderr, "native set: missing original code symbol %s\n", e->native);
 			return -EINVAL;
 		}
@@ -311,6 +314,8 @@ static int native_set_btf(struct object *obj)
 		const struct btf_type *proto;
 		char tag[64];
 
+		if (native_code_symbol(obj, c->native) == -ENOENT)
+			continue;
 		if (func < 0)
 			return func;
 		proto = btf__type_by_id(btf, btf__type_by_id(btf, func)->type);

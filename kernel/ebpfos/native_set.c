@@ -32,7 +32,7 @@ enum ebpfos_native_scalar_counts {
 };
 static enum ebpfos_native_scalar_counts __used native_scalar_count_btf;
 
-BTF_KFUNCS_START(ebpfos_native_ids)
+BTF_KFUNCS_START_OPTIONAL(ebpfos_native_ids)
 #define NATIVE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
 #define NATIVE_PROTOTYPE(source)
 #define NATIVE_INLINE_FUNCTION(source, native, flags) BTF_ID_FLAGS(func, native, flags)
