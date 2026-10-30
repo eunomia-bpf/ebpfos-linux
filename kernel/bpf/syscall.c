@@ -3010,10 +3010,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
 	     (type != BPF_PROG_TYPE_SYSCALL &&
 	      type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
-	      (type != BPF_PROG_TYPE_TRACING ||
-	       (attr->expected_attach_type != BPF_TRACE_FENTRY &&
-		attr->expected_attach_type != BPF_TRACE_ITER &&
-		attr->expected_attach_type != BPF_TRACE_REPLACE))) ||
+	      type != BPF_PROG_TYPE_TRACING) ||
 	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
 	/* This is load metadata, copied with kvmalloc rather than into a page.
@@ -3037,16 +3034,16 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 				 BPF_F_TRUSTED_KERNEL |
 				 BPF_F_TOKEN_FD))
 		return -EINVAL;
+	/* Component metadata does not replace a tracing program's original
+	 * attach or sleepability contract. Stock attachment and verifier checks
+	 * below validate those fields, including sleepable-helper eligibility.
+	 */
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !((type == BPF_PROG_TYPE_SYSCALL &&
 	       (attr->prog_flags & BPF_F_SLEEPABLE)) ||
 	      (type == BPF_PROG_TYPE_RAW_TRACEPOINT &&
 	       !(attr->prog_flags & BPF_F_SLEEPABLE)) ||
-	      (type == BPF_PROG_TYPE_TRACING &&
-	       (attr->expected_attach_type == BPF_TRACE_FENTRY ||
-		attr->expected_attach_type == BPF_TRACE_ITER ||
-	       attr->expected_attach_type == BPF_TRACE_REPLACE) &&
-	       !(attr->prog_flags & BPF_F_SLEEPABLE))))
+	      type == BPF_PROG_TYPE_TRACING))
 		return -EINVAL;
 	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
 	    !IS_ENABLED(CONFIG_EBPFOS))
