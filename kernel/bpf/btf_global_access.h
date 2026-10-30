@@ -3,6 +3,62 @@
  * untyped writable byte buffer. Only permanent writable core storage qualifies.
  * Each store needs the current function's compiler-described symbol and span.
  */
+/* Preserve native pointer-cell identity, including homogeneous arrays.
+ * The cell is readable; the value has no lifetime or write capability.
+ */
+static bool btf_pointer_global(const struct btf *btf, u32 id)
+{
+	const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
+
+	while (t && btf_type_is_array(t))
+		t = btf_type_skip_modifiers(btf, btf_array(t)->type, NULL);
+	return t && btf_type_is_ptr(t);
+}
+
+static int check_btf_pointer_global(struct bpf_verifier_env *env,
+				    struct bpf_reg_state *regs, int regno,
+				    int off, int size, enum bpf_access_type atype,
+				    int value_regno)
+{
+	struct bpf_reg_state *reg = &regs[regno];
+	const struct btf_type *var = btf_type_by_id(reg->btf, reg->btf_id), *type;
+	enum bpf_type_flag flags = 0;
+	u32 bytes, id = 0;
+	int ret;
+
+	if (!btf_is_kernel(reg->btf) ||
+	    base_type(reg->type) != PTR_TO_BTF_ID ||
+	    reg->type & (PTR_UNTRUSTED | PTR_MAYBE_NULL | MEM_USER | MEM_PERCPU |
+			 MEM_RCU | MEM_ALLOC) || reg->ref_obj_id ||
+	    atype != BPF_READ)
+		return -EACCES;
+	type = btf_type_skip_modifiers(reg->btf, var->type, NULL);
+	if (IS_ERR(btf_resolve_size(reg->btf, type, &bytes)))
+		return -EINVAL;
+	ret = check_mem_region_access(env, regno, off, size, bytes, false);
+	if (ret || value_regno < 0)
+		return ret;
+	/* Partial or overlapping pointer words stay ordinary scalar bits.
+	 * No arithmetic on such fragments can reconstruct pointer provenance.
+	 */
+	if (size != sizeof(void *) ||
+	    ((reg->var_off.value + off) & (sizeof(void *) - 1)) ||
+	    (reg->var_off.mask & (sizeof(void *) - 1))) {
+		mark_reg_unknown(env, regs, value_regno);
+		return 0;
+	}
+	/* The bounds and alignment above cover every possible array index.
+	 * Classify its uniform element at zero, without assuming an index value.
+	 */
+	ret = btf_struct_access(&env->log, reg, 0, size, atype, &id, &flags, NULL);
+	if (ret < 0)
+		return ret;
+	flags |= PTR_UNTRUSTED;
+	if (ret == PTR_TO_BTF_ID || ret == PTR_TO_BTF_FUNC)
+		flags |= PTR_MAYBE_NULL;
+	return mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf, id, flags);
+}
+
 static bool btf_plain_scalar_global(const struct btf *btf, u32 id)
 {
 	const struct btf_type *type;
@@ -77,6 +133,9 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 	const char *tag;
 	char key[KSYM_NAME_LEN + 80];
 	int len, err;
+
+	if (btf_pointer_global(reg->btf, var->type))
+		return check_btf_pointer_global(env, regs, regno, off, size, atype, value_regno);
 
 	/* No reference, nullable, user, RCU or per-CPU capability can become a
 	 * writable global. VAR pointers originate only at checked symbol loads.

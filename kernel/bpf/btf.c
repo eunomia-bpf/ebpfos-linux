@@ -7305,6 +7305,29 @@ static void btf_pointer_flags(const struct btf *btf, u32 id,
 	}
 }
 
+/* A standalone pointer cell and a record field use the same type decoder. */
+static int btf_pointer_walk(const struct btf *btf, const struct btf_type *ptr,
+			    u32 *next_btf_id, enum bpf_type_flag *flag,
+			    bool *nullable)
+{
+	const struct btf_type *target;
+	u32 id;
+
+	btf_pointer_flags(btf, ptr->type, flag, nullable);
+	target = btf_type_skip_modifiers(btf, ptr->type, &id);
+	if (nullable)
+		*next_btf_id = id;
+	if (btf_type_is_func_proto(target)) {
+		*next_btf_id = id;
+		return WALK_FUNC;
+	}
+	if (btf_type_is_struct(target)) {
+		*next_btf_id = id;
+		return WALK_PTR;
+	}
+	return WALK_PTR_UNTRUSTED;
+}
+
 static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 			   const struct btf_type *t, int off, int size,
 			   u32 *next_btf_id, enum bpf_type_flag *flag,
@@ -7315,6 +7338,24 @@ static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 	const struct btf_member *member;
 	const char *tname, *mname;
 	u32 vlen, elem_id, mid;
+
+	/* Native VARs have no containing record. Arrays are homogeneous,
+	 * including nested arrays, so each complete cell has the same type.
+	 */
+	if (btf_type_is_var(t)) {
+		t = btf_type_skip_modifiers(btf, t->type, NULL);
+		while (btf_type_is_array(t)) {
+			u32 bytes;
+
+			t = btf_type_skip_modifiers(btf, btf_array(t)->type, NULL);
+			if (IS_ERR(btf_resolve_size(btf, t, &bytes)) || !bytes)
+				return -EINVAL;
+			off %= bytes;
+		}
+		if (!btf_type_is_ptr(t) || off || size != sizeof(void *))
+			return -EACCES;
+		return btf_pointer_walk(btf, t, next_btf_id, flag, nullable);
+	}
 
 again:
 	if (btf_type_is_modifier(t))
@@ -7509,9 +7550,7 @@ error:
 		}
 
 		if (btf_type_is_ptr(mtype)) {
-			const struct btf_type *stype;
-			enum bpf_type_flag tmp_flag = 0;
-			u32 id;
+			int ret;
 
 			if (msize != size || off != moff) {
 				bpf_log(log,
@@ -7520,25 +7559,10 @@ error:
 				return -EACCES;
 			}
 
-			/* check type tag */
-			btf_pointer_flags(btf, mtype->type, &tmp_flag, nullable);
-
-			stype = btf_type_skip_modifiers(btf, mtype->type, &id);
-			if (btf_type_is_func_proto(stype)) {
-				*next_btf_id = id;
-				return WALK_FUNC;
-			}
-			if (nullable)
-				*next_btf_id = id;
-			*flag |= tmp_flag;
-			if (btf_type_is_struct(stype)) {
-				*next_btf_id = id;
-				if (field_name)
-					*field_name = mname;
-				return WALK_PTR;
-			}
-
-			return WALK_PTR_UNTRUSTED;
+			ret = btf_pointer_walk(btf, mtype, next_btf_id, flag, nullable);
+			if (ret == WALK_PTR && field_name)
+				*field_name = mname;
+			return ret;
 		}
 
 		/* Allow more flexible access within an int as long as

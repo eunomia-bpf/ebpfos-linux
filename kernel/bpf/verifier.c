@@ -12522,7 +12522,14 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 		mark_reg_known_zero(env, regs, BPF_REG_0);
 		t = btf_type_skip_modifiers(meta.ret_btf, meta.ret_btf_id, NULL);
-		if (!btf_type_is_struct(t)) {
+		if (btf_type_is_var(t) && btf_pointer_global(meta.ret_btf, t->type)) {
+			/* Resolving a CPU changes the address, not the cell's type.
+			 * Keep the ordinary helper's read-only/nullable result flags.
+			 */
+			regs[BPF_REG_0].type = PTR_TO_BTF_ID | ret_flag;
+			regs[BPF_REG_0].btf = meta.ret_btf;
+			regs[BPF_REG_0].btf_id = meta.ret_btf_id;
+		} else if (!btf_type_is_struct(t)) {
 			u32 tsize;
 			const struct btf_type *ret;
 			const char *tname;
@@ -20782,7 +20789,15 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		    bytes <= (unsigned long)__end_rodata - addr)
 			aux->btf_var.mem_stable = BPF_MEM_KERNEL_STABLE;
 	}
-	if (percpu) {
+	if (btf_is_kernel(btf) && btf_pointer_global(btf, type)) {
+		aux->btf_var.reg_type = PTR_TO_BTF_ID | PTR_TRUSTED;
+		if (percpu)
+			aux->btf_var.reg_type |= MEM_PERCPU;
+		else
+			aux->btf_var.reg_type |= MEM_RDONLY;
+		aux->btf_var.btf = btf;
+		aux->btf_var.btf_id = id;
+	} else if (percpu) {
 		aux->btf_var.reg_type = PTR_TO_BTF_ID | MEM_PERCPU;
 		aux->btf_var.btf = btf;
 		aux->btf_var.btf_id = type;
