@@ -24,6 +24,7 @@
 #include <linux/vmalloc.h>
 #include <linux/prandom.h>
 #include <linux/bpf.h>
+#include <linux/bpf_native_seq.h>
 #include <linux/btf.h>
 #include <linux/hex.h>
 #include <linux/objtool.h>
@@ -412,6 +413,25 @@ static int bpf_adj_branches(struct bpf_prog *prog, u32 pos, s32 end_old,
 						   end_new, i, probe_pass);
 			if (ret)
 				return ret;
+			continue;
+		}
+		if (bpf_native_seq_insn(insn)) {
+			struct bpf_native_seq *seq = bpf_native_seq_get(prog, insn->imm);
+			struct bpf_native_goto *targets;
+			u32 j;
+
+			if (!seq)
+				return -EINVAL;
+			targets = (void *)seq + seq->gotos_offset;
+			for (j = 0; j < seq->gotos_count; j++) {
+				struct bpf_insn branch = { .imm = targets[j].delta };
+
+				ret = bpf_adj_delta_to_imm(&branch, pos, end_old, end_new, i, probe_pass);
+				if (ret)
+					return ret;
+				if (!probe_pass)
+					targets[j].delta = branch.imm;
+			}
 			continue;
 		}
 		code = insn->code;
@@ -3108,8 +3128,10 @@ static void bpf_prog_free_deferred(struct work_struct *work)
 	}
 	if (aux->real_func_cnt) {
 		kfree(aux->func);
+		kvfree(aux->native_seqs);
 		bpf_prog_unlock_free(aux->prog);
 	} else {
+		kvfree(aux->native_seqs);
 		bpf_jit_free(aux->prog);
 	}
 }

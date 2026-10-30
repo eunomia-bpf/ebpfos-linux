@@ -9,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/bpf.h>
+#include <linux/bpf_native_seq.h>
 #include <linux/bpf_kernel_rule_context.h>
 #include <linux/btf.h>
 #include "btf_record_return.h"
@@ -21066,6 +21067,14 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 	switch (opcode) {
 	case BPF_CALL:
+		if (insn->code == (BPF_JMP | BPF_CALL) &&
+		    insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
+			if (!env->prog->aux->trusted_kernel) {
+				verbose(env, "native sequence requires the privileged trusted kernel tier; x86 bytes are not verified\n");
+				return -EACCES;
+			}
+			return insn->dst_reg || insn->off ? -EINVAL : 0;
+		}
 		if (BPF_SRC(insn->code) == BPF_X) {
 			if (class != BPF_JMP || insn->src_reg || insn->dst_reg ||
 			    insn->off || insn->imm < BPF_REG_0 || (insn->imm >= BPF_REG_FP && insn->imm != BPF_REG_ARG6)) {
@@ -23134,6 +23143,11 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 			goto skip_full_check;
 	}
 
+	if (env->prog->aux->trusted_kernel) {
+		ret = bpf_native_seq_clone_records(env->prog);
+		if (ret)
+			goto skip_full_check;
+	}
 	ret = lower_kop_proof_regions(env);
 	if (ret < 0)
 		goto skip_full_check;

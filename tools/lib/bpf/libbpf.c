@@ -711,6 +711,8 @@ enum bpf_object_state {
 };
 
 struct bpf_object {
+	void *native_seqs;
+	size_t native_seqs_size;
 	char name[BPF_OBJ_NAME_LEN];
 	char license[64];
 	__u32 kern_version;
@@ -3983,7 +3985,13 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 			 (int)sh->sh_link, (unsigned long)sh->sh_flags,
 			 (int)sh->sh_type);
 
-		if (strcmp(name, "license") == 0) {
+		if (strcmp(name, ".bpf.native") == 0) {
+			obj->native_seqs = malloc(data->d_size);
+			if (!obj->native_seqs)
+				return -ENOMEM;
+			memcpy(obj->native_seqs, data->d_buf, data->d_size);
+			obj->native_seqs_size = data->d_size;
+		} else if (strcmp(name, "license") == 0) {
 			err = bpf_object__init_license(obj, data->d_buf, data->d_size);
 			if (err)
 				return err;
@@ -7982,6 +7990,8 @@ retry_load:
 	load_attr.log_size = log_buf_size;
 	load_attr.log_level = log_level;
 
+	load_attr.native_seqs = obj->native_seqs;
+	load_attr.native_seqs_size = obj->native_seqs_size;
 	ret = bpf_prog_load(prog->type, prog_name, license, insns, insns_cnt, &load_attr);
 	if (ret >= 0) {
 		if (log_level && own_log_buf) {
@@ -8651,6 +8661,8 @@ static int find_ksym_btf_id(struct bpf_object *obj, const char *ksym_name,
 	return id;
 }
 
+static bool source_component_calls(struct bpf_object *obj);
+
 static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 					       struct extern_desc *ext)
 {
@@ -8663,6 +8675,15 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 
 	id = find_ksym_btf_id(obj, ext->name, BTF_KIND_VAR, &btf, &mod_btf);
 	if (id < 0) {
+		if (id == -ESRCH && source_component_calls(obj)) {
+			/* Preserve a symbolic operand. The kernel decides whether
+			 * this source namespace is allowed for this program tier.
+			 */
+			ext->is_set = true;
+			ext->ksym.kernel_btf_id = ext->btf_id;
+			ext->ksym.kernel_btf_obj_fd = BPF_BTF_SOURCE;
+			return 0;
+		}
 		if (id == -ESRCH && ext->is_weak)
 			return 0;
 		pr_warn("extern (var ksym) '%s': not found in kernel BTF\n",
@@ -8768,6 +8789,13 @@ static int bpf_object__resolve_ksym_func_btf_id(struct bpf_object *obj,
 	kfunc_id = find_ksym_btf_id(obj, ext->essent_name ?: ext->name, BTF_KIND_FUNC, &kern_btf,
 				    &mod_btf);
 	if (kfunc_id < 0) {
+		if (kfunc_id == -ESRCH && source_component_calls(obj)) {
+			ext->is_set = true;
+			ext->ksym.kernel_btf_id = ext->btf_id;
+			ext->ksym.btf_fd_idx = BPF_BTF_SOURCE;
+			ext->ksym.kernel_btf_obj_fd = BPF_BTF_SOURCE;
+			return 0;
+		}
 		if (kfunc_id == -ESRCH && ext->is_weak)
 			return 0;
 		pr_warn("extern (func ksym) '%s': not found in kernel or module BTFs\n",
@@ -9596,6 +9624,7 @@ void bpf_object__close(struct bpf_object *obj)
 
 	if (IS_ERR_OR_NULL(obj))
 		return;
+	free(obj->native_seqs);
 
 	/*
 	 * if user called bpf_object__prepare() without ever getting to
@@ -9991,6 +10020,8 @@ int bpf_program__clone(struct bpf_program *prog, const struct bpf_prog_load_opts
 		return libbpf_err(-EINVAL);
 
 	obj = prog->obj;
+	attr.native_seqs = OPTS_GET(opts, native_seqs, NULL) ?: obj->native_seqs;
+	attr.native_seqs_size = OPTS_GET(opts, native_seqs_size, 0) ?: obj->native_seqs_size;
 	if (obj->state < OBJ_PREPARED)
 		return libbpf_err(-EINVAL);
 

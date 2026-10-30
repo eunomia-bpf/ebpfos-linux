@@ -118,9 +118,11 @@ struct bpf_prog_load_opts {
 	__u32 ebpfos_field_access_cnt;
 	const __u32 *trusted_stack_sizes;
 	__u32 trusted_stack_size_cnt;
+	const void *native_seqs;
+	__u32 native_seqs_size;
 	size_t :0;
 };
-#define bpf_prog_load_opts__last_field trusted_stack_size_cnt
+#define bpf_prog_load_opts__last_field native_seqs_size
 
 LIBBPF_API int bpf_prog_load(enum bpf_prog_type prog_type,
 			     const char *prog_name, const char *license,

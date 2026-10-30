@@ -2095,6 +2095,8 @@ out_free_kop_proof:
 			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_KOP_CALL)
 			goto next_insn;
+		if (insn->src_reg == BPF_PSEUDO_NATIVE_SEQ)
+			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL) {
 			ret = bpf_fixup_kfunc_call(env, insn, insn_buf, i + delta, &cnt);
 			if (ret)

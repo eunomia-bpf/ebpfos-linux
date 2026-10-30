@@ -2922,7 +2922,7 @@ static int bpf_prog_mark_insn_arrays_ready(struct bpf_prog *prog)
 }
 
 /* last field in 'union bpf_attr' used by this command */
-#define BPF_PROG_LOAD_LAST_FIELD trusted_stack_size_cnt
+#define BPF_PROG_LOAD_LAST_FIELD native_seqs_size
 
 /* Resident native versions use the ordinary program registry, descriptors,
  * pinning and LSM hooks. No verifier or JIT is claimed for this staged type.
@@ -3209,6 +3209,16 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			     make_bpfptr(attr->insns, uattr.is_kernel),
 			     bpf_prog_insn_size(prog)) != 0)
 		goto free_prog;
+	if (attr->native_seqs_size) {
+		prog->aux->native_seqs = kvmemdup_bpfptr(
+			make_bpfptr(attr->native_seqs, uattr.is_kernel), attr->native_seqs_size);
+		if (IS_ERR(prog->aux->native_seqs)) {
+			err = PTR_ERR(prog->aux->native_seqs);
+			prog->aux->native_seqs = NULL;
+			goto free_prog;
+		}
+		prog->aux->native_seqs_size = attr->native_seqs_size;
+	}
 	/* copy eBPF program license from user space */
 	if (strncpy_from_bpfptr(license,
 				make_bpfptr(attr->license, uattr.is_kernel),

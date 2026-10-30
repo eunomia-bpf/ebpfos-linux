@@ -1396,6 +1396,10 @@ enum {
  *                   is struct/union.
  */
 #define BPF_PSEUDO_BTF_ID	3
+/* Program BTF for built-in native externs. Trusted preparation only.
+ * Used in ldimm64 insn[1].imm and a native call's insn.off.
+ */
+#define BPF_BTF_SOURCE		(-1)
 /* insn[0].src_reg:  BPF_PSEUDO_FUNC
  * insn[0].imm:      insn offset to the func
  * insn[1].imm:      0
@@ -1423,6 +1427,7 @@ enum {
  * bpf_call->imm == btf_id of a BTF_KIND_FUNC kop stub
  */
 #define BPF_PSEUDO_KOP_CALL	4
+#define BPF_PSEUDO_NATIVE_SEQ	5
 
 enum bpf_addr_space_cast {
 	BPF_ADDR_SPACE_CAST = 1,
@@ -1712,6 +1717,9 @@ union bpf_attr {
 		 */
 		__aligned_u64	trusted_stack_sizes;
 		__u32		trusted_stack_size_cnt;
+		/* Native-sequence records from the object's .bpf.native section. */
+		__aligned_u64	native_seqs;
+		__u32		native_seqs_size;
 	};
 
 	struct { /* anonymous struct used by BPF_OBJ_* commands */

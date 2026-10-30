@@ -240,7 +240,7 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 		  const struct bpf_insn *insns, size_t insn_cnt,
 		  struct bpf_prog_load_opts *opts)
 {
-	const size_t attr_sz = offsetofend(union bpf_attr, trusted_stack_size_cnt);
+	const size_t attr_sz = offsetofend(union bpf_attr, native_seqs_size);
 	void *finfo = NULL, *linfo = NULL;
 	const char *func_info, *line_info;
 	__u32 log_size, log_level, attach_prog_fd, attach_btf_obj_fd;
@@ -318,6 +318,8 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 	attr.ebpfos_field_access_cnt = OPTS_GET(opts, ebpfos_field_access_cnt, 0);
 	attr.trusted_stack_sizes = ptr_to_u64(OPTS_GET(opts, trusted_stack_sizes, NULL));
 	attr.trusted_stack_size_cnt = OPTS_GET(opts, trusted_stack_size_cnt, 0);
+	attr.native_seqs = ptr_to_u64(OPTS_GET(opts, native_seqs, NULL));
+	attr.native_seqs_size = OPTS_GET(opts, native_seqs_size, 0);
 
 	if (log_level) {
 		attr.log_buf = ptr_to_u64(log_buf);
