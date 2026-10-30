@@ -1448,6 +1448,8 @@ struct bpf_kfunc_call_arg_meta {
 	u32 func_id;
 	u32 kfunc_flags;
 	const struct btf_type *func_proto;
+	/* Declaration contracts survive bare-prototype native call checking. */
+	const struct btf_type *func_decl;
 	const char *func_name;
 	bool native_call;
 	/* Out parameters */

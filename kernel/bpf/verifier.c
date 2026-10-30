@@ -13911,11 +13911,16 @@ static bool check_css_task_iter_allowlist(struct bpf_verifier_env *env)
 /* Optional argument promises use the same BTF declaration vocabulary as
  * compiled globals. Absence is not a pointer; duplicates are invalid.
  */
+static const struct btf_type *kfunc_arg_contract(const struct bpf_kfunc_call_arg_meta *meta)
+{
+	return meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id);
+}
+
 static int kfunc_mem_arg_tag(const struct bpf_kfunc_call_arg_meta *meta,
 			     u32 arg, const char *name)
 {
 	const char *value = btf_find_decl_tag_value(meta->btf,
-			btf_type_by_id(meta->btf, meta->func_id), arg, name);
+			kfunc_arg_contract(meta), arg, name);
 
 	if (IS_ERR(value))
 		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
@@ -13929,7 +13934,7 @@ static int kfunc_arg_size_index(const struct bpf_kfunc_call_arg_meta *meta,
 				u32 arg, u32 nargs)
 {
 	const char *value = btf_find_decl_tag_value(meta->btf,
-			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:sz:");
+			kfunc_arg_contract(meta), arg, "arg:sz:");
 	u32 index;
 
 	if (IS_ERR(value))
@@ -13944,7 +13949,7 @@ static int check_kfunc_scalar_max(struct bpf_verifier_env *env,
 				 const struct btf_type *t, u32 arg, u32 regno)
 {
 	const char *value = btf_find_decl_tag_value(meta->btf,
-			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:max:");
+			kfunc_arg_contract(meta), arg, "arg:max:");
 	struct bpf_reg_state *reg = &cur_regs(env)[regno];
 	u64 max;
 
@@ -13966,7 +13971,7 @@ static int check_kfunc_scalar_alignment(struct bpf_verifier_env *env,
 				       const struct btf_type *t, u32 arg, u32 regno)
 {
 	const char *value = btf_find_decl_tag_value(meta->btf,
-			btf_type_by_id(meta->btf, meta->func_id), arg, "arg:align:");
+			kfunc_arg_contract(meta), arg, "arg:align:");
 	struct bpf_reg_state *reg = &cur_regs(env)[regno];
 	u64 alignment, mask;
 
@@ -14888,7 +14893,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 static int check_native_prototype_call(struct bpf_verifier_env *env,
                                       struct btf *btf,
                                       const struct btf_type *prototype,
-                                      bool direct)
+                                      bool direct, const struct btf_type *declaration)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_kfunc_call_arg_meta meta = {
@@ -14896,6 +14901,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		.func_proto = prototype,
 		.func_id = U32_MAX,
 		.func_name = "native call",
+		.func_decl = declaration,
 		.native_call = direct,
 	};
 	struct bpf_reg_state native_result = {};
@@ -15007,7 +15013,7 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 		return -EACCES;
 	}
 	err = check_native_prototype_call(env, target->btf,
-			btf_type_by_id(target->btf, target->btf_id), false);
+			btf_type_by_id(target->btf, target->btf_id), false, NULL);
 	if (err)
 		return err;
 	env->prog->aux->has_callx = true;
@@ -15509,7 +15515,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			verbose(env, "native call cannot establish a lock-held target contract\n");
 			return -EACCES;
 		}
-		err = check_native_prototype_call(env, meta.btf, meta.func_proto, true);
+		err = check_native_prototype_call(env, meta.btf, meta.func_proto, true,
+					  btf_type_by_id(meta.btf, meta.func_id));
 		if (!err) {
 			env->subprog_info[owner].has_native_call = true;
 			verbose(env, "func#%u relies on verifier option C; name='%s'\n",
