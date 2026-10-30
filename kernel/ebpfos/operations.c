@@ -153,12 +153,20 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  if (attr->map_flags & BPF_F_VTYPE_BTF_OBJ_FD) {
   btf = btf_get_by_fd(attr->value_type_btf_obj_fd);
   if (IS_ERR(btf)) return ERR_CAST(btf);
-  module = btf_try_get_module(btf);
-  if (!module) {btf_put(btf);return ERR_PTR(-ENOENT);}
  } else {
   if (IS_ERR_OR_NULL(btf)) return ERR_PTR(-EOPNOTSUPP);
   btf_get(btf);
  }
+ /* Split BTF can name storage inherited from its base. The VAR owns
+  * storage and its lease; a shared record type does not choose the owner. */
+ {
+  struct btf *owner = btf, *base;
+  while ((base = btf_base_btf(owner)) && attr->map_extra < btf_nr_types(base))
+   owner = base;
+  if (owner != btf) {btf_get(owner);btf_put(btf);btf = owner;}
+ }
+ module = btf_try_get_module(btf);
+ if (!module && !btf_is_vmlinux(btf)) {btf_put(btf);return ERR_PTR(-ENOENT);}
  variable = btf_type_by_id(btf, attr->map_extra);
  record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
  if (!variable || !btf_type_is_var(variable) || !record ||
