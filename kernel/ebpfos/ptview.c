@@ -18,7 +18,11 @@
 #include <asm/set_memory.h>
 #include <asm/tlbflush.h>
 
-struct ptview_page { unsigned long address; struct page *copy; };
+struct ptview_page {
+ unsigned long address;
+ struct page *copy;
+ DECLARE_BITMAP(changed, PAGE_SIZE);
+};
 struct ebpfos_ptview {
  struct module *owner;
  refcount_t refs;
@@ -32,12 +36,31 @@ struct ptview_mm {
  pgd_t *root;
  DECLARE_BITMAP(changed, PTRS_PER_PGD);
  pgd_t original[PTRS_PER_PGD];
+ void (*release)(void *);
+ void *lease;
 };
 
 unsigned long ebpfos_ptview_symbol(const char *name) { return kallsyms_lookup_name(name); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_symbol);
 unsigned long ebpfos_ptview_entry(unsigned long address) { return ftrace_location(address); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_entry);
+
+/* Binding data may be copied; mutable object state and Native instructions
+ * must remain shared. This check runs after programs have loaded and JITed. */
+int ebpfos_ptview_pointer_change(unsigned long address, const void *bytes,
+ ebpfos_ptview_visit visit, void *data)
+{
+ unsigned long at = address, end = address + sizeof(void *);
+ if (end < address) return -EINVAL;
+ while (at < end) {
+  unsigned int level;
+  pte_t *pte = lookup_address(at, &level);
+  if (!pte || !pte_present(*pte) || pte_write(*pte) || !(pte_val(*pte) & _PAGE_NX))
+   return -EOPNOTSUPP;
+  at += min_t(unsigned long, end - at, PAGE_SIZE - offset_in_page(at));
+ }
+ return visit(address, bytes, sizeof(void *), data);
+}
 
 void ebpfos_ptview_put(struct ebpfos_ptview *view)
 {
@@ -48,13 +71,22 @@ void ebpfos_ptview_put(struct ebpfos_ptview *view)
 }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_put);
 
+void ebpfos_ptview_mm_retain(struct mm_struct *mm, void (*release)(void *), void *lease)
+{
+ struct ptview_mm *binding = mm->context.ptview;
+ if (binding->release) binding->release(binding->lease);
+ binding->release = release;binding->lease = lease;
+}
+struct ebpfos_ptview *ebpfos_ptview_get(struct ebpfos_ptview *view)
+{ if (view) refcount_inc(&view->refs);return view; }
+
 struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *changes, unsigned int count, struct module *owner)
 {
  struct ebpfos_ptview *view;
  unsigned int i, j;
  int error = -EINVAL;
  /* These are admission restrictions, not checks in the replaced code. */
- if (!count || count > 64 || pgtable_l5_enabled() ||
+ if (!count || pgtable_l5_enabled() ||
      boot_cpu_has(X86_FEATURE_PCID)) return ERR_PTR(-EOPNOTSUPP);
  view = kzalloc(struct_size(view, pages, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
@@ -83,12 +115,52 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
    ++view->count;
   }
   memcpy(page_address(view->pages[j].copy) + offset, changes[i].bytes, changes[i].size);
+  bitmap_set(view->pages[j].changed, offset, changes[i].size);
  }
  return view;
 fail:
  ebpfos_ptview_put(view);return ERR_PTR(error);
 }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_prepare);
+
+/* All inputs were prepared at link time. Compose only their changed bytes;
+ * independent rules may share a physical page without replacing each other. */
+struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsigned int count)
+{
+ struct ebpfos_ptview *result;
+ unsigned int n, i, j, maximum = 0;
+ for (n = 0; n < count; ++n) maximum += views[n]->count;
+ if (!maximum) return NULL;
+ if (count == 1) return ebpfos_ptview_get(views[0]);
+ result = kzalloc(struct_size(result, pages, maximum), GFP_KERNEL);
+ if (!result) return ERR_PTR(-ENOMEM);
+ refcount_set(&result->refs, 1);
+ for (n = 0; n < count; ++n) for (i = 0; i < views[n]->count; ++i) {
+  struct ptview_page *page = &views[n]->pages[i], *target;
+  unsigned long bit;
+  for (j = 0; j < result->count; ++j)
+   if (result->pages[j].address == page->address) break;
+  target = &result->pages[j];
+  if (j == result->count) {
+   target->copy = alloc_page(GFP_KERNEL);
+   if (!target->copy) {ebpfos_ptview_put(result);return ERR_PTR(-ENOMEM);}
+   target->address = page->address;
+   memcpy(page_address(target->copy), page_address(page->copy), PAGE_SIZE);
+   ++result->count;
+  } else for_each_set_bit(bit, page->changed, PAGE_SIZE)
+   ((u8 *)page_address(target->copy))[bit] = ((u8 *)page_address(page->copy))[bit];
+  bitmap_or(target->changed, target->changed, page->changed, PAGE_SIZE);
+ }
+ return result;
+}
+bool ebpfos_ptview_overlap(struct ebpfos_ptview *a, struct ebpfos_ptview *b)
+{
+ unsigned int i, j;
+ for (i = 0; a && i < a->count; ++i) for (j = 0; b && j < b->count; ++j)
+  if (a->pages[i].address == b->pages[j].address &&
+      bitmap_intersects(a->pages[i].changed, b->pages[j].changed, PAGE_SIZE)) return true;
+ return false;
+}
 
 static void free_mapping(struct ptview_mm *binding)
 {
@@ -100,7 +172,9 @@ static void free_mapping(struct ptview_mm *binding)
  }
  free_page((unsigned long)binding->root);
  owner = binding->view->owner;
- ebpfos_ptview_put(binding->view);kfree(binding);module_put(owner);
+ ebpfos_ptview_put(binding->view);
+ if (binding->release) binding->release(binding->lease);
+ kfree(binding);module_put(owner);
 }
 
 static void *copy_table(struct ptview_mm *binding, void *source)

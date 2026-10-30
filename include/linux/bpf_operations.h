@@ -4,6 +4,7 @@
 #include <linux/bpf.h>
 struct bpf_operations_set;
 struct ebpfos_operations;
+typedef int (*bpf_operations_visit_change)(unsigned long, const void *, size_t, void *);
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 u32 btf_module_type_id(const struct module *, u32);
 long bpf_operations_update(struct bpf_map *, void *, void *, u64);
@@ -12,6 +13,7 @@ struct bpf_operations_set *bpf_operations_set_get(struct bpf_operations_set *set
 void bpf_operations_set_put(struct bpf_operations_set *set);
 u32 bpf_operations_set_count(const struct bpf_operations_set *set);
 int bpf_operations_visit_programs(const struct bpf_operations_set *,int (*visit)(struct bpf_prog *,void *),void *);
+int bpf_operations_visit_changes(const struct bpf_operations_set *, bpf_operations_visit_change, void *);
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 index);
 bool bpf_operations_set_targets(const struct bpf_operations_set *, const struct bpf_operations_set *);
 bool bpf_operations_overlap(const struct bpf_operations_set *, const struct bpf_operations_set *);

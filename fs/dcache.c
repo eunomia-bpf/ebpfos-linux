@@ -35,7 +35,7 @@
 #include "internal.h"
 #include "mount.h"
 
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 #include <linux/ebpfos_operations.h>
 #endif
 
@@ -2011,7 +2011,7 @@ static unsigned d_flags_for_inode(struct inode *inode)
 	if (!inode)
 		return DCACHE_MISS_TYPE;
 
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 	/* All callers hold i_lock. Tables and their code were prepared before
 	 * selection; this publication does not allocate or sleep. */
 	inode->i_op = ebpfos_operations_resolve(inode->ebpfos_operations, inode->i_op);

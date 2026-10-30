@@ -380,6 +380,23 @@ int bpf_operations_visit_programs(const struct bpf_operations_set *set,
  }
  return 0;
 }
+int bpf_operations_visit_changes(const struct bpf_operations_set *set,
+ bpf_operations_visit_change visit, void *data)
+{
+ u32 i, j;
+ int error;
+ for (i = 0; set && i < set->count; ++i) {
+  struct ebpfos_operations *ops = container_of(set->maps[i], struct ebpfos_operations, map);
+  for (j = 0; j < ops->field_count; ++j) if (ops->programs[j]) {
+   u32 at = ops->fields[j].offset;
+   if (IS_ENABLED(CONFIG_EBPFOS_AUTOBIND))
+    error = ebpfos_ptview_pointer_change((unsigned long)ops->original + at, ops->table + at, visit, data);
+   else error = visit((unsigned long)ops->original + at, ops->table + at, sizeof(void *), data);
+   if (error) return error;
+  }
+ }
+ return 0;
+}
 u32 bpf_operations_set_count(const struct bpf_operations_set *set) { return set ? set->count : 0; }
 u32 bpf_operations_set_id(const struct bpf_operations_set *set, u32 at)
 { return set && at < set->count ? set->maps[at]->id : 0; }
@@ -598,6 +615,7 @@ void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
 { if (owner) call_rcu(&owner->rcu, operations_owner_rcu); }
 EXPORT_SYMBOL_GPL(ebpfos_operations_owner_put);
 
+#ifndef CONFIG_EBPFOS_AUTOBIND
 #include <linux/btf_ids.h>
 BTF_ID_LIST_SINGLE(operations_file_btf_id, struct, file_operations)
 int ebpfos_file_view_open(struct file *file)
@@ -616,6 +634,7 @@ int ebpfos_file_view_open(struct file *file)
 EXPORT_SYMBOL(ebpfos_file_view_open);
 void ebpfos_file_view_free(struct file *file)
 { ebpfos_operations_put(file->ebpfos_operations); }
+#endif
 
 /* A rule chooses one complete set. Independent rules must never supply two
  * versions of the same table for one operation. Alternative sets within a

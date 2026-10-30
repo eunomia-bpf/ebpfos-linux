@@ -11,6 +11,8 @@ struct ebpfos_ptview_change {
  const void *bytes;
  size_t size;
 };
+typedef int (*ebpfos_ptview_visit)(unsigned long, const void *, size_t, void *);
+int ebpfos_ptview_pointer_change(unsigned long, const void *, ebpfos_ptview_visit, void *);
 #ifdef CONFIG_EBPFOS_PTVIEW
 /* Cold preparation reads the original kernel, independent of the caller's view. */
 int ebpfos_ptview_read_native(void *, const void *, size_t);
@@ -21,6 +23,10 @@ int ebpfos_ptview_read_native(void *, const void *, size_t);
 struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *, unsigned int, struct module *);
 void ebpfos_ptview_put(struct ebpfos_ptview *);
 int ebpfos_ptview_bind(struct ebpfos_ptview *);
+void ebpfos_ptview_mm_retain(struct mm_struct *, void (*)(void *), void *);
+struct ebpfos_ptview *ebpfos_ptview_get(struct ebpfos_ptview *);
+struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **, unsigned int);
+bool ebpfos_ptview_overlap(struct ebpfos_ptview *, struct ebpfos_ptview *);
 void ebpfos_ptview_mm_free(struct mm_struct *);
 bool ebpfos_ptview_mm(const struct mm_struct *);
 unsigned long ebpfos_ptview_symbol(const char *);

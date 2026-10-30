@@ -7,9 +7,11 @@
 #include <linux/ebpfos_operations.h>
 #include <linux/ebpfos_rule_cache.h>
 #include <linux/ebpfos_task_rule.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/filter.h>
 #include <linux/hash.h>
 #include <linux/mutex.h>
+#include <linux/mm.h>
 #include <linux/nsproxy.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -22,6 +24,9 @@ struct rule_generation {
  struct bpf_operations_set *versions[BPF_KERNEL_RULE_MAX_VERSIONS];
  struct ebpfos_task_view_request *tasks[BPF_KERNEL_RULE_MAX_VERSIONS];
  bool has_tasks;
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ struct ebpfos_ptview *views[BPF_KERNEL_RULE_MAX_VERSIONS];
+#endif
 };
 struct kernel_rule_link {
  struct bpf_link link;
@@ -71,6 +76,9 @@ static void generation_put(struct rule_generation *generation)
  u32 i;
  if (!generation || !refcount_dec_and_test(&generation->refs)) return;
  for (i = 0; i < generation->count; ++i) {
+#ifdef CONFIG_EBPFOS_AUTOBIND
+  ebpfos_ptview_put(generation->views[i]);
+#endif
   bpf_operations_set_put(generation->versions[i]);ebpfos_rule_task_put(generation->tasks[i]);
  }
  bpf_prog_put(generation->program);kfree(generation);
@@ -155,6 +163,70 @@ struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *de
  return NULL;
 }
 EXPORT_SYMBOL_GPL(ebpfos_rule_operations);
+
+#ifdef CONFIG_EBPFOS_AUTOBIND
+struct binding_changes {
+ struct ebpfos_ptview_change *changes;
+ unsigned int count, capacity;
+};
+
+static int collect_change(unsigned long address, const void *bytes, size_t size, void *opaque)
+{
+ struct binding_changes *set = opaque;
+ while (size) {
+  size_t part = min_t(size_t, size, PAGE_SIZE - offset_in_page(address));
+  if (set->count == set->capacity) {
+   unsigned int capacity = set->capacity ? set->capacity * 2 : 16;
+   void *next = krealloc_array(set->changes, capacity, sizeof(*set->changes), GFP_KERNEL);
+   if (!next) return -ENOMEM;
+   set->changes = next;set->capacity = capacity;
+  }
+  set->changes[set->count++] = (struct ebpfos_ptview_change){address, bytes, part};
+  bytes += part;address += part;size -= part;
+ }
+ return 0;
+}
+static struct ebpfos_ptview *rule_prepare_view(struct bpf_operations_set *operations)
+{
+ struct binding_changes changes = {};
+ struct ebpfos_ptview *view = NULL;
+ int error = bpf_operations_visit_changes(operations, collect_change, &changes);
+ if (!error && changes.count)
+  view = ebpfos_ptview_prepare(changes.changes, changes.count, NULL);
+ kfree(changes.changes);
+ return error ? ERR_PTR(error) : view;
+}
+
+static int rule_views(struct ebpfos_rule_decision *decision, struct ebpfos_ptview ***result)
+{
+ struct ebpfos_ptview **views = kcalloc(decision->count, sizeof(*views), GFP_KERNEL);
+ u32 i, count = 0;
+ if (decision->count && !views) return -ENOMEM;
+ for (i = 0; decision && i < decision->count; ++i) {
+  struct rule_choice *choice = &decision->choices[i];
+  u32 selected = choice->selection;
+  if (!selected || selected > choice->generation->count) continue;
+  if (choice->generation->views[selected - 1]) views[count++] = choice->generation->views[selected - 1];
+ }
+ *result = views;return count;
+}
+static void release_decision(void *decision) { ebpfos_rule_decision_put(decision); }
+
+int ebpfos_rule_bind_view(struct ebpfos_rule_decision *decision)
+{
+ struct ebpfos_ptview **inputs, *view;
+ int error, count = rule_views(decision, &inputs);
+ if (count < 0) return count;
+ view = ebpfos_ptview_compose(inputs, count);kfree(inputs);
+ if (IS_ERR(view)) return PTR_ERR(view);
+ error = ebpfos_ptview_bind(view);
+ if (!error && view)
+  ebpfos_ptview_mm_retain(current->mm, release_decision, ebpfos_rule_decision_get(decision));
+ ebpfos_ptview_put(view);
+ return error;
+}
+
+#endif
 
 bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *decision)
 {
@@ -294,6 +366,9 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  for (i = 0; i < next->count; ++i) {
   next->versions[i] = bpf_operations_set_get(before->versions[i]);
   next->tasks[i] = ebpfos_rule_task_get(before->tasks[i]);
+#ifdef CONFIG_EBPFOS_AUTOBIND
+  next->views[i] = ebpfos_ptview_get(before->views[i]);
+#endif
  }
  write_lock_irqsave(&rule_lock, flags);
  link->generation = next;
@@ -333,7 +408,11 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
  list_for_each_entry(owner, &rule_links, node)
   for (i = 0; i < generation->count; ++i)
    for (j = 0; j < owner->generation->count; ++j)
-    if (bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
+    if (
+#ifdef CONFIG_EBPFOS_AUTOBIND
+        ebpfos_ptview_overlap(generation->views[i], owner->generation->views[j]) ||
+#endif
+        bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
         ebpfos_rule_task_overlap(generation->tasks[i], owner->generation->tasks[j])) return true;
  return false;
 }
@@ -372,13 +451,21 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
    }
    generation->has_tasks = true;
   }
-  if (!versions[i].operations_count) continue;
-  fds = memdup_user(u64_to_user_ptr(versions[i].operations_fds), versions[i].operations_count * sizeof(u32));
-  if (IS_ERR(fds)) {error = PTR_ERR(fds);goto fail;}
-  generation->versions[i] = bpf_operations_prepare(fds, versions[i].operations_count);kfree(fds);
-  if (IS_ERR(generation->versions[i])) {
-   error = PTR_ERR(generation->versions[i]);generation->versions[i] = NULL;goto fail;
+  if (versions[i].operations_count) {
+   fds = memdup_user(u64_to_user_ptr(versions[i].operations_fds), versions[i].operations_count * sizeof(u32));
+   if (IS_ERR(fds)) {error = PTR_ERR(fds);goto fail;}
+   generation->versions[i] = bpf_operations_prepare(fds, versions[i].operations_count);kfree(fds);
+   if (IS_ERR(generation->versions[i])) {
+    error = PTR_ERR(generation->versions[i]);generation->versions[i] = NULL;goto fail;
+   }
+   if (IS_ENABLED(CONFIG_EBPFOS_AUTOBIND)) generation->has_tasks = true;
   }
+#ifdef CONFIG_EBPFOS_AUTOBIND
+  generation->views[i] = rule_prepare_view(generation->versions[i]);
+  if (IS_ERR(generation->views[i])) {
+   error = PTR_ERR(generation->views[i]);generation->views[i] = NULL;goto fail;
+  }
+#endif
  }
  kfree(versions);versions = NULL;
  link = kzalloc(sizeof(*link), GFP_KERNEL);

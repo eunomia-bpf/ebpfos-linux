@@ -211,7 +211,7 @@ static int init_file(struct file *f, int flags, const struct cred *cred)
 	file_set_fsnotify_mode(f, FMODE_NONOTIFY_PERM);
 
 	f->f_op		= NULL;
-#ifdef CONFIG_EBPFOS_ENTRY_LINK
+#if defined(CONFIG_EBPFOS_ENTRY_LINK) && !defined(CONFIG_EBPFOS_AUTOBIND)
 	f->ebpfos_operations = NULL;
 #endif
 	f->f_mapping	= NULL;
@@ -482,7 +482,7 @@ struct file *alloc_file_clone(struct file *base, int flags,
 	if (!IS_ERR(f)) {
 		path_get(&f->f_path);
 		f->f_mapping = base->f_mapping;
-#ifdef CONFIG_EBPFOS_ENTRY_LINK
+#if defined(CONFIG_EBPFOS_ENTRY_LINK) && !defined(CONFIG_EBPFOS_AUTOBIND)
 		if (fops == base->f_op && base->ebpfos_operations) {
 			ebpfos_operations_put(f->ebpfos_operations);
 			f->ebpfos_operations = ebpfos_operations_get(base->ebpfos_operations);

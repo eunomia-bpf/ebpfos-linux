@@ -21,6 +21,9 @@ struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *,
 u64 ebpfos_rule_epoch(void);
 bool ebpfos_rule_active(void);
 void ebpfos_rule_context(struct bpf_kernel_rule_ctx *, u64 object, u64 binding);
+#ifdef CONFIG_EBPFOS_AUTOBIND
+int ebpfos_rule_bind_view(struct ebpfos_rule_decision *);
+#endif
 #else
 static inline int bpf_kernel_rule_link_create(const union bpf_attr *attr) { return -EOPNOTSUPP; }
 #endif

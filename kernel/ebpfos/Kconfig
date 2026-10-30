@@ -40,5 +40,16 @@ config EBPFOS_PTVIEW
  depends on EBPFOS_ENTRY_LINK && X86_64 && !X86_5LEVEL
  default n
  help
-   Opt-in four-level, non-PCID prototype. Private copies cover only changed
-   table and entry pages. Owners resolve L6 rules at their quiet boundaries.
+   Opt-in four-level, non-PCID prototype. Private copies cover changed
+   binding-data pages.
+   Rule resolution retains the selected mappings at the task boundary.
+
+config EBPFOS_AUTOBIND
+ bool "Automatic rule-selected kernel mappings"
+ depends on EBPFOS_PTVIEW
+ default y
+ help
+   Resolve existing L6 rules at the task boundary and map immutable callback
+   data at its original addresses. Syscall roots keep their existing table.
+   The owner-boundary handoff remains an optional alternative
+   when this option is disabled. Paging restrictions are those of PTVIEW.

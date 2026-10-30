@@ -56,6 +56,12 @@ static long task_rule_resolve(const struct pt_regs *regs, unsigned int nr)
  decision = ebpfos_rule_resolve(&context, GFP_KERNEL);
  if (IS_ERR(decision)) {kfree(binding);return PTR_ERR(decision);}
  memcpy(binding->table, sys_call_table, sizeof(binding->table));
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ {
+  int error = ebpfos_rule_bind_view(decision);
+  if (error) {ebpfos_rule_decision_put(decision);kfree(binding);return error;}
+ }
+#endif
  ebpfos_rule_task_table(decision, binding->table);
  /* An object-only rule has no enclosing syscall version. Its first object
   * binding still resolves with that object's identity and sampling hash. */
@@ -99,7 +105,13 @@ void ebpfos_task_rule_resume(void)
  if (current->ebpfos_task_rule_pending) {
   current->ebpfos_task_rule_pending = false;
   old = current->ebpfos_task_rule;current->ebpfos_task_rule = NULL;
+#ifdef CONFIG_EBPFOS_AUTOBIND
+  /* Even removal of the last rule needs one cold entry to restore this
+   * task's mappings. Afterwards its ordinary table is cached as usual. */
+  current->ebpfos_syscalls = task_rule_resolvers;
+#else
   current->ebpfos_syscalls = READ_ONCE(task_rule_links) ? task_rule_resolvers : sys_call_table;
+#endif
  }
  task_unlock(current);task_rule_put(old);
 }

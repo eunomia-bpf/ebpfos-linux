@@ -316,7 +316,7 @@ struct sockfs_inode {
 	struct list_head xattrs;
 	struct simple_xattr_limits xattr_limits;
 	struct socket_alloc;
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 	struct ebpfos_operations *operations;
 #endif
 };
@@ -326,7 +326,7 @@ static struct sockfs_inode *SOCKFS_I(struct inode *inode)
 	return container_of(inode, struct sockfs_inode, vfs_inode);
 }
 
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 #include <linux/ebpfos_operations.h>
 #include <linux/btf_ids.h>
 BTF_ID_LIST_SINGLE(ebpfos_proto_ops_btf_id, struct, proto_ops)
@@ -377,7 +377,7 @@ static struct inode *sock_alloc_inode(struct super_block *sb)
 	si->socket.ops = NULL;
 	si->socket.sk = NULL;
 	si->socket.file = NULL;
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 	si->operations = NULL;
 #endif
 
@@ -396,7 +396,7 @@ static void sock_free_inode(struct inode *inode)
 {
 	struct sockfs_inode *si = SOCKFS_I(inode);
 
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
 	ebpfos_operations_put(si->operations);
 #endif
 	kmem_cache_free(sock_inode_cachep, si);
