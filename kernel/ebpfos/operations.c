@@ -21,6 +21,7 @@
 #include "function_contract.h"
 #include "function_lifetime.h"
 
+struct operations_field { u32 offset, pointer_type; };
 struct ebpfos_operations {
  struct bpf_map map;
  struct btf *types;
@@ -28,6 +29,8 @@ struct ebpfos_operations {
  const void *original;
  void *table, *user;
  struct bpf_prog **programs;
+ struct operations_field *fields;
+ u32 field_count;
  struct mutex lock;
  struct delayed_work release;
  u32 count;
@@ -40,6 +43,44 @@ struct bpf_operations_set {
  struct bpf_map *maps[];
 };
 static struct bpf_operations_set __rcu *global_operations;
+
+/* Kernel BTF has already checked the by-value type graph. Walk only storage
+ * contained in this allocation; a data pointer names a different allocation.
+ * This runs while preparing an immutable map, never during a method call. */
+static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size,
+ struct operations_field *fields, u32 *count)
+{
+ const struct btf_type *type = btf_type_skip_modifiers(btf, id, &id);
+ u32 i;
+ int error;
+ if (!type || offset > size) return -EINVAL;
+ if (btf_type_is_ptr(type)) {
+  const struct btf_type *target = btf_type_skip_modifiers(btf, type->type, NULL);
+  if (!target || !btf_type_is_func_proto(target)) return 0;
+  if (sizeof(void *) > size - offset || *count == U32_MAX) return -EINVAL;
+  if (fields) fields[*count] = (struct operations_field){offset, id};
+  ++*count;return 0;
+ }
+ if (btf_type_is_array(type)) {
+  const struct btf_array *array = btf_array(type);
+  u32 element = array->type, stride;
+  const struct btf_type *element_type = btf_type_skip_modifiers(btf, element, &element);
+  if (!element_type || !btf_resolve_size(btf, element_type, &stride)) return -EINVAL;
+  if ((u64)array->nelems * stride > size - offset) return -EINVAL;
+  for (i = 0; i < array->nelems; ++i) {
+   error = operations_fields(btf, element, offset + (u64)i * stride, size, fields, count);
+   if (error) return error;
+  }
+ } else if (btf_type_is_struct(type)) {
+  for (i = 0; i < btf_type_vlen(type); ++i) {
+   if (btf_member_bitfield_size(type, i) || btf_member_bit_offset(type, i) % 8) continue;
+   error = operations_fields(btf, btf_members(type)[i].type,
+    offset + btf_member_bit_offset(type, i) / 8, size, fields, count);
+   if (error) return error;
+  }
+ }
+ return 0;
+}
 
 /* Require the actual BTF VAR and its complete storage. No raw addresses or
  * user-supplied data pointers enter a generated kernel operations table. */
@@ -105,6 +146,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  struct btf *btf = bpf_get_btf_vmlinux();
  struct module *module = NULL;
  unsigned long address;
+ u32 size;
  int error = -EINVAL;
  if (attr->map_flags & BPF_F_VTYPE_BTF_OBJ_FD) {
   btf = btf_get_by_fd(attr->value_type_btf_obj_fd);
@@ -116,60 +158,61 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
   btf_get(btf);
  }
  variable = btf_type_by_id(btf, attr->map_extra);
- record = btf_type_by_id(btf, attr->btf_vmlinux_value_type_id);
- if (!variable || !btf_type_is_var(variable) || !record || !btf_type_is_struct(record) ||
-     record->size != attr->value_size ||
+ record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
+ if (!variable || !btf_type_is_var(variable) || !record ||
+     !btf_resolve_size(btf, record, &size) || size != attr->value_size ||
      btf_type_skip_modifiers(btf, variable->type, NULL) != record) goto fail;
- address = operations_storage(module, btf_name_by_offset(btf, variable->name_off), record->size);
+ address = operations_storage(module, btf_name_by_offset(btf, variable->name_off), size);
  if (!address) {error = -ENOENT;goto fail;}
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);
  if (!ops) {error = -ENOMEM;goto fail;}
- ops->table = kmemdup((void *)address, record->size, GFP_KERNEL);
- ops->user = kzalloc(record->size, GFP_KERNEL);
- ops->programs = kvcalloc(btf_type_vlen(record), sizeof(*ops->programs), GFP_KERNEL);
- if (!ops->table || !ops->user || !ops->programs) {
-  kfree(ops->table);kfree(ops->user);kvfree(ops->programs);kfree(ops);error = -ENOMEM;goto fail;
+ ops->table = kmemdup((void *)address, size, GFP_KERNEL);
+ ops->user = kzalloc(size, GFP_KERNEL);
+ error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size,
+  NULL, &ops->field_count);
+ if (error) goto free_ops;
+ ops->fields = kvcalloc(ops->field_count, sizeof(*ops->fields), GFP_KERNEL);
+ ops->programs = kvcalloc(ops->field_count, sizeof(*ops->programs), GFP_KERNEL);
+ if (!ops->table || !ops->user || !ops->programs || !ops->fields) {error = -ENOMEM;goto free_ops;}
+ {
+  u32 filled = 0;
+  error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size, ops->fields, &filled);
+  if (error) goto free_ops;
  }
  bpf_map_init_from_attr(&ops->map, attr);
  ops->map.btf_vmlinux_value_type_id = attr->btf_vmlinux_value_type_id;
  ops->types = btf;ops->module = module;ops->original = (void *)address;
  mutex_init(&ops->lock);
  return &ops->map;
+free_ops:
+ kfree(ops->table);kfree(ops->user);kvfree(ops->programs);kvfree(ops->fields);kfree(ops);
 fail:
  module_put(module);btf_put(btf);return ERR_PTR(error);
 }
 long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flags)
 {
  struct ebpfos_operations *ops = container_of(map, struct ebpfos_operations, map);
- const struct btf_type *record = btf_type_by_id(ops->types, map->btf_vmlinux_value_type_id);
- const struct btf_member *members = btf_members(record);
  struct bpf_prog **programs;
  unsigned long *addresses;
  void *checked;
  u32 i, count = 0;
+ bool incompatible = false;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
  if (*(u32 *)key || (flags != BPF_ANY && flags != BPF_NOEXIST)) return -EINVAL;
- programs = kvcalloc(btf_type_vlen(record), sizeof(*programs), GFP_KERNEL);
- addresses = kvcalloc(btf_type_vlen(record), sizeof(*addresses), GFP_KERNEL);
+ programs = kvcalloc(ops->field_count, sizeof(*programs), GFP_KERNEL);
+ addresses = kvcalloc(ops->field_count, sizeof(*addresses), GFP_KERNEL);
  checked = kzalloc(map->value_size, GFP_KERNEL);
  if (!programs || !addresses || !checked) {error = -ENOMEM;goto free;}
- for (i = 0; i < btf_type_vlen(record); ++i) {
-  const struct btf_type *pointer = btf_type_skip_modifiers(ops->types, members[i].type, NULL);
-  const struct btf_type *prototype;
+ for (i = 0; i < ops->field_count; ++i) {
+  const struct btf_type *pointer = btf_type_by_id(ops->types, ops->fields[i].pointer_type);
   unsigned long original, bytes, offset;
   char symbol[KSYM_NAME_LEN];
   const char *name;
   u64 fd;
-  u32 at = btf_member_bit_offset(record, i) / 8;
+  u32 at = ops->fields[i].offset;
   int id;
-  if (!pointer || !btf_type_is_ptr(pointer)) continue;
-  prototype = btf_type_skip_modifiers(ops->types, pointer->type, NULL);
-  if (!prototype || !btf_type_is_func_proto(prototype)) continue;
-  if (btf_member_bitfield_size(record, i) || btf_member_bit_offset(record, i) % 8 ||
-      at % sizeof(u64) || at > map->value_size || sizeof(u64) > map->value_size - at) goto free;
   memcpy(&fd, value + at, sizeof(fd));
-  memcpy(checked + at, &fd, sizeof(fd));
   if (!fd) continue;
   if (fd > INT_MAX) goto free;
   memcpy(&original, ops->original + at, sizeof(original));
@@ -182,7 +225,9 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   {
    const struct btf_type *function = btf_type_by_id(ops->types, id);
    if (!cell_layout(ops->types, function->type, ops->types, pointer->type, 0, false)) {
-    error = -EPROTOTYPE;goto free;
+    /* Union alternatives share storage. Only the alternative matching the
+     * actual original function's prototype supplies this binding contract. */
+    incompatible = true;continue;
    }
   }
   programs[i] = bpf_prog_get(fd);
@@ -190,16 +235,17 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   error = bpf_entry_program_address(ops->types, id, programs[i], false, &addresses[i]);
   if (error) goto free;
   if (ebpfos_program_addresses(programs[i])) {error = -EOPNOTSUPP;goto free;}
+  memcpy(checked + at, &fd, sizeof(fd));
   ++count;
  }
  /* Non-method data (owner pointers, flags, locks, strings) stays native. */
- error = -EINVAL;
+ error = incompatible && !count ? -EPROTOTYPE : -EINVAL;
  if (!count || memcmp(checked, value, map->value_size)) goto free;
  mutex_lock(&ops->lock);
  if (ops->ready) error = -EBUSY;
  else {
-  for (i = 0; i < btf_type_vlen(record); ++i) {
-   u32 at = btf_member_bit_offset(record, i) / 8;
+  for (i = 0; i < ops->field_count; ++i) {
+   u32 at = ops->fields[i].offset;
    u64 id;
    if (!programs[i]) continue;
    ops->programs[i] = programs[i];programs[i] = NULL;
@@ -210,7 +256,7 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  }
  mutex_unlock(&ops->lock);
 free:
- if (programs) for (i = 0; i < btf_type_vlen(record); ++i) if (programs[i]) bpf_prog_put(programs[i]);
+ if (programs) for (i = 0; i < ops->field_count; ++i) if (programs[i]) bpf_prog_put(programs[i]);
  kvfree(programs);kvfree(addresses);kfree(checked);return error;
 }
 static void *operations_lookup(struct bpf_map *map, void *key)
@@ -229,10 +275,9 @@ static int operations_next(struct bpf_map *map, void *key, void *next)
 static bool operations_contains(void *opaque, unsigned long ip)
 {
  struct ebpfos_operations *ops = opaque;
- const struct btf_type *record = btf_type_by_id(ops->types, ops->map.btf_vmlinux_value_type_id);
  u32 i;
  if (ops->module && within_module_mem_type(ip, ops->module, MOD_TEXT)) return true;
- for (i = 0; i < btf_type_vlen(record); ++i) {
+ for (i = 0; i < ops->field_count; ++i) {
   struct bpf_prog *p = ops->programs[i];
   if (ebpfos_program_contains(p, ip) || (p && p->type == BPF_PROG_TYPE_NATIVE &&
       p->aux->mod && within_module_mem_type(ip, p->aux->mod, MOD_TEXT))) return true;
@@ -242,14 +287,13 @@ static bool operations_contains(void *opaque, unsigned long ip)
 static void operations_release(struct work_struct *work)
 {
  struct ebpfos_operations *ops = container_of(to_delayed_work(work), struct ebpfos_operations, release);
- const struct btf_type *record = btf_type_by_id(ops->types, ops->map.btf_vmlinux_value_type_id);
  u32 i;
  if (ops->ready && ebpfos_code_quiescent(operations_contains, ops)) {
   schedule_delayed_work(&ops->release, HZ / 10);return;
  }
- for (i = 0; i < btf_type_vlen(record); ++i) if (ops->programs[i]) bpf_prog_put(ops->programs[i]);
+ for (i = 0; i < ops->field_count; ++i) if (ops->programs[i]) bpf_prog_put(ops->programs[i]);
  module_put(ops->module);btf_put(ops->types);
- kvfree(ops->programs);kfree(ops->table);kfree(ops->user);kfree(ops);
+ kvfree(ops->programs);kvfree(ops->fields);kfree(ops->table);kfree(ops->user);kfree(ops);
 }
 static void operations_free(struct bpf_map *map)
 {
@@ -259,8 +303,8 @@ static void operations_free(struct bpf_map *map)
 static u64 operations_memory(const struct bpf_map *map)
 {
  const struct ebpfos_operations *ops = container_of(map, struct ebpfos_operations, map);
- const struct btf_type *record = btf_type_by_id(ops->types, map->btf_vmlinux_value_type_id);
- return sizeof(*ops) + map->value_size * 2 + btf_type_vlen(record) * sizeof(struct bpf_prog *);
+ return sizeof(*ops) + map->value_size * 2 +
+  ops->field_count * (sizeof(struct bpf_prog *) + sizeof(struct operations_field));
 }
 const struct bpf_map_ops bpf_operations_map_ops = {
  .map_alloc_check = operations_alloc_check, .map_alloc = operations_alloc,
@@ -316,10 +360,9 @@ int bpf_operations_visit_programs(const struct bpf_operations_set *set,
  u32 i,j;int error;
  for(i=0;set&&i<set->count;++i) {
   struct ebpfos_operations *ops=container_of(set->maps[i],struct ebpfos_operations,map);
-  const struct btf_type *record=btf_type_by_id(ops->types,ops->map.btf_vmlinux_value_type_id);
-  /* Programs use native BTF field indices; holes are not bound methods.
-   * Ready operation objects are immutable and held by the prepared set. */
-  for(j=0;j<btf_type_vlen(record);++j)if(ops->programs[j]) {
+  /* Only BTF-derived callback leaves contain programs. Ready operation
+   * objects are immutable and held by the prepared set. */
+  for(j=0;j<ops->field_count;++j)if(ops->programs[j]) {
    error=visit(ops->programs[j],data);if(error)return error;
   }
  }
