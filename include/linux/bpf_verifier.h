@@ -250,56 +250,53 @@ typedef struct {
 #define SPIS_ZERO	((spis_t){})
 #define SPIS_ALL	((spis_t){{ [0 ... STACK_MASK_WORDS - 1] = U64_MAX }})
 
-static inline bool spis_is_zero(spis_t s)
+static inline bool spis_is_zero(const spis_t *s)
 {
 	unsigned int i;
 
 	for (i = 0; i < STACK_MASK_WORDS; i++)
-		if (s.v[i])
+		if (s->v[i])
 			return false;
 	return true;
 }
 
-static inline bool spis_equal(spis_t a, spis_t b)
+static inline bool spis_equal(const spis_t *a, const spis_t *b)
 {
 	unsigned int i;
 
 	for (i = 0; i < STACK_MASK_WORDS; i++)
-		if (a.v[i] != b.v[i])
+		if (a->v[i] != b->v[i])
 			return false;
 	return true;
 }
 
-static inline spis_t spis_or(spis_t a, spis_t b)
+static inline void spis_or(spis_t *a, const spis_t *b)
 {
 	unsigned int i;
 
 	for (i = 0; i < STACK_MASK_WORDS; i++)
-		a.v[i] |= b.v[i];
-	return a;
+		a->v[i] |= b->v[i];
 }
 
-static inline spis_t spis_and(spis_t a, spis_t b)
+static inline void spis_and(spis_t *a, const spis_t *b)
 {
 	unsigned int i;
 
 	for (i = 0; i < STACK_MASK_WORDS; i++)
-		a.v[i] &= b.v[i];
-	return a;
+		a->v[i] &= b->v[i];
 }
 
-static inline spis_t spis_not(spis_t s)
+static inline void spis_not(spis_t *s)
 {
 	unsigned int i;
 
 	for (i = 0; i < STACK_MASK_WORDS; i++)
-		s.v[i] = ~s.v[i];
-	return s;
+		s->v[i] = ~s->v[i];
 }
 
-static inline bool spis_test_bit(spis_t s, u32 slot)
+static inline bool spis_test_bit(const spis_t *s, u32 slot)
 {
-	return s.v[slot / 64] & BIT_ULL(slot % 64);
+	return s->v[slot / 64] & BIT_ULL(slot % 64);
 }
 
 static inline void spis_or_range(spis_t *mask, u32 lo, u32 hi)

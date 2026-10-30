@@ -10,6 +10,9 @@
 
 #define verbose(env, fmt, args...) bpf_verifier_log_write(env, fmt, ##args)
 
+/* Immutable source for conservative full-frame reads; never a C stack copy. */
+static const spis_t all_stack_slots = SPIS_ALL;
+
 struct per_frame_masks {
 	spis_t may_read;	/* stack slots that may be read by this instruction */
 	spis_t must_write;	/* stack slots written by this instruction */
@@ -176,7 +179,8 @@ static struct per_frame_masks *alloc_frame_masks(struct func_instance *instance,
 }
 
 /* Accumulate may_read masks for @frame at @insn_idx */
-static int mark_stack_read(struct func_instance *instance, u32 frame, u32 insn_idx, spis_t mask)
+static int mark_stack_read(struct func_instance *instance, u32 frame, u32 insn_idx,
+			   const spis_t *mask)
 {
 	struct per_frame_masks *masks;
 
@@ -184,19 +188,7 @@ static int mark_stack_read(struct func_instance *instance, u32 frame, u32 insn_i
 	if (IS_ERR(masks))
 		return PTR_ERR(masks);
 	for (u32 word = 0; word < STACK_MASK_WORDS; word++)
-		masks->may_read.v[word] |= mask.v[word];
-	return 0;
-}
-
-static int mark_stack_write(struct func_instance *instance, u32 frame, u32 insn_idx, spis_t mask)
-{
-	struct per_frame_masks *masks;
-
-	masks = alloc_frame_masks(instance, frame, insn_idx);
-	if (IS_ERR(masks))
-		return PTR_ERR(masks);
-	for (u32 word = 0; word < STACK_MASK_WORDS; word++)
-		masks->must_write.v[word] |= mask.v[word];
+		masks->may_read.v[word] |= mask->v[word];
 	return 0;
 }
 
@@ -336,7 +328,7 @@ static bool is_live_before(struct func_instance *instance, u32 insn_idx, u32 fra
 	struct per_frame_masks *masks;
 
 	masks = get_frame_masks(instance, frameno, insn_idx);
-	return masks && spis_test_bit(masks->live_before, half_spi);
+	return masks && spis_test_bit(&masks->live_before, half_spi);
 }
 
 int bpf_live_stack_query_init(struct bpf_verifier_env *env, struct bpf_verifier_state *st)
@@ -434,7 +426,8 @@ static int spi_off(int spi)
  * When only one half is set, print as "-4h","-8h",...
  * Runs of 3+ consecutive fully-set SPIs are collapsed: "fp0-8..-24"
  */
-static char *fmt_spis_mask(struct bpf_verifier_env *env, int frame, bool first, spis_t spis)
+static char *fmt_spis_mask(struct bpf_verifier_env *env, int frame, bool first,
+			   const spis_t *spis)
 {
 	int buf_sz = sizeof(env->tmp_str_buf);
 	char *buf = env->tmp_str_buf;
@@ -507,9 +500,9 @@ static void print_instance(struct bpf_verifier_env *env, struct func_instance *i
 		verbose(env, " use: ");
 		for (frame = instance->depth; frame >= 0; --frame) {
 			masks = get_frame_masks(instance, frame, insn_idx);
-			if (!masks || spis_is_zero(masks->may_read))
+			if (!masks || spis_is_zero(&masks->may_read))
 				continue;
-			verbose(env, "%s", fmt_spis_mask(env, frame, !has_use, masks->may_read));
+			verbose(env, "%s", fmt_spis_mask(env, frame, !has_use, &masks->may_read));
 			has_use = true;
 		}
 		if (!has_use)
@@ -518,9 +511,9 @@ static void print_instance(struct bpf_verifier_env *env, struct func_instance *i
 		verbose(env, " def: ");
 		for (frame = instance->depth; frame >= 0; --frame) {
 			masks = get_frame_masks(instance, frame, insn_idx);
-			if (!masks || spis_is_zero(masks->must_write))
+			if (!masks || spis_is_zero(&masks->must_write))
 				continue;
-			verbose(env, "%s", fmt_spis_mask(env, frame, !has_def, masks->must_write));
+			verbose(env, "%s", fmt_spis_mask(env, frame, !has_def, &masks->must_write));
 			has_def = true;
 		}
 		if (!has_def)
@@ -1201,41 +1194,35 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 static int record_stack_access_off(struct func_instance *instance, s64 fp_off,
 				   s64 access_bytes, u32 frame, u32 insn_idx)
 {
+	struct per_frame_masks *masks;
 	s32 slot_hi, slot_lo;
-	spis_t mask;
+	bool read = access_bytes > 0 || access_bytes == S64_MIN;
 
-	if (fp_off >= 0)
-		/*
-		 * out of bounds stack access doesn't contribute
-		 * into actual stack liveness. It will be rejected
-		 * by the main verifier pass later.
-		 */
+	if (fp_off >= 0 || access_bytes == 0)
+		/* Bounds remain checked by the main verifier pass. */
 		return 0;
 	if (access_bytes == S64_MIN) {
-		/* helper/kfunc read unknown amount of bytes from fp_off until fp+0 */
 		slot_hi = (-fp_off - 1) / STACK_SLOT_SZ;
-		mask = SPIS_ZERO;
-		spis_or_range(&mask, 0, slot_hi);
-		return mark_stack_read(instance, frame, insn_idx, mask);
-	}
-	if (access_bytes > 0) {
-		/* Mark any touched slot as use */
+		slot_lo = 0;
+	} else if (read) {
+		/* Mark any touched slot as use. */
 		slot_hi = (-fp_off - 1) / STACK_SLOT_SZ;
 		slot_lo = max_t(s32, (-fp_off - access_bytes) / STACK_SLOT_SZ, 0);
-		mask = SPIS_ZERO;
-		spis_or_range(&mask, slot_lo, slot_hi);
-		return mark_stack_read(instance, frame, insn_idx, mask);
-	} else if (access_bytes < 0) {
-		/* Mark only fully covered slots as def */
+	} else {
+		/* Only completely overwritten slots are guaranteed definitions. */
 		access_bytes = -access_bytes;
 		slot_hi = (-fp_off) / STACK_SLOT_SZ - 1;
 		slot_lo = max_t(s32, (-fp_off - access_bytes + STACK_SLOT_SZ - 1) / STACK_SLOT_SZ, 0);
-		if (slot_lo <= slot_hi) {
-			mask = SPIS_ZERO;
-			spis_or_range(&mask, slot_lo, slot_hi);
-			return mark_stack_write(instance, frame, insn_idx, mask);
-		}
+		if (slot_lo > slot_hi)
+			return 0;
 	}
+	masks = alloc_frame_masks(instance, frame, insn_idx);
+	if (IS_ERR(masks))
+		return PTR_ERR(masks);
+	/* Accumulate directly into heap storage. A temporary whole mask grows
+	 * with the configured BPF stack and can overflow the native task stack.
+	 */
+	spis_or_range(read ? &masks->may_read : &masks->must_write, slot_lo, slot_hi);
 	return 0;
 }
 
@@ -1253,7 +1240,7 @@ static int record_stack_access(struct func_instance *instance,
 		return 0;
 	if (arg->off_cnt == 0) {
 		if (access_bytes > 0 || access_bytes == S64_MIN)
-			return mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+			return mark_stack_read(instance, frame, insn_idx, &all_stack_slots);
 		return 0;
 	}
 	if (access_bytes != S64_MIN && access_bytes < 0 && arg->off_cnt != 1)
@@ -1281,7 +1268,7 @@ static int record_imprecise(struct func_instance *instance, u32 mask, u32 insn_i
 		if (!(mask & 1))
 			continue;
 		if (f <= depth) {
-			err = mark_stack_read(instance, f, insn_idx, SPIS_ALL);
+			err = mark_stack_read(instance, f, insn_idx, &all_stack_slots);
 			if (err)
 				return err;
 		}
@@ -1387,7 +1374,7 @@ static int record_call_access(struct bpf_verifier_env *env,
 
 			if (!type || btf_native_scalar_storage(env->prog->aux->btf, sub->native_abi.args[arg].type_id, 0)) continue;
 			for (int frame = 0; frame <= depth; frame++) {
-				err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+				err = mark_stack_read(instance, frame, insn_idx, &all_stack_slots);
 				if (err) return err;
 			}
 			break;
@@ -1413,7 +1400,7 @@ static int record_call_access(struct bpf_verifier_env *env,
 		 * frame. The call's ordinary type/extent checks still decide access.
 		 */
 		for (int frame = 0; frame <= depth; frame++) {
-			err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+			err = mark_stack_read(instance, frame, insn_idx, &all_stack_slots);
 			if (err) return err;
 		}
 	}
@@ -1427,7 +1414,7 @@ static int record_call_access(struct bpf_verifier_env *env,
 				const struct btf_type *type = btf_type_skip_modifiers(meta.btf, btf_params(meta.func_proto)[arg].type, NULL);
 				if (!btf_type_is_struct(type)) continue;
 				for (int frame = 0; frame <= depth; frame++) {
-					err = mark_stack_read(instance, frame, insn_idx, SPIS_ALL);
+					err = mark_stack_read(instance, frame, insn_idx, &all_stack_slots);
 					if (err) return err;
 				}
 				break;
@@ -1451,7 +1438,7 @@ static int record_call_access(struct bpf_verifier_env *env,
 			bytes = bpf_kfunc_stack_access_bytes(env, insn, arg, insn_idx);
 		} else {
 			for (int f = 0; f <= depth; f++) {
-				err = mark_stack_read(instance, f, insn_idx, SPIS_ALL);
+				err = mark_stack_read(instance, f, insn_idx, &all_stack_slots);
 				if (err)
 					return err;
 			}
@@ -1794,7 +1781,8 @@ static void merge_instances(struct func_instance *dst, struct func_instance *src
 			/* This pass didn't touch frame f — must_write intersects with empty. */
 			if (dst->frames[f])
 				for (i = 0; i < dst->insn_cnt; i++)
-					dst->frames[f][i].must_write = SPIS_ZERO;
+					memset(&dst->frames[f][i].must_write, 0,
+					       sizeof(dst->frames[f][i].must_write));
 			continue;
 		}
 		if (!dst->frames[f]) {
@@ -1802,7 +1790,8 @@ static void merge_instances(struct func_instance *dst, struct func_instance *src
 			dst->frames[f] = src->frames[f];
 			src->frames[f] = NULL;
 			for (i = 0; i < dst->insn_cnt; i++)
-				dst->frames[f][i].must_write = SPIS_ZERO;
+				memset(&dst->frames[f][i].must_write, 0,
+					       sizeof(dst->frames[f][i].must_write));
 			continue;
 		}
 		for (i = 0; i < dst->insn_cnt; i++) {
@@ -1960,7 +1949,7 @@ scan:
 				if (info[frame->subprog].at_in[j][caller_reg].frame == ARG_NONE)
 					continue;
 				for (int f = 0; f <= depth; f++) {
-					err = mark_stack_read(instance, f, idx, SPIS_ALL);
+					err = mark_stack_read(instance, f, idx, &all_stack_slots);
 					if (err)
 						goto out_free;
 				}
@@ -2019,7 +2008,7 @@ scan:
 		entry = get_frame_masks(frame->callee, f, frame->callee->subprog_start);
 		if (!entry)
 			continue;
-		err = mark_stack_read(instance, f, frame->callsite, entry->live_before);
+		err = mark_stack_read(instance, f, frame->callsite, &entry->live_before);
 		if (err)
 			goto out_free;
 	}
@@ -2055,7 +2044,7 @@ int bpf_compute_subprog_arg_access(struct bpf_verifier_env *env)
 	/*
 	 * Analyze every subprog in reverse topological order (callers
 	 * before callees) so that each subprog is analyzed before its
-	 * callees, allowing the recursive walk inside analyze_subprog()
+	 * callees, allowing the heap-backed walk inside analyze_subprog()
 	 * to naturally reach callees that receive FP-derived args.
 	 *
 	 * Subprogs and callbacks that don't receive FP-derived arguments
