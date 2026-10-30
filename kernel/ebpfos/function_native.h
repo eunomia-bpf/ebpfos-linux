@@ -7,7 +7,7 @@
 #include <linux/rcupdate.h>
 /* Module BTF may label C globals STATIC. Require a unique global ELF FUNC
  * in ordinary module text; init/exit text cannot outlive preparation. */
-static unsigned long ebpfos_module_function(struct module *module, const char *name)
+static inline unsigned long ebpfos_module_function(struct module *module, const char *name)
 {
  unsigned long target = 0;
 #if defined(CONFIG_MODULES) && defined(CONFIG_KALLSYMS)
@@ -29,30 +29,30 @@ static unsigned long ebpfos_module_function(struct module *module, const char *n
 #endif
  return target;
 }
-struct ebpfos_core_symbol { unsigned long address; bool ambiguous; };
+struct ebpfos_core_symbol { unsigned long address; bool found, ambiguous, text; };
 static int ebpfos_core_match(void *opaque, unsigned long address)
 {
  struct ebpfos_core_symbol *symbol = opaque;
- if (!core_kernel_text(address)) return 0;
- if (symbol->address && symbol->address != address) {symbol->ambiguous = true;return 1;}
- symbol->address = address;return 0;
+ if (symbol->text && !core_kernel_text(address)) return 0;
+ if (symbol->found && symbol->address != address) {symbol->ambiguous = true;return 1;}
+ symbol->address = address;symbol->found = true;return 0;
 }
-static unsigned long ebpfos_core_function(const char *name)
+static inline unsigned long ebpfos_core_symbol_address(const char *name, bool text)
 {
- struct ebpfos_core_symbol symbol = {};
+ struct ebpfos_core_symbol symbol = {.text=text};
  kallsyms_on_each_match_symbol(ebpfos_core_match, name, &symbol);
  return symbol.ambiguous ? 0 : symbol.address;
 }
 /* Resolve one resident definition in its owning image, never a same-named
  * symbol in another module. The caller holds the module through publication. */
-static unsigned long ebpfos_native_function(struct btf *btf, u32 id, struct module *module)
+static inline unsigned long ebpfos_native_function(struct btf *btf, u32 id, struct module *module)
 {
  const struct btf_type *function = btf_type_by_id(btf, id);
  unsigned long address;
  if (!function || !btf_type_is_func(function) ||
      (module && id < btf_nr_types(bpf_get_btf_vmlinux()))) return 0;
  address = module ? ebpfos_module_function(module, btf_name_by_offset(btf, function->name_off)) :
-  ebpfos_core_function(btf_name_by_offset(btf, function->name_off));
+  ebpfos_core_symbol_address(btf_name_by_offset(btf, function->name_off), true);
  return address && (module || core_kernel_text(address)) ? address : 0;
 }
 #endif

@@ -19,6 +19,7 @@
 #include <linux/mutex.h>
 #include <asm/sections.h>
 #include "function_binding.h"
+#include "function_native.h"
 #include "function_contract.h"
 #include "function_lifetime.h"
 
@@ -84,29 +85,41 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
  return 0;
 }
 
-/* Require the actual BTF VAR and its complete storage. No raw addresses or
- * user-supplied data pointers enter a generated kernel operations table. */
-static unsigned long operations_storage(struct module *module, const char *name, u32 size)
+/* Native BTF section offsets preserve distinct variables with the same
+ * spelling. An unambiguous symbol in that section supplies its relocated base. */
+static bool operations_storage_range(struct module *module, unsigned long address, u32 size)
 {
- unsigned long address = 0, bytes, offset;
  if (!module) {
-  address = kallsyms_lookup_name(name);
-  if (!address ||
-      !((address >= (unsigned long)__start_rodata && address < (unsigned long)__end_rodata &&
+  unsigned long bytes, offset;
+  return address &&
+      ((address >= (unsigned long)__start_rodata && address < (unsigned long)__end_rodata &&
          size <= (unsigned long)__end_rodata - address) ||
         (address >= (unsigned long)_sdata && address < (unsigned long)_edata &&
          size <= (unsigned long)_edata - address) ||
         (address >= (unsigned long)__bss_start && address < (unsigned long)__bss_stop &&
-         size <= (unsigned long)__bss_stop - address)) ||
-      !kallsyms_lookup_size_offset(address, &bytes, &offset) || offset || bytes < size)
-   return 0;
-  return address;
+         size <= (unsigned long)__bss_stop - address)) &&
+      kallsyms_lookup_size_offset(address, &bytes, &offset) && !offset && bytes >= size;
  }
 #ifdef CONFIG_MODULES
- rcu_read_lock();
  {
-  struct mod_kallsyms *symbols = rcu_dereference(module->kallsyms);
+  enum mod_mem_type type;
+  for (type = MOD_DATA; type <= MOD_RO_AFTER_INIT; ++type)
+   if (type != MOD_TEXT && within_module_mem_type(address, module, type) &&
+       size <= module->mem[type].size - (address - (unsigned long)module->mem[type].base)) return true;
+ }
+#endif
+ return false;
+}
+static unsigned long operations_storage_symbol(struct module *module, const char *name, u32 size)
+{
+ unsigned long address = 0;
+ if (!module) address = ebpfos_core_symbol_address(name, false);
+#ifdef CONFIG_MODULES
+ else {
+  struct mod_kallsyms *symbols;
   unsigned int i;
+  rcu_read_lock();
+  symbols = rcu_dereference(module->kallsyms);
   for (i = 0; symbols && i < symbols->num_symtab; ++i) {
    const Elf_Sym *symbol = &symbols->symtab[i];
    if (strcmp(name, symbols->strtab + symbol->st_name)) continue;
@@ -115,20 +128,39 @@ static unsigned long operations_storage(struct module *module, const char *name,
    }
    address = kallsyms_symbol_value(symbol);
   }
- }
- rcu_read_unlock();
- {
-  enum mod_mem_type type;
-  bool valid = false;
-  for (type = MOD_DATA; type <= MOD_RO_AFTER_INIT; ++type) {
-   if (type == MOD_TEXT) continue;
-   if (within_module_mem_type(address, module, type) &&
-       size <= module->mem[type].size - (address - (unsigned long)module->mem[type].base)) valid = true;
-  }
-  if (!valid) address = 0;
+  rcu_read_unlock();
  }
 #endif
- return address;
+ return operations_storage_range(module, address, size) ? address : 0;
+}
+static unsigned long operations_storage(struct btf *btf, u32 variable, struct module *module, u32 size)
+{
+ const struct btf_type *target = btf_type_by_id(btf, variable);
+ u32 i, j;
+ for (i = 1; i < btf_nr_types(btf); ++i) {
+  const struct btf_type *section = btf_type_by_id(btf, i);
+  const struct btf_var_secinfo *entries;
+  if (BTF_INFO_KIND(section->info) != BTF_KIND_DATASEC) continue;
+  entries = btf_type_var_secinfo(section);
+  for (j = 0; j < btf_type_vlen(section); ++j) if (entries[j].type == variable) {
+   u32 k, offset = entries[j].offset;
+   if (entries[j].size < size || offset > section->size || size > section->size - offset) return 0;
+   for (k = 0; k < btf_type_vlen(section); ++k) {
+    const struct btf_type *anchor = btf_type_by_id(btf, entries[k].type);
+    unsigned long address, base;
+    if (!anchor || !btf_type_is_var(anchor) || !entries[k].size ||
+        entries[k].offset > section->size || entries[k].size > section->size - entries[k].offset) continue;
+    address = operations_storage_symbol(module, btf_name_by_offset(btf, anchor->name_off), entries[k].size);
+    if (!address || address < entries[k].offset) continue;
+    base = address - entries[k].offset;address = base + offset;
+    if (address >= base && operations_storage_range(module, address, size)) return address;
+   }
+   return 0;
+  }
+ }
+ /* Older provider BTF can omit section records. Name lookup is safe only
+  * for one actual Native allocation, never a first same-named match. */
+ return operations_storage_symbol(module, btf_name_by_offset(btf, target->name_off), size);
 }
 static int operations_alloc_check(union bpf_attr *attr)
 {
@@ -166,7 +198,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  if (!variable || !btf_type_is_var(variable) || !record ||
      !btf_resolve_size(btf, record, &size) || size != attr->value_size ||
      btf_type_skip_modifiers(btf, variable->type, NULL) != record) goto fail;
- address = operations_storage(module, btf_name_by_offset(btf, variable->name_off), size);
+ address = operations_storage(btf, attr->map_extra, module, size);
  if (!address) {error = -ENOENT;goto fail;}
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);
  if (!ops) {error = -ENOMEM;goto fail;}
