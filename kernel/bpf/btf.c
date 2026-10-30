@@ -10017,6 +10017,17 @@ again:
 			goto again;
 	}
 
+	/* Trusted kernel code has already opted out of the hook's proof.
+	 * Its JIT still needs the registered instruction descriptor. Keep the
+	 * normal hook/filter lookup above for every verified program.
+	 */
+	if (prog->aux->trusted_kernel)
+		for (hook = 0; hook < BTF_KFUNC_HOOK_MAX; hook++) {
+			kop = btf_kfunc_kop_set_contains(btf, hook, kfunc_btf_id);
+			if (kop)
+				return kop;
+		}
+
 	return NULL;
 }
 
