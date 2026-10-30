@@ -110,7 +110,10 @@ static int native_parse_sequence(struct bpf_prog *prog, struct native_sequence *
 		return -EINVAL;
 	seq->record = record;
 	seq->insn = insn;
-	if (record->flags & 8) {
+	/* The compiler's native frame contract supplies the stack alignment;
+	 * its prologue has already established it before these bytes run.
+	 */
+	if ((record->flags & 8) && !prog->aux->native_frame) {
 		pr_err("bpf_jit: native sequence align-stack needs a native frame contract\n");
 		return -EOPNOTSUPP;
 	}
