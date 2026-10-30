@@ -24,12 +24,14 @@
 #include <linux/bpf_operations.h>
 #include <linux/bpf_entry.h>
 #include <linux/bpf_kernel_rule.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/ebpfos_task_rule.h>
 #include "function_binding.h"
 #include "function_contract.h"
 #include <linux/workqueue.h>
 #include "function_lifetime.h"
 #include "function_native.h"
+#include "entry_slot_instruction.h"
 
 struct task_view {
  u64 generation;
@@ -37,6 +39,9 @@ struct task_view {
  bool revocable;
  DECLARE_BITMAP(selected, NR_syscalls);
  struct bpf_operations_set *operations;
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ struct ebpfos_ptview *mapping;
+#endif
  struct delayed_work release_work;
  sys_call_ptr_t table[NR_syscalls];
  struct ebpfos_function_binding bindings[];
@@ -68,6 +73,9 @@ static void task_view_free(struct task_view *view)
  for (i = 0; i < view->count; ++i)
   ebpfos_function_binding_put(&view->bindings[i]);
  bpf_operations_set_put(view->operations);
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ ebpfos_ptview_put(view->mapping);
+#endif
  kvfree(view);
 }
 static bool task_view_code_contains(void *opaque, unsigned long ip)
@@ -139,6 +147,48 @@ struct bpf_entry_target {
  unsigned long native_address;
  unsigned long address;
 };
+#ifdef CONFIG_EBPFOS_AUTOBIND
+/* A mapping changes atomically at the existing task boundary. Unlike a live
+ * text poke it does not execute a breakpoint or displaced instructions, so
+ * the original entry needs no reservation. Other bytes on the page are
+ * unchanged. The loaded programs and source modules are retained by
+ * the same task-view graph which owns the mapping. */
+static struct ebpfos_ptview *task_view_mapping(const struct bpf_entry_target *sources, u32 count)
+{
+ struct ebpfos_ptview_change *changes;
+ struct ebpfos_ptview *mapping = NULL;
+ u8 (*instructions)[5];
+ unsigned int i, used = 0;
+ int error = 0;
+ changes = kvmalloc_array(count, 2 * sizeof(*changes), GFP_KERNEL);
+ instructions = kvmalloc_array(count, sizeof(*instructions), GFP_KERNEL);
+ if (!changes || !instructions) {error = -ENOMEM;goto done;}
+ for (i = 0; i < count; ++i) {
+  static const u8 endbr[] = {0xf3, 0x0f, 0x1e, 0xfa};
+  unsigned long address = sources[i].native_address, size, offset;
+  u8 prefix[sizeof(endbr)];
+  size_t part;
+  if (!sources[i].source_module && !core_kernel_text(address)) {error = -ENOENT;goto done;}
+  if (!kallsyms_lookup_size_offset(address, &size, &offset) || offset) {error = -ENOENT;goto done;}
+  error = ebpfos_ptview_read_native(prefix, (void *)address, sizeof(prefix));
+  if (error) goto done;
+  offset = !memcmp(prefix, endbr, sizeof(prefix)) ? sizeof(prefix) : 0;
+  /* Short/private members are republished through their compiler-discovered
+   * holders. Never overwrite a neighbouring definition's instructions. */
+  if (size < offset + sizeof(*instructions)) {error = -ERANGE;goto done;}
+  address += offset;
+  if (!entry_native_jump(address, sources[i].address, instructions[i])) {error = -ERANGE;goto done;}
+  part = min_t(size_t, sizeof(*instructions), PAGE_SIZE - offset_in_page(address));
+  changes[used++] = (struct ebpfos_ptview_change){address, instructions[i], part};
+  if (part != sizeof(*instructions))
+   changes[used++] = (struct ebpfos_ptview_change){address + part, instructions[i] + part, sizeof(*instructions) - part};
+ }
+ mapping = ebpfos_ptview_prepare(changes, used, NULL);
+done:
+ kvfree(changes);kvfree(instructions);
+ return error ? ERR_PTR(error) : mapping;
+}
+#endif
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 static struct ebpfos_task_view_request *task_view_prepare(
  const struct bpf_entry_target *sources, u32 count, u64 generation,
@@ -180,7 +230,17 @@ static struct ebpfos_task_view_request *task_view_prepare(
   }
   if (slot >= 0) {view->table[slot] = (sys_call_ptr_t)sources[i].address;++roots;}
  }
- if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ if (count) {
+  view->mapping = task_view_mapping(sources, count);
+  if (IS_ERR(view->mapping)) {error = PTR_ERR(view->mapping);view->mapping = NULL;goto fail;}
+ }
+#endif
+ if (!roots && !operations
+#ifdef CONFIG_EBPFOS_AUTOBIND
+     && !view->mapping
+#endif
+    ) {error = -EOPNOTSUPP;goto fail;}
  request = kzalloc(sizeof(*request), GFP_KERNEL);
  if (!request) {error = -ENOMEM;goto fail;}
  file = anon_inode_getfile("bpf-rule-syscall-table", &task_view_ops, view, O_RDONLY);
@@ -193,6 +253,13 @@ fail:
 }
 void ebpfos_rule_task_put(struct ebpfos_task_view_request *request)
 { task_view_request_free(request); }
+#ifdef CONFIG_EBPFOS_AUTOBIND
+struct ebpfos_ptview *ebpfos_rule_task_mapping(struct ebpfos_task_view_request *request)
+{
+ struct task_view *view = request ? request->next->private_data : NULL;
+ return view ? ebpfos_ptview_get(view->mapping) : NULL;
+}
+#endif
 struct ebpfos_task_view_request *ebpfos_rule_task_get(struct ebpfos_task_view_request *request)
 { if (request) refcount_inc(&request->references);return request; }
 struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kernel_rule_version *version)

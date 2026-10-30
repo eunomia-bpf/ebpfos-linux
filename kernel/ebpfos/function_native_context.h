@@ -61,6 +61,13 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     continue;
    }
    if (insn->code != (BPF_JMP | BPF_CALL)) continue;
+   /* Native sequences have already passed privileged source loading and the
+    * upstream JIT's operand/relocation checks. Their execution context has
+    * the same stated source/compiler trust as native indirect calls. */
+   if (insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
+    if (pure || !aux->trusted_kernel) goto out;
+    continue;
+   }
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||
        insn->src_reg == BPF_PSEUDO_KOP_CALL) {
     if (pure) goto out;

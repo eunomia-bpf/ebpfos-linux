@@ -98,7 +98,9 @@ void ebpfos_rule_context(struct bpf_kernel_rule_ctx *ctx, u64 object, u64 bindin
   ctx->task = task_pid_nr(current);
   rcu_read_lock();
   ctx->process_subtree = task_tgid_nr(rcu_dereference(current->real_parent));
+#ifdef CONFIG_CGROUPS
   ctx->cgroup = cgroup_id(task_dfl_cgroup(current));
+#endif
   rcu_read_unlock();
   if (current->nsproxy && current->nsproxy->net_ns) ctx->netns = current->nsproxy->net_ns->ns.inum;
  }
@@ -186,15 +188,21 @@ static int collect_change(unsigned long address, const void *bytes, size_t size,
  }
  return 0;
 }
-static struct ebpfos_ptview *rule_prepare_view(struct bpf_operations_set *operations)
+static struct ebpfos_ptview *rule_prepare_view(struct bpf_operations_set *operations,
+ struct ebpfos_task_view_request *tasks)
 {
  struct binding_changes changes = {};
- struct ebpfos_ptview *view = NULL;
+ struct ebpfos_ptview *view = NULL, *inputs[2], *result;
  int error = bpf_operations_visit_changes(operations, collect_change, &changes);
  if (!error && changes.count)
   view = ebpfos_ptview_prepare(changes.changes, changes.count, NULL);
  kfree(changes.changes);
- return error ? ERR_PTR(error) : view;
+ if (error || IS_ERR(view)) return error ? ERR_PTR(error) : view;
+ inputs[0] = ebpfos_rule_task_mapping(tasks);inputs[1] = view;
+ if (!inputs[0]) return view;
+ result = ebpfos_ptview_compose(inputs, view ? 2 : 1);
+ ebpfos_ptview_put(inputs[0]);ebpfos_ptview_put(view);
+ return result;
 }
 
 static int rule_views(struct ebpfos_rule_decision *decision, struct ebpfos_ptview ***result)
@@ -461,7 +469,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
    if (IS_ENABLED(CONFIG_EBPFOS_AUTOBIND)) generation->has_tasks = true;
   }
 #ifdef CONFIG_EBPFOS_AUTOBIND
-  generation->views[i] = rule_prepare_view(generation->versions[i]);
+  generation->views[i] = rule_prepare_view(generation->versions[i], generation->tasks[i]);
   if (IS_ERR(generation->views[i])) {
    error = PTR_ERR(generation->views[i]);generation->views[i] = NULL;goto fail;
   }

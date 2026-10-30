@@ -1053,6 +1053,13 @@ extern void ftrace_module_init(struct module *mod);
 extern void ftrace_module_enable(struct module *mod);
 extern void ftrace_release_mod(struct module *mod);
 #else /* CONFIG_DYNAMIC_FTRACE */
+struct ftrace_text_reservation;
+static inline struct ftrace_text_reservation *ftrace_text_reserve(
+	const unsigned long *ips, unsigned int count)
+{
+	return count ? ERR_PTR(-EOPNOTSUPP) : NULL;
+}
+static inline void ftrace_text_release(struct ftrace_text_reservation *owner) { }
 static inline int skip_trace(unsigned long ip) { return 0; }
 static inline void ftrace_module_init(struct module *mod) { }
 static inline void ftrace_module_enable(struct module *mod) { }

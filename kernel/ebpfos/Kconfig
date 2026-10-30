@@ -26,7 +26,7 @@ config EBPFOS_KOPERATION
 
 config EBPFOS_ENTRY_LINK
  bool "Typed multi-target BPF entry links"
- depends on EBPFOS && X86_64 && DYNAMIC_FTRACE
+ depends on EBPFOS && X86_64
  depends on !CFI
  select INSTRUCTION_DECODER
  default y
@@ -41,7 +41,7 @@ config EBPFOS_PTVIEW
  default n
  help
    Opt-in four-level, non-PCID prototype. Private copies cover changed
-   binding-data pages.
+   entry instructions and binding-data pages.
    Rule resolution retains the selected mappings at the task boundary.
 
 config EBPFOS_AUTOBIND
