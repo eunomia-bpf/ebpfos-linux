@@ -59,8 +59,8 @@
 # EXPORT_SYMBOL (namespace)
 / __kstrtabns_/d
 
-# MODULE_DEVICE_TABLE (symbol name)
-/ __mod_device_table__/d
+# Device tables can also be storage referenced by compiled kernel bodies.
+# Keep their names available for native symbol relocation.
 
 # ---------------------------------------------------------------------------
 # Ignored suffixes
