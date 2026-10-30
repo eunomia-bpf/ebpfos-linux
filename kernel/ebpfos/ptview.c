@@ -7,6 +7,9 @@
 #include <linux/kallsyms.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/preempt.h>
+#include <linux/irqflags.h>
+#include <linux/uaccess.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
@@ -228,6 +231,23 @@ EXPORT_SYMBOL_GPL(ebpfos_ptview_global_enter);
 void notrace ebpfos_ptview_global_exit(unsigned long token)
 { if (token) unuse_temporary_mm((struct mm_struct *)token); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_global_exit);
+
+/* Link-time source data must not come from an already selected replacement.
+ * Allocate buffers before entering this short, non-scheduling copy. Linux's
+ * temporary-mm path preserves loaded-mm, TLB and breakpoint bookkeeping.
+ */
+int ebpfos_ptview_read_native(void *to, const void *from, size_t size)
+{
+ unsigned long flags, token;
+ int error;
+ preempt_disable();local_irq_save(flags);
+ token = ebpfos_ptview_global_enter();
+ error = copy_from_kernel_nofault(to, from, size);
+ ebpfos_ptview_global_exit(token);
+ local_irq_restore(flags);preempt_enable();
+ return error;
+}
+EXPORT_SYMBOL_GPL(ebpfos_ptview_read_native);
 
 /* NMI may interrupt switch_mm's own bookkeeping. It changes only hardware
  * CR3 and restores it before returning; it neither schedules nor flushes

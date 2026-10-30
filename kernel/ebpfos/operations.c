@@ -6,6 +6,7 @@
 #include <linux/bpf_operations.h>
 #include <linux/bpf_kernel_rule.h>
 #include <linux/ebpfos_task_rule.h>
+#include <linux/ebpfos_ptview.h>
 #include <linux/ebpfos_operations.h>
 #include <linux/ebpfos_file_view.h>
 #include <linux/filter.h>
@@ -166,7 +167,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  if (!address) {error = -ENOENT;goto fail;}
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);
  if (!ops) {error = -ENOMEM;goto fail;}
- ops->table = kmemdup((void *)address, size, GFP_KERNEL);
+ ops->table = kmalloc(size, GFP_KERNEL);
  ops->user = kzalloc(size, GFP_KERNEL);
  error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size,
   NULL, &ops->field_count);
@@ -174,6 +175,8 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  ops->fields = kvcalloc(ops->field_count, sizeof(*ops->fields), GFP_KERNEL);
  ops->programs = kvcalloc(ops->field_count, sizeof(*ops->programs), GFP_KERNEL);
  if (!ops->table || !ops->user || !ops->programs || !ops->fields) {error = -ENOMEM;goto free_ops;}
+ error = ebpfos_ptview_read_native(ops->table, (void *)address, size);
+ if (error) goto free_ops;
  {
   u32 filled = 0;
   error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size, ops->fields, &filled);
@@ -215,7 +218,8 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   memcpy(&fd, value + at, sizeof(fd));
   if (!fd) continue;
   if (fd > INT_MAX) goto free;
-  memcpy(&original, ops->original + at, sizeof(original));
+  error = ebpfos_ptview_read_native(&original, ops->original + at, sizeof(original));
+  if (error) goto free;
   if (original && !(ops->module ? within_module_mem_type(original, ops->module, MOD_TEXT) :
         core_kernel_text(original))) {error = -ENOENT;goto free;}
   name = original ? kallsyms_lookup(original, &bytes, &offset, NULL, symbol) : NULL;

@@ -12,6 +12,8 @@ struct ebpfos_ptview_change {
  size_t size;
 };
 #ifdef CONFIG_EBPFOS_PTVIEW
+/* Cold preparation reads the original kernel, independent of the caller's view. */
+int ebpfos_ptview_read_native(void *, const void *, size_t);
 /* Cold preparation and owner-serialized binding. No entry dispatch helper.
  * This prototype requires four-level paging, no PCID, and one mm user.
  * The caller retains referenced code and serializes changes against its work.
@@ -32,6 +34,9 @@ void ebpfos_ptview_global_exit(unsigned long);
 void ebpfos_ptview_irq_enter(void);
 void ebpfos_ptview_irq_exit(void);
 #else
+#include <linux/uaccess.h>
+static inline int ebpfos_ptview_read_native(void *to, const void *from, size_t size)
+{ return copy_from_kernel_nofault(to, from, size); }
 static inline bool ebpfos_ptview_mm(const struct mm_struct *mm) { return false; }
 static inline void ebpfos_ptview_mm_free(struct mm_struct *mm) {}
 static inline void ebpfos_ptview_nmi_enter(struct ebpfos_ptview_nmi_state *state) {}
