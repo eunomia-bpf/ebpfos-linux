@@ -19,8 +19,6 @@
 # define __ctx_btf_try_acquires_shared(ret, var) __attribute__((btf_decl_tag("context_try_acquire_shared:" #ret ":" #var)))
 # define __ctx_btf_requires(...) __attribute__((btf_decl_tag("context_require:" #__VA_ARGS__)))
 # define __ctx_btf_requires_shared(...) __attribute__((btf_decl_tag("context_require_shared:" #__VA_ARGS__)))
-# define __ctx_btf_asserts(...) __attribute__((btf_decl_tag("context_assert:" #__VA_ARGS__)))
-# define __ctx_btf_asserts_shared(...) __attribute__((btf_decl_tag("context_assert_shared:" #__VA_ARGS__)))
 # define __ctx_btf_excludes(...) __attribute__((btf_decl_tag("context_exclude:" #__VA_ARGS__)))
 # endif
 #endif
@@ -33,8 +31,6 @@
 # define __ctx_btf_try_acquires_shared(ret, var)
 # define __ctx_btf_requires(...)
 # define __ctx_btf_requires_shared(...)
-# define __ctx_btf_asserts(...)
-# define __ctx_btf_asserts_shared(...)
 # define __ctx_btf_excludes(...)
 #endif
 
@@ -65,10 +61,11 @@
  * The "assert_capability" attribute is a bit confusingly named. It does not
  * generate a check. Instead, it tells the analysis to *assume* the capability
  * is held. This is used for augmenting runtime assertions, that can then help
- * with patterns beyond the compiler's static reasoning abilities.
+ * with patterns beyond the compiler's static reasoning abilities. BTF retains
+ * this as a caller precondition, not an acquisition or a state transfer.
  */
-# define __assumes_ctx_lock(...)		__attribute__((assert_capability(__VA_ARGS__))) __ctx_btf_asserts(__VA_ARGS__)
-# define __assumes_shared_ctx_lock(...)	__attribute__((assert_shared_capability(__VA_ARGS__))) __ctx_btf_asserts_shared(__VA_ARGS__)
+# define __assumes_ctx_lock(...)		__attribute__((assert_capability(__VA_ARGS__))) __ctx_btf_requires(__VA_ARGS__)
+# define __assumes_shared_ctx_lock(...)	__attribute__((assert_shared_capability(__VA_ARGS__))) __ctx_btf_requires_shared(__VA_ARGS__)
 
 /**
  * __guarded_by - struct member and globals attribute, declares variable
@@ -187,8 +184,8 @@
 # define __try_acquires_shared_ctx_lock(ret, var) __ctx_btf_try_acquires_shared(ret, var)
 # define __releases_ctx_lock(...) __ctx_btf_releases(__VA_ARGS__)
 # define __releases_shared_ctx_lock(...) __ctx_btf_releases_shared(__VA_ARGS__)
-# define __assumes_ctx_lock(...) __ctx_btf_asserts(__VA_ARGS__)
-# define __assumes_shared_ctx_lock(...) __ctx_btf_asserts_shared(__VA_ARGS__)
+# define __assumes_ctx_lock(...) __ctx_btf_requires(__VA_ARGS__)
+# define __assumes_shared_ctx_lock(...) __ctx_btf_requires_shared(__VA_ARGS__)
 # define __returns_ctx_lock(var)
 # define __guarded_by(...)
 # define __pt_guarded_by(...)
