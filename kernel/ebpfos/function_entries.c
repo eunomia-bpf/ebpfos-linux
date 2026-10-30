@@ -75,7 +75,7 @@ static LIST_HEAD(entry_sharing_sets);
  * The retained graph owns the resolved address for the journal's lifetime.
  */
 static bool entry_export(struct btf *native, u32 prototype,
- const struct btf_type *function, const char *name,
+ const struct btf_type *function, const char *name, bool source_name,
  struct bpf_prog *program, unsigned long *address)
 {
  struct bpf_prog_aux *aux = program->aux;
@@ -86,7 +86,7 @@ static bool entry_export(struct btf *native, u32 prototype,
   u32 id = aux->func_info[i].type_id;
   const struct btf_type *candidate = btf_type_by_id(aux->btf, id);
   if (!candidate || !btf_type_is_func(candidate) ||
-      !cell_export_name(name, aux->btf, id)) continue;
+      !cell_export_name(name, aux->btf, id, !source_name)) continue;
   if (found || !cell_callable_proto(native, prototype, function, name, program, id, address)) return false;
   found = true;
  }
@@ -99,7 +99,7 @@ static int entry_callers_stopped(struct entry_set *set);
 
 /* One cold native-call contract for direct entries and generated tables. */
 static int entry_program_address(struct btf *btf, u32 prototype,
- const struct btf_type *function, const char *name, struct bpf_prog *program,
+ const struct btf_type *function, const char *name, bool source_name, struct bpf_prog *program,
  bool task, unsigned long *target)
 {
  if (program->type == BPF_PROG_TYPE_NATIVE) {
@@ -115,7 +115,7 @@ static int entry_program_address(struct btf *btf, u32 prototype,
         program->expected_attach_type == BPF_TRACE_REPLACE) ||
        (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
         !program->expected_attach_type))) return -EOPNOTSUPP;
- if (!entry_export(btf, prototype, function, name, program, target)) {
+ if (!entry_export(btf, prototype, function, name, source_name, program, target)) {
   pr_warn("BPF entry '%s': compiled callable is incompatible\n",
           name);
   return -EPROTOTYPE;
@@ -129,25 +129,36 @@ int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
  const struct btf_type *function = btf_type_by_id(btf, id);
  if (!function || !btf_type_is_func(function)) return -EINVAL;
  return entry_program_address(btf, function->type, function,
-  btf_name_by_offset(btf, function->name_off), program, task, target);
+  btf_name_by_offset(btf, function->name_off), false, program, task, target);
 }
 
 /* A field retains its native call contract even when its private callback has
- * no FUNC record. The actual native address supplies the export identity.
+ * no FUNC record. A non-NULL native address supplies the export identity;
+ * an empty field uses the selected component root's exact source callable.
  * Missing function annotations grant no additional verified preconditions.
  */
 int bpf_method_program_address(struct btf *btf, u32 prototype, const char *name,
  struct bpf_prog *program, unsigned long *target)
 {
  const struct btf_type *type = btf_type_skip_modifiers(btf, prototype, &prototype), *function = NULL;
- int id = btf_find_by_name_kind(btf, name, BTF_KIND_FUNC);
+ int id = name ? btf_find_by_name_kind(btf, name, BTF_KIND_FUNC) : 0;
+ bool source_name = !name;
  if (!type || !btf_type_is_func_proto(type)) return -EINVAL;
  if (id > 0) {
   function = btf_type_by_id(btf, id);
   if (!cell_layout(btf, function->type, btf, prototype, 0, false)) return -EPROTOTYPE;
   prototype = function->type;
  }
- return entry_program_address(btf, prototype, function, name, program, false, target);
+ if (!name && program->type != BPF_PROG_TYPE_NATIVE) {
+  struct bpf_prog_aux *aux = program->aux;
+  const struct btf_type *root;
+  if (!aux->btf || !aux->func_info || !aux->func_info_cnt) return -EPROTOTYPE;
+  root = btf_type_by_id(aux->btf, aux->func_info[0].type_id);
+  if (!root || !btf_type_is_func(root)) return -EPROTOTYPE;
+  name = btf_find_decl_tag_value(aux->btf, root, -1, "component.entry/");
+  if (IS_ERR(name) || !*name) return -EPROTOTYPE;
+ }
+ return entry_program_address(btf, prototype, function, name, source_name, program, false, target);
 }
 
 /* Every appended generation owns an immutable prepared set. Revision IDs

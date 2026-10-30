@@ -44,12 +44,13 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
 }
 /* A compiler-selected source entry can have a different final native name.
  * This selects an export only; its ABI/context/proof checks remain below. */
-static bool cell_export_name(const char *name, struct btf *compiled, u32 id)
+static bool cell_export_name(const char *name, struct btf *compiled, u32 id, bool native_aliases)
 {
  const struct btf_type *function = btf_type_by_id(compiled, id), *tag;
  u32 at;
  if (!function || !btf_type_is_func(function)) return false;
  if (!strcmp(name, btf_name_by_offset(compiled, function->name_off))) return true;
+ if (!native_aliases) return false;
  for (at = 1; (tag = btf_type_by_id(compiled, at)); ++at) {
   const char *text;
   if (BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG || tag->type != id ||
@@ -154,7 +155,7 @@ static bool cell_callable_proto(struct btf *native, u32 native_type,
      (!trusted && (!aux->func_info_aux[index].verified || aux->func_info_aux[index].unreliable))) return false;
  function = btf_type_by_id(aux->btf, id);
  if (!function || !btf_type_is_func(function) || btf_func_linkage(function) != BTF_FUNC_GLOBAL ||
-     !aux->func[index]->jited || !cell_export_name(native_name, aux->btf, id)) return false;
+     !aux->func[index]->jited || !cell_export_name(native_name, aux->btf, id, true)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
  /* Trusted unmodified source retains Linux's context transfers under its
