@@ -44,6 +44,8 @@ struct entry_set {
  struct module *source_module;
  struct btf *source_btf;
  struct bpf_prog **programs;
+ struct bpf_prog **code_programs;
+ u32 code_count;
  struct bpf_operations_set *tables;
  struct ftrace_text_reservation *ftrace;
  struct entry_native_slot *slots;
@@ -290,6 +292,9 @@ static void entry_free(struct entry_set *set)
  if (set->programs)
   for (i = 0; i < set->count * 2; ++i)
    if (set->programs[i]) bpf_prog_put(set->programs[i]);
+ for (i = 0; set->code_programs && i < set->code_count; ++i)
+  if (set->code_programs[i]) bpf_prog_put(set->code_programs[i]);
+ kvfree(set->code_programs);
  bpf_operations_set_put(set->tables);
  kvfree(set->programs);
  kvfree(set->slots);kvfree(set->locations);kvfree(set->addresses);kfree(set);
@@ -300,12 +305,13 @@ static bool entry_code_contains(void *opaque, unsigned long ip)
 {
  struct entry_lifetime *lifetime = opaque;
  struct entry_set *set = lifetime->generation;
- unsigned int i;
- for (i = 0; i < set->count; ++i) {
-  struct bpf_prog *program = set->programs[i * 2 + lifetime->slot];
+ u64 i, count = (u64)set->count + (lifetime->slot ? 0 : set->code_count);
+ for (i = 0; i < count; ++i) {
+  struct bpf_prog *program = i < set->count ? set->programs[i * 2 + lifetime->slot] :
+   set->code_programs[i - set->count];
   struct module *module = program && program->type == BPF_PROG_TYPE_NATIVE ? program->aux->mod : NULL;
   if ((module && within_module_mem_type(ip, module, MOD_TEXT)) ||
-      ebpfos_program_contains(set->programs[i * 2 + lifetime->slot], ip)) return true;
+      ebpfos_program_contains(program, ip)) return true;
  }
  return false;
 }
@@ -319,13 +325,13 @@ static int entry_callers_stopped(struct entry_set *set)
 static int entry_quiescent(struct entry_set *set, unsigned int slot)
 {
  struct entry_lifetime lifetime = { .generation = set, .slot = slot };
- unsigned int i;
+ u64 i, count = (u64)set->count + (slot ? 0 : set->code_count);
  bool executable = false;
- for (i = 0; i < set->count; ++i) {
-  if (ebpfos_program_addresses(set->programs[i * 2 + slot])) return -EOPNOTSUPP;
-  if (set->programs[i * 2 + slot] &&
-      (set->programs[i * 2 + slot]->type != BPF_PROG_TYPE_NATIVE ||
-       set->programs[i * 2 + slot]->aux->mod)) executable = true;
+ for (i = 0; i < count; ++i) {
+  struct bpf_prog *program = i < set->count ? set->programs[i * 2 + slot] :
+   set->code_programs[i - set->count];
+  if (ebpfos_program_addresses(program)) return -EOPNOTSUPP;
+  if (program && (program->type != BPF_PROG_TYPE_NATIVE || program->aux->mod)) executable = true;
  }
  if (!executable) {synchronize_rcu_tasks();return 0;}
  return ebpfos_code_quiescent(entry_code_contains, &lifetime);
@@ -417,6 +423,43 @@ static void entry_release_work(struct work_struct *work)
  if (!error) entry_free(set);
  else schedule_delayed_work(&set->release_work, HZ / 10);
 }
+static struct entry_set *entry_alloc(void)
+{
+ struct entry_set *set = kzalloc(sizeof(*set), GFP_KERNEL);
+ if (!set) return NULL;
+ INIT_LIST_HEAD(&set->sharing);
+ INIT_LIST_HEAD(&set->generations);
+ INIT_LIST_HEAD(&set->generation_node);
+ INIT_DELAYED_WORK(&set->release_work, entry_release_work);
+ INIT_DELAYED_WORK(&set->retire_work, entry_retire_work);
+ set->next_generation = 2;
+ return set;
+}
+/* Data bindings can publish callbacks which later store private code pointers.
+ * Their code uses this journal's existing stack/escape retirement, separately
+ * from the operations map and its original Native storage lease. */
+struct entry_set *bpf_entry_code_get(struct bpf_prog *const *programs, u32 count)
+{
+ struct entry_set *set = entry_alloc();
+ u32 i;
+ if (!set) return ERR_PTR(-ENOMEM);
+ set->code_programs = kvcalloc(count, sizeof(*set->code_programs), GFP_KERNEL);
+ if (!set->code_programs) {entry_free(set);return ERR_PTR(-ENOMEM);}
+ set->code_count = count;set->retired[1] = true;
+ for (i = 0; i < count; ++i) if (programs[i]) {
+  bpf_prog_inc(programs[i]);set->code_programs[i] = programs[i];
+ }
+ return set;
+}
+void bpf_entry_code_put(struct entry_set *set)
+{
+ if (!set) return;
+ mutex_lock(&entry_lock);
+ set->closing = true;set->published = true;
+ list_add_tail(&set->retained, &entry_retained);
+ mutex_unlock(&entry_lock);
+ schedule_delayed_work(&set->release_work, 0);
+}
 static struct entry_set *entry_prepare(const struct entry_member *entries,
  unsigned int count, struct btf *source, bool task, struct entry_set *owner)
 {
@@ -427,14 +470,8 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
  if (IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
- set = kzalloc(sizeof(*set), GFP_KERNEL);
+ set = entry_alloc();
  if (!set) return ERR_PTR(-ENOMEM);
- INIT_LIST_HEAD(&set->sharing);
- INIT_LIST_HEAD(&set->generations);
- INIT_LIST_HEAD(&set->generation_node);
- INIT_DELAYED_WORK(&set->release_work, entry_release_work);
- INIT_DELAYED_WORK(&set->retire_work, entry_retire_work);
- set->next_generation = 2;
  set->count = count;
  if (source) {
   set->source_module = btf_try_get_module(source);

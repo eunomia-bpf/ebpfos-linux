@@ -30,6 +30,7 @@ struct ebpfos_operations {
  const void *original;
  void *table, *user;
  struct bpf_prog **programs;
+ struct entry_set *code;
  struct operations_field *fields;
  u32 field_count;
  struct mutex lock;
@@ -241,7 +242,6 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
    incompatible = true;continue;
   }
   if (error) goto free;
-  if (ebpfos_program_addresses(programs[i])) {error = -EOPNOTSUPP;goto free;}
   memcpy(checked + at, &fd, sizeof(fd));
   ++count;
  }
@@ -251,6 +251,9 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  mutex_lock(&ops->lock);
  if (ops->ready) error = -EBUSY;
  else {
+  struct entry_set *code = bpf_entry_code_get(programs, ops->field_count);
+  if (IS_ERR(code)) {error = PTR_ERR(code);goto unlock;}
+  ops->code = code;
   for (i = 0; i < ops->field_count; ++i) {
    u32 at = ops->fields[i].offset;
    u64 id;
@@ -261,6 +264,7 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   }
   ops->count = count;smp_store_release(&ops->ready, true);error = 0;
  }
+unlock:
  mutex_unlock(&ops->lock);
 free:
  if (programs) for (i = 0; i < ops->field_count; ++i) if (programs[i]) bpf_prog_put(programs[i]);
@@ -299,6 +303,7 @@ static void operations_release(struct work_struct *work)
   schedule_delayed_work(&ops->release, HZ / 10);return;
  }
  for (i = 0; i < ops->field_count; ++i) if (ops->programs[i]) bpf_prog_put(ops->programs[i]);
+ bpf_entry_code_put(ops->code);
  module_put(ops->module);btf_put(ops->types);
  kvfree(ops->programs);kvfree(ops->fields);kfree(ops->table);kfree(ops->user);kfree(ops);
 }
