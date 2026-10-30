@@ -10870,6 +10870,18 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		const struct bpf_native_arg *location = sub->native_frame ? &sub->native_abi.args[i + sub->native_abi.result_buffer] : NULL;
 		struct native_arg_scope temporary __free(native_arg) = {};
 
+		if (arg->arg_type == ARG_DONTCARE &&
+		    (env->prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(i))) {
+			/* Observers can copy raw argument bits through tracing helpers.
+			 * Omit the memory capability, not definite initialization.
+			 */
+			ret = check_reg_arg(env, location ? bpf_arg_regno(location->reg) : regno,
+					    SRC_OP);
+			if (ret)
+				return ret;
+			continue;
+		}
+
 		if (location) {
 			if (!btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0) &&
 			    btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
@@ -21740,6 +21752,10 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {
 			const struct bpf_native_arg *location = sub->native_frame ? &sub->native_abi.args[ai + sub->native_abi.result_buffer] : NULL;
 
+			if (sub->args[ai].arg_type == ARG_DONTCARE &&
+			    (env->prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(ai)))
+				continue;
+
 			if (location && btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL)) &&
 			    !btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0)) {
 				ret = init_native_record_arg(env, sub, state->frame[0], location);
@@ -22706,6 +22722,17 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 		 */
 		env->ops = bpf_verifier_ops[tgt_prog->type];
 		prog->expected_attach_type = tgt_prog->expected_attach_type;
+		/* BTF compatibility alone cannot reintroduce an unread input's
+		 * memory contract. Initialize those replacement registers as
+		 * NOT_INIT, exactly like the target's independent proof.
+		 */
+		for (u32 i = 0; i < tgt_prog->aux->func_info_cnt; i++) {
+			if (tgt_prog->aux->func_info[i].type_id == btf_id) {
+				prog->aux->func_info_aux[0].unused_arg_mask =
+					tgt_prog->aux->func_info_aux[i].unused_arg_mask;
+				break;
+			}
+		}
 	}
 
 	/* store info about the attachment target that will be used later */

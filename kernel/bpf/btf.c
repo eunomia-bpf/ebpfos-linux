@@ -7081,6 +7081,20 @@ bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 			return false;
 		}
 	} else {
+		/* An unread formal has no caller-side input contract. Tracing may
+		 * not recover that missing capability from its unchanged BTF type.
+		 */
+		if (tgt_prog && tgt_prog->aux->func_info_aux) {
+			for (i = 0; i < tgt_prog->aux->func_info_cnt; i++) {
+				if (tgt_prog->aux->func_info[i].type_id != prog->aux->attach_btf_id)
+					continue;
+				if (tgt_prog->aux->func_info_aux[i].unused_arg_mask & BIT_ULL(arg)) {
+					bpf_log(log, "func '%s' arg%d has no input contract\n", tname, arg);
+					return false;
+				}
+				break;
+			}
+		}
 		if (!t)
 			/* Default prog with MAX_BPF_FUNC_REG_ARGS args */
 			return true;
@@ -8247,6 +8261,47 @@ int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
  return 0;
 }
 
+/* Ordinary unread pointer inputs need no memory contract. Liveness is an
+ * over-approximation of every register read, including calls. Keep explicit
+ * argument roles and managed/context inputs on their existing paths. A skipped
+ * input remains NOT_INIT during independent verification, so no capability is
+ * manufactured even if an input is later found to be used.
+ */
+static bool btf_global_pointer_arg_unused(struct bpf_prog *prog, int subprog,
+					 struct bpf_subprog_info *sub,
+					 struct bpf_verifier_env *env,
+					 const struct btf_type *pointer, u32 index)
+{
+	const struct bpf_native_arg *location;
+	const struct btf_type *type;
+	struct btf *btf = prog->aux->btf;
+	u32 regno;
+
+	/* Publication reuses only the fact established by the loaded verifier. */
+	if (!env)
+		return prog->aux->func_info_aux[subprog].verified &&
+		       (prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(index));
+	if (!subprog || env->prog->type == BPF_PROG_TYPE_EXT ||
+	    sub->is_cb || env->exception_callback_subprog == subprog)
+		return false;
+	/* Type tags encode spaces/lifetimes independently of arg: annotations. */
+	for (type = btf_type_by_id(btf, pointer->type);
+	     btf_type_is_modifier(type) || btf_type_is_type_tag(type);) {
+		if (btf_type_is_type_tag(type))
+			return false;
+		type = btf_type_by_id(btf, type->type);
+	}
+	regno = bpf_arg_regno(index);
+	if (sub->native_frame) {
+		location = &sub->native_abi.args[index + sub->native_abi.result_buffer];
+		/* Stack inputs retain the ordinary stack-slot argument analysis. */
+		if (location->reg < 0 || location->size != 8 || location->words != 1)
+			return false;
+		regno = bpf_arg_regno(location->reg);
+	}
+	return !(env->insn_aux_data[sub->start].live_regs_before & BIT(regno));
+}
+
 static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				     struct bpf_subprog_info *sub,
 				     struct bpf_verifier_log *log,
@@ -8519,6 +8574,27 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		}
 		if (!btf_type_is_ptr(t))
 			goto skip_pointer;
+
+		/* A replacement inherits the target's absent input capability.
+		 * Reads remain invalid during independent entry verification even
+		 * when the replacement spells a stronger argument annotation.
+		 */
+		if (env && !subprog && prog->type == BPF_PROG_TYPE_EXT &&
+		    (prog->aux->func_info_aux[0].unused_arg_mask & BIT_ULL(i))) {
+			sub->args[i].arg_type = ARG_DONTCARE;
+			continue;
+		}
+
+		if (is_global && !tags && size_arg < 0 && !read_only &&
+		    !user_address && !has_btf_offset && !has_scalar_max &&
+		    !btf_is_prog_ctx_type(log, btf, t, prog_type, i) &&
+		    !btf_is_dynptr_ptr(btf, t) &&
+		    btf_global_pointer_arg_unused(prog, subprog, sub, env, t, i)) {
+			sub->args[i].arg_type = ARG_DONTCARE;
+			if (env)
+				prog->aux->func_info_aux[subprog].unused_arg_mask |= BIT_ULL(i);
+			continue;
+		}
 
 		if (is_global) {
 			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
@@ -8847,7 +8923,9 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 	if (error)
 		goto out;
 	for (i = 0; i < info->arg_cnt; i++)
-		if ((info->args[i].arg_type & PTR_MAYBE_NULL) ||
+		if ((info->args[i].arg_type == ARG_DONTCARE &&
+		     (prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(i))) ||
+		    (info->args[i].arg_type & PTR_MAYBE_NULL) ||
 		    ((info->args[i].arg_type & PTR_UNTRUSTED) && !info->args[i].nonnull))
 			*mask |= BIT_ULL(i);
 out:
