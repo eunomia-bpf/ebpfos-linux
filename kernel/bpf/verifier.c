@@ -3016,35 +3016,6 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 	return 0;
 }
 
-/* Trusted native calls already carry their complete register/stack operands.
- * Distill the fixed prefix of a variadic prototype for the x86 backend only;
- * this supplies no argument proof and is never used by normal verification.
- */
-static int distill_trusted_variadic(struct bpf_verifier_env *env,
-				    const struct bpf_kfunc_meta *meta,
-				    struct btf_func_model *model)
-{
-	struct {
-		struct btf_type proto;
-		struct btf_param args[MAX_BPF_FUNC_ARGS];
-	} fixed;
-	u32 nargs = btf_type_vlen(meta->proto);
-	int err;
-
-	if (!IS_ENABLED(CONFIG_X86_64) || !env->prog->aux->trusted_kernel ||
-	    !nargs || nargs > MAX_BPF_FUNC_ARGS || btf_params(meta->proto)[nargs - 1].type)
-		return -EOPNOTSUPP;
-	fixed.proto = *meta->proto;
-	fixed.proto.info = (fixed.proto.info & ~BTF_INFO_VLEN(~0U)) | (nargs - 1);
-	memcpy(fixed.args, btf_params(meta->proto), (nargs - 1) * sizeof(fixed.args[0]));
-	err = btf_distill_native_func_proto(&env->log, meta->btf, &fixed.proto,
-					    meta->name, model);
-	/* A variadic target cannot supply a fixed tracing trampoline model. */
-	if (!err)
-		model->native_stack = true;
-	return err;
-}
-
 static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 			      u16 offset, bool kop_call)
 {
@@ -3201,11 +3172,7 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 					     kfunc.name, &func_model);
 		if (err && bpf_jit_supports_native_args() && env->prog->jit_requested)
 			err = btf_distill_native_func_proto(&env->log, kfunc.btf, kfunc.proto,
-						    kfunc.name, &func_model);
-		if (err && IS_ENABLED(CONFIG_X86_64) && prog_aux->trusted_kernel &&
-		    env->prog->jit_requested && btf_type_vlen(kfunc.proto) &&
-		    !btf_params(kfunc.proto)[btf_type_vlen(kfunc.proto) - 1].type)
-			err = distill_trusted_variadic(env, &kfunc, &func_model);
+						    kfunc.name, &func_model, prog_aux->trusted_kernel);
 		if (err)
 			goto err_remove_desc;
 		desc->addr = addr;
@@ -14117,7 +14084,7 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 	struct bpf_native_abi abi;
 	const struct btf_type *type = btf_type_skip_modifiers(btf, proto->type, NULL);
 	u32 physical = 0;
-	int err = bpf_native_abi_plan(btf, proto, &abi);
+	int err = bpf_native_abi_plan(btf, proto, &abi, env->prog->aux->trusted_kernel);
 
 	if (err)
 		return err;
@@ -14213,7 +14180,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	args = (const struct btf_param *)(meta->func_proto + 1);
 	nargs = btf_type_vlen(meta->func_proto);
 	if (native) {
-		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi);
+		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
+				  env->prog->aux->trusted_kernel);
 		if (ret) return ret;
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
@@ -15933,7 +15901,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_native_abi abi = {};
 	bool native = env->subprog_info[cur_func(env)->subprogno].native_frame;
 	if (native) {
-		err = bpf_native_abi_plan(desc_btf, meta.func_proto, &abi);
+		err = bpf_native_abi_plan(desc_btf, meta.func_proto, &abi,
+				  env->prog->aux->trusted_kernel);
 		if (err) return err;
 	}
 	for (i = 0; i < nargs; i++) {
@@ -21316,30 +21285,6 @@ static int check_insn_fields(struct bpf_verifier_env *env, struct bpf_insn *insn
 	}
 }
 
-/* A variadic function's fixed prefix determines its incoming named area.
- * The trailing void parameter is an ellipsis, not a physical argument.
- * Only trusted preparation may use this layout without proving the
- * additional argument accesses; ordinary verification keeps the full proto.
- */
-static int native_frame_abi_plan(struct bpf_verifier_env *env, struct btf *btf,
-				 const struct btf_type *proto, struct bpf_native_abi *abi)
-{
-	struct {
-		struct btf_type proto;
-		struct btf_param args[MAX_BPF_FUNC_ARGS];
-	} fixed;
-	u32 nargs = btf_type_vlen(proto);
-
-	if (!env->prog->aux->trusted_kernel || !nargs || btf_params(proto)[nargs - 1].type)
-		return bpf_native_abi_plan(btf, proto, abi);
-	if (nargs - 1 > ARRAY_SIZE(fixed.args))
-		return -E2BIG;
-	fixed.proto = *proto;
-	fixed.proto.info = (fixed.proto.info & ~BTF_INFO_VLEN(~0U)) | (nargs - 1);
-	memcpy(fixed.args, btf_params(proto), (nargs - 1) * sizeof(fixed.args[0]));
-	return bpf_native_abi_plan(btf, &fixed.proto, abi);
-}
-
 /*
  * Check that insns are sane and rewrite pseudo imm in ld_imm64 instructions:
  *
@@ -21376,7 +21321,7 @@ static int check_native_frames(struct bpf_verifier_env *env)
 			    local > MAX_BPF_STACK - round_up(outgoing, 8))
 				return -E2BIG;
 			proto = btf_type_by_id(btf, fn->type);
-			err = native_frame_abi_plan(env, btf, proto, &sub->native_abi);
+			err = bpf_native_abi_plan(btf, proto, &sub->native_abi, aux->trusted_kernel);
 			if (err)
 				return err;
 			if (sub->native_abi.result_buffer &&
@@ -22565,7 +22510,8 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			t = NULL;
 
 		if (prog->expected_attach_type == BPF_TRACE_REPLACE && prog->aux->ebpfos_component)
-			ret = btf_distill_native_func_proto(log, btf, t, tname, &tgt_info->fmodel);
+			ret = btf_distill_native_func_proto(log, btf, t, tname, &tgt_info->fmodel,
+						    prog->aux->trusted_kernel);
 		else
 			ret = btf_distill_func_proto(log, btf, t, tname, &tgt_info->fmodel);
 		if (ret < 0)

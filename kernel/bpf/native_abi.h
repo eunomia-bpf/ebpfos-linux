@@ -153,7 +153,7 @@ static u8 native_word_mask(struct btf *btf, u32 id)
  return (classes[0] == BPF_NC_INTEGER) | ((classes[1] == BPF_NC_INTEGER) << 1);
 }
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
- struct bpf_native_abi *abi)
+ struct bpf_native_abi *abi, bool allow_variadic_prefix)
 {
  const struct btf_param *params;
  u32 size = 0, next_reg = 0, nargs;
@@ -162,6 +162,12 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  memset(abi, 0, sizeof(*abi));
  if (!proto || !btf_type_is_func_proto(proto)) return -EINVAL;
  nargs = btf_type_vlen(proto);
+ /* Trusted x86 native entries carry their variadic operands directly.
+  * Only named arguments contribute to the incoming fixed frame.
+  */
+ if (allow_variadic_prefix && IS_ENABLED(CONFIG_X86_64) && nargs &&
+     !btf_params(proto)[nargs - 1].type)
+  nargs--;
  if (nargs > MAX_BPF_FUNC_ARGS) return -E2BIG;
  if (proto->type) {
   err = bpf_native_classify(btf, proto->type, &size, &words);

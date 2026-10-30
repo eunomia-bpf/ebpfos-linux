@@ -7947,11 +7947,11 @@ int btf_distill_func_proto(struct bpf_verifier_log *log,
 /* Native entries are called directly, without a tracing argument adapter. */
 int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 				 const struct btf_type *proto, const char *name,
-				 struct btf_func_model *model)
+				 struct btf_func_model *model, bool allow_variadic_prefix)
 {
 	struct bpf_native_abi abi;
 	const struct btf_type *type;
-	int size, err = bpf_native_abi_plan(btf, proto, &abi);
+	int size, err = bpf_native_abi_plan(btf, proto, &abi, allow_variadic_prefix);
 
 	if (err)
 		return err;
@@ -7963,6 +7963,12 @@ int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 	model->ret_flags = __get_type_fmodel_flags(type);
 	model->nr_args = btf_type_vlen(proto);
 	model->native_stack = abi.stack_size || abi.result_buffer;
+	if (allow_variadic_prefix && model->nr_args &&
+	    !btf_params(proto)[model->nr_args - 1].type) {
+		model->nr_args--;
+		/* A variadic entry cannot use a fixed tracing trampoline. */
+		model->native_stack = true;
+	}
 	for (u32 i = 0; i < model->nr_args; i++) {
 		size = __get_type_size(btf, btf_params(proto)[i].type, &type);
 		if (size <= 0)
@@ -8939,7 +8945,8 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 
 		info->native_frame = true;
 		error = bpf_native_abi_plan(prog->aux->btf,
-			btf_type_by_id(prog->aux->btf, fn->type), &info->native_abi);
+			btf_type_by_id(prog->aux->btf, fn->type), &info->native_abi,
+			prog->aux->trusted_kernel);
 		if (error)
 			goto out;
 	}

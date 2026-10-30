@@ -69,8 +69,8 @@ static bool cell_trusted_native_scalar_proto(struct btf *native, const struct bt
 {
  struct btf_func_model a, b;
  unsigned int i;
- if (btf_distill_native_func_proto(NULL, native, n, NULL, &a) ||
-     btf_distill_native_func_proto(NULL, compiled, c, NULL, &b) ||
+ if (btf_distill_native_func_proto(NULL, native, n, NULL, &a, false) ||
+     btf_distill_native_func_proto(NULL, compiled, c, NULL, &b, false) ||
      a.nr_args != b.nr_args || a.ret_size != b.ret_size || a.ret_flags != b.ret_flags ||
      a.native_stack != b.native_stack || (a.ret_flags & BTF_FMODEL_STRUCT_ARG) ||
      (!framed && (a.native_stack || a.nr_args > MAX_BPF_FUNC_REG_ARGS))) return false;
