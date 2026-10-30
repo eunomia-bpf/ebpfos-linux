@@ -1223,6 +1223,22 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 	}
 	if (type != R_X86_64_64 && type != R_X86_64_32)
 		return -EOPNOTSUPP;
+	if (type == R_X86_64_64 && aot->position_independent) {
+		/* lea symbol(%rip), dst preserves the source code model even
+		 * before the image's final virtual mappings have been installed.
+		 * Literal integers and native-assembly relocations keep their own
+		 * encoders; only symbolic BPF address materialization comes here.
+		 */
+		err = aot_record(aot, ip - aot->image + 3, R_X86_64_PC32,
+				 name, addend - 4);
+		if (err)
+			return err;
+		EMIT3(is_ereg(dst_reg) ? 0x4c : 0x48, 0x8d,
+		      add_2reg(0x05, BPF_REG_0, dst_reg));
+		EMIT(0, 4);
+		*pprog = prog;
+		return 0;
+	}
 	err = aot_record(aot, ip - aot->image + 2, type, name, addend);
 	if (err)
 		return err;
@@ -3373,6 +3389,15 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 	aot.patchable_jumps = request->flags & BPF_AOT_F_PATCHABLE_JUMPS;
 	source = root->aux->func_cnt ? root->aux->func[request->func_index] : root;
 	aot.source = source;
+	if (source->aux->btf && source->aux->func_info &&
+	    source->aux->func_idx < source->aux->func_info_cnt) {
+		const struct btf_type *function = btf_type_by_id(source->aux->btf,
+			source->aux->func_info[source->aux->func_idx].type_id);
+		const char *pic = function ? btf_find_decl_tag_value(source->aux->btf,
+			function, -1, "aot:pic") : ERR_PTR(-ENOENT);
+
+		aot.position_independent = !IS_ERR(pic) && !*pic;
+	}
 	name = aot_function_name(source);
 	if (!name || !*name)
 		return -ENOENT;

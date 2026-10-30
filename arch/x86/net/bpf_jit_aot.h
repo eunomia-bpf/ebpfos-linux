@@ -29,6 +29,7 @@ struct bpf_aot_context {
 	u32 native_size;
 	bool final;
 	bool patchable_jumps;
+	bool position_independent;
 	int error;
 };
 
