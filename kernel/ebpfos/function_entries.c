@@ -336,12 +336,42 @@ static void entry_retire_work(struct work_struct *work)
 out:
  mutex_unlock(&entry_lock);
 }
+/* Restored source text and escaped replacement code have separate leases.
+ * A private callback can retain the BPF graph after every source frame left;
+ * that does not require keeping its original publication module resident.
+ * Native imports and Native versions retain their own program module refs. */
+static bool entry_source_contains(void *opaque, unsigned long ip)
+{
+ struct entry_set *set = opaque, *generation;
+ if (set->source_module && within_module(ip, set->source_module)) return true;
+ list_for_each_entry(generation, &set->generations, generation_node)
+  if (generation->source_module && within_module(ip, generation->source_module)) return true;
+ return false;
+}
+static int entry_source_release(struct entry_set *set)
+{
+ struct entry_set *generation;
+ bool resident = set->source_module != NULL;
+ int error;
+ list_for_each_entry(generation, &set->generations, generation_node)
+  resident |= generation->source_module != NULL;
+ if (!resident) return 0;
+ error = ebpfos_code_quiescent(entry_source_contains, set);
+ if (error) return error;
+ ftrace_text_release(set->ftrace);set->ftrace = NULL;
+ module_put(set->source_module);set->source_module = NULL;
+ list_for_each_entry(generation, &set->generations, generation_node) {
+  module_put(generation->source_module);generation->source_module = NULL;
+ }
+ return 0;
+}
 static void entry_release_work(struct work_struct *work)
 {
  struct entry_set *set = container_of(to_delayed_work(work), struct entry_set, release_work);
  int error;
  mutex_lock(&entry_lock);
  error = set->poisoned ? -EUCLEAN : entry_switch(set, set->active, 0);
+ if (!error) error = entry_source_release(set);
  if (!error) error = entry_all_quiescent(set);
  if (!error && set->published) list_del(&set->retained);
  if (!error) list_del_init(&set->sharing);

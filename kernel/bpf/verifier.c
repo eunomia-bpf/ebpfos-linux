@@ -22838,6 +22838,17 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 		return -EINVAL;
 	}
 
+	/* A component is an unbound version. Its BTF retains the prototype;
+	 * the entry journal owns a live publication target, and used_btfs
+	 * separately own any actual native code/data imports. No tracing
+	 * trampoline is used by the component's native-ABI entry. */
+	if (prog->aux->ebpfos_component &&
+	    prog->expected_attach_type == BPF_TRACE_REPLACE) {
+		module_put(prog->aux->mod);
+		prog->aux->mod = NULL;
+		return 0;
+	}
+
 	key = bpf_trampoline_compute_key(tgt_prog, prog->aux->attach_btf, btf_id);
 	tr = bpf_trampoline_get(key, &tgt_info);
 	if (!tr)
