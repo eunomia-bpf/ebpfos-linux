@@ -23,11 +23,13 @@
 #include <linux/slab.h>
 #include <linux/bpf_operations.h>
 #include <linux/bpf_entry.h>
+#include <linux/bpf_kernel_rule.h>
 #include <linux/ebpfos_task_rule.h>
 #include "function_binding.h"
 #include "function_contract.h"
 #include <linux/workqueue.h>
 #include "function_lifetime.h"
+#include "function_native.h"
 
 struct task_view {
  u64 generation;
@@ -75,7 +77,9 @@ static bool task_view_code_contains(void *opaque, unsigned long ip)
  for (i = 0; i < view->count; ++i)
   if (ebpfos_program_contains(view->bindings[i].program, ip) ||
       (view->bindings[i].module &&
-       within_module_mem_type(ip, view->bindings[i].module, MOD_TEXT))) return true;
+       within_module_mem_type(ip, view->bindings[i].module, MOD_TEXT)) ||
+      (view->bindings[i].source_module &&
+       within_module(ip, view->bindings[i].source_module))) return true;
  return false;
 }
 static inline void task_view_release_work(struct work_struct *work)
@@ -115,14 +119,9 @@ static const struct file_operations task_view_ops = {
  * The source descriptor and loaded export supply the complete checked ABI.
  * A native bpf control entry guarantees self-selection has no old-view frame
  * beneath it. Each other task retains its own lease through sleeping calls. */
-static inline int task_view_slot(struct btf *native, u32 id, unsigned long *used)
+static inline int task_view_slot(unsigned long address, unsigned long *used)
 {
- const struct btf_type *function = btf_type_by_id(native, id);
- unsigned long address;
  u32 nr, j;
- if (!function || !btf_type_is_func(function)) return -EINVAL;
- address = kallsyms_lookup_name(btf_name_by_offset(native, function->name_off));
- if (!address) return -ENOENT;
  for (nr = 0; nr < NR_syscalls; ++nr)
   if ((unsigned long)sys_call_table[nr] == address) break;
  if (nr == NR_syscalls) return -ENOENT;
@@ -134,8 +133,10 @@ static inline int task_view_slot(struct btf *native, u32 id, unsigned long *used
 }
 #include <linux/bpf_operations.h>
 struct bpf_entry_target {
- u32 function;
+ struct btf *native;
+ struct module *source_module;
  struct bpf_prog *program;
+ unsigned long native_address;
  unsigned long address;
 };
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
@@ -144,12 +145,11 @@ static struct ebpfos_task_view_request *task_view_prepare(
  struct bpf_operations_set *operations)
 {
  struct ebpfos_task_view_request *request;
- struct btf *native = bpf_get_btf_vmlinux();
  struct task_view *view;
  struct file *file;
  unsigned int i, roots = 0;
  int error;
- if ((!count && !operations) || IS_ERR_OR_NULL(native)) return ERR_PTR(-EINVAL);
+ if (!count && !operations) return ERR_PTR(-EINVAL);
  if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU))
   return ERR_PTR(-EOPNOTSUPP);
  view = kvzalloc(struct_size(view, bindings, count), GFP_KERNEL);
@@ -161,7 +161,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
  bitmap_zero(view->selected, NR_syscalls);
  for (i = 0; i < count; ++i) {
   struct bpf_prog *program = sources[i].program;
-  int slot = task_view_slot(native, sources[i].function, view->selected);
+  int slot = task_view_slot(sources[i].native_address, view->selected);
   /* Private members retain code with their syscall roots. They acquire no
    * per-process direct-call dispatch of their own. */
   if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
@@ -169,6 +169,11 @@ static struct ebpfos_task_view_request *task_view_prepare(
   bpf_prog_inc(program);
   view->bindings[i].program = program;
   view->bindings[i].address = sources[i].address;
+  view->bindings[i].native_address = sources[i].native_address;
+  if (sources[i].source_module) {
+   __module_get(sources[i].source_module);
+   view->bindings[i].source_module = sources[i].source_module;
+  }
   if (program->type == BPF_PROG_TYPE_NATIVE && program->aux->mod) {
    __module_get(program->aux->mod);
    view->bindings[i].module = program->aux->mod;
@@ -190,34 +195,73 @@ void ebpfos_rule_task_put(struct ebpfos_task_view_request *request)
 { task_view_request_free(request); }
 struct ebpfos_task_view_request *ebpfos_rule_task_get(struct ebpfos_task_view_request *request)
 { if (request) refcount_inc(&request->references);return request; }
-struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const u32 *ids,
- const u32 *fds, u32 count)
+struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kernel_rule_version *version)
 {
  struct bpf_entry_target *sources;
+ struct bpf_kernel_rule_function *targets;
  struct ebpfos_task_view_request *request;
  struct btf *native = bpf_get_btf_vmlinux();
- u32 i;
+ u32 i, count = version->function_count;
  int error = 0;
  if (!count) return NULL;
  if (IS_ERR_OR_NULL(native)) return ERR_PTR(-EOPNOTSUPP);
- sources = kvmalloc_array(count, sizeof(*sources), GFP_KERNEL | __GFP_ZERO);
- if (!sources) return ERR_PTR(-ENOMEM);
+ if (version->function_flags & BPF_KERNEL_RULE_SCOPED_FUNCTIONS) {
+  if (version->function_prog_fds) return ERR_PTR(-EINVAL);
+  targets = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(*targets));
+  if (IS_ERR(targets)) return ERR_CAST(targets);
+ } else {
+  u32 *ids, *fds;
+  ids = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(u32));
+  if (IS_ERR(ids)) return ERR_CAST(ids);
+  fds = memdup_array_user(u64_to_user_ptr(version->function_prog_fds), count, sizeof(u32));
+  if (IS_ERR(fds)) {kfree(ids);return ERR_CAST(fds);}
+  targets = kvcalloc(count, sizeof(*targets), GFP_KERNEL);
+  if (!targets) {kfree(ids);kfree(fds);return ERR_PTR(-ENOMEM);}
+  for (i = 0; i < count; ++i) {
+   targets[i].btf_id = ids[i];targets[i].prog_fd = fds[i];
+  }
+  kfree(ids);kfree(fds);
+ }
+ sources = kvcalloc(count, sizeof(*sources), GFP_KERNEL);
+ if (!sources) {kvfree(targets);return ERR_PTR(-ENOMEM);}
  for (i = 0; i < count; ++i) {
-  sources[i].function = ids[i];sources[i].program = bpf_prog_get(fds[i]);
+  struct btf *types = native;
+  sources[i].program = bpf_prog_get(targets[i].prog_fd);
   if (IS_ERR(sources[i].program)) {error = PTR_ERR(sources[i].program);sources[i].program = NULL;break;}
-  error = bpf_entry_program_address(native, ids[i], sources[i].program, true, &sources[i].address);
+  if (targets[i].btf_obj_fd) {
+   types = btf_get_by_fd(targets[i].btf_obj_fd);
+   if (IS_ERR(types)) {error = PTR_ERR(types);break;}
+   sources[i].native = types;
+   if (types != native) {
+    sources[i].source_module = btf_try_get_module(types);
+    if (!sources[i].source_module) {error = -ENOENT;break;}
+   }
+  }
+  error = bpf_entry_program_address(types, targets[i].btf_id, sources[i].program, true, &sources[i].address);
   if (error) break;
+  sources[i].native_address = ebpfos_native_function(types, targets[i].btf_id, sources[i].source_module);
+  if (!sources[i].native_address) {error = -ENOENT;break;}
  }
  request = error ? ERR_PTR(error) : task_view_prepare(sources, count, 0, NULL);
- for (i = 0; i < count; ++i) if (sources[i].program) bpf_prog_put(sources[i].program);
- kvfree(sources);return request;
+ for (i = 0; i < count; ++i) {
+  if (sources[i].program) bpf_prog_put(sources[i].program);
+  if (sources[i].native) btf_put(sources[i].native);
+  module_put(sources[i].source_module);
+ }
+ kvfree(sources);kvfree(targets);return request;
 }
+
 bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *a,
  struct ebpfos_task_view_request *b)
 {
  struct task_view *x, *y;
  if (!a || !b) return false;
  x = a->next->private_data;y = b->next->private_data;
+ {
+  u32 i, j;
+  for (i = 0; i < x->count; ++i) for (j = 0; j < y->count; ++j)
+   if (x->bindings[i].native_address == y->bindings[j].native_address) return true;
+ }
  return bitmap_intersects(x->selected, y->selected, NR_syscalls);
 }
 void ebpfos_rule_task_copy(struct ebpfos_task_view_request *request, void *table)
@@ -228,6 +272,7 @@ void ebpfos_rule_task_copy(struct ebpfos_task_view_request *request, void *table
  view = request->next->private_data;
  for_each_set_bit(nr, view->selected, NR_syscalls) ((sys_call_ptr_t *)table)[nr] = view->table[nr];
 }
+
 #endif
 
 #endif /* CONFIG_EBPFOS && CONFIG_X86_64 */

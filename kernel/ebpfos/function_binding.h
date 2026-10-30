@@ -7,6 +7,8 @@ struct module;
 struct ebpfos_function_binding {
  struct bpf_prog *program;
  struct module *module;
+ struct module *source_module;
  unsigned long address;
+ unsigned long native_address;
 };
 #endif

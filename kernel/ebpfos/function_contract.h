@@ -278,6 +278,8 @@ static inline void ebpfos_function_binding_put(struct ebpfos_function_binding *b
 {
  if (binding->program) bpf_prog_put(binding->program);
  module_put(binding->module);
- binding->program = NULL;binding->module = NULL;binding->address = 0;
+ module_put(binding->source_module);
+ binding->program = NULL;binding->module = NULL;binding->source_module = NULL;
+ binding->address = 0;binding->native_address = 0;
 }
 #endif

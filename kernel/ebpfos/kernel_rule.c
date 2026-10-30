@@ -361,19 +361,12 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  refcount_set(&generation->refs, 1);generation->program = program;generation->count = count;
  for (i = 0; i < count; ++i) {
   u32 *fds;
-  if (versions[i].reserved || versions[i].reserved2) {
+  if (versions[i].reserved ||
+      (versions[i].function_flags & ~BPF_KERNEL_RULE_SCOPED_FUNCTIONS)) {
    error = -EINVAL;goto fail;
   }
   if (versions[i].function_count) {
-   u32 *ids, *programs;
-   ids = memdup_array_user(u64_to_user_ptr(versions[i].function_btf_ids),
-                          versions[i].function_count, sizeof(u32));
-   if (IS_ERR(ids)) {error = PTR_ERR(ids);goto fail;}
-   programs = memdup_array_user(u64_to_user_ptr(versions[i].function_prog_fds),
-                               versions[i].function_count, sizeof(u32));
-   if (IS_ERR(programs)) {error = PTR_ERR(programs);kfree(ids);goto fail;}
-   generation->tasks[i] = ebpfos_rule_task_prepare(ids, programs, versions[i].function_count);
-   kfree(ids);kfree(programs);
+   generation->tasks[i] = ebpfos_rule_task_prepare(&versions[i]);
    if (IS_ERR(generation->tasks[i])) {
     error = PTR_ERR(generation->tasks[i]);generation->tasks[i] = NULL;goto fail;
    }

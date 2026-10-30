@@ -459,10 +459,8 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
   if (source && entry->native_function < btf_nr_types(vmlinux_btf)) goto fail;
-  address = source ? ebpfos_module_function(set->source_module,
-   btf_name_by_offset(btf, function->name_off)) :
-   kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
-  if (!address || (!source && !core_kernel_text(address))) {error = -ENOENT;goto fail;}
+  address = ebpfos_native_function(btf, entry->native_function, set->source_module);
+  if (!address) {error = -ENOENT;goto fail;}
   ip = address;
   if (!task && source && entry_module_noinstr(set->source_module, address)) {
    /* No entry patch or breakpoint in noinstr text. Replace every decoded
@@ -564,13 +562,11 @@ int bpf_native_prog_init(struct bpf_prog *prog, const union bpf_attr *attr)
  }
  function = btf_type_by_id(btf, attr->attach_btf_id);
  if (!function || !btf_type_is_func(function) ||
-     (!module && btf_func_linkage(function) != BTF_FUNC_GLOBAL) ||
      (module && attr->attach_btf_id < btf_nr_types(bpf_get_btf_vmlinux()))) {
   module_put(module);btf_put(btf);return -EINVAL;
  }
- address = module ? ebpfos_module_function(module, btf_name_by_offset(btf, function->name_off)) :
-  kallsyms_lookup_name(btf_name_by_offset(btf, function->name_off));
- if (!address || (!module && !core_kernel_text(address))) {
+ address = ebpfos_native_function(btf, attr->attach_btf_id, module);
+ if (!address) {
   module_put(module);btf_put(btf);return -ENOENT;
  }
  prog->aux->attach_btf = btf;

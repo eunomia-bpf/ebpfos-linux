@@ -5,6 +5,7 @@
 struct task_struct;
 struct ebpfos_rule_decision;
 struct ebpfos_task_view_request;
+struct bpf_kernel_rule_version;
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 void ebpfos_task_rule_claim(void);
 void ebpfos_task_rule_unclaim(void);
@@ -14,7 +15,7 @@ void ebpfos_task_rule_resume(void);
 void ebpfos_task_rule_fork(struct task_struct *);
 void ebpfos_task_rule_free(struct task_struct *);
 struct ebpfos_rule_decision *ebpfos_task_rule_decision(void);
-struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const u32 *, const u32 *, u32);
+struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kernel_rule_version *);
 void ebpfos_rule_task_put(struct ebpfos_task_view_request *);
 struct ebpfos_task_view_request *ebpfos_rule_task_get(struct ebpfos_task_view_request *);
 bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *, struct ebpfos_task_view_request *);
