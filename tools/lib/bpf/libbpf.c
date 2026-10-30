@@ -4404,6 +4404,34 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 		} else if (strcmp(sec_name, KSYMS_SEC) == 0) {
 			ksym_sec = sec;
 			ext->type = EXT_KSYM;
+			/* Generated aliases carry their exact native relocation target.
+			 * This is name relocation only; normal prototype checks remain.
+			 */
+			if (btf_is_func(t)) {
+				const char *target = NULL;
+				int tag_id;
+
+				for (tag_id = 1; tag_id < btf__type_cnt(obj->btf); tag_id++) {
+					const struct btf_type *tag = btf__type_by_id(obj->btf, tag_id);
+					const char *name;
+
+					if (!btf_is_decl_tag(tag) || tag->type != ext->btf_id ||
+					    btf_decl_tag(tag)->component_idx != -1)
+						continue;
+					name = btf__name_by_offset(obj->btf, tag->name_off);
+					if (strncmp(name, "ksym:name:", 10))
+						continue;
+					if (target || !name[10])
+						return -EINVAL;
+					target = name + 10;
+				}
+				if (target) {
+					free(ext->essent_name);
+					ext->essent_name = strdup(target);
+					if (!ext->essent_name)
+						return -ENOMEM;
+				}
+			}
 			skip_mods_and_typedefs(obj->btf, t->type,
 					       &ext->ksym.type_id);
 		} else {

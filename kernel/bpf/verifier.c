@@ -3158,13 +3158,23 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	} else {
 		if ((s16)offset == BPF_BTF_SOURCE) {
 			char name[KSYM_NAME_LEN];
-			size_t length = bpf_core_essential_name_len(kfunc.name);
+			const char *target = btf_find_decl_tag_value(kfunc.btf,
+				btf_type_by_id(kfunc.btf, kfunc.id), -1, "ksym:name:");
+			size_t length;
+
+			if (IS_ERR(target) && PTR_ERR(target) != -ENOENT) {
+				err = PTR_ERR(target);
+				goto err_remove_desc;
+			}
+			length = IS_ERR(target) ? bpf_core_essential_name_len(kfunc.name) : strlen(target);
+			if (IS_ERR(target))
+				target = kfunc.name;
 
 			if (length >= sizeof(name)) {
 				err = -ENAMETOOLONG;
 				goto err_remove_desc;
 			}
-			memcpy(name, kfunc.name, length);
+			memcpy(name, target, length);
 			name[length] = 0;
 			addr = kallsyms_lookup_name(name);
 			/* Module calls keep their BTF/module reference path. */
@@ -20727,7 +20737,14 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 
 	sym_name = btf_name_by_offset(btf, t->name_off);
 	if (source_btf && btf_type_is_func(t)) {
-		size_t length = bpf_core_essential_name_len(sym_name);
+		const char *target = btf_find_decl_tag_value(btf, t, -1, "ksym:name:");
+		size_t length;
+
+		if (IS_ERR(target) && PTR_ERR(target) != -ENOENT)
+			return PTR_ERR(target);
+		length = IS_ERR(target) ? bpf_core_essential_name_len(sym_name) : strlen(target);
+		if (!IS_ERR(target))
+			sym_name = target;
 
 		if (length >= sizeof(source_name))
 			return -ENAMETOOLONG;
