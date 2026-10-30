@@ -4407,7 +4407,7 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 			/* Generated aliases carry their exact native relocation target.
 			 * This is name relocation only; normal prototype checks remain.
 			 */
-			if (btf_is_func(t)) {
+			if (btf_is_func(t) || btf_is_var(t)) {
 				const char *target = NULL;
 				int tag_id;
 
@@ -4424,6 +4424,10 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 					if (target || !name[10])
 						return -EINVAL;
 					target = name + 10;
+				}
+				if (!target && btf_is_var(t)) {
+					free(ext->essent_name);
+					ext->essent_name = NULL;
 				}
 				if (target) {
 					free(ext->essent_name);
@@ -8638,30 +8642,33 @@ static int kallsyms_cb(unsigned long long sym_addr, char sym_type,
 		       const char *sym_name, void *ctx)
 {
 	struct bpf_object *obj = ctx;
-	const struct btf_type *t;
-	struct extern_desc *ext;
+	int i;
 
-	/* Bind the complete ELF spelling. Stripping an LTO suffix can bind a
-	 * different declaration even when an exact public symbol exists.
+	/* Multiple compiler operands may name the same native address. An alias
+	 * tag gives its exact target; ordinary VARs retain their full spelling.
 	 */
-	ext = find_extern_by_name(obj, sym_name);
-	if (!ext || ext->type != EXT_KSYM)
-		return 0;
+	for (i = 0; i < obj->nr_extern; i++) {
+		struct extern_desc *ext = &obj->externs[i];
+		const struct btf_type *t;
 
-	t = btf__type_by_id(obj->btf, ext->btf_id);
-	if (!btf_is_var(t))
-		return 0;
+		if (ext->type != EXT_KSYM ||
+		    strcmp(ext->essent_name ?: ext->name, sym_name))
+			continue;
+		t = btf__type_by_id(obj->btf, ext->btf_id);
+		if (!btf_is_var(t))
+			continue;
+		if (ext->is_set && ext->ksym.addr != sym_addr) {
+			pr_warn("extern (ksym) '%s': resolution is ambiguous: 0x%llx or 0x%llx\n",
+				sym_name, ext->ksym.addr, sym_addr);
+			return -EINVAL;
+		}
+		if (!ext->is_set) {
+			ext->is_set = true;
+			ext->ksym.addr = sym_addr;
+			pr_debug("extern (ksym) '%s': set to 0x%llx\n", sym_name, sym_addr);
+		}
+	}
 
-	if (ext->is_set && ext->ksym.addr != sym_addr) {
-		pr_warn("extern (ksym) '%s': resolution is ambiguous: 0x%llx or 0x%llx\n",
-			sym_name, ext->ksym.addr, sym_addr);
-		return -EINVAL;
-	}
-	if (!ext->is_set) {
-		ext->is_set = true;
-		ext->ksym.addr = sym_addr;
-		pr_debug("extern (ksym) '%s': set to 0x%llx\n", sym_name, sym_addr);
-	}
 	return 0;
 }
 
@@ -8716,7 +8723,7 @@ static int bpf_object__resolve_ksym_var_btf_id(struct bpf_object *obj,
 	struct btf *btf = NULL;
 	int id, err;
 
-	id = find_ksym_btf_id(obj, ext->name, BTF_KIND_VAR, &btf, &mod_btf);
+	id = find_ksym_btf_id(obj, ext->essent_name ?: ext->name, BTF_KIND_VAR, &btf, &mod_btf);
 	if (id < 0) {
 		if (id == -ESRCH && source_component_calls(obj)) {
 			/* Preserve a symbolic operand. The kernel decides whether

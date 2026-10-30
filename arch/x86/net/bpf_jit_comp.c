@@ -1203,6 +1203,12 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 
 			if (type && btf_type_is_var(type)) {
 				const char *symbol = btf_name_by_offset(aot->root->aux->btf, type->name_off);
+				const char *target = btf_find_decl_tag_value(aot->root->aux->btf, type, -1, "ksym:name:");
+
+				if (IS_ERR(target) && PTR_ERR(target) != -ENOENT)
+					return PTR_ERR(target);
+				if (!IS_ERR(target))
+					symbol = target;
 
 				if (strscpy(name, symbol, sizeof(name)) < 0)
 					return -ENAMETOOLONG;

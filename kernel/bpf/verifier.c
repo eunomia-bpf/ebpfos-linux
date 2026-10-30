@@ -20705,13 +20705,14 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 
 	sym_name = btf_name_by_offset(btf, t->name_off);
-	if (source_btf && btf_type_is_func(t)) {
+	if (source_btf) {
 		const char *target = btf_find_decl_tag_value(btf, t, -1, "ksym:name:");
 		size_t length;
 
 		if (IS_ERR(target) && PTR_ERR(target) != -ENOENT)
 			return PTR_ERR(target);
-		length = IS_ERR(target) ? bpf_core_essential_name_len(sym_name) : strlen(target);
+		length = !IS_ERR(target) ? strlen(target) :
+			btf_type_is_func(t) ? bpf_core_essential_name_len(sym_name) : strlen(sym_name);
 		if (!IS_ERR(target))
 			sym_name = target;
 
