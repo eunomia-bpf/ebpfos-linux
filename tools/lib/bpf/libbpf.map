@@ -459,6 +459,7 @@ LIBBPF_1.7.0 {
 LIBBPF_1.8.0 {
 	global:
 		bpf_program__clone;
+		bpf_program__set_prepare_load_fn;
 		bpf_program__set_ebpfos_field_accesses;
 		btf__new_empty_opts;
 } LIBBPF_1.7.0;

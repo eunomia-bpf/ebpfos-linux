@@ -520,6 +520,8 @@ struct bpf_program {
 	__u32 line_info_rec_size;
 	__u32 line_info_cnt;
 	__u32 prog_flags;
+	libbpf_prog_prepare_load_fn_t prepare_load_fn;
+	long prepare_load_cookie;
 	const struct bpf_ebpfos_field_access *ebpfos_field_accesses;
 	__u32 ebpfos_field_access_cnt;
 	__u8  hash[SHA256_DIGEST_LENGTH];
@@ -7971,6 +7973,14 @@ static int bpf_object_load_prog(struct bpf_object *obj, struct bpf_program *prog
 		insns_cnt = prog->insns_cnt;
 	}
 
+	if (prog->prepare_load_fn) {
+		err = prog->prepare_load_fn(prog, &load_attr, prog->prepare_load_cookie);
+		if (err)
+			return err;
+		insns = prog->insns;
+		insns_cnt = prog->insns_cnt;
+	}
+
 	if (obj->gen_loader) {
 		bpf_gen__prog_load(obj->gen_loader, prog->type, prog->name,
 				   license, insns, insns_cnt, &load_attr,
@@ -9957,6 +9967,14 @@ int bpf_program__set_flags(struct bpf_program *prog, __u32 flags)
 	return 0;
 }
 
+int bpf_program__set_prepare_load_fn(struct bpf_program *prog,
+				    libbpf_prog_prepare_load_fn_t fn, long cookie)
+{
+	prog->prepare_load_fn = fn;
+	prog->prepare_load_cookie = cookie;
+	return 0;
+}
+
 int bpf_program__set_ebpfos_field_accesses(struct bpf_program *prog,
 				const struct bpf_ebpfos_field_access *fields,
 				__u32 count)
@@ -10112,6 +10130,12 @@ int bpf_program__clone(struct bpf_program *prog, const struct bpf_prog_load_opts
 
 	if (prog->sec_def && prog->sec_def->prog_prepare_load_fn) {
 		err = prog->sec_def->prog_prepare_load_fn(prog, &attr, prog->sec_def->cookie);
+		if (err)
+			return libbpf_err(err);
+	}
+
+	if (prog->prepare_load_fn) {
+		err = prog->prepare_load_fn(prog, &attr, prog->prepare_load_cookie);
 		if (err)
 			return libbpf_err(err);
 	}

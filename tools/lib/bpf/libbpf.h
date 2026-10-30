@@ -1958,6 +1958,18 @@ typedef int (*libbpf_prog_setup_fn_t)(struct bpf_program *prog, long cookie);
 typedef int (*libbpf_prog_prepare_load_fn_t)(struct bpf_program *prog,
 					     struct bpf_prog_load_opts *opts, long cookie);
 
+/**
+ * @brief **bpf_program__set_prepare_load_fn()** adds a per-program load callback.
+ * It runs after the section handler has prepared the program's load options,
+ * preserving its type, attach target and section-specific flags. The callback
+ * receives the final relocated function information. It runs for ordinary
+ * object loads and bpf_program__clone(), before explicit clone overrides.
+ * Pass NULL to remove the callback. The hook may also be changed before
+ * a later clone of a loaded object.
+ */
+LIBBPF_API int bpf_program__set_prepare_load_fn(struct bpf_program *prog,
+					     libbpf_prog_prepare_load_fn_t fn, long cookie);
+
 /* Called during skeleton attach or through bpf_program__attach(). If
  * auto-attach is not supported, callback should return 0 and set link to
  * NULL (it's not considered an error during skeleton attach, but it will be
