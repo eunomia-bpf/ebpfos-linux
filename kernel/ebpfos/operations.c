@@ -157,14 +157,8 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
   if (IS_ERR_OR_NULL(btf)) return ERR_PTR(-EOPNOTSUPP);
   btf_get(btf);
  }
- /* Split BTF can name storage inherited from its base. The VAR owns
-  * storage and its lease; a shared record type does not choose the owner. */
- {
-  struct btf *owner = btf, *base;
-  while ((base = btf_base_btf(owner)) && attr->map_extra < btf_nr_types(base))
-   owner = base;
-  if (owner != btf) {btf_get(owner);btf_put(btf);btf = owner;}
- }
+ /* The VAR owns storage and its lease, independently of shared types. */
+ btf = ebpfos_binding_btf_owner(btf, attr->map_extra);
  module = btf_try_get_module(btf);
  if (!module && !btf_is_vmlinux(btf)) {btf_put(btf);return ERR_PTR(-ENOENT);}
  variable = btf_type_by_id(btf, attr->map_extra);

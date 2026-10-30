@@ -253,6 +253,7 @@ struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kerne
   if (targets[i].btf_obj_fd) {
    types = btf_get_by_fd(targets[i].btf_obj_fd);
    if (IS_ERR(types)) {error = PTR_ERR(types);break;}
+   types = ebpfos_binding_btf_owner(types, targets[i].btf_id);
    sources[i].native = types;
    if (types != native) {
     sources[i].source_module = btf_try_get_module(types);
