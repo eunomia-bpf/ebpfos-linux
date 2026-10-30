@@ -22777,6 +22777,20 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	    prog->type != BPF_PROG_TYPE_EXT)
 		return 0;
 
+	/* Source globals can be compiled before a resident entry exists. The
+	 * privileged tier has already opted out of the proof; its build-only
+	 * reachability caller needs no trampoline. Keep normal context checking
+	 * for verified loads and for every program naming an actual target.
+	 * Live attachment still requires target BTF in the existing link path.
+	 */
+	if (prog->type == BPF_PROG_TYPE_TRACING &&
+	    prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	    prog->aux->ebpfos_component && prog->aux->trusted_kernel &&
+	    !btf_id && !tgt_prog) {
+		verbose(env, "trusted kernel tier: no resident native target; no entry binding\n");
+		return 0;
+	}
+
 	ret = bpf_check_attach_target(&env->log, prog, tgt_prog, btf_id, &tgt_info);
 	if (ret)
 		return ret;
