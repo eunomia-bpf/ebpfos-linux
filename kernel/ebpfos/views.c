@@ -38,6 +38,7 @@ struct task_view {
  bool revocable;
  DECLARE_BITMAP(selected, NR_syscalls);
  struct bpf_operations_set *operations;
+ struct entry_set *code;
  struct delayed_work release_work;
  sys_call_ptr_t table[NR_syscalls];
  struct ebpfos_function_binding bindings[];
@@ -69,6 +70,7 @@ static void task_view_free(struct task_view *view)
  for (i = 0; i < view->count; ++i)
   ebpfos_function_binding_put(&view->bindings[i]);
  bpf_operations_set_put(view->operations);
+ bpf_entry_code_put(view->code);
  kvfree(view);
 }
 static bool task_view_code_contains(void *opaque, unsigned long ip)
@@ -147,6 +149,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
 {
  struct ebpfos_task_view_request *request;
  struct task_view *view;
+ struct bpf_prog **programs;
  struct file *file;
  unsigned int i, roots = 0;
  int error;
@@ -167,7 +170,6 @@ static struct ebpfos_task_view_request *task_view_prepare(
   /* Private members retain code with their syscall roots. They acquire no
    * per-process direct-call dispatch of their own. */
   if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
-  if (ebpfos_program_addresses(program)) {error = -EOPNOTSUPP;goto fail;}
   bpf_prog_inc(program);
   view->bindings[i].program = program;
   view->bindings[i].address = sources[i].address;
@@ -191,6 +193,16 @@ static struct ebpfos_task_view_request *task_view_prepare(
    }
  }
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
+ /* Stored private callbacks can outlive the rule and its last syscall frame.
+  * Transfer their independent code lease to the existing entry journal. */
+ if (count) {
+  programs = kvmalloc_array(count, sizeof(*programs), GFP_KERNEL);
+  if (!programs) {error = -ENOMEM;goto fail;}
+  for (i = 0; i < count; ++i) programs[i] = view->bindings[i].program;
+  view->code = bpf_entry_code_get(programs, count);
+  kvfree(programs);
+  if (IS_ERR(view->code)) {error = PTR_ERR(view->code);view->code = NULL;goto fail;}
+ }
  request = kzalloc(sizeof(*request), GFP_KERNEL);
  if (!request) {error = -ENOMEM;goto fail;}
  file = anon_inode_getfile("bpf-rule-syscall-table", &task_view_ops, view, O_RDONLY);
