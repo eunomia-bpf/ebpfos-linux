@@ -1717,7 +1717,7 @@ static void __layout_sections(struct module *mod, struct load_info *info, bool i
 			if ((s->sh_flags & masks[m][0]) != masks[m][0]
 			    || (s->sh_flags & masks[m][1])
 			    || s->sh_entsize != ~0UL
-			    || is_init != module_init_layout_section(sname))
+			    || is_init != (!info->keep_init && module_init_layout_section(sname)))
 				continue;
 
 			if (WARN_ON_ONCE(type == MOD_INVALID))
@@ -3020,6 +3020,191 @@ static int post_relocation(struct module *mod, const struct load_info *info)
 	return module_finalize(info->hdr, info->sechdrs, mod);
 }
 
+/* A generated ELF uses the same section allocation, architecture finalizer and
+ * section subscribers as a source module. Its identity and lifetime belong to
+ * its caller; it is not inserted into the module namespace.
+ */
+struct module_section_image {
+	struct module mod;
+	struct load_info info;
+	struct delayed_work free_work;
+	struct list_head list;
+#ifdef CONFIG_KALLSYMS
+	Elf_Sym null_symbol;
+#endif
+	void (*release)(void *);
+	void *owner;
+	bool finalized, registered, published;
+};
+
+static LIST_HEAD(module_section_images);
+
+struct module_section_image *module_section_image_alloc(Elf_Ehdr *hdr,
+					Elf_Shdr *sections, char *names)
+{
+	struct module_section_image *image;
+	struct module *mod;
+	int err;
+
+	image = kzalloc(sizeof(*image), GFP_KERNEL);
+	if (!image)
+		return ERR_PTR(-ENOMEM);
+	mod = &image->mod;
+	strscpy(mod->name, "generated-elf", sizeof(mod->name));
+	mod->state = MODULE_STATE_UNFORMED;
+#ifdef CONFIG_KALLSYMS
+	/* BPF keeps its own symbol names; module address readers need symbol zero. */
+	mod->core_kallsyms.symtab = &image->null_symbol;
+	mod->core_kallsyms.num_symtab = 1;
+	mod->core_kallsyms.strtab = "";
+	rcu_assign_pointer(mod->kallsyms, &mod->core_kallsyms);
+#endif
+	module_unload_init(mod);
+	module_put(mod); /* The image owns the base reference. */
+	image->info = (struct load_info) {
+		.hdr = hdr, .sechdrs = sections, .secstrings = names,
+		.mod = mod, .keep_init = true,
+	};
+	err = module_frob_arch_sections(hdr, sections, names, mod);
+	if (err)
+		goto fail;
+	err = module_enforce_rwx_sections(hdr, sections, names, mod);
+	if (err)
+		goto fail;
+	module_mark_ro_after_init(hdr, sections, names);
+	image->info.index.pcpu = find_pcpusec(&image->info);
+	sections[image->info.index.pcpu].sh_flags &= ~(unsigned long)SHF_ALLOC;
+	err = percpu_modalloc(mod, &image->info);
+	if (err)
+		goto fail;
+	layout_sections(mod, &image->info);
+	err = move_module(mod, &image->info);
+	if (err) {
+		percpu_modfree(mod);
+		goto fail;
+	}
+	return image;
+fail:
+	kfree(image);
+	return ERR_PTR(err);
+}
+
+unsigned int module_section_image_size(const struct module_section_image *image)
+{
+	unsigned int size = 0;
+
+	for_each_mod_mem_type(type)
+		size += image->mod.mem[type].size;
+	return size;
+}
+
+unsigned int module_section_image_text_size(const struct module_section_image *image)
+{
+	return image->mod.mem[MOD_TEXT].size;
+}
+
+unsigned long module_section_image_symbol(const struct module_section_image *image, unsigned int index)
+{
+#ifdef CONFIG_SMP
+	if (index && index == image->info.index.pcpu)
+		return (unsigned long)image->mod.percpu;
+#endif
+	return image->info.sechdrs[index].sh_addr;
+}
+
+int module_section_image_finalize(struct module_section_image *image)
+{
+	struct module *mod = &image->mod;
+	int err;
+
+	err = find_module_sections(mod, &image->info);
+	if (err)
+		return err;
+	sort_extable(mod->extable, mod->extable + mod->num_exentries);
+	percpu_modcopy(mod, (void *)image->info.sechdrs[image->info.index.pcpu].sh_addr,
+		      image->info.sechdrs[image->info.index.pcpu].sh_size);
+	image->finalized = true;
+	return module_finalize(image->info.hdr, image->info.sechdrs, mod);
+}
+
+int module_section_image_register(struct module_section_image *image)
+{
+	struct module *mod = &image->mod;
+	int err;
+
+	if (image->registered)
+		return 0;
+	mutex_lock(&module_mutex);
+	mod->state = MODULE_STATE_COMING;
+	module_bug_finalize(image->info.hdr, image->info.sechdrs, mod);
+	module_cfi_finalize(image->info.hdr, image->info.sechdrs, mod);
+	mod_update_bounds(mod);
+	mod_tree_insert(mod);
+	list_add_rcu(&image->list, &module_section_images);
+	image->published = true;
+	mutex_unlock(&module_mutex);
+	err = notifier_to_errno(blocking_notifier_call_chain_robust(&module_notify_list,
+			MODULE_STATE_COMING, MODULE_STATE_GOING, mod));
+	if (err)
+		return err;
+	image->registered = true;
+	err = module_enable_rodata_ro(mod);
+	if (!err)
+		err = module_enable_data_nx(mod);
+	if (!err)
+		err = module_enable_rodata_ro_after_init(mod);
+	if (!err)
+		err = module_enable_text_rox(mod);
+	if (err)
+		return err;
+	flush_module_icache(mod);
+	mod->state = MODULE_STATE_LIVE;
+	blocking_notifier_call_chain(&module_notify_list, MODULE_STATE_LIVE, mod);
+	return 0;
+}
+
+static void module_section_image_free_work(struct work_struct *work)
+{
+	struct module_section_image *image = container_of(to_delayed_work(work),
+					struct module_section_image, free_work);
+#ifdef CONFIG_MODULE_UNLOAD
+	if (atomic_read(&image->mod.refcnt)) {
+		schedule_delayed_work(&image->free_work, HZ / 10);
+		return;
+	}
+#endif
+	if (image->published) {
+		mutex_lock(&module_mutex);
+		mod_tree_remove(&image->mod);
+		list_del_rcu(&image->list);
+		module_bug_cleanup(&image->mod);
+		mutex_unlock(&module_mutex);
+	}
+	synchronize_rcu();
+	if (image->finalized)
+		module_arch_cleanup(&image->mod);
+	module_memory_restore_rox(&image->mod);
+	codetag_free_module_sections(&image->mod);
+	percpu_modfree(&image->mod);
+	free_mod_mem(&image->mod);
+	if (image->release)
+		image->release(image->owner);
+	kfree(image);
+}
+
+void module_section_image_free(struct module_section_image *image,
+			      void (*release)(void *), void *owner)
+{
+	image->mod.state = MODULE_STATE_GOING;
+	if (image->registered)
+		blocking_notifier_call_chain(&module_notify_list, MODULE_STATE_GOING, &image->mod);
+	module_put(&image->mod);
+	image->release = release;
+	image->owner = owner;
+	INIT_DELAYED_WORK(&image->free_work, module_section_image_free_work);
+	schedule_delayed_work(&image->free_work, 0);
+}
+
 /* Call module constructors. */
 static void do_mod_ctors(struct module *mod)
 {
@@ -3900,6 +4085,19 @@ struct module *__module_address(unsigned long addr)
 
 lookup:
 	mod = mod_find(addr, &mod_tree);
+#ifndef CONFIG_MODULES_TREE_LOOKUP
+	if (!mod) {
+		struct module_section_image *image;
+
+		list_for_each_entry_rcu(image, &module_section_images, list,
+				       lockdep_is_held(&module_mutex)) {
+			if (within_module(addr, &image->mod)) {
+				mod = &image->mod;
+				break;
+			}
+		}
+	}
+#endif
 	if (mod) {
 		BUG_ON(!within_module(addr, mod));
 		if (mod->state == MODULE_STATE_UNFORMED)

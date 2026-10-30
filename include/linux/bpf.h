@@ -1835,6 +1835,8 @@ static inline bool bpf_prog_has_trampoline(const struct bpf_prog *prog)
 #endif
 
 struct bpf_func_info_aux {
+	/* Verified unread pointer formals; no input capability is initialized. */
+	u64 unused_arg_mask;
 	u16 linkage;
 	bool unreliable;
 	bool called : 1;
@@ -1959,6 +1961,7 @@ struct bpf_prog_aux {
 	bool trusted_kernel;
 	void *native_seqs;
 	u32 native_seqs_size;
+	struct bpf_native_image *native_image;
 	/* Cold native bindings must supply any context assumed by verification. */
 	bool requires_rcu;
 	u32 ebpfos_load_insn_cnt;

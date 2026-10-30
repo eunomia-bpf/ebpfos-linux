@@ -2690,7 +2690,13 @@ struct bpf_prog *__bpf_prog_select_runtime(struct bpf_verifier_env *env, struct 
 	 * work with regards to JITing, etc.
 	 */
 	bool jit_needed = false;
+	u32 i;
 
+	for (i = 0; i < fp->len; i++)
+		if (bpf_native_seq_insn(&fp->insnsi[i])) {
+			jit_needed = true;
+			break;
+		}
 	if (fp->bpf_func)
 		goto finalize;
 

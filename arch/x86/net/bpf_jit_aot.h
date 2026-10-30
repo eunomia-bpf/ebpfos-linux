@@ -25,6 +25,8 @@ struct bpf_aot_context {
 	u8 *image;
 	struct exception_table_entry *extable;
 	u32 nr_exentries;
+	void *native_data;
+	u32 native_size;
 	bool final;
 	bool patchable_jumps;
 	int error;
@@ -227,10 +229,10 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 			 u8 *text, u32 text_size, int *offsets, u32 nr_offsets,
 			 void **object, u32 *object_size)
 {
-	enum { NULL_SEC, TEXT, RELA, STRTAB, SYMTAB, SHSTRTAB, OFFSETS, STACK, EXTAB, EXRELA, NR_SECS };
+	enum { NULL_SEC, TEXT, RELA, STRTAB, SYMTAB, SHSTRTAB, OFFSETS, STACK, EXTAB, EXRELA, NATIVE, NR_SECS };
 	static const char shstrings[] = "\0.rela.text\0.strtab\0.symtab\0.shstrtab\0.bpf.aot.offsets\0.note.GNU-stack\0.text.";
 	size_t strings_size = 1 + strlen(function) + 1;
-	size_t shstrings_size = sizeof(shstrings) + strlen(function) + 1 + sizeof("__ex_table") + sizeof(".rela__ex_table");
+	size_t shstrings_size = sizeof(shstrings) + strlen(function) + 1 + sizeof("__ex_table") + sizeof(".rela__ex_table") + sizeof(".bpf.aot.native");
 	u32 nr_symbols = aot->nr_records + 3;
 	size_t cursor = sizeof(Elf64_Ehdr);
 	u32 i, names;
@@ -257,6 +259,7 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 	}
 	sizes[EXTAB] = aot->nr_exentries * sizeof(*aot->extable);
 	sizes[EXRELA] = nr_exrelocs * sizeof(Elf64_Rela);
+	sizes[NATIVE] = aot->native_size;
 	for (i = 1; i < NR_SECS; i++) {
 		cursor = ALIGN(cursor, i == TEXT ? 16 : 8);
 		positions[i] = cursor;
@@ -321,6 +324,10 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 	sections[EXRELA].sh_link = SYMTAB;
 	sections[EXRELA].sh_info = EXTAB;
 	sections[EXRELA].sh_addralign = 8;
+	sections[NATIVE].sh_name = sections[EXRELA].sh_name + sizeof(".rela__ex_table");
+	sections[NATIVE].sh_addralign = 8;
+	if (aot->native_size)
+		memcpy(data + positions[NATIVE], aot->native_data, aot->native_size);
 	memcpy(data + positions[TEXT], text, text_size);
 	for (i = 0; i < nr_offsets; i++)
 		((u32 *)(data + positions[OFFSETS]))[i] = offsets[i] < 0 ? U32_MAX : offsets[i];
@@ -328,6 +335,7 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 	strcpy(data + positions[SHSTRTAB] + sizeof(shstrings) - 1, function);
 	strcpy(data + positions[SHSTRTAB] + sections[EXTAB].sh_name, "__ex_table");
 	strcpy(data + positions[SHSTRTAB] + sections[EXRELA].sh_name, ".rela__ex_table");
+	strcpy(data + positions[SHSTRTAB] + sections[NATIVE].sh_name, ".bpf.aot.native");
 	symbols = (void *)(data + positions[SYMTAB]);
 	symbols[1].st_info = ((STB_LOCAL << 4) | STT_SECTION);
 	symbols[1].st_shndx = TEXT;

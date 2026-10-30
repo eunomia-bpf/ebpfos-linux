@@ -116,6 +116,31 @@ static inline void flush_module_init_free_work(void)
 }
 #endif
 
+/* Shared native ELF section handling for generated code owners. Callers retain
+ * the ELF headers and names until the release callback runs. Section addresses
+ * are returned in sh_addr; bytes stay writable until registration completes.
+ */
+struct module_section_image;
+#ifdef CONFIG_MODULES
+struct module_section_image *module_section_image_alloc(Elf_Ehdr *, Elf_Shdr *, char *);
+unsigned int module_section_image_size(const struct module_section_image *);
+unsigned int module_section_image_text_size(const struct module_section_image *);
+unsigned long module_section_image_symbol(const struct module_section_image *, unsigned int);
+int module_section_image_finalize(struct module_section_image *);
+int module_section_image_register(struct module_section_image *);
+void module_section_image_free(struct module_section_image *, void (*release)(void *), void *);
+#else
+static inline struct module_section_image *module_section_image_alloc(Elf_Ehdr *hdr,
+		Elf_Shdr *sections, char *names) { return ERR_PTR(-EOPNOTSUPP); }
+static inline unsigned int module_section_image_size(const struct module_section_image *image) { return 0; }
+static inline unsigned int module_section_image_text_size(const struct module_section_image *image) { return 0; }
+static inline unsigned long module_section_image_symbol(const struct module_section_image *image, unsigned int index) { return 0; }
+static inline int module_section_image_finalize(struct module_section_image *image) { return -EOPNOTSUPP; }
+static inline int module_section_image_register(struct module_section_image *image) { return -EOPNOTSUPP; }
+static inline void module_section_image_free(struct module_section_image *image,
+		void (*release)(void *), void *owner) { }
+#endif
+
 /* Any cleanup needed when module leaves. */
 void module_arch_cleanup(struct module *mod);
 

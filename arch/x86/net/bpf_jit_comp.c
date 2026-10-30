@@ -12,6 +12,8 @@
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/sort.h>
+#include <linux/extable.h>
+#include <linux/bpf_native_seq.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
 #include <asm/set_memory.h>
@@ -1801,6 +1803,16 @@ static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
 		int cnt;
 		int err;
 
+		if (bpf_native_seq_insn(&insn[i])) {
+			struct bpf_native_seq *seq = bpf_native_seq_get(bpf_prog, insn[i].imm);
+			u32 reg;
+
+			if (!seq)
+				return -EINVAL;
+			for (reg = BPF_REG_6; reg <= BPF_REG_9; reg++)
+				if ((seq->read_mask | seq->write_mask) & BIT(reg))
+					regs_used[reg - BPF_REG_6] = true;
+		}
 		if (!bpf_kop_is_sidecar_insn(&insn[i]))
 			continue;
 		if (i + 1 >= insn_cnt)
@@ -1924,6 +1936,8 @@ static void emit_priv_frame_ptr(u8 **pprog, void __percpu *priv_frame_ptr)
 #define PRIV_STACK_GUARD_SZ    8
 #define PRIV_STACK_GUARD_VAL   0xEB9F12345678eb9fULL
 
+#include "bpf_jit_native.h"
+
 static int emit_spectre_bhb_barrier(u8 **pprog, u8 *ip,
 				    struct bpf_prog *bpf_prog)
 {
@@ -1966,15 +1980,15 @@ static int emit_spectre_bhb_barrier(u8 **pprog, u8 *ip,
 	return 0;
 }
 
-static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *addrs, u8 *image,
-		  u8 *rw_image, int oldproglen, struct jit_context *ctx, bool jmp_padding)
+static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *addrs, u8 *image,
+		    u8 *rw_image, int oldproglen, struct jit_context *ctx, bool jmp_padding,
+		    u8 *temp, u32 temp_size)
 {
 	bool tail_call_reachable = bpf_prog->aux->tail_call_reachable;
 	struct bpf_insn *insn = bpf_prog->insnsi;
 	bool callee_regs_used[4] = {};
 	int insn_cnt = bpf_prog->len;
 	bool seen_exit = false;
-	u8 temp[BPF_MAX_INSN_SIZE + BPF_INSN_SAFETY];
 	void __percpu *priv_frame_ptr = NULL;
 	u64 arena_vm_start, user_vm_start;
 	void __percpu *priv_stack_ptr;
@@ -2001,10 +2015,27 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int *
 	u32 native_depth = stack_depth;
 	bool native_realign = bpf_prog->aux->native_frame && bpf_prog->aux->native_stack_align > 8;
 	u32 native_fp = native_realign ? X86_REG_R12 : BPF_REG_FP;
+	struct bpf_native_image *native = bpf_prog->aux->native_image;
+	u32 spill_size = native ? native->spill_size : 0;
+	s32 spill_offset = -(s32)round_up(stack_depth, 8) - 8;
+
+	if (native_realign) {
+		spill_offset = -16;
+		for (int reg = 0; reg < 4; reg++)
+			spill_offset -= callee_regs_used[reg] ? 8 : 0;
+	} else {
+		stack_depth += spill_size;
+		native_depth = stack_depth;
+	}
+	if (native)
+		for (int seq = 0; seq < native->count; seq++)
+			native->sequences[seq].spill_offset = spill_offset;
 	if (bpf_prog->aux->native_frame) {
 		native_depth = round_up(stack_depth, 8) + round_up(bpf_prog->aux->native_arg_out, 8);
 		for (int reg = 0; reg < 4; reg++)
 			native_depth += callee_regs_used[reg] ? 8 : 0;
+		if (native_realign)
+			native_depth += spill_size;
 	}
 	emit_prologue(&prog, image, native_depth + (native_realign ? 8 : 0),
 		      bpf_prog_was_classic(bpf_prog), tail_call_reachable,
@@ -2843,6 +2874,12 @@ populate_extable:
 			u32 recovery = 0, exception_data = 0;
 			bool fault_call = false;
 
+			if (src_reg == BPF_PSEUDO_NATIVE_SEQ) {
+				err = native_emit(bpf_prog, i - 1, addrs[i - 1] + prog - temp, &prog);
+				if (err)
+					return err;
+				break;
+			}
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
 				err = emit_kop_desc_call(&prog, bpf_prog,
@@ -3231,7 +3268,9 @@ emit_jmp:
 		if (ctx->aot && ctx->aot->error)
 			return ctx->aot->error;
 		ilen = prog - temp;
-		if (ilen > BPF_MAX_INSN_SIZE) {
+		if (ilen < 0 || proglen > INT_MAX - ilen)
+			return -E2BIG;
+		if (ilen > temp_size - BPF_INSN_SAFETY) {
 			pr_err("bpf_jit: fatal insn size error\n");
 			return -EFAULT;
 		}
@@ -3257,11 +3296,41 @@ emit_jmp:
 		prog = temp;
 	}
 
+	err = native_layout(bpf_prog->aux->native_image, proglen);
+	if (err < 0)
+		return err;
+	proglen = err;
+	if (image) {
+		err = native_finish(bpf_prog, addrs, image, rw_image, ctx->aot);
+		if (err)
+			return err;
+	}
 	if (image && excnt != bpf_prog->aux->num_exentries) {
 		pr_err("extable is not populated\n");
 		return -EFAULT;
 	}
 	return proglen;
+}
+
+static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *prog, int *addrs,
+		  u8 *image, u8 *rw_image, int oldlen, struct jit_context *ctx, bool padding)
+{
+	u32 size = BPF_MAX_INSN_SIZE;
+	u8 *temp;
+	int err;
+
+	err = native_image_prepare(prog);
+	if (err)
+		return err;
+	if (prog->aux->native_image)
+		size = max(size, prog->aux->native_image->max_emit);
+	temp = kvmalloc(size + BPF_INSN_SAFETY, GFP_KERNEL);
+	if (!temp)
+		return -ENOMEM;
+	err = __do_jit(env, prog, addrs, image, rw_image, oldlen, ctx, padding,
+		       temp, size + BPF_INSN_SAFETY);
+	kvfree(temp);
+	return err;
 }
 
 /* Produce a new, unplaced image from the already rewritten program. All
@@ -3334,6 +3403,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		goto out;
 	prog->aux = aux;
 	aux->extable = NULL;
+	aux->native_image = NULL;
 	aux->poke_tab = NULL;
 	if (source->aux->size_poke_tab) {
 		aux->poke_tab = kmemdup(source->aux->poke_tab,
@@ -3363,6 +3433,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 	image = kvzalloc(ALIGN(len, 4) + aux->num_exentries * sizeof(*aux->extable), GFP_KERNEL);
 	if (!image)
 		goto out;
+	jit_fill_hole(image, len);
 	aot.image = image;
 	aot.final = true;
 	if (aux->num_exentries)
@@ -3377,8 +3448,13 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 			addrs[++i] = -1;
 	aot.extable = aux->extable;
 	aot.nr_exentries = aux->num_exentries;
+	err = native_aot_data(prog, addrs, &aot);
+	if (err)
+		goto out;
 	err = aot_build_elf(&aot, name, image, len, addrs, source->len + 1, object, size);
 out:
+	if (aux)
+		native_image_free(aux->native_image);
 	kvfree(image);
 	kvfree(addrs);
 	if (aux)
@@ -3386,6 +3462,7 @@ out:
 	kfree(aux);
 	kfree(prog);
 	kvfree(aot.records);
+	kvfree(aot.native_data);
 	kfree(aot.operands);
 	return err;
 }
@@ -4463,7 +4540,8 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 		image = jit_data->image;
 		header = jit_data->header;
 		rw_header = jit_data->rw_header;
-		rw_image = (void *)rw_header + ((void *)image - (void *)header);
+		rw_image = prog->aux->native_image ? image :
+			(void *)rw_header + ((void *)image - (void *)header);
 		extra_pass = true;
 		padding = true;
 		goto skip_init_addrs;
@@ -4496,6 +4574,10 @@ skip_init_addrs:
 		if (proglen <= 0) {
 out_image:
 			image = NULL;
+			if (prog->aux->native_image) {
+				native_image_free(prog->aux->native_image);
+				prog->aux->native_image = NULL;
+			}
 			if (header) {
 				bpf_arch_text_copy(&header->size, &rw_header->size,
 						   sizeof(rw_header->size));
@@ -4527,6 +4609,12 @@ out_image:
 			u32 extable_size = prog->aux->num_exentries *
 				sizeof(struct exception_table_entry);
 
+			if (prog->aux->native_image) {
+				if (native_image_alloc(prog, proglen, &image))
+					goto out_image;
+				rw_image = image;
+				goto allocated;
+			}
 			/* allocate module memory for x86 insns and extable */
 			header = bpf_jit_binary_pack_alloc(roundup(proglen, align) + extable_size,
 							   &image, align, &rw_header, &rw_image,
@@ -4535,6 +4623,7 @@ out_image:
 			if (!header)
 				goto out_addrs;
 			prog->aux->extable = (void *) image + roundup(proglen, align);
+allocated:;
 		}
 		oldproglen = proglen;
 		cond_resched();
@@ -4552,12 +4641,15 @@ out_image:
 			 *
 			 * Both cases are serious bugs and justify WARN_ON.
 			 */
-			if (WARN_ON(bpf_jit_binary_pack_finalize(header, rw_header))) {
+			if (!prog->aux->native_image &&
+			    WARN_ON(bpf_jit_binary_pack_finalize(header, rw_header))) {
 				/* header has been freed */
 				header = NULL;
 				goto out_image;
 			}
 
+			if (native_finalize(prog) || native_register(prog))
+				goto out_image;
 			bpf_tail_call_direct_fixup(prog);
 		} else {
 			jit_data->addrs = addrs;
@@ -4585,7 +4677,9 @@ out_image:
 		 */
 		prog->bpf_func = (void *)image + cfi_get_offset();
 		prog->jited = 1;
-		prog->jited_len = proglen - cfi_get_offset();
+		prog->jited_len = (prog->aux->native_image ?
+			module_section_image_text_size(prog->aux->native_image->module) : proglen) -
+			cfi_get_offset();
 	}
 
 	if (!image || !prog->is_func || extra_pass) {
@@ -4630,6 +4724,9 @@ bool bpf_jit_supports_percpu_insn(void)
 
 void bpf_jit_free(struct bpf_prog *prog)
 {
+	bool native = prog->aux->native_image && prog->aux->native_image->module;
+
+
 	if (prog->jited) {
 		struct x64_jit_data *jit_data = prog->aux->jit_data;
 		struct bpf_binary_header *hdr;
@@ -4642,14 +4739,17 @@ void bpf_jit_free(struct bpf_prog *prog)
 		 * before freeing it.
 		 */
 		if (jit_data) {
-			bpf_jit_binary_pack_finalize(jit_data->header,
-						     jit_data->rw_header);
+			if (!native)
+				bpf_jit_binary_pack_finalize(jit_data->header,
+							     jit_data->rw_header);
 			kvfree(jit_data->addrs);
 			kfree(jit_data);
 		}
-		prog->bpf_func = (void *)prog->bpf_func - cfi_get_offset();
-		hdr = bpf_jit_binary_pack_hdr(prog);
-		bpf_jit_binary_pack_free(hdr, NULL);
+		if (!native) {
+			prog->bpf_func = (void *)prog->bpf_func - cfi_get_offset();
+			hdr = bpf_jit_binary_pack_hdr(prog);
+			bpf_jit_binary_pack_free(hdr, NULL);
+		}
 		priv_stack_ptr = prog->aux->priv_stack_ptr;
 		if (priv_stack_ptr) {
 			priv_stack_alloc_sz = round_up(prog->aux->stack_depth, 8) +
@@ -4659,6 +4759,9 @@ void bpf_jit_free(struct bpf_prog *prog)
 		}
 		WARN_ON_ONCE(!bpf_prog_kallsyms_verify_off(prog));
 	}
+
+	native_image_free(prog->aux->native_image);
+	prog->aux->native_image = NULL;
 
 	bpf_prog_unlock_free(prog);
 }
