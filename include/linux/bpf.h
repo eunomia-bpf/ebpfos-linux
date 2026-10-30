@@ -2050,6 +2050,8 @@ struct bpf_prog_aux {
 	struct bpf_map __rcu *st_ops_assoc;
 	/* Resolved ldimm64 operands which came from symbolic references. */
 	unsigned long *jit_addr_insns;
+	/* Source-BTF names of address-only native storage operands. */
+	u32 *jit_native_symbol_ids;
 };
 
 #define BPF_NR_CONTEXTS        4       /* normal, softirq, hardirq, NMI */

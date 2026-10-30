@@ -617,6 +617,53 @@ static int probe_kern_btf_layout(int token_fd)
 						 (char *)layout, token_fd));
 }
 
+static int probe_source_scalar_symbol(int token_fd)
+{
+	static const char strs[] = "\0int\0_stext\0ksym:scalar\0probe";
+	__u32 types[] = {
+		BTF_TYPE_INT_ENC(1, BTF_INT_SIGNED, 0, 32, 4),
+		BTF_TYPE_ENC(5, BTF_INFO_ENC(BTF_KIND_VAR, 0, 0), 1),
+		BTF_VAR_GLOBAL_ALLOCATED,
+		BTF_TYPE_ENC(12, BTF_INFO_ENC(BTF_KIND_DECL_TAG, 0, 0), 2),
+		(__u32)-1,
+		BTF_TYPE_ENC(0, BTF_INFO_ENC(BTF_KIND_FUNC_PROTO, 0, 0), 1),
+		BTF_TYPE_ENC(24, BTF_INFO_ENC(BTF_KIND_FUNC, 0, BTF_FUNC_GLOBAL), 4),
+	};
+	struct bpf_insn insns[] = {
+		BPF_LD_IMM64_RAW(BPF_REG_1, BPF_PSEUDO_BTF_ID, 2),
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	};
+	struct bpf_func_info function = { .type_id = 5 };
+	char log[4096] = {};
+	LIBBPF_OPTS(bpf_prog_load_opts, opts,
+		.token_fd = token_fd,
+		.prog_flags = token_fd ? BPF_F_TOKEN_FD : 0,
+		.func_info = &function,
+		.func_info_cnt = 1,
+		.func_info_rec_size = sizeof(function),
+		.log_buf = log,
+		.log_size = sizeof(log),
+		.log_level = 1,
+	);
+	int btf_fd, fd;
+
+	btf_fd = libbpf__load_raw_btf((char *)types, sizeof(types), strs, sizeof(strs), token_fd);
+	if (btf_fd < 0)
+		return 0;
+	opts.prog_btf_fd = btf_fd;
+	insns[1].imm = BPF_BTF_SOURCE;
+	fd = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns,
+			   ARRAY_SIZE(insns), &opts);
+	if (fd < 0)
+		fd = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, NULL, "GPL", insns,
+				   ARRAY_SIZE(insns), &opts);
+	if (fd < 0)
+		pr_debug("source scalar symbol probe: %d: %s\n", fd, log);
+	close(btf_fd);
+	return probe_fd(fd);
+}
+
 typedef int (*feature_probe_fn)(int /* token_fd */);
 
 static struct kern_feature_cache feature_cache;
@@ -700,6 +747,9 @@ static struct kern_feature_desc {
 	},
 	[FEAT_BTF_LAYOUT] = {
 		"kernel supports BTF layout", probe_kern_btf_layout,
+	},
+	[FEAT_SOURCE_SCALAR_SYMBOL] = {
+		"source BTF address-only symbols", probe_source_scalar_symbol,
 	},
 };
 

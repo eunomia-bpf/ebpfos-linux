@@ -3,9 +3,14 @@ config EBPFOS
 	bool "eBPFOS transactional component graph"
 	depends on BPF_SYSCALL && BPF_JIT
 	select CRYPTO_LIB_SHA256
+	select DEBUG_KERNEL
+	select KALLSYMS
+	select KALLSYMS_ALL
 	default n
 	help
 	  Build the eBPFOS component nucleus and transactional package admission.
+	  Keep data symbols, including local and per-CPU allocations, available
+	  for native-symbol relocations at runtime.
 
 config EBPFOS_BUILD
 	bool

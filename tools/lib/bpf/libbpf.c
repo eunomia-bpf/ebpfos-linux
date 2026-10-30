@@ -4529,6 +4529,20 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 			vs->offset = ext->kcfg.data_off;
 		}
 	}
+	/* DATASEC compatibility rewrites VAR types to int. Preserve the original
+	 * address-only role separately, without claiming an int-sized memory view.
+	 * Append after all borrowed BTF pointers above have gone out of use.
+	 */
+	for (i = 0; i < obj->nr_extern; i++) {
+		int id;
+
+		ext = &obj->externs[i];
+		if (ext->type != EXT_KSYM || ext->ksym.type_id)
+			continue;
+		id = btf__add_decl_tag(obj->btf, "ksym:scalar", ext->btf_id, -1);
+		if (id < 0)
+			return id;
+	}
 	return 0;
 }
 
@@ -6487,8 +6501,15 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 					insn[0].imm = ext->ksym.kernel_btf_id;
 					insn[1].imm = ext->ksym.kernel_btf_obj_fd;
 				} else { /* typeless ksyms or unresolved typed ksyms */
-					insn[0].imm = (__u32)ext->ksym.addr;
-					insn[1].imm = ext->ksym.addr >> 32;
+					if (!ext->ksym.type_id && ext->is_set &&
+					    kernel_supports(obj, FEAT_SOURCE_SCALAR_SYMBOL)) {
+						insn[0].src_reg = BPF_PSEUDO_BTF_ID;
+						insn[0].imm = ext->btf_id;
+						insn[1].imm = BPF_BTF_SOURCE;
+					} else {
+						insn[0].imm = (__u32)ext->ksym.addr;
+						insn[1].imm = ext->ksym.addr >> 32;
+					}
 				}
 			}
 			break;
@@ -8597,11 +8618,13 @@ static int kallsyms_cb(unsigned long long sym_addr, char sym_type,
 	struct extern_desc *ext;
 	const char *res;
 
+	/* Source components retain the complete native ELF spelling, including
+	 * LTO suffixes. Prefer that identity before the legacy unsuffixed form.
+	 */
+	ext = find_extern_by_name(obj, sym_name);
 	res = strstr(sym_name, ".llvm.");
-	if (sym_type == 'd' && res)
+	if (!ext && sym_type == 'd' && res)
 		ext = find_extern_by_name_with_len(obj, sym_name, res - sym_name);
-	else
-		ext = find_extern_by_name(obj, sym_name);
 	if (!ext || ext->type != EXT_KSYM)
 		return 0;
 

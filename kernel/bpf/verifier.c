@@ -19162,6 +19162,10 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			dst_reg->btf = aux->btf_var.btf;
 			dst_reg->btf_id = aux->btf_var.btf_id;
 			break;
+		case SCALAR_VALUE:
+			/* An address-only VAR has no memory view. */
+			__mark_reg_known(dst_reg, ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm);
+			break;
 		default:
 			verifier_bug(env, "pseudo btf id: unexpected dst reg type");
 			return -EFAULT;
@@ -20672,6 +20676,20 @@ int bpf_verifier_add_used_btf(struct bpf_verifier_env *env, struct btf *btf)
 	return __add_used_btf(env, btf);
 }
 
+/* A source address-only extern carries only relocation identity. It grants exactly
+ * the same scalar value as libbpf's traditional untyped ksym immediate.
+ */
+static bool source_scalar_symbol(const struct btf *btf, u32 id)
+{
+	const struct btf_type *type = btf_type_by_id(btf, id);
+	const char *tag;
+
+	if (!type || !btf_type_is_var(type))
+		return false;
+	tag = btf_find_decl_tag_value(btf, type, -1, "ksym:scalar");
+	return !IS_ERR(tag) && !*tag;
+}
+
 /* replace pseudo btf_id with kernel symbol address */
 static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 				 struct bpf_insn *insn,
@@ -20718,6 +20736,11 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 	insn[0].imm = (u32)addr;
 	insn[1].imm = addr >> 32;
+	if (source_btf && source_scalar_symbol(btf, id)) {
+		aux->btf_var.reg_type = SCALAR_VALUE;
+		aux->native_symbol_id = id;
+		return 0;
+	}
 
 	if (btf_type_is_func(t)) {
 		aux->btf_var.reg_type = PTR_TO_MEM | MEM_RDONLY;
@@ -20802,13 +20825,14 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 
 	btf_fd = insn[1].imm;
 	if (btf_fd == BPF_BTF_SOURCE) {
-		if (!env->prog->aux->trusted_kernel) {
-			verbose(env, "source BTF native extern requires the trusted tier\n");
-			return -EACCES;
-		}
 		btf = env->prog->aux->btf;
 		if (!btf)
 			return -EINVAL;
+		if (!env->prog->aux->trusted_kernel &&
+		    !(env->allow_ptr_leaks && source_scalar_symbol(btf, insn->imm))) {
+			verbose(env, "source BTF native extern requires the trusted tier\n");
+			return -EACCES;
+		}
 		btf_get(btf);
 	} else if (btf_fd) {
 		btf = btf_get_by_fd(btf_fd);
@@ -20831,7 +20855,7 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 
 	err = __check_pseudo_btf_id(env, insn, aux, btf, btf_fd == BPF_BTF_SOURCE);
-	if (!err && btf_fd == BPF_BTF_SOURCE &&
+	if (!err && btf_fd == BPF_BTF_SOURCE && !aux->native_symbol_id &&
 	    !is_kernel(((u64)(u32)insn[1].imm << 32) | (u32)insn[0].imm)) {
 		verbose(env, "source BTF extern is not a built-in symbol\n");
 		err = -EOPNOTSUPP;
@@ -21531,6 +21555,16 @@ static int convert_pseudo_ld_imm64(struct bpf_verifier_env *env)
 	for (i = 0; i < insn_cnt; i++, insn++) {
 		if (insn->code != (BPF_LD | BPF_IMM | BPF_DW))
 			continue;
+		if (env->insn_aux_data[i].native_symbol_id) {
+			u32 **ids = &env->prog->aux->jit_native_symbol_ids;
+
+			if (!*ids) {
+				*ids = kvcalloc(insn_cnt, sizeof(**ids), GFP_KERNEL_ACCOUNT);
+				if (!*ids)
+					return -ENOMEM;
+			}
+			(*ids)[i] = env->insn_aux_data[i].native_symbol_id;
+		}
 		if (insn->src_reg) {
 			if (!addresses) {
 				addresses = kvcalloc(BITS_TO_LONGS(insn_cnt), sizeof(*addresses), GFP_KERNEL_ACCOUNT);

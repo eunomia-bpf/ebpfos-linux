@@ -1196,7 +1196,23 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 			emit_mov_imm64(pprog, dst_reg, value >> 32, value);
 			return 0;
 		}
-		err = aot_address_name(aot, value, name, &addend);
+		if (aot && aot->root->aux->jit_native_symbol_ids) {
+			u32 index = insn + aot->source->aux->subprog_start;
+			u32 id = index < aot->root->len ? aot->root->aux->jit_native_symbol_ids[index] : 0;
+			const struct btf_type *type = id ? btf_type_by_id(aot->root->aux->btf, id) : NULL;
+
+			if (type && btf_type_is_var(type)) {
+				const char *symbol = btf_name_by_offset(aot->root->aux->btf, type->name_off);
+
+				if (strscpy(name, symbol, sizeof(name)) < 0)
+					return -ENAMETOOLONG;
+				err = 0;
+			} else {
+				err = aot_address_name(aot, value, name, &addend);
+			}
+		} else {
+			err = aot_address_name(aot, value, name, &addend);
+		}
 		if (err)
 			return err;
 	}
