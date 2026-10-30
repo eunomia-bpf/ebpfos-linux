@@ -2924,6 +2924,13 @@ void bpf_free_kfunc_btf_tab(struct bpf_kfunc_btf_tab *tab)
 
 static struct btf *find_kfunc_desc_btf(struct bpf_verifier_env *env, s16 offset)
 {
+	if (offset == BPF_BTF_SOURCE) {
+		if (!env->prog->aux->trusted_kernel) {
+			verbose(env, "source BTF native extern requires the trusted tier\n");
+			return ERR_PTR(-EACCES);
+		}
+		return env->prog->aux->btf ?: ERR_PTR(-EINVAL);
+	}
 	if (offset) {
 		if (offset < 0) {
 			/* In the future, this can be allowed to increase limit
@@ -3094,7 +3101,7 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 	if (!kop_call && !func_id && !offset)
 		return 0;
 
-	if (!btf_tab && offset) {
+	if (!btf_tab && offset && (s16)offset != BPF_BTF_SOURCE) {
 		btf_tab = kzalloc_obj(*btf_tab, GFP_KERNEL_ACCOUNT);
 		if (!btf_tab)
 			return -ENOMEM;
@@ -3149,14 +3156,33 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		desc->imm = func_id;
 		desc->kop = kfunc.kop;
 	} else {
-		addr = kallsyms_lookup_name(kfunc.name);
+		if ((s16)offset == BPF_BTF_SOURCE) {
+			char name[KSYM_NAME_LEN];
+			size_t length = bpf_core_essential_name_len(kfunc.name);
+
+			if (length >= sizeof(name)) {
+				err = -ENAMETOOLONG;
+				goto err_remove_desc;
+			}
+			memcpy(name, kfunc.name, length);
+			name[length] = 0;
+			addr = kallsyms_lookup_name(name);
+			/* Module calls keep their BTF/module reference path. */
+			if (addr && !is_kernel(addr)) {
+				verbose(env, "source BTF extern is not a built-in symbol\n");
+				err = -EOPNOTSUPP;
+				goto err_remove_desc;
+			}
+		} else {
+			addr = kallsyms_lookup_name(kfunc.name);
+		}
 		if (!addr) {
 			verbose(env, "cannot find address for kernel function %s\n",
 				kfunc.name);
 			err = -EINVAL;
 			goto err_remove_desc;
 		}
-		if (bpf_dev_bound_kfunc_id(func_id)) {
+		if ((s16)offset != BPF_BTF_SOURCE && bpf_dev_bound_kfunc_id(func_id)) {
 			err = bpf_dev_bound_kfunc_check(&env->log, prog_aux);
 			if (err)
 				goto err_remove_desc;
@@ -20638,12 +20664,13 @@ int bpf_verifier_add_used_btf(struct bpf_verifier_env *env, struct btf *btf)
 static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 				 struct bpf_insn *insn,
 				 struct bpf_insn_aux_data *aux,
-				 struct btf *btf)
+				 struct btf *btf, bool source_btf)
 {
 	const struct btf_var_secinfo *vsi;
 	const struct btf_type *datasec;
 	const struct btf_type *t;
 	const char *sym_name;
+	char source_name[KSYM_NAME_LEN];
 	bool percpu = false;
 	u32 type, id = insn->imm;
 	s32 datasec_id;
@@ -20662,6 +20689,15 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 
 	sym_name = btf_name_by_offset(btf, t->name_off);
+	if (source_btf && btf_type_is_func(t)) {
+		size_t length = bpf_core_essential_name_len(sym_name);
+
+		if (length >= sizeof(source_name))
+			return -ENAMETOOLONG;
+		memcpy(source_name, sym_name, length);
+		source_name[length] = 0;
+		sym_name = source_name;
+	}
 	addr = kallsyms_lookup_name(sym_name);
 	if (!addr) {
 		verbose(env, "ldimm64 failed to find the address for kernel symbol '%s'.\n",
@@ -20753,11 +20789,25 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 	int err;
 
 	btf_fd = insn[1].imm;
-	if (btf_fd) {
+	if (btf_fd == BPF_BTF_SOURCE) {
+		if (!env->prog->aux->trusted_kernel) {
+			verbose(env, "source BTF native extern requires the trusted tier\n");
+			return -EACCES;
+		}
+		btf = env->prog->aux->btf;
+		if (!btf)
+			return -EINVAL;
+		btf_get(btf);
+	} else if (btf_fd) {
 		btf = btf_get_by_fd(btf_fd);
 		if (IS_ERR(btf)) {
 			verbose(env, "invalid module BTF object FD specified.\n");
 			return -EINVAL;
+		}
+		if (!btf_is_kernel(btf)) {
+			verbose(env, "non-kernel BTF cannot describe a native extern\n");
+			btf_put(btf);
+			return -EACCES;
 		}
 	} else {
 		if (!btf_vmlinux) {
@@ -20768,7 +20818,12 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 		btf = btf_vmlinux;
 	}
 
-	err = __check_pseudo_btf_id(env, insn, aux, btf);
+	err = __check_pseudo_btf_id(env, insn, aux, btf, btf_fd == BPF_BTF_SOURCE);
+	if (!err && btf_fd == BPF_BTF_SOURCE &&
+	    !is_kernel(((u64)(u32)insn[1].imm << 32) | (u32)insn[0].imm)) {
+		verbose(env, "source BTF extern is not a built-in symbol\n");
+		err = -EOPNOTSUPP;
+	}
 	if (err) {
 		btf_put(btf);
 		return err;
