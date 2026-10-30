@@ -153,7 +153,7 @@ static u8 native_word_mask(struct btf *btf, u32 id)
  return (classes[0] == BPF_NC_INTEGER) | ((classes[1] == BPF_NC_INTEGER) << 1);
 }
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
- struct bpf_native_abi *abi, bool allow_variadic_prefix)
+ struct bpf_native_abi *abi, bool trusted_native)
 {
  const struct btf_param *params;
  u32 size = 0, next_reg = 0, nargs;
@@ -165,10 +165,10 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  /* Trusted x86 native entries carry their variadic operands directly.
   * Only named arguments contribute to the incoming fixed frame.
   */
- if (allow_variadic_prefix && IS_ENABLED(CONFIG_X86_64) && nargs &&
+ if (trusted_native && IS_ENABLED(CONFIG_X86_64) && nargs &&
      !btf_params(proto)[nargs - 1].type)
   nargs--;
- if (nargs > MAX_BPF_FUNC_ARGS) return -E2BIG;
+ if (nargs > MAX_BPF_FUNC_ARGS && !trusted_native) return -E2BIG;
  if (proto->type) {
   err = bpf_native_classify(btf, proto->type, &size, &words);
   if (err < 0) return err;
@@ -185,7 +185,13 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  }
  params = btf_params(proto);
  for (u32 i = 0; i < nargs; i++) {
-  struct bpf_native_arg *arg = &abi->args[abi->nr_args++];
+  struct bpf_native_arg temporary = {};
+  /* Trusted preparation needs the complete stack layout, not per-argument
+   * proof records. Keep the existing records without imposing the tracing
+   * model capacity on native frames. Normal verification requires them all.
+   */
+  struct bpf_native_arg *arg = abi->nr_args < ARRAY_SIZE(abi->args) ?
+   &abi->args[abi->nr_args++] : &temporary;
   if (!params[i].type) return -EOPNOTSUPP;
   err = bpf_native_classify(btf, params[i].type, &size, &words);
   if (err < 0) return err;

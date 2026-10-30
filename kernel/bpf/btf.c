@@ -7947,11 +7947,11 @@ int btf_distill_func_proto(struct bpf_verifier_log *log,
 /* Native entries are called directly, without a tracing argument adapter. */
 int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 				 const struct btf_type *proto, const char *name,
-				 struct btf_func_model *model, bool allow_variadic_prefix)
+				 struct btf_func_model *model, bool trusted_native)
 {
 	struct bpf_native_abi abi;
 	const struct btf_type *type;
-	int size, err = bpf_native_abi_plan(btf, proto, &abi, allow_variadic_prefix);
+	int size, err = bpf_native_abi_plan(btf, proto, &abi, trusted_native);
 
 	if (err)
 		return err;
@@ -7961,9 +7961,16 @@ int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 		return size;
 	model->ret_size = size;
 	model->ret_flags = __get_type_fmodel_flags(type);
-	model->nr_args = btf_type_vlen(proto);
 	model->native_stack = abi.stack_size || abi.result_buffer;
-	if (allow_variadic_prefix && model->nr_args &&
+	if (btf_type_vlen(proto) > MAX_BPF_FUNC_ARGS) {
+		/* Trusted native operands already carry the complete call ABI.
+		 * No fixed tracing argument model describes this entry.
+		 */
+		model->native_stack = true;
+		return 0;
+	}
+	model->nr_args = btf_type_vlen(proto);
+	if (trusted_native && model->nr_args &&
 	    !btf_params(proto)[model->nr_args - 1].type) {
 		model->nr_args--;
 		/* A variadic entry cannot use a fixed tracing trampoline. */

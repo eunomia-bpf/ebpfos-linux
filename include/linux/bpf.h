@@ -3313,7 +3313,7 @@ int btf_distill_native_func_proto(struct bpf_verifier_log *log,
 			   struct btf *btf,
 			   const struct btf_type *func_proto,
 			   const char *func_name,
-			   struct btf_func_model *m, bool allow_variadic_prefix);
+			   struct btf_func_model *m, bool trusted_native);
 
 struct bpf_reg_state;
 int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog);

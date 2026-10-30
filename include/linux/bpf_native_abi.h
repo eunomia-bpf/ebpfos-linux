@@ -28,5 +28,5 @@ bool btf_native_record_entry_contract(struct btf *btf, u32 id);
 int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
                               u32 word, u32 *bytes, struct bpf_verifier_log *log);
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
-                       struct bpf_native_abi *abi, bool allow_variadic_prefix);
+                       struct bpf_native_abi *abi, bool trusted_native);
 #endif
