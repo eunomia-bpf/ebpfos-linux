@@ -10712,20 +10712,60 @@ static int native_stack_arg(struct bpf_verifier_env *env,
 	return native_stack_arg_at(env, arg, scope, 13, 8);
 }
 
-/* R0 is caller-clobbered and is not an argument register. Borrow its verifier
- * state for a second stack value, restoring it before leaving the checker.
- * No BPF instruction or JIT register move is inserted.
+/* Logical scalar precision and signedness are shared by native entries,
+ * global calls, ordinary Native calls and typed callbacks.
  */
-/* A C 32-bit scalar defines its low word, not the upper native register.
- * Records and pointers retain their existing complete-word contracts.
+static u32 native_scalar_bits(const struct btf_type *type, bool *sign)
+{
+ u32 encoding, bits;
+
+ if (!type || !btf_type_is_scalar(type) || !type->size || type->size > 8)
+  return 0;
+ encoding = btf_type_is_int(type) ? btf_int_encoding(type) : 0;
+ bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(type) ? btf_int_bits(type) : type->size * 8;
+ *sign = btf_type_is_int(type) ? encoding & BTF_INT_SIGNED : btf_type_kflag(type);
+ return bits && bits <= type->size * 8 ? bits : 0;
+}
+
+/* The native C ABI promotes ordinary subword integers to their canonical low
+ * word; none of these values defines the upper native register or stack slot.
+ * Records, pointers and non-byte-width integers retain their prior contracts.
  */
 static u32 native_named_input_bytes(const struct btf *btf, const struct bpf_native_arg *arg)
 {
  const struct btf_type *type = btf_type_skip_modifiers(btf, arg->type_id, NULL);
- return type && btf_type_is_scalar(type) && type->size == 4 &&
-  (!btf_type_is_int(type) || btf_int_bits(type) == 32) ? 4 : 8;
+ bool sign;
+ u32 bits = native_scalar_bits(type, &sign);
+
+ return bits && (type->size == 1 || type->size == 2 || type->size == 4) &&
+  (!btf_type_is_int(type) || (btf_int_encoding(type) & BTF_INT_BOOL) ||
+   btf_int_bits(type) == type->size * 8) ? 4 : 8;
 }
 
+static int check_native_scalar_extension(struct bpf_verifier_env *env,
+                                        const struct btf_type *type, u32 regno)
+{
+ struct bpf_reg_state *reg = &cur_regs(env)[regno];
+ bool sign;
+ u32 bits = native_scalar_bits(type, &sign);
+
+ if (!bits || bits > 64) return -EINVAL;
+ if (bits < 32) {
+  if ((sign && (reg->s32_min_value < -(1 << (bits - 1)) ||
+                reg->s32_max_value > (1 << (bits - 1)) - 1)) ||
+      (!sign && reg->u32_max_value > (1U << bits) - 1)) {
+   verbose(env, "R%d lacks its native scalar extension\n", regno);
+   return -EINVAL;
+  }
+  return mark_chain_precision(env, regno);
+ }
+ return 0;
+}
+
+/* R0 is caller-clobbered and is not an argument register. Borrow its verifier
+ * state for a second stack value, restoring it before leaving the checker.
+ * No BPF instruction or JIT register move is inserted.
+ */
 static int native_call_arg_reg(struct bpf_verifier_env *env, const struct btf *btf, const struct bpf_native_abi *abi,
 			       u32 index, struct native_arg_scope *scope)
 {
@@ -11088,6 +11128,11 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
 				return -EINVAL;
+			}
+			if (location && native_named_input_bytes(btf, location) == 4) {
+				ret = check_native_scalar_extension(env,
+					btf_type_skip_modifiers(btf, location->type_id, NULL), regno);
+				if (ret) return ret;
 			}
 			if (arg->has_scalar_max) {
 				/* Match the declared C value, as Native kfuncs do. A
@@ -14436,20 +14481,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			ret = __check_reg_arg(env, regs, regno, SRC_OP,
 				native ? native_named_input_bytes(btf, &abi.args[i + abi.result_buffer]) : 8);
 			if (ret) return ret;
-			if (meta->func_id == U32_MAX && native) {
-				u32 encoding = btf_type_is_int(t) ? btf_int_encoding(t) : 0;
-				u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(t) ? btf_int_bits(t) : t->size * 8;
-				bool sign = btf_type_is_int(t) ? encoding & BTF_INT_SIGNED : btf_type_kflag(t);
-
-				if (!bits || bits > 64 || (bits < 32 &&
-				    ((sign && (reg->s32_min_value < -(1 << (bits - 1)) ||
-				               reg->s32_max_value > (1 << (bits - 1)) - 1)) ||
-				     (!sign && reg->u32_max_value > (1U << bits) - 1))))
-					return -EINVAL;
-				if (bits < 32) {
-					ret = mark_chain_precision(env, regno);
-					if (ret) return ret;
-				}
+			if (native) {
+				ret = check_native_scalar_extension(env, t, regno);
+				if (ret) return ret;
 			}
 			if (reg->type != SCALAR_VALUE) {
 				verbose(env, "R%d is not a scalar\n", regno);
@@ -15109,20 +15143,8 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		if (err)
 			return err;
 		if (btf_type_is_scalar(type)) {
-			struct bpf_reg_state *arg = &regs[bpf_arg_regno(i - 1)];
-			u32 encoding = btf_type_is_int(type) ? btf_int_encoding(type) : 0;
-			u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(type) ?
-				btf_int_bits(type) : type->size * 8;
-			bool sign = btf_type_is_int(type) ?
-				encoding & BTF_INT_SIGNED : btf_type_kflag(type);
-			if (!bits || bits > 64)
-				return -EINVAL;
-			if (bits < 32 && ((sign && (arg->s32_min_value < -(1 << (bits - 1)) ||
-				      arg->s32_max_value > (1 << (bits - 1)) - 1)) ||
-			    (!sign && arg->u32_max_value > (1U << bits) - 1))) {
-				verbose(env, "callx arg#%d lacks its native scalar extension\n", i - 1);
-				return -EINVAL;
-			}
+			err = check_native_scalar_extension(env, type, bpf_arg_regno(i - 1));
+			if (err) return err;
 		}
 	}
 	err = check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
@@ -22083,7 +22105,24 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				/* Bounds describe the defined low-word value. The permission
 				 * still rejects a physical full-register read before normalization.
 				 */
+				bool sign;
+				u32 bits = native_scalar_bits(btf_type_skip_modifiers(env->prog->aux->btf,
+					location->type_id, NULL), &sign);
+
 				coerce_reg_to_size(reg, 4);
+				if (bits < 32) {
+					if (sign) {
+						reg->s32_min_value = -(1 << (bits - 1));
+						reg->s32_max_value = (1 << (bits - 1)) - 1;
+					} else {
+						u32 max = (1U << bits) - 1;
+
+						reg->var_off = tnum_range(0, max);
+						reg->umax_value = reg->u32_max_value = max;
+						reg->smax_value = reg->s32_max_value = max;
+					}
+					reg_bounds_sync(reg);
+				}
 				reg->native_input_bits = 32;
 			}
 			if (stacked) {
