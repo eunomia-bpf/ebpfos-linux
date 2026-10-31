@@ -504,6 +504,7 @@ static char slot_type_char[] = {
 	[STACK_ITER]	= 'i',
 	[STACK_IRQ_FLAG] = 'f',
 	[STACK_POISON]	= 'p',
+	[STACK_NATIVE_PADDING] = 'u',
 };
 
 #define UNUM_MAX_DECIMAL U16_MAX

@@ -120,6 +120,10 @@ struct bpf_reg_state {
 	 */
 	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
 	u8 mem_stable; /* enum bpf_mem_stability */
+	/* Native scalar input: 32 means only its low word is initialized.
+	 * Zero retains the ordinary complete-register state.
+	 */
+	u8 native_input_bits;
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
@@ -231,6 +235,7 @@ enum bpf_stack_slot_type {
 	STACK_ITER,
 	STACK_IRQ_FLAG,
 	STACK_POISON,
+	STACK_NATIVE_PADDING, /* upper bytes absent from a native scalar contract */
 };
 
 #define BPF_REG_SIZE 8	/* size of eBPF register in bytes */

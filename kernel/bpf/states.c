@@ -467,7 +467,11 @@ static void __clean_func_state(struct bpf_verifier_env *env,
 				bpf_mark_reg_not_init(env, spill);
 			}
 			for (j = start; j < end; j++)
-				st->stack[i].slot_type[j] = STACK_POISON;
+				/* Liveness may discard values, not turn unavailable
+				 * native padding into privileged-readable local bytes.
+				 */
+				if (st->stack[i].slot_type[j] != STACK_NATIVE_PADDING)
+					st->stack[i].slot_type[j] = STACK_POISON;
 		}
 	}
 }
@@ -541,6 +545,8 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
 	if (rold->type != rcur->type)
 		return false;
 	if (rold->mem_stable != rcur->mem_stable)
+		return false;
+	if (rold->native_input_bits != rcur->native_input_bits)
 		return false;
 	if (!check_ids(rold->mem_size_id, rcur->mem_size_id, idmap))
 		return false;
@@ -835,6 +841,7 @@ static bool stacksafe(struct bpf_verifier_env *env, struct bpf_func_state *old,
 		case STACK_ZERO:
 		case STACK_INVALID:
 		case STACK_POISON:
+		case STACK_NATIVE_PADDING:
 			continue;
 		/* Ensure that new unhandled slot types return false by default */
 		default:

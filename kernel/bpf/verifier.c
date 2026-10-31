@@ -4132,7 +4132,7 @@ static void mark_insn_zext(struct bpf_verifier_env *env,
 }
 
 static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *regs, u32 regno,
-			   enum bpf_reg_arg_type t)
+			   enum bpf_reg_arg_type t, u32 input_bytes)
 {
 	struct bpf_insn *insn = env->prog->insnsi + env->insn_idx;
 	struct bpf_reg_state *reg;
@@ -4146,6 +4146,18 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 		/* check whether register used as source operand can be read */
 		if (reg->type == NOT_INIT) {
 			verbose(env, "R%d !read_ok\n", regno);
+			return -EACCES;
+		}
+		/* MOVSX reads only its encoded low source width. Other full-width
+		 * operations cannot consume the unproved high half of a native input.
+		 * Typed calls supply their actual argument width explicitly.
+		 */
+		if (reg->native_input_bits &&
+		    (input_bytes ? input_bytes > 4 :
+		     (rw64 || (BPF_CLASS(insn->code) == BPF_JMP && BPF_OP(insn->code) == BPF_CALL)) &&
+		     !(BPF_CLASS(insn->code) == BPF_ALU64 && BPF_OP(insn->code) == BPF_MOV &&
+		       BPF_SRC(insn->code) == BPF_X && insn->off > 0 && insn->off <= 32))) {
+			verbose(env, "R%d native input has only its low 32 bits initialized\n", regno);
 			return -EACCES;
 		}
 		/* We don't need to worry about FP liveness because it's read-only */
@@ -4175,7 +4187,7 @@ static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
 	struct bpf_verifier_state *vstate = env->cur_state;
 	struct bpf_func_state *state = vstate->frame[vstate->curframe];
 
-	return __check_reg_arg(env, state->regs, regno, t);
+	return __check_reg_arg(env, state->regs, regno, t, 0);
 }
 
 static int insn_stack_access_flags(int frameno, int spi)
@@ -4452,8 +4464,12 @@ static void save_register_state(struct bpf_verifier_env *env,
 		state->stack[spi].slot_type[i - 1] = STACK_SPILL;
 
 	/* size < 8 bytes spill */
-	for (; i; i--)
-		mark_stack_slot_misc(env, &state->stack[spi].slot_type[i - 1]);
+	for (; i; i--) {
+		u8 *type = &state->stack[spi].slot_type[i - 1];
+		if (reg->native_input_bits && (*type == STACK_INVALID || *type == STACK_NATIVE_PADDING))
+			*type = STACK_NATIVE_PADDING;
+		else mark_stack_slot_misc(env, type);
+	}
 }
 
 static bool is_bpf_st_mem(struct bpf_insn *insn)
@@ -6441,6 +6457,7 @@ static int check_buffer_access(struct bpf_verifier_env *env,
 /* BPF architecture zero extends alu32 ops into 64-bit registesr */
 static void zext_32_to_64(struct bpf_reg_state *reg)
 {
+	reg->native_input_bits = 0;
 	reg->var_off = tnum_subreg(reg->var_off);
 	__reg_assign_32_into_64(reg);
 }
@@ -6451,6 +6468,8 @@ static void zext_32_to_64(struct bpf_reg_state *reg)
 static void coerce_reg_to_size(struct bpf_reg_state *reg, int size)
 {
 	u64 mask;
+
+	reg->native_input_bits = 0;
 
 	/* clear high bits in bit representation */
 	reg->var_off = tnum_cast(reg->var_off, size);
@@ -6501,6 +6520,8 @@ static void coerce_reg_to_size_sx(struct bpf_reg_state *reg, int size)
 	s64 init_s64_max, init_s64_min, s64_max, s64_min, u64_cval;
 	u64 top_smax_value, top_smin_value;
 	u64 num_bits = size * 8;
+
+	reg->native_input_bits = 0;
 
 	if (tnum_is_const(reg->var_off)) {
 		u64_cval = reg->var_off.value;
@@ -8992,7 +9013,10 @@ static void maybe_widen_reg(struct bpf_verifier_env *env,
 		return;
 	if (rold->precise || rcur->precise || scalars_exact_for_widen(rold, rcur))
 		return;
+	/* Widening value ranges does not define previously unavailable bits. */
+	u8 input_bits = rcur->native_input_bits;
 	__mark_reg_unknown(env, rcur);
+	rcur->native_input_bits = input_bits;
 }
 
 static int widen_imprecise_scalars(struct bpf_verifier_env *env,
@@ -10555,7 +10579,7 @@ static void clear_caller_saved_regs(struct bpf_verifier_env *env,
 	/* after the call registers r0 - r5 were scratched */
 	for (i = 0; i < CALLER_SAVED_REGS; i++) {
 		bpf_mark_reg_not_init(env, &regs[caller_saved[i]]);
-		__check_reg_arg(env, regs, caller_saved[i], DST_OP_NO_MARK);
+		__check_reg_arg(env, regs, caller_saved[i], DST_OP_NO_MARK, 0);
 	}
 }
 
@@ -10644,7 +10668,7 @@ static void native_value_scope(struct bpf_verifier_env *env,
 
 static int native_stack_arg_at(struct bpf_verifier_env *env,
 				   const struct bpf_native_arg *arg,
-				   struct native_arg_scope *scope, u32 regno)
+				   struct native_arg_scope *scope, u32 regno, u32 input_bytes)
 {
 	struct bpf_func_state *frame = cur_func(env);
 	struct bpf_subprog_info *sub = &env->subprog_info[frame->subprogno];
@@ -10654,16 +10678,16 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 	int err;
 	bool zero = true;
 
-	if (!sub->native_frame || arg->size > 8 || arg->stack_offset > sub->native_arg_out ||
+	if (!sub->native_frame || (input_bytes != 4 && input_bytes != 8) || arg->size > 8 || arg->stack_offset > sub->native_arg_out ||
 	    8 > sub->native_arg_out - arg->stack_offset || sp->type != PTR_TO_STACK ||
 	    !tnum_is_const(sp->var_off))
 		return -EINVAL;
-	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, 8, BPF_READ);
+	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, input_bytes, BPF_READ);
 	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
 	slot = &frame->stack[bpf_get_spi(off)];
-	for (u32 byte = 0; byte < 8; byte++) {
-		u8 type = slot->slot_type[byte];
+	for (u32 byte = 0; byte < input_bytes; byte++) {
+		u8 type = slot->slot_type[7 - byte];
 
 		if (type != STACK_ZERO) zero = false;
 		if (type != STACK_MISC && type != STACK_ZERO && type != STACK_SPILL)
@@ -10676,6 +10700,8 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 		__mark_reg_const_zero(env, scope->reg);
 	else
 		__mark_reg_unknown(env, scope->reg);
+	if (input_bytes < 8 && scope->reg->type == SCALAR_VALUE)
+		coerce_reg_to_size(scope->reg, input_bytes);
 	env->native_arg_temps |= BIT(regno);
 	return 0;
 }
@@ -10683,7 +10709,7 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 static int native_stack_arg(struct bpf_verifier_env *env,
 			    const struct bpf_native_arg *arg, struct native_arg_scope *scope)
 {
-	return native_stack_arg_at(env, arg, scope, 13);
+	return native_stack_arg_at(env, arg, scope, 13, 8);
 }
 
 /* R0 is caller-clobbered and is not an argument register. Borrow its verifier
@@ -10698,14 +10724,11 @@ static int native_call_arg_reg(struct bpf_verifier_env *env, const struct bpf_na
 
 	if (arg->words != 1) return -EOPNOTSUPP;
 	if (arg->reg >= 0) return bpf_arg_regno(arg->reg);
-	err = native_stack_arg_at(env, arg, scope, BPF_REG_0);
+	err = native_stack_arg_at(env, arg, scope, BPF_REG_0, 8);
 	return err ?: BPF_REG_0;
 }
 
-/* Only complete scalar words are transportable here. Narrow tail inputs
- * retain their source types but need separate native padding/extension proof;
- * they do not acquire initialized high bytes or registers from this rule.
- */
+/* Anonymous scalar arguments supply their source width, never padding bits. */
 static int check_native_scalar_tail(struct bpf_verifier_env *env,
                                     const struct bpf_native_abi *abi)
 {
@@ -10713,12 +10736,11 @@ static int check_native_scalar_tail(struct bpf_verifier_env *env,
   struct bpf_native_arg arg = bpf_native_tail_arg(abi, index);
   struct native_arg_scope temporary __free(native_arg) = {};
   int regno, err;
-  if (arg.size != 8) return -EOPNOTSUPP;
   if (arg.reg >= 0) {
    regno = bpf_arg_regno(arg.reg);
-   err = check_reg_arg(env, regno, SRC_OP);
+   err = __check_reg_arg(env, cur_regs(env), regno, SRC_OP, arg.size);
   } else {
-   err = native_stack_arg(env, &arg, &temporary);regno = 13;
+   err = native_stack_arg_at(env, &arg, &temporary, 13, arg.size);regno = 13;
   }
   if (err) return err;
   if (cur_regs(env)[regno].type != SCALAR_VALUE) {
@@ -10964,6 +10986,16 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
  native_argument:
 		reg = &regs[regno];
+		/* Independently checked named arguments currently assume a complete
+		 * register. A partial anonymous input must first be normalized by
+		 * its actual BPF width operation, not widened by a prototype change.
+		 */
+		ret = __check_reg_arg(env, regs, regno, SRC_OP, 8);
+		if (ret) return ret;
+		if (location && location->words == 2) {
+			ret = __check_reg_arg(env, regs, bpf_arg_regno(location->reg + 1), SRC_OP, 8);
+			if (ret) return ret;
+		}
 
 		if (arg->has_btf_offset &&
 		    (base_type(reg->type) != PTR_TO_BTF_ID ||
@@ -14385,6 +14417,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			return ret;
 
 		if (btf_type_is_scalar(t)) {
+			ret = __check_reg_arg(env, regs, regno, SRC_OP, 8);
+			if (ret) return ret;
 			if (meta->func_id == U32_MAX && native) {
 				u32 encoding = btf_type_is_int(t) ? btf_int_encoding(t) : 0;
 				u32 bits = encoding & BTF_INT_BOOL ? 1 : btf_type_is_int(t) ? btf_int_bits(t) : t->size * 8;
@@ -22037,16 +22071,19 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		if (sub->native_frame) for (u32 ti = 0; ti < sub->native_abi.tail_count; ++ti) {
 			struct bpf_native_arg location = bpf_native_tail_arg(&sub->native_abi, ti);
 			struct bpf_reg_state *input;
-			if (location.size != 8) continue;
 			if (location.reg >= 0) input = &regs[bpf_arg_regno(location.reg)];
 			else {
 				u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) + round_up(sub->native_arg_in, 8);
 				s64 off = -(s64)end + location.stack_offset;
 				struct bpf_stack_state *slot = &state->frame[0]->stack[bpf_get_spi(off)];
 				input = &slot->spilled_ptr;
-				memset(slot->slot_type, STACK_SPILL, sizeof(slot->slot_type));
+				if (location.size == 8)
+					memset(slot->slot_type, STACK_SPILL, sizeof(slot->slot_type));
+				else for (u32 byte = 0; byte < BPF_REG_SIZE; ++byte)
+					slot->slot_type[7 - byte] = byte < location.size ? STACK_MISC : STACK_NATIVE_PADDING;
 			}
 			__mark_reg_unknown(env, input);input->precise = true;
+			if (location.reg >= 0 && location.size == 4) input->native_input_bits = 32;
 		}
 		/* All arguments exist before a pointer is related to its count. */
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {
