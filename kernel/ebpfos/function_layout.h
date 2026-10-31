@@ -19,6 +19,48 @@
 #define cell_layout_name btf__name_by_offset
 #define cell_layout_count btf__type_cnt
 #endif
+/* BTF represents C ellipsis as an unnamed trailing type-zero parameter, not
+ * a physical argument. Share the shape check with compiler and call readers.
+ */
+static inline bool cell_function_parameters(const struct btf_type *prototype,
+ unsigned int *fixed, bool *variadic)
+{
+ unsigned int i, count;
+ if (!prototype || BTF_INFO_KIND(prototype->info) != BTF_KIND_FUNC_PROTO) return false;
+ count = BTF_INFO_VLEN(prototype->info);
+ *fixed = count; *variadic = false;
+ for (i = 0; i < count; ++i) if (!btf_params(prototype)[i].type) {
+  if (i + 1 != count || btf_params(prototype)[i].name_off) return false;
+  --*fixed; *variadic = true;
+ }
+ return true;
+}
+/* This provider-body guarantee is emitted only after the complete Native
+ * footprint proof. It grants no type or extent to an anonymous value.
+ */
+static inline bool cell_variadic_tail_unused(const struct btf *btf,
+ const struct btf_type *function)
+{
+ const struct btf_type *prototype;
+ unsigned int id, count;
+ bool variadic;
+ if (!function || BTF_INFO_KIND(function->info) != BTF_KIND_FUNC) return false;
+ prototype = cell_layout_type(btf, function->type);
+ if (!cell_function_parameters(prototype, &count, &variadic) || !variadic) return false;
+ for (id = 1; id < cell_layout_count(btf); ++id) {
+  const struct btf_type *tag = cell_layout_type(btf, id);
+  if (tag && BTF_INFO_KIND(tag->info) == BTF_KIND_DECL_TAG &&
+      !BTF_INFO_KFLAG(tag->info) && cell_layout_type(btf, tag->type) == function &&
+      btf_decl_tag(tag)->component_idx == -1 &&
+      !strcmp(cell_layout_name(btf, tag->name_off), "native:variadic_tail_unused")) return true;
+ }
+ return false;
+}
+static inline bool cell_variadic_tail_compatible(const struct btf *native,
+ const struct btf_type *nf, const struct btf *compiled, const struct btf_type *cf)
+{
+ return !cell_variadic_tail_unused(native, nf) || cell_variadic_tail_unused(compiled, cf);
+}
 /* A record's alignment is C type information, not its byte size. In
  * particular a packed i128 and a naturally aligned i128 wrapper can have
  * identical BTF members. Keep the frontend fact in an ordinary declaration

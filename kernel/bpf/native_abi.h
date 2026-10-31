@@ -158,18 +158,16 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
 {
  const struct btf_param *params;
  u32 size = 0, next_reg = 0, nargs;
+ bool variadic;
  u8 words = 0;
  int err;
  memset(abi, 0, sizeof(*abi));
- if (!proto || !btf_type_is_func_proto(proto)) return -EINVAL;
- nargs = btf_type_vlen(proto);
+ if (!cell_function_parameters(proto, &nargs, &variadic)) return -EINVAL;
+ if (variadic && !IS_ENABLED(CONFIG_X86_64)) return -EOPNOTSUPP;
  /* An ellipsis describes no named argument or incoming fixed storage.
   * This layout grants no register or memory capability to a variadic tail;
   * normal verification must still prove every actual operand read.
   */
- if (IS_ENABLED(CONFIG_X86_64) && nargs &&
-     !btf_params(proto)[nargs - 1].type)
-  nargs--;
  if (nargs > MAX_BPF_FUNC_ARGS && !trusted_native) return -E2BIG;
  if (proto->type) {
   err = bpf_native_classify(btf, proto->type, &size, &words);

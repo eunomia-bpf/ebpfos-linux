@@ -14185,6 +14185,29 @@ static int check_kfunc_address_arg(struct bpf_verifier_env *env,
 	}
 }
 
+static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
+ const struct btf_type *prototype, const struct btf_type *declaration, u32 *named)
+{
+ u32 count;
+ bool variadic;
+
+ if (!cell_function_parameters(prototype, &count, &variadic)) return -EINVAL;
+
+ if (variadic) {
+  /* The Native provider's complete body proof is the authority. A callback
+   * prototype or caller-owned annotation cannot assert that another body
+   * ignores its anonymous list. Fixed arguments retain every ordinary check.
+   */
+  if (!cell_variadic_tail_unused(btf, declaration) ||
+      btf_type_by_id(btf, declaration->type) != prototype) {
+   verbose(env, "variadic call requires a provider-proved unused tail\n");
+   return -EOPNOTSUPP;
+  }
+ }
+ *named = count;
+ return 0;
+}
+
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_arg_meta *meta,
 			    int insn_idx, struct bpf_reg_state *native_result,
 			    u32 *native_result_size)
@@ -14199,7 +14222,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	bool native = env->subprog_info[cur_func(env)->subprogno].native_frame;
 
 	args = (const struct btf_param *)(meta->func_proto + 1);
-	nargs = btf_type_vlen(meta->func_proto);
+	ret = native_call_named_args(env, meta->btf, meta->func_proto,
+		meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id), &nargs);
+	if (ret) return ret;
 	if (native) {
 		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
 				  env->prog->aux->trusted_kernel);
@@ -14956,7 +14981,8 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 
 	if (!prototype || !btf_type_is_func_proto(prototype))
 		return -EINVAL;
-	nargs = btf_type_vlen(meta.func_proto);
+	err = native_call_named_args(env, btf, meta.func_proto, declaration, &nargs);
+	if (err) return err;
 	if (nargs > (env->subprog_info[cur_func(env)->subprogno].native_frame ? MAX_BPF_FUNC_ARGS : MAX_BPF_NATIVE_REG_ARGS))
 		return -EINVAL;
 	for (i = 1; i <= nargs && !env->subprog_info[cur_func(env)->subprogno].native_frame; i++) {
@@ -15923,6 +15949,9 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	args = (const struct btf_param *)(meta.func_proto + 1);
 	struct bpf_native_abi abi = {};
 	bool native = env->subprog_info[cur_func(env)->subprogno].native_frame;
+	err = native_call_named_args(env, meta.btf, meta.func_proto,
+		btf_type_by_id(meta.btf, meta.func_id), &nargs);
+	if (err) return err;
 	if (native) {
 		err = bpf_native_abi_plan(desc_btf, meta.func_proto, &abi,
 				  env->prog->aux->trusted_kernel);

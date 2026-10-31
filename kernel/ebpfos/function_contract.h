@@ -158,6 +158,10 @@ static bool cell_callable_proto(struct btf *native, u32 native_type,
      !aux->func[index]->jited || !cell_export_name(native_name, aux->btf, id, true)) return false;
  prototype = btf_type_by_id(aux->btf, function->type);
  if (!prototype || !btf_type_is_func_proto(prototype)) return false;
+ /* Verified callers may already rely on the old provider ignoring its tail.
+  * Trusted publication must retain that guarantee too; it is not a type grant.
+  */
+ if (!cell_variadic_tail_compatible(native, native_function, aux->btf, function)) return false;
  /* Trusted unmodified source retains Linux's context transfers under its
   * source/compiler assumption. Its annotations do not provide independently
   * verified transfer summaries. Keep that requirement in the verified tier.
