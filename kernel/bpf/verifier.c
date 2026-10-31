@@ -5742,7 +5742,10 @@ static int check_ctx_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		err = __check_ptr_off_reg(env, reg, regno, fixed_off_ok);
 	if (err)
 		return err;
-	if (env->prog->aux->ebpfos_component) {
+	/* Only syscall components use the eBPFOS call frame. Other program
+	 * families retain their original type-specific context permissions.
+	 */
+	if (var_off_ok && env->prog->aux->ebpfos_component) {
 		err = check_ebpfos_component_ctx_range(env, regno, off,
 						       access_size, t);
 		if (err)
