@@ -4284,6 +4284,16 @@ static int add_dummy_ksym_var(struct btf *btf)
 	if (sec_btf_id < 0)
 		return 0;
 
+	/* DATASEC bookkeeping needs an int even when the source uses only
+	 * wider values or address-only externs. Add it before borrowing any
+	 * BTF pointers; original extern types are still collected below.
+	 */
+	int_btf_id = find_int_btf_id(btf);
+	if (!int_btf_id)
+		int_btf_id = btf__add_int(btf, "int", sizeof(int), BTF_INT_SIGNED);
+	if (int_btf_id < 0)
+		return int_btf_id;
+
 	sec = btf__type_by_id(btf, sec_btf_id);
 	vs = btf_var_secinfos(sec);
 	for (i = 0; i < btf_vlen(sec); i++, vs++) {
@@ -4298,7 +4308,6 @@ static int add_dummy_ksym_var(struct btf *btf)
 	if (i == btf_vlen(sec))
 		return 0;
 
-	int_btf_id = find_int_btf_id(btf);
 	dummy_var_btf_id = btf__add_var(btf,
 					"dummy_ksym",
 					BTF_VAR_GLOBAL_ALLOCATED,
