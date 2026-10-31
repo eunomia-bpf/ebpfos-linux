@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
+#include "function_native.h"
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
 #include <asm/set_memory.h>
@@ -118,7 +119,7 @@ struct ptview_mm {
 
 unsigned long ebpfos_ptview_symbol(const char *name) { return kallsyms_lookup_name(name); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_symbol);
-unsigned long ebpfos_ptview_entry(unsigned long address) { return ftrace_location(address); }
+unsigned long ebpfos_ptview_entry(unsigned long address) { return ebpfos_ftrace_entry(address); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_entry);
 
 /* Binding data may be copied; mutable object state and Native instructions

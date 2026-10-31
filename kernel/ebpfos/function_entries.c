@@ -505,14 +505,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     * direct caller instead, with all tasks and IRQs stopped. */
    call_sites = true;ip = address;
   } else if (!task) {
-  ip = ftrace_location(address);
-#ifdef FTRACE_MCOUNT_MAX_OFFSET
-  /* ftrace_location() includes disabled records. Mirror stock ftrace's
-   * validity bound before choosing it over an immutable native reservation.
-   * Entry padding can move __fentry__ beyond that bound.
-   */
-  if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) ip = 0;
-#endif
+  ip = ebpfos_ftrace_entry(address);
   if (!ip) {
    ip = source ? entry_module_native_location(set->source_module, address, &canonical_nop) :
     entry_native_location(address, &canonical_nop);

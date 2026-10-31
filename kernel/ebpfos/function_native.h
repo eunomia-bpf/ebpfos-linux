@@ -1,10 +1,21 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef EBPFOS_FUNCTION_NATIVE_H
 #define EBPFOS_FUNCTION_NATIVE_H
+#include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/module.h>
 #include <linux/kallsyms.h>
 #include <linux/rcupdate.h>
+#include <linux/ftrace.h>
+/* Only Linux's existing function-trace entry; no compiler reservations. */
+static inline unsigned long ebpfos_ftrace_entry(unsigned long address)
+{
+ unsigned long ip = ftrace_location(address);
+#ifdef FTRACE_MCOUNT_MAX_OFFSET
+ if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) return 0;
+#endif
+ return ip;
+}
 /* Module BTF may label C globals STATIC. Require a unique global ELF FUNC
  * in ordinary module text; init/exit text cannot outlive preparation. */
 static inline unsigned long ebpfos_module_function(struct module *module, const char *name)

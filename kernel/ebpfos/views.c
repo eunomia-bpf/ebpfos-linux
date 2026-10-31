@@ -2,8 +2,8 @@
 #if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
 
 // SPDX-License-Identifier: GPL-2.0-only
-/* Task-owned syscall bindings. Publication and graph leases are cold; a
- * syscall enters its resolved body directly. No program runner is involved. */
+/* Task-owned function bindings. Publication and graph leases are cold;
+ * selected mappings and syscall slots enter their bodies directly. */
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/capability.h>
@@ -31,6 +31,9 @@
 #include <linux/workqueue.h>
 #include "function_lifetime.h"
 #include "function_native.h"
+#include "entry_slot_instruction.h"
+
+struct task_text_entry { unsigned long ip; u8 bytes[MCOUNT_INSN_SIZE]; };
 
 struct task_view {
  u64 generation;
@@ -39,6 +42,9 @@ struct task_view {
  DECLARE_BITMAP(selected, NR_syscalls);
  struct bpf_operations_set *operations;
  struct entry_set *code;
+ struct ftrace_text_reservation *text_owner;
+ struct task_text_entry *text;
+ u32 text_count;
  struct delayed_work release_work;
  sys_call_ptr_t table[NR_syscalls];
  struct ebpfos_function_binding bindings[];
@@ -71,6 +77,8 @@ static void task_view_free(struct task_view *view)
   ebpfos_function_binding_put(&view->bindings[i]);
  bpf_operations_set_put(view->operations);
  bpf_entry_code_put(view->code);
+ ftrace_text_release(view->text_owner);
+ kvfree(view->text);
  kvfree(view);
 }
 static bool task_view_code_contains(void *opaque, unsigned long ip)
@@ -118,7 +126,7 @@ static const struct file_operations task_view_ops = {
  .show_fdinfo = task_view_fdinfo, .llseek = noop_llseek,
 };
 
-/* Bind only actual syscall exports, never a caller-provided address or ordinal.
+/* Bind actual syscall exports, never a caller-provided address or ordinal.
  * The source descriptor and loaded export supply the complete checked ABI.
  * A native bpf control entry guarantees self-selection has no old-view frame
  * beneath it. Each other task retains its own lease through sleeping calls. */
@@ -160,6 +168,10 @@ static struct ebpfos_task_view_request *task_view_prepare(
  if (!view) return ERR_PTR(-ENOMEM);
  view->count = count;view->generation = generation;view->revocable = true;
  view->operations = bpf_operations_set_get(operations);
+ if (count) {
+  view->text = kvcalloc(count, sizeof(*view->text), GFP_KERNEL);
+  if (!view->text) {error = -ENOMEM;goto fail;}
+ }
  INIT_DELAYED_WORK(&view->release_work, task_view_release_work);
  error = ebpfos_ptview_read_native(view->table, sys_call_table, sizeof(view->table));
  if (error) goto fail;
@@ -167,14 +179,28 @@ static struct ebpfos_task_view_request *task_view_prepare(
  for (i = 0; i < count; ++i) {
   struct bpf_prog *program = sources[i].program;
   int slot = task_view_slot(sources[i].native_address, view->selected, view->table);
-  /* Private members retain code with their syscall roots. They acquire no
-   * per-process direct-call dispatch of their own. */
   if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
   /* A private member can escape into an asynchronous callback. The view
    * proves a task entry only for an actual native syscall-table root.
    */
   if (slot < 0 && bpf_native_func_entry(program) && program->sleepable) {
    error = -EOPNOTSUPP;goto fail;
+  }
+  if (slot < 0) {
+   unsigned long ip = ebpfos_ftrace_entry(sources[i].native_address);
+   if (ip) {
+    struct task_text_entry *entry = &view->text[view->text_count];
+    unsigned int j;
+    /* A generic entry can also run outside a task. Its callable cannot
+     * acquire syscall-only sleepable authority from this request. */
+    if (program->sleepable) {error = -EOPNOTSUPP;goto fail;}
+    for (j = 0; j < view->text_count; ++j)
+     if (view->text[j].ip == ip) {error = -ENOTUNIQ;goto fail;}
+    if (!entry_native_jump(ip, sources[i].address, entry->bytes)) {error = -ERANGE;goto fail;}
+    entry->ip = ip;++view->text_count;++roots;
+   }
+   /* An entry without its own instruction stays private to its holders.
+    * Its loaded graph still needs the same independent lifetime lease. */
   }
   bpf_prog_inc(program);
   view->bindings[i].program = program;
@@ -199,6 +225,14 @@ static struct ebpfos_task_view_request *task_view_prepare(
    }
  }
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
+ if (view->text_count) {
+  unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
+  if (!ips) {error = -ENOMEM;goto fail;}
+  for (i = 0; i < view->text_count; ++i) ips[i] = view->text[i].ip;
+  view->text_owner = ftrace_text_reserve(ips, view->text_count, true);
+  kvfree(ips);
+  if (IS_ERR(view->text_owner)) {error = PTR_ERR(view->text_owner);view->text_owner = NULL;goto fail;}
+ }
  /* Stored private callbacks can outlive the rule and its last syscall frame.
   * Transfer their independent code lease to the existing entry journal. */
  if (count) {
@@ -323,6 +357,21 @@ void ebpfos_rule_task_copy(struct ebpfos_task_view_request *request, void *table
  if (!request) return;
  view = request->next->private_data;
  for_each_set_bit(nr, view->selected, NR_syscalls) ((sys_call_ptr_t *)table)[nr] = view->table[nr];
+}
+
+int ebpfos_rule_task_visit_changes(struct ebpfos_task_view_request *request,
+ ebpfos_ptview_visit visit, void *opaque)
+{
+ struct task_view *view;
+ unsigned int i;
+ int error;
+ if (!request) return 0;
+ view = request->next->private_data;
+ for (i = 0; i < view->text_count; ++i) {
+  error = visit(view->text[i].ip, view->text[i].bytes, sizeof(view->text[i].bytes), opaque);
+  if (error) return error;
+ }
+ return 0;
 }
 
 #endif

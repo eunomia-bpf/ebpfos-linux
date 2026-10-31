@@ -195,6 +195,7 @@ static struct ebpfos_ptview *rule_prepare_view(struct bpf_operations_set *operat
  struct ebpfos_ptview *view = NULL;
  int error = ebpfos_rule_task_operations_check(tasks, operations);
  if (!error) error = bpf_operations_visit_changes(operations, collect_change, &changes);
+ if (!error) error = ebpfos_rule_task_visit_changes(tasks, collect_change, &changes);
  if (!error && changes.count)
   view = ebpfos_ptview_prepare(changes.changes, changes.count, NULL);
  kfree(changes.changes);

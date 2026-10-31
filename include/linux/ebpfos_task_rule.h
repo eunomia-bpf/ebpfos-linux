@@ -2,6 +2,7 @@
 #ifndef _LINUX_EBPFOS_TASK_RULE_H
 #define _LINUX_EBPFOS_TASK_RULE_H
 #include <linux/types.h>
+#include <linux/ebpfos_ptview.h>
 struct task_struct;
 struct ebpfos_rule_decision;
 struct ebpfos_task_view_request;
@@ -21,6 +22,7 @@ void ebpfos_rule_task_put(struct ebpfos_task_view_request *);
 struct ebpfos_task_view_request *ebpfos_rule_task_get(struct ebpfos_task_view_request *);
 bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *, struct ebpfos_task_view_request *);
 int ebpfos_rule_task_operations_check(struct ebpfos_task_view_request *, const struct bpf_operations_set *);
+int ebpfos_rule_task_visit_changes(struct ebpfos_task_view_request *, ebpfos_ptview_visit, void *);
 void ebpfos_rule_task_copy(struct ebpfos_task_view_request *, void *);
 bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *);
 void ebpfos_rule_task_table(struct ebpfos_rule_decision *, void *);
