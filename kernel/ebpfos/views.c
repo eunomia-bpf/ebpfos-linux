@@ -33,7 +33,7 @@
 #include "function_native.h"
 #include "entry_slot_instruction.h"
 
-struct task_text_entry { unsigned long ip; u8 bytes[MCOUNT_INSN_SIZE]; };
+struct task_text_entry { unsigned long ip; u8 bytes[MCOUNT_INSN_SIZE]; bool ftrace; };
 
 struct task_view {
  u64 generation;
@@ -187,7 +187,9 @@ static struct ebpfos_task_view_request *task_view_prepare(
    error = -EOPNOTSUPP;goto fail;
   }
   if (slot < 0) {
-   unsigned long ip = ebpfos_ftrace_entry(sources[i].native_address);
+   bool ftrace, canonical_nop;
+   unsigned long ip = bpf_entry_text_location(sources[i].source_module,
+    sources[i].native_address, &ftrace, &canonical_nop);
    if (ip) {
     struct task_text_entry *entry = &view->text[view->text_count];
     unsigned int j;
@@ -197,7 +199,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
     for (j = 0; j < view->text_count; ++j)
      if (view->text[j].ip == ip) {error = -ENOTUNIQ;goto fail;}
     if (!entry_native_jump(ip, sources[i].address, entry->bytes)) {error = -ERANGE;goto fail;}
-    entry->ip = ip;++view->text_count;++roots;
+    entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
    }
    /* An entry without its own instruction stays private to its holders.
     * Its loaded graph still needs the same independent lifetime lease. */
@@ -227,9 +229,11 @@ static struct ebpfos_task_view_request *task_view_prepare(
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
  if (view->text_count) {
   unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
+  unsigned int count = 0;
   if (!ips) {error = -ENOMEM;goto fail;}
-  for (i = 0; i < view->text_count; ++i) ips[i] = view->text[i].ip;
-  view->text_owner = ftrace_text_reserve(ips, view->text_count, true);
+  for (i = 0; i < view->text_count; ++i)
+   if (view->text[i].ftrace) ips[count++] = view->text[i].ip;
+  view->text_owner = ftrace_text_reserve(ips, count, true);
   kvfree(ips);
   if (IS_ERR(view->text_owner)) {error = PTR_ERR(view->text_owner);view->text_owner = NULL;goto fail;}
  }

@@ -99,6 +99,21 @@ static bool entry_export(struct btf *native, u32 prototype,
 #include "function_entry_calls.h"
 static int entry_callers_stopped(struct entry_set *set);
 
+/* Share L1's immutable AOT/native records with task-view publication. Only
+ * Linux ftrace entries need a tracing reservation; recorded entries already
+ * carry the producer's ordinary NOKPROBE protection. */
+unsigned long bpf_entry_text_location(struct module *module, unsigned long address,
+ bool *ftrace, bool *canonical_nop)
+{
+ unsigned long ip;
+ *ftrace = false;*canonical_nop = false;
+ if (module && entry_module_noinstr(module, address)) return 0;
+ ip = ebpfos_ftrace_entry(address);
+ if (ip) {*ftrace = true;return ip;}
+ return module ? entry_module_native_location(module, address, canonical_nop) :
+  entry_native_location(address, canonical_nop);
+}
+
 /* One cold native-call contract for direct entries and generated tables. */
 static int entry_program_address(struct btf *btf, u32 prototype,
  const struct btf_type *function, const char *name, bool source_name, struct bpf_prog *program,
@@ -492,7 +507,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   const struct entry_member *entry = &entries[i];
   const struct btf_type *function = btf_type_by_id(btf, entry->native_function);
   unsigned long address,ip,target;
-  bool call_sites = false, canonical_nop = false;
+  bool call_sites = false, canonical_nop = false, ftrace = false;
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
@@ -505,20 +520,16 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     * direct caller instead, with all tasks and IRQs stopped. */
    call_sites = true;ip = address;
   } else if (!task) {
-  ip = ebpfos_ftrace_entry(address);
+  ip = bpf_entry_text_location(set->source_module, address, &ftrace, &canonical_nop);
   if (!ip) {
-   ip = source ? entry_module_native_location(set->source_module, address, &canonical_nop) :
-    entry_native_location(address, &canonical_nop);
-   if (!ip) {
     if (!source) {error = -ENOENT;goto fail;}
     /* An unpadded module entry uses the same closed direct-caller
      * transaction as noinstr text. No reservation is added to its body. */
     call_sites = true;ip = address;
-   } else {
+  } else {
     slot = &set->slots[set->slot_count++];slot->ip = ip;
-    slot->canonical_nop = canonical_nop;
-   }
-  } else {slot = &set->slots[set->slot_count++];slot->ip = ip;slot->ftrace = true;}
+    slot->canonical_nop = canonical_nop;slot->ftrace = ftrace;
+  }
   }
   for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
   set->locations[i] = ip;
