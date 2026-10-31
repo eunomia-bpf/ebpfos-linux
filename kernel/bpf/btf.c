@@ -7962,7 +7962,8 @@ int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 		return size;
 	model->ret_size = size;
 	model->ret_flags = __get_type_fmodel_flags(type);
-	model->native_stack = abi.stack_size || abi.result_buffer;
+	model->native_stack = abi.stack_size || abi.result_buffer ||
+		(proto->type && !abi.result_words);
 	nargs = btf_type_vlen(proto);
 	if (nargs && !btf_params(proto)[nargs - 1].type) {
 		nargs--;
@@ -7980,8 +7981,13 @@ int btf_distill_native_func_proto(struct bpf_verifier_log *log, struct btf *btf,
 	model->nr_args = nargs;
 	for (u32 i = 0; i < model->nr_args; i++) {
 		size = __get_type_size(btf, btf_params(proto)[i].type, &type);
-		if (size <= 0)
-			return size ?: -EINVAL;
+		if (size < 0)
+			return size;
+		/* The ABI plan already rejected void operands. A zero-sized
+		 * record is NO_CLASS and has no fixed tracing argument slot.
+		 */
+		if (!size)
+			model->native_stack = true;
 		model->arg_size[i] = size;
 		model->arg_flags[i] = __get_type_fmodel_flags(type);
 	}
@@ -8525,6 +8531,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	    !sub->readonly_record_result_size[1] && !sub->readonly_stack_result && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||
+	       (sub->native_frame && !sub->native_abi.result_buffer &&
+	        !sub->native_abi.result_words) ||
 	       (sub->native_frame && sub->native_abi.result_buffer &&
 	        btf_native_scalar_storage(btf, btf_type_by_id(btf, fn_t->type)->type, 0))))) {
 		if (!is_global)

@@ -372,7 +372,13 @@ static bool subprog_returns_void(struct bpf_verifier_env *env, int subprog)
 	if (!type)
 		return false;
 
-	return btf_type_is_void(type);
+	/* Native NO_CLASS results retain their logical BTF type but supply no
+	 * return register, just as void supplies none. Reuse the ABI classifier.
+	 */
+	return btf_type_is_void(type) ||
+	       (env->subprog_info[subprog].native_frame &&
+		!env->subprog_info[subprog].native_abi.result_buffer &&
+		!env->subprog_info[subprog].native_abi.result_words);
 }
 
 bool bpf_subprog_returns_two_regs(struct bpf_verifier_env *env, int subprog)
@@ -10857,6 +10863,10 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		struct bpf_subprog_arg_info *arg = &sub->args[i];
 		const struct bpf_native_arg *location = sub->native_frame ? &sub->native_abi.args[i + sub->native_abi.result_buffer] : NULL;
 		struct native_arg_scope temporary __free(native_arg) = {};
+
+		/* A logical NO_CLASS argument has no caller operand to inspect. */
+		if (location && location->reg >= 0 && !location->words)
+			continue;
 
 		if (arg->arg_type == ARG_DONTCARE &&
 		    (env->prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(i))) {
@@ -21778,6 +21788,10 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		}
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {
 			const struct bpf_native_arg *location = sub->native_frame ? &sub->native_abi.args[ai + sub->native_abi.result_buffer] : NULL;
+
+			/* No register is supplied for a native NO_CLASS argument. */
+			if (location && location->reg >= 0 && !location->words)
+				continue;
 
 			if (sub->args[ai].arg_type == ARG_DONTCARE &&
 			    (env->prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(ai)))
