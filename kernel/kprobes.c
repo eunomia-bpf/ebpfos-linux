@@ -75,6 +75,7 @@ static DEFINE_PER_CPU(struct kprobe *, kprobe_instance);
 struct kprobe_text_reservation {
  struct list_head list;
  unsigned int count;
+ bool shared;
  struct { unsigned long begin, end; } ranges[];
 };
 static LIST_HEAD(kprobe_text_reservations);
@@ -88,7 +89,7 @@ static bool kprobe_text_owned(unsigned long address)
    if (address >= owner->ranges[i].begin && address < owner->ranges[i].end) return true;
  return false;
 }
-struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length)
+struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length, bool shared)
 {
  struct kprobe_text_reservation *owner;
  struct kprobe *probe;
@@ -97,7 +98,7 @@ struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, un
  if (!count) return NULL;
  owner = kvzalloc(struct_size(owner, ranges, count), GFP_KERNEL);
  if (!owner) return ERR_PTR(-ENOMEM);
- owner->count = count;
+ owner->count = count;owner->shared = shared;
  for (i = 0; i < count; ++i) {
   unsigned long size, offset, begin;
   if (!kallsyms_lookup_size_offset(ips[i], &size, &offset) || !size || !length ||
@@ -109,7 +110,13 @@ struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, un
  mutex_lock(&kprobe_mutex);
  error = -EBUSY;
  for (i = 0; i < count; ++i) {
-  if (kprobe_text_owned(owner->ranges[i].begin)) goto unlock;
+  struct kprobe_text_reservation *other;
+  unsigned int j;
+  list_for_each_entry(other, &kprobe_text_reservations, list)
+   if (!shared || !other->shared)
+    for (j = 0; j < other->count; ++j)
+     if (owner->ranges[i].begin < other->ranges[j].end &&
+         other->ranges[j].begin < owner->ranges[i].end) goto unlock;
   for (bucket = 0; bucket < KPROBE_TABLE_SIZE; ++bucket)
    hlist_for_each_entry(probe, &kprobe_table[bucket], hlist)
     if ((unsigned long)probe->addr >= owner->ranges[i].begin &&

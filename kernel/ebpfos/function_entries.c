@@ -568,7 +568,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   unsigned int count = 0;
   if (!ips) {error = -ENOMEM;goto fail;}
   for (i = 0; i < set->slot_count; ++i) if (set->slots[i].ftrace) ips[count++] = set->slots[i].ip;
-  set->ftrace = ftrace_text_reserve(ips, count);kvfree(ips);
+  set->ftrace = ftrace_text_reserve(ips, count, false);kvfree(ips);
   if (IS_ERR(set->ftrace)) {error = PTR_ERR(set->ftrace);set->ftrace = NULL;goto fail;}
  }
  return set;
