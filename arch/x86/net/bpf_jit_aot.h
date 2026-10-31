@@ -30,6 +30,7 @@ struct bpf_aot_context {
 	bool final;
 	bool patchable_jumps;
 	bool position_independent;
+	const char *section;
 	int error;
 };
 
@@ -245,6 +246,8 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 	u32 nr_exrelocs = 0;
 	u8 *data;
 
+	if (aot->section)
+		shstrings_size += 2 * (strlen(aot->section) + 1) + strlen(".rela");
 	for (i = 0; i < aot->nr_records; i++)
 		strings_size += strlen(aot->records[i].name) + 1;
 	sizes[TEXT] = text_size;
@@ -337,6 +340,16 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 	strcpy(data + positions[SHSTRTAB] + sections[EXTAB].sh_name, "__ex_table");
 	strcpy(data + positions[SHSTRTAB] + sections[EXRELA].sh_name, ".rela__ex_table");
 	strcpy(data + positions[SHSTRTAB] + sections[NATIVE].sh_name, ".bpf.aot.native");
+	if (aot->section) {
+		/* Source placement is an emission property, independent of tier.
+		 * Keep the exact compiler spelling, including explicit subsections.
+		 */
+		sections[TEXT].sh_name = sections[NATIVE].sh_name + sizeof(".bpf.aot.native");
+		sections[RELA].sh_name = sections[TEXT].sh_name + strlen(aot->section) + 1;
+		strcpy(data + positions[SHSTRTAB] + sections[TEXT].sh_name, aot->section);
+		strcpy(data + positions[SHSTRTAB] + sections[RELA].sh_name, ".rela");
+		strcat(data + positions[SHSTRTAB] + sections[RELA].sh_name, aot->section);
+	}
 	symbols = (void *)(data + positions[SYMTAB]);
 	symbols[1].st_info = ((STB_LOCAL << 4) | STT_SECTION);
 	symbols[1].st_shndx = TEXT;

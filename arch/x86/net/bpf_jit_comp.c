@@ -3403,8 +3403,11 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 			function, -1, "aot:pic") : ERR_PTR(-ENOENT);
 		const char *register_entry = function ? btf_find_decl_tag_value(source->aux->btf,
 			function, -1, "aot:native-register-entry") : ERR_PTR(-ENOENT);
+		const char *section = function ? btf_find_decl_tag_value(source->aux->btf,
+			function, -1, "aot:section:") : ERR_PTR(-ENOENT);
 
 		aot.position_independent = !IS_ERR(pic) && !*pic;
+		aot.section = IS_ERR(section) ? NULL : section;
 		/* The normal BPF argument/result registers implement the C view.
 		 * They cannot stand in for an original assembly register entry.
 		 * Until that convention is lowered here, report the JIT's actual
