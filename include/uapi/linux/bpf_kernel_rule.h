@@ -11,7 +11,9 @@ struct bpf_kernel_rule_ctx {
 
 /* Zero returns the empty set; result i selects prepared set i-1. A set
  * contains versions through generated operations tables and syscall graphs. Alternative
- * sets may replace the same table; separate rules own disjoint tables. */
+ * sets may replace the same table. BPF_LINK_CREATE target_fd may name a
+ * cgroup-v2 subtree; zero is global. Separate rules may share bindings only
+ * when their enforced cgroup subtrees are disjoint. */
 #define BPF_KERNEL_RULE_MAX_VERSIONS 32
 #define BPF_KERNEL_RULE_SCOPED_FUNCTIONS (1U << 0)
 struct bpf_kernel_rule_function {

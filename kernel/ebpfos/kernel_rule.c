@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Rules run on resolution, never on the cached indirect-call path. */
 #include <linux/bpf_kernel_rule.h>
+#include <linux/bpf_kernel_rule_context.h>
 #include <linux/bpf_operations.h>
 #include <linux/btf.h>
 #include <linux/cgroup.h>
@@ -20,6 +21,7 @@
 struct rule_generation {
  refcount_t refs;
  struct bpf_prog *program;
+ struct cgroup *scope;
  u32 count;
  struct bpf_operations_set *versions[BPF_KERNEL_RULE_MAX_VERSIONS];
  struct ebpfos_task_view_request *tasks[BPF_KERNEL_RULE_MAX_VERSIONS];
@@ -81,6 +83,9 @@ static void generation_put(struct rule_generation *generation)
 #endif
   bpf_operations_set_put(generation->versions[i]);ebpfos_rule_task_put(generation->tasks[i]);
  }
+#ifdef CONFIG_CGROUPS
+ if (generation->scope) cgroup_put(generation->scope);
+#endif
  bpf_prog_put(generation->program);kfree(generation);
 }
 u64 ebpfos_rule_epoch(void) { return atomic64_read(&rule_epoch); }
@@ -134,7 +139,10 @@ struct ebpfos_rule_decision *ebpfos_rule_resolve(const struct bpf_kernel_rule_ct
  }
  for (count = 0; count < decision->count; ++count) {
   struct rule_choice *choice = &decision->choices[count];
-  choice->selection = bpf_prog_run_pin_on_cpu(choice->generation->program, &ctx);
+  struct rule_generation *generation = choice->generation;
+  if (!generation->scope ||
+      bpf_kernel_rule_cgroup_under(&ctx, cgroup_id(generation->scope)))
+   choice->selection = bpf_prog_run_pin_on_cpu(generation->program, &ctx);
  }
  return decision;
 }
@@ -367,6 +375,10 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  if (!link->attached) {error = -ENOLINK;goto fail;}
  if (old && old != before->program) {error = -EPERM;goto fail;}
  next->program = program;next->count = before->count;
+ next->scope = before->scope;
+#ifdef CONFIG_CGROUPS
+ if (next->scope) cgroup_get(next->scope);
+#endif
  next->has_tasks = before->has_tasks;
  for (i = 0; i < next->count; ++i) {
   next->versions[i] = bpf_operations_set_get(before->versions[i]);
@@ -410,7 +422,15 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
  struct kernel_rule_link *owner;
  u32 i, j;
  lockdep_assert_held(&rule_mutex);
- list_for_each_entry(owner, &rule_links, node)
+ list_for_each_entry(owner, &rule_links, node) {
+  /* Disjoint cgroup subtrees cannot select either other's mappings.
+   * The FD scope is enforced by the cold resolver, independently of the
+   * policy program, and is retained unchanged across program updates. */
+#ifdef CONFIG_CGROUPS
+  if (generation->scope && owner->generation->scope &&
+      !cgroup_is_descendant(generation->scope, owner->generation->scope) &&
+      !cgroup_is_descendant(owner->generation->scope, generation->scope)) continue;
+#endif
   for (i = 0; i < generation->count; ++i)
    for (j = 0; j < owner->generation->count; ++j)
     if (
@@ -421,6 +441,7 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
 #endif
         bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
         ebpfos_rule_task_overlap(generation->tasks[i], owner->generation->tasks[j])) return true;
+ }
  return false;
 }
 int bpf_kernel_rule_link_create(const union bpf_attr *attr)
@@ -434,7 +455,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  unsigned long flags;
  int error;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (attr->link_create.target_fd || attr->link_create.flags || !count ||
+ if (attr->link_create.flags || !count ||
      count > BPF_KERNEL_RULE_MAX_VERSIONS || attr->link_create.kernel_rule.reserved) return -EINVAL;
  versions = memdup_array_user(u64_to_user_ptr(attr->link_create.kernel_rule.versions),
                              count, sizeof(*versions));
@@ -445,6 +466,17 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  generation = kzalloc(sizeof(*generation), GFP_KERNEL);
  if (!generation) {bpf_prog_put(program);kfree(versions);return -ENOMEM;}
  refcount_set(&generation->refs, 1);generation->program = program;generation->count = count;
+ if (attr->link_create.target_fd) {
+#ifdef CONFIG_CGROUPS
+  generation->scope = cgroup_get_from_fd(attr->link_create.target_fd);
+  if (IS_ERR(generation->scope)) {
+   error = PTR_ERR(generation->scope);generation->scope = NULL;goto fail;
+  }
+  if (!cgroup_on_dfl(generation->scope)) {error = -EINVAL;goto fail;}
+#else
+  error = -EOPNOTSUPP;goto fail;
+#endif
+ }
  for (i = 0; i < count; ++i) {
   u32 *fds;
   if (versions[i].reserved ||
