@@ -15426,6 +15426,13 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	}
 	if (err)
 		return err;
+	/* Meet all successful visits. A bare prototype on any path must keep
+	 * publication from treating this instruction as an ordinary Native call.
+	 */
+	if (!declaration)
+		cur_aux(env)->native_callx_contract = BPF_NATIVE_CALLX_UNPROVED;
+	else if (!cur_aux(env)->native_callx_contract)
+		cur_aux(env)->native_callx_contract = BPF_NATIVE_CALLX_PROVIDER;
 	env->prog->aux->has_callx = true;
 	return 0;
 }

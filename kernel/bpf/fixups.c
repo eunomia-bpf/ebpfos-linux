@@ -1342,8 +1342,16 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		func[i]->aux->used_maps = env->used_maps;
 		func[i]->aux->used_map_cnt = env->used_map_cnt;
 		num_exentries = 0;
+		func[i]->aux->native_callx_context = true;
 		insn = func[i]->insnsi;
 		for (j = 0; j < func[i]->len; j++, insn++) {
+			/* Inspect the final retained instructions. Unseen calls, or
+			 * any visit carrying only a field prototype, keep the old
+			 * native-context obligation. Auxiliary facts follow rewrites.
+			 */
+			if (insn->code == (BPF_JMP | BPF_CALL | BPF_X) &&
+			    env->insn_aux_data[subprog_start + j].native_callx_contract != BPF_NATIVE_CALLX_PROVIDER)
+				func[i]->aux->native_callx_context = false;
 			if (BPF_CLASS(insn->code) == BPF_LDX &&
 			    (BPF_MODE(insn->code) == BPF_PROBE_MEM ||
 			     BPF_MODE(insn->code) == BPF_PROBE_MEM32 ||

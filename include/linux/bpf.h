@@ -1989,6 +1989,8 @@ struct bpf_prog_aux {
 	struct bpf_jit_poke_descriptor *poke_tab;
 	struct bpf_kfunc_desc_tab *kfunc_tab;
 	bool has_callx;
+	/* Every retained callx was checked against an actual Native provider. */
+	bool native_callx_context;
 	struct bpf_kfunc_btf_tab *kfunc_btf_tab;
 	u32 size_poke_tab;
 #ifdef CONFIG_FINEIBT

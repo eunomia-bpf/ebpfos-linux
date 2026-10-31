@@ -49,14 +49,14 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     continue;
    }
    if (insn->code == (BPF_JMP | BPF_TAIL_CALL)) goto out;
-   /* Trusted source retains Linux's native indirect calls and their execution
-    * context. There is no immutable BPF target graph to inspect here. This is
-    * the tier's stated source/compiler trust, not a verified context proof.
-    * Keep the verified and pure-binding restrictions until their target
-    * context contracts are available at load time.
+   /* A verified callx may retain the same actual-provider contract as an
+    * ordinary Native call. The verifier meets every visited path and JIT
+    * preparation checks all retained instructions; a field prototype alone
+    * supplies no such fact. Trusted source keeps its stated Native premise.
+    * Neither route establishes a pure binding.
     */
    if (insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
-    if (pure || !aux->trusted_kernel) {
+    if (pure || (!aux->trusted_kernel && !function->aux->native_callx_context)) {
      pr_warn("BPF native context: indirect call has no native-context summary\n");goto out;
     }
     continue;
