@@ -10,13 +10,39 @@
 #include <linux/string.h>
 #define cell_layout_type btf_type_by_id
 #define cell_layout_name btf_name_by_offset
+#define cell_layout_count btf_nr_types
 #else
 #include <bpf/btf.h>
 #include <stdbool.h>
 #include <string.h>
 #define cell_layout_type btf__type_by_id
 #define cell_layout_name btf__name_by_offset
+#define cell_layout_count btf__type_cnt
 #endif
+/* A flexible member's type size is only its prefix. A concrete VAR's DATASEC
+ * entry describes its allocated storage; neither a neighboring variable nor
+ * an arbitrary caller-supplied extent can complete that allocation. */
+static inline __u32 cell_storage_extent(const struct btf *types, __u32 variable)
+{
+ __u32 id, bytes = 0;
+ const struct btf_type *var = cell_layout_type(types, variable);
+ if (!var || BTF_INFO_KIND(var->info) != BTF_KIND_VAR) return 0;
+ for (id = 1; id < cell_layout_count(types); ++id) {
+  const struct btf_type *section = cell_layout_type(types, id);
+  const struct btf_var_secinfo *entries;
+  unsigned int i;
+  if (!section || BTF_INFO_KIND(section->info) != BTF_KIND_DATASEC) continue;
+  entries = (const struct btf_var_secinfo *)(section + 1);
+  for (i = 0; i < BTF_INFO_VLEN(section->info); ++i) {
+   if (entries[i].type != variable) continue;
+   if (!entries[i].size || entries[i].offset > section->size ||
+       entries[i].size > section->size - entries[i].offset ||
+       (bytes && bytes != entries[i].size)) return 0;
+   bytes = entries[i].size;
+  }
+ }
+ return bytes;
+}
 /* Compare the actual storage passed through this call. Pointer-valued record
  * fields keep nominal pointee identities; their unrelated reachable objects
  * are not part of the argument object's layout. Qualifiers remain significant.
@@ -79,4 +105,5 @@ static inline bool cell_layout(const struct btf *a, __u32 ai, const struct btf *
 }
 #undef cell_layout_type
 #undef cell_layout_name
+#undef cell_layout_count
 #endif

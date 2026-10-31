@@ -52,7 +52,7 @@ static struct bpf_operations_set __rcu *global_operations;
  * contained in this allocation; a data pointer names a different allocation.
  * This runs while preparing an immutable map, never during a method call. */
 static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size,
- struct operations_field *fields, u32 *count)
+ struct operations_field *fields, u32 *count, bool tail)
 {
  const struct btf_type *type = btf_type_skip_modifiers(btf, id, &id);
  u32 i;
@@ -67,19 +67,24 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
  }
  if (btf_type_is_array(type)) {
   const struct btf_array *array = btf_array(type);
-  u32 element = array->type, stride;
+  u32 element = array->type, stride, elements;
   const struct btf_type *element_type = btf_type_skip_modifiers(btf, element, &element);
   if (!element_type || !btf_resolve_size(btf, element_type, &stride)) return -EINVAL;
-  if ((u64)array->nelems * stride > size - offset) return -EINVAL;
-  for (i = 0; i < array->nelems; ++i) {
-   error = operations_fields(btf, element, offset + (u64)i * stride, size, fields, count);
+  if (!stride) return 0;
+  elements = array->nelems ? array->nelems : tail ? (size-offset)/stride : 0;
+  if ((u64)elements * stride > size - offset) return -EINVAL;
+  for (i = 0; i < elements; ++i) {
+   error = operations_fields(btf, element, offset + (u64)i * stride,
+    offset + (u64)(i+1)*stride, fields, count, false);
    if (error) return error;
   }
  } else if (btf_type_is_struct(type)) {
+  if (!tail) size = min_t(u64, size, offset + type->size);
   for (i = 0; i < btf_type_vlen(type); ++i) {
    if (btf_member_bitfield_size(type, i) || btf_member_bit_offset(type, i) % 8) continue;
    error = operations_fields(btf, btf_members(type)[i].type,
-    offset + btf_member_bit_offset(type, i) / 8, size, fields, count);
+    offset + btf_member_bit_offset(type, i) / 8, size, fields, count,
+    tail && (BTF_INFO_KIND(type->info) == BTF_KIND_UNION || i+1 == btf_type_vlen(type)));
    if (error) return error;
   }
  }
@@ -193,7 +198,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  struct btf *btf = bpf_get_btf_vmlinux();
  struct module *module = NULL;
  unsigned long address;
- u32 size;
+ u32 size, allocated;
  int error = -EINVAL;
  if (attr->map_flags & BPF_F_VTYPE_BTF_OBJ_FD) {
   btf = btf_get_by_fd(attr->value_type_btf_obj_fd);
@@ -209,8 +214,14 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  variable = btf_type_by_id(btf, attr->map_extra);
  record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
  if (!variable || !btf_type_is_var(variable) || !record ||
-     !btf_resolve_size(btf, record, &size) || size != attr->value_size ||
+     !btf_resolve_size(btf, record, &size) ||
      btf_type_skip_modifiers(btf, variable->type, NULL) != record) goto fail;
+ allocated = cell_storage_extent(btf, attr->map_extra);
+ if (allocated) {
+  if (allocated < size) goto fail;
+  size = allocated;
+ }
+ if (size != attr->value_size) goto fail;
  address = operations_storage(btf, attr->map_extra, module, size);
  if (!address) {error = -ENOENT;goto fail;}
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);
@@ -218,7 +229,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  ops->table = kmalloc(size, GFP_KERNEL);
  ops->user = kzalloc(size, GFP_KERNEL);
  error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size,
-  NULL, &ops->field_count);
+  NULL, &ops->field_count, allocated != 0);
  if (error) goto free_ops;
  ops->fields = kvcalloc(ops->field_count, sizeof(*ops->fields), GFP_KERNEL);
  ops->programs = kvcalloc(ops->field_count, sizeof(*ops->programs), GFP_KERNEL);
@@ -227,7 +238,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  if (error) goto free_ops;
  {
   u32 filled = 0;
-  error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size, ops->fields, &filled);
+  error = operations_fields(btf, attr->btf_vmlinux_value_type_id, 0, size, ops->fields, &filled, allocated != 0);
   if (error) goto free_ops;
  }
  bpf_map_init_from_attr(&ops->map, attr);
