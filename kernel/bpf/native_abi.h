@@ -206,6 +206,15 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
    arg->stack_offset = abi->stack_size;
    if (size > MAX_BPF_STACK - abi->stack_size) return -E2BIG;
    abi->stack_size += round_up(size, 8u);
+#if defined(CONFIG_CC_IS_CLANG) && CONFIG_CLANG_VERSION < 200000
+   /* The native Clang 18/19 x86 convention shadows R9 when a scalar
+    * i128 cannot start in the remaining register slot. Record arguments
+    * use the frontend's byval convention and do not consume that slot.
+    */
+   const struct btf_type *type = btf_type_skip_modifiers(btf, params[i].type, NULL);
+   if (!err && size == 16 && words == 2 && btf_type_is_int(type))
+    next_reg = MAX_BPF_NATIVE_REG_ARGS;
+#endif
   }
  }
  return 0;
