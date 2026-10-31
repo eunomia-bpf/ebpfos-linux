@@ -223,6 +223,36 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
 #endif
   }
  }
+ abi->next_reg = next_reg;
+ abi->tail_stack_start = abi->stack_size;
+ return 0;
+}
+/* Continue the named ABI instead of reclassifying or shifting its holes. */
+struct bpf_native_arg bpf_native_tail_arg(const struct bpf_native_abi *abi, u32 index)
+{
+ u32 slot = abi->next_reg + index;
+ struct bpf_native_arg arg = {.words=1, .word_mask=1,
+  .size=abi->tail_types[index * 4 + 1] == '6' ? 8 : 4};
+ arg.reg = slot < MAX_BPF_NATIVE_REG_ARGS ? slot : -1;
+ if (arg.reg < 0)
+  arg.stack_offset = abi->tail_stack_start + (slot - MAX_BPF_NATIVE_REG_ARGS) * 8;
+ return arg;
+}
+int bpf_native_abi_tail(struct btf *btf, const struct btf_type *function,
+ struct bpf_native_abi *abi)
+{
+ const char prefix[] = "native:variadic_scalar_tail:";
+ const char *types;
+ u32 count = cell_variadic_scalar_tail_info(btf, function, &types);
+ u32 registers = MAX_BPF_NATIVE_REG_ARGS - abi->next_reg;
+ u32 overflow;
+ if (count == ~0U) return -EINVAL;
+ if (!count) return 0;
+ overflow = count > registers ? count - registers : 0;
+ if (overflow > (MAX_BPF_STACK - abi->stack_size) / 8) return -E2BIG;
+ abi->tail_types = types + sizeof(prefix) - 1;
+ abi->tail_count = count;
+ abi->stack_size += overflow * 8;
  return 0;
 }
 #endif

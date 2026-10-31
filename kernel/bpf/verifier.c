@@ -10702,6 +10702,33 @@ static int native_call_arg_reg(struct bpf_verifier_env *env, const struct bpf_na
 	return err ?: BPF_REG_0;
 }
 
+/* Only complete scalar words are transportable here. Narrow tail inputs
+ * retain their source types but need separate native padding/extension proof;
+ * they do not acquire initialized high bytes or registers from this rule.
+ */
+static int check_native_scalar_tail(struct bpf_verifier_env *env,
+                                    const struct bpf_native_abi *abi)
+{
+ for (u32 index = 0; index < abi->tail_count; ++index) {
+  struct bpf_native_arg arg = bpf_native_tail_arg(abi, index);
+  struct native_arg_scope temporary __free(native_arg) = {};
+  int regno, err;
+  if (arg.size != 8) return -EOPNOTSUPP;
+  if (arg.reg >= 0) {
+   regno = bpf_arg_regno(arg.reg);
+   err = check_reg_arg(env, regno, SRC_OP);
+  } else {
+   err = native_stack_arg(env, &arg, &temporary);regno = 13;
+  }
+  if (err) return err;
+  if (cur_regs(env)[regno].type != SCALAR_VALUE) {
+   verbose(env, "anonymous input requires an initialized scalar word\n");
+   return -EACCES;
+  }
+ }
+ return 0;
+}
+
 static struct bpf_reg_state *native_global_arg_state(struct bpf_subprog_info *sub,
 						    struct bpf_func_state *frame, u32 index)
 {
@@ -11181,7 +11208,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
 	}
 
-	return 0;
+	return sub->native_frame ? check_native_scalar_tail(env, &sub->native_abi) : 0;
 }
 
 /* The callee's independently checked result contract describes exactly the
@@ -14217,9 +14244,10 @@ static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
    * prototype or caller-owned annotation cannot assert that another body
    * ignores its anonymous list. Fixed arguments retain every ordinary check.
    */
-  if (!cell_variadic_tail_unused(btf, declaration) ||
-      btf_type_by_id(btf, declaration->type) != prototype) {
-   verbose(env, "variadic call requires a provider-proved unused tail\n");
+  u32 tail = cell_variadic_scalar_tail(btf, declaration);
+  if ((!cell_variadic_tail_unused(btf, declaration) && (!tail || tail == ~0U)) ||
+      !declaration || btf_type_by_id(btf, declaration->type) != prototype) {
+   verbose(env, "variadic call requires an actual provider tail contract\n");
    return -EOPNOTSUPP;
   }
  }
@@ -14244,9 +14272,14 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	ret = native_call_named_args(env, meta->btf, meta->func_proto,
 		meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id), &nargs);
 	if (ret) return ret;
+	if (!native && cell_variadic_scalar_tail(meta->btf, meta->func_decl ?:
+		btf_type_by_id(meta->btf, meta->func_id))) return -EOPNOTSUPP;
 	if (native) {
 		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
 				  env->prog->aux->trusted_kernel);
+		if (ret) return ret;
+		ret = bpf_native_abi_tail(meta->btf, meta->func_decl ?:
+			btf_type_by_id(meta->btf, meta->func_id), &abi);
 		if (ret) return ret;
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
@@ -14973,6 +15006,10 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		return -EINVAL;
 	}
 
+	if (abi.tail_count) {
+		ret = check_native_scalar_tail(env, &abi);
+		if (ret) return ret;
+	}
 	/* The native callee writes the same typed result layout as the caller. */
 	if (*native_result_size)
 		return native_prototype_record_result(env, meta->btf, meta->func_proto, true);
@@ -21452,6 +21489,8 @@ static int check_native_frames(struct bpf_verifier_env *env)
 			err = bpf_native_abi_plan(btf, proto, &sub->native_abi, aux->trusted_kernel);
 			if (err)
 				return err;
+			err = bpf_native_abi_tail(btf, fn, &sub->native_abi);
+			if (err) return err;
 			if (sub->native_abi.result_buffer &&
 			    (sub->native_abi.args[0].size > BPF_TRACKED_STACK ||
 			     round_up(sub->native_abi.args[0].size, 8) >
@@ -21874,8 +21913,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 
 			ret = grow_stack_state(env, state->frame[0], end);
 			if (ret) goto out;
-			for (u32 byte = out; byte < end; byte += 8) {
-				struct bpf_stack_state *slot = &state->frame[0]->stack[byte / 8];
+			for (u32 byte = 0; byte < sub->native_abi.tail_stack_start; byte += 8) {
+				struct bpf_stack_state *slot = &state->frame[0]->stack[(end - byte - 1) / 8];
 
 				__mark_reg_unknown(env, &slot->spilled_ptr);
 				slot->spilled_ptr.precise = true;
@@ -21994,6 +22033,20 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				regs[13] = saved_temp;
 			}
 
+		}
+		if (sub->native_frame) for (u32 ti = 0; ti < sub->native_abi.tail_count; ++ti) {
+			struct bpf_native_arg location = bpf_native_tail_arg(&sub->native_abi, ti);
+			struct bpf_reg_state *input;
+			if (location.size != 8) continue;
+			if (location.reg >= 0) input = &regs[bpf_arg_regno(location.reg)];
+			else {
+				u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) + round_up(sub->native_arg_in, 8);
+				s64 off = -(s64)end + location.stack_offset;
+				struct bpf_stack_state *slot = &state->frame[0]->stack[bpf_get_spi(off)];
+				input = &slot->spilled_ptr;
+				memset(slot->slot_type, STACK_SPILL, sizeof(slot->slot_type));
+			}
+			__mark_reg_unknown(env, input);input->precise = true;
 		}
 		/* All arguments exist before a pointer is related to its count. */
 		for (int ai = 0; ai < sub->arg_cnt; ai++) {

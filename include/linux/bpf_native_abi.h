@@ -11,10 +11,13 @@ struct bpf_native_arg {
 };
 struct bpf_native_abi {
  u32 stack_size;
- u8 nr_args, result_words, result_word_mask;
+ u8 nr_args, result_words, result_word_mask, next_reg;
+ u32 tail_count, tail_stack_start;
+ const char *tail_types;
  bool result_buffer;
  struct bpf_native_arg args[MAX_BPF_FUNC_ARGS + 1];
 };
+struct bpf_native_arg bpf_native_tail_arg(const struct bpf_native_abi *abi, u32 index);
 /* A compiled native entry is checked as the function in func_info[0], not
  * as a tracing context reader. Native frames require the x86 JIT and retain
  * the complete C prototype; publication still checks the actual caller.
@@ -39,4 +42,6 @@ int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
                               u32 word, u32 *bytes, struct bpf_verifier_log *log);
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
                        struct bpf_native_abi *abi, bool trusted_native);
+int bpf_native_abi_tail(struct btf *btf, const struct btf_type *function,
+                       struct bpf_native_abi *abi);
 #endif
