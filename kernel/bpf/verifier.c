@@ -10716,7 +10716,17 @@ static int native_stack_arg(struct bpf_verifier_env *env,
  * state for a second stack value, restoring it before leaving the checker.
  * No BPF instruction or JIT register move is inserted.
  */
-static int native_call_arg_reg(struct bpf_verifier_env *env, const struct bpf_native_abi *abi,
+/* A C 32-bit scalar defines its low word, not the upper native register.
+ * Records and pointers retain their existing complete-word contracts.
+ */
+static u32 native_named_input_bytes(const struct btf *btf, const struct bpf_native_arg *arg)
+{
+ const struct btf_type *type = btf_type_skip_modifiers(btf, arg->type_id, NULL);
+ return type && btf_type_is_scalar(type) && type->size == 4 &&
+  (!btf_type_is_int(type) || btf_int_bits(type) == 32) ? 4 : 8;
+}
+
+static int native_call_arg_reg(struct bpf_verifier_env *env, const struct btf *btf, const struct bpf_native_abi *abi,
 			       u32 index, struct native_arg_scope *scope)
 {
 	const struct bpf_native_arg *arg = &abi->args[index + abi->result_buffer];
@@ -10724,7 +10734,7 @@ static int native_call_arg_reg(struct bpf_verifier_env *env, const struct bpf_na
 
 	if (arg->words != 1) return -EOPNOTSUPP;
 	if (arg->reg >= 0) return bpf_arg_regno(arg->reg);
-	err = native_stack_arg_at(env, arg, scope, BPF_REG_0, 8);
+	err = native_stack_arg_at(env, arg, scope, BPF_REG_0, native_named_input_bytes(btf, arg));
 	return err ?: BPF_REG_0;
 }
 
@@ -10939,15 +10949,16 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			}
 			if (location->reg < 0) {
 				struct bpf_subprog_info *caller = &env->subprog_info[cur_func(env)->subprogno];
-				u32 bytes = max(location->size, 8u);
+				u32 bytes = !arg->has_scalar_max && native_named_input_bytes(btf, location) == 4 ? 4 : max(location->size, 8u);
 
 				if (!caller->native_frame || location->stack_offset > caller->native_arg_out ||
-				    bytes > caller->native_arg_out - location->stack_offset)
+				    max(bytes, 8u) > caller->native_arg_out - location->stack_offset)
 					return -EINVAL;
 				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max) {
 					if (location->size > 8)
 						return -EOPNOTSUPP;
-					ret = native_stack_arg(env, location, &temporary);
+					ret = native_stack_arg_at(env, location, &temporary, 13,
+						arg->has_scalar_max ? 8 : native_named_input_bytes(btf, location));
 					if (ret) return ret;
 					regno = 13;
 					goto native_argument;
@@ -10986,11 +10997,11 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
  native_argument:
 		reg = &regs[regno];
-		/* Independently checked named arguments currently assume a complete
-		 * register. A partial anonymous input must first be normalized by
-		 * its actual BPF width operation, not widened by a prototype change.
+		/* The declared scalar width is shared by the caller and independent
+		 * entry. Explicit full-register maximum contracts retain that promise.
 		 */
-		ret = __check_reg_arg(env, regs, regno, SRC_OP, 8);
+		ret = __check_reg_arg(env, regs, regno, SRC_OP,
+			location && !arg->has_scalar_max ? native_named_input_bytes(btf, location) : 8);
 		if (ret) return ret;
 		if (location && location->words == 2) {
 			ret = __check_reg_arg(env, regs, bpf_arg_regno(location->reg + 1), SRC_OP, 8);
@@ -11040,7 +11051,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		} else if (arg->mem_size_reg) {
 			struct native_arg_scope count_scope __free(native_arg) = {};
 			int count_regno = sub->native_frame ?
-				native_call_arg_reg(env, &sub->native_abi, arg->mem_size_arg - 1, &count_scope) :
+				native_call_arg_reg(env, btf, &sub->native_abi, arg->mem_size_arg - 1, &count_scope) :
 				arg->mem_size_reg;
 			struct bpf_reg_state *count;
 			struct bpf_call_arg_meta meta = {};
@@ -14366,7 +14377,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 				if (is_kfunc_release(meta) || is_kfunc_arg_prog_aux(btf, &args[i]) ||
 				    is_kfunc_arg_implicit(meta, i))
 					return -EOPNOTSUPP;
-				ret = native_stack_arg(env, location, &temporary);
+				ret = native_stack_arg_at(env, location, &temporary, 13,
+					native_named_input_bytes(btf, location));
 				if (ret) return ret;
 				regno = 13;
 			} else {
@@ -14417,7 +14429,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			return ret;
 
 		if (btf_type_is_scalar(t)) {
-			ret = __check_reg_arg(env, regs, regno, SRC_OP, 8);
+			ret = __check_reg_arg(env, regs, regno, SRC_OP,
+				native ? native_named_input_bytes(btf, &abi.args[i + abi.result_buffer]) : 8);
 			if (ret) return ret;
 			if (meta->func_id == U32_MAX && native) {
 				u32 encoding = btf_type_is_int(t) ? btf_int_encoding(t) : 0;
@@ -14546,7 +14559,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
 							args[size_arg].type, NULL);
 			struct native_arg_scope count_scope __free(native_arg) = {};
-			int count_regno = native ? native_call_arg_reg(env, &abi, size_arg, &count_scope) :
+			int count_regno = native ? native_call_arg_reg(env, btf, &abi, size_arg, &count_scope) :
 				bpf_arg_regno(size_arg);
 			struct bpf_reg_state *count;
 
@@ -14884,7 +14897,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			struct bpf_reg_state *buff_reg = &regs[regno];
 			const struct btf_param *buff_arg = &args[i];
 			struct native_arg_scope count_scope __free(native_arg) = {};
-			int count_regno = native ? native_call_arg_reg(env, &abi, i + 1, &count_scope) :
+			int count_regno = native ? native_call_arg_reg(env, btf, &abi, i + 1, &count_scope) :
 				bpf_arg_regno(i + 1);
 			struct bpf_reg_state *size_reg;
 
@@ -19003,6 +19016,8 @@ static void sync_linked_regs(struct bpf_verifier_env *env, struct bpf_verifier_s
 		 */
 		if (((reg->id ^ known_reg->id) & BPF_ADD_CONST) == BPF_ADD_CONST)
 			continue;
+		/* Value refinement does not execute a write to this register. */
+		u8 saved_input_bits = reg->native_input_bits;
 		if ((!(reg->id & BPF_ADD_CONST) && !(known_reg->id & BPF_ADD_CONST)) ||
 		    reg->delta == known_reg->delta) {
 			s32 saved_subreg_def = reg->subreg_def;
@@ -19034,6 +19049,7 @@ static void sync_linked_regs(struct bpf_verifier_env *env, struct bpf_verifier_s
 				zext_32_to_64(reg);
 			reg_bounds_sync(reg);
 		}
+		reg->native_input_bits = saved_input_bits;
 		if (e->is_reg)
 			mark_reg_scratched(env, e->regno);
 		else
@@ -21986,7 +22002,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			struct bpf_reg_state saved_temp = regs[13];
 
 			if (stacked && sub->args[ai].arg_type == ARG_ANYTHING &&
-			    !sub->args[ai].has_scalar_max)
+			    !sub->args[ai].has_scalar_max &&
+			    native_named_input_bytes(env->prog->aux->btf, location) != 4)
 				continue;
 			if (stacked && location->size > 8) {
 				ret = -EOPNOTSUPP;
@@ -22056,6 +22073,14 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				ret = -EFAULT;
 				goto out;
 			}
+			if (location && arg->arg_type == ARG_ANYTHING && !arg->has_scalar_max &&
+			    native_named_input_bytes(env->prog->aux->btf, location) == 4) {
+				/* Bounds describe the defined low-word value. The permission
+				 * still rejects a physical full-register read before normalization.
+				 */
+				coerce_reg_to_size(reg, 4);
+				reg->native_input_bits = 32;
+			}
 			if (stacked) {
 				u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) +
 					round_up(sub->native_arg_in, 8);
@@ -22063,7 +22088,9 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				struct bpf_stack_state *slot = &state->frame[0]->stack[bpf_get_spi(off)];
 
 				slot->spilled_ptr = *reg;
-				memset(slot->slot_type, STACK_SPILL, sizeof(slot->slot_type));
+				for (u32 byte = 0; byte < BPF_REG_SIZE; ++byte)
+					slot->slot_type[7 - byte] = reg->native_input_bits && byte >= 4 ?
+						STACK_NATIVE_PADDING : STACK_SPILL;
 				regs[13] = saved_temp;
 			}
 
