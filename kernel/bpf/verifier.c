@@ -10952,13 +10952,15 @@ static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf 
 }
 
 static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
-                             const struct bpf_native_arg *arg, bool global)
+                             const struct bpf_native_arg *arg, bool global, bool checked_entry)
 {
  u32 reg_index = 0;
  for (u32 offset = 0; offset < arg->size; offset += 8) {
   struct native_arg_scope temporary __free(native_arg) = {};
   struct bpf_native_arg word = *arg;
   u32 pointer, regno;
+  if (arg->reg < 0 && checked_entry && arg->word_mask &&
+      !(arg->word_mask & BIT(offset / 8))) continue;
   int err = btf_native_pointer_word(btf, arg->type_id, offset, &pointer);
   if (err) return err;
   if (arg->reg >= 0) {
@@ -10998,6 +11000,11 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
    reg = &slot->spilled_ptr;
   }
   __mark_reg_unknown(env, reg);
+  if (slot && arg->word_mask && !(arg->word_mask & BIT(offset / 8))) {
+   reg->type = NOT_INIT;
+   memset(slot->slot_type, STACK_NATIVE_PADDING, sizeof(slot->slot_type));
+   continue;
+  }
   reg->precise = true;
   if (!pointer) {
    if (bytes < 8) {
@@ -11023,13 +11030,13 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
 
 /* Integer records carry bytes, not pointer capabilities. */
 static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *btf,
-				    const struct bpf_native_arg *arg)
+				    const struct bpf_native_arg *arg, bool checked_entry)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	int err;
 
 	if (arg->reg >= 0)
-		return native_record_arg(env, btf, arg, false);
+		return native_record_arg(env, btf, arg, false, checked_entry);
 	struct bpf_subprog_info *sub = &env->subprog_info[cur_func(env)->subprogno];
 	struct bpf_reg_state *sp = &regs[BPF_REG_ARG_SP];
 	struct bpf_func_state *frame = bpf_func(env, sp);
@@ -11042,6 +11049,7 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
 	for (u32 byte = 0; byte < arg->size; byte++) {
+		if (checked_entry && arg->word_mask && !(arg->word_mask & BIT(byte / 8))) continue;
 		u32 slot_byte = -off - byte - 1;
 		struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
 		u8 type = slot->slot_type[slot_byte % 8];
@@ -11095,8 +11103,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		if (location) {
 			if (btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
 				ret = btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0) ?
-					native_scalar_record_arg(env, env->prog->aux->btf, location) :
-					native_record_arg(env, env->prog->aux->btf, location, true);
+					native_scalar_record_arg(env, env->prog->aux->btf, location, true) :
+					native_record_arg(env, env->prog->aux->btf, location, true, true);
 				if (ret) return ret;
 				continue;
 			}
@@ -14533,8 +14541,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			    (btf_type_is_scalar(t) && t->size > 8)) {
 				if (!btf_native_value_storage(meta->btf, args[i].type)) return -EOPNOTSUPP;
 				ret = btf_native_scalar_storage(meta->btf, args[i].type, 0) ?
-					native_scalar_record_arg(env, meta->btf, location) :
-					native_record_arg(env, meta->btf, location, meta->native_call);
+					native_scalar_record_arg(env, meta->btf, location, false) :
+					native_record_arg(env, meta->btf, location, meta->native_call, false);
 				if (ret) return ret;
 				continue;
 			}
