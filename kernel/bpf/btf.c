@@ -8318,7 +8318,7 @@ static bool btf_global_pointer_arg_unused(struct bpf_prog *prog, int subprog,
 	if (!env)
 		return prog->aux->func_info_aux[subprog].verified &&
 		       (prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(index));
-	if (!subprog || env->prog->type == BPF_PROG_TYPE_EXT ||
+	if ((!subprog && !bpf_native_func_entry(prog)) || env->prog->type == BPF_PROG_TYPE_EXT ||
 	    sub->is_cb || env->exception_callback_subprog == subprog)
 		return false;
 	/* Type tags encode spaces/lifetimes independently of arg: annotations. */

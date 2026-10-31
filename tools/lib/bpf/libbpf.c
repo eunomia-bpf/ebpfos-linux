@@ -387,6 +387,7 @@ enum reloc_type {
 struct reloc_desc {
 	enum reloc_type type;
 	int insn_idx;
+	int sym_sec_idx; /* executable section for calls and function addresses */
 	union {
 		const struct bpf_core_relo *core_relo; /* used when type == RELO_CORE */
 		struct {
@@ -482,6 +483,13 @@ struct bpf_program {
 	 * one needs to subtract sec_insn_off; and vice versa.
 	 */
 	struct bpf_insn *insns;
+	/* Pristine link inputs for a callable that is also a program entry.
+	 * Relocating that entry must not change another root's callee input.
+	 * Freed with the other relocation scratch after object preparation.
+	 */
+	struct bpf_insn *subprog_insns;
+	struct reloc_desc *subprog_relocs;
+	int subprog_nr_relocs;
 	/* actual number of instruction in this BPF program's image; for
 	 * entry-point BPF programs this includes the size of main program
 	 * itself plus all the used sub-programs, appended at the end
@@ -824,6 +832,8 @@ static void bpf_program__exit(struct bpf_program *prog)
 	zfree(&prog->name);
 	zfree(&prog->sec_name);
 	zfree(&prog->insns);
+	zfree(&prog->subprog_insns);
+	zfree(&prog->subprog_relocs);
 	zfree(&prog->reloc_desc);
 
 	prog->nr_reloc = 0;
@@ -4623,6 +4633,9 @@ bpf_object__section_to_libbpf_map_type(const struct bpf_object *obj, int shndx)
 	}
 }
 
+static struct bpf_program *find_prog_by_sec_insn(const struct bpf_object *obj,
+						 size_t sec_idx, size_t insn_idx);
+
 static int bpf_prog_compute_hash(struct bpf_program *prog)
 {
 	struct bpf_insn *purged;
@@ -4712,8 +4725,8 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 			pr_warn("prog '%s': incorrect bpf_call opcode\n", prog->name);
 			return -LIBBPF_ERRNO__RELOC;
 		}
-		/* text_shndx can be 0, if no default "main" program exists */
-		if (!shdr_idx || shdr_idx != obj->efile.text_shndx) {
+		if (!shdr_idx || !find_prog_by_sec_insn(obj, shdr_idx,
+						      sym->st_value / BPF_INSN_SZ)) {
 			sym_sec_name = elf_sec_name(obj, elf_sec_by_idx(obj, shdr_idx));
 			pr_warn("prog '%s': bad call relo against '%s' in section '%s'\n",
 				prog->name, sym_name, sym_sec_name);
@@ -4725,6 +4738,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 			return -LIBBPF_ERRNO__RELOC;
 		}
 		reloc_desc->type = RELO_CALL;
+		reloc_desc->sym_sec_idx = shdr_idx;
 		reloc_desc->insn_idx = insn_idx;
 		reloc_desc->sym_off = sym->st_value;
 		return 0;
@@ -4737,7 +4751,9 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 	}
 
 	/* loading subprog addresses */
-	if (sym_is_subprog(sym, obj->efile.text_shndx)) {
+	if (sym_is_subprog(sym, obj->efile.text_shndx) ||
+	    (ELF64_ST_TYPE(sym->st_info) == STT_FUNC &&
+	     find_prog_by_sec_insn(obj, shdr_idx, sym->st_value / BPF_INSN_SZ))) {
 		/* global_func: sym->st_value = offset in the section, insn->imm = 0.
 		 * local_func: sym->st_value = 0, insn->imm = offset in the section.
 		 */
@@ -4748,6 +4764,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 		}
 
 		reloc_desc->type = RELO_SUBPROG_ADDR;
+		reloc_desc->sym_sec_idx = shdr_idx;
 		reloc_desc->insn_idx = insn_idx;
 		reloc_desc->sym_off = sym->st_value;
 		return 0;
@@ -6890,8 +6907,8 @@ bpf_object__reloc_code(struct bpf_object *obj, struct bpf_program *main_prog,
 			sub_insn_idx = prog->sec_insn_off + insn_idx + insn->imm + 1;
 		}
 
-		/* we enforce that sub-programs should be in .text section */
-		subprog = find_prog_by_sec_insn(obj, obj->efile.text_shndx, sub_insn_idx);
+		subprog = find_prog_by_sec_insn(obj,
+			relo ? relo->sym_sec_idx : prog->sec_idx, sub_insn_idx);
 		if (!subprog) {
 			pr_warn("prog '%s': no .text section found yet sub-program call exists\n",
 				prog->name);
@@ -6908,11 +6925,20 @@ bpf_object__reloc_code(struct bpf_object *obj, struct bpf_program *main_prog,
 		 *   there are no more unprocesses subprograms left to append
 		 *   and relocate.
 		 */
-		if (subprog->sub_insn_off == 0) {
-			err = bpf_object__append_subprog_code(obj, main_prog, subprog);
+		if (subprog->sub_insn_off == 0 && subprog != main_prog) {
+			struct bpf_program source = *subprog;
+
+			if (source.subprog_insns) {
+				source.insns = source.subprog_insns;
+				source.insns_cnt = source.sec_insn_cnt;
+				source.reloc_desc = source.subprog_relocs;
+				source.nr_reloc = source.subprog_nr_relocs;
+			}
+			err = bpf_object__append_subprog_code(obj, main_prog, &source);
 			if (err)
 				return err;
-			err = bpf_object__reloc_code(obj, main_prog, subprog);
+			subprog->sub_insn_off = source.sub_insn_off;
+			err = bpf_object__reloc_code(obj, main_prog, &source);
 			if (err)
 				return err;
 		}
@@ -7028,9 +7054,6 @@ bpf_object__relocate_calls(struct bpf_object *obj, struct bpf_program *prog)
 	 */
 	for (i = 0; i < obj->nr_programs; i++) {
 		subprog = &obj->programs[i];
-		if (!prog_is_subprog(obj, subprog))
-			continue;
-
 		subprog->sub_insn_off = 0;
 	}
 
@@ -7051,6 +7074,9 @@ bpf_object__free_relocs(struct bpf_object *obj)
 	for (i = 0; i < obj->nr_programs; i++) {
 		prog = &obj->programs[i];
 		zfree(&prog->reloc_desc);
+		zfree(&prog->subprog_insns);
+		zfree(&prog->subprog_relocs);
+		prog->subprog_nr_relocs = 0;
 		prog->nr_reloc = 0;
 	}
 }
@@ -7526,6 +7552,27 @@ static int bpf_object__relocate(struct bpf_object *obj, const char *targ_btf_pat
 			if (relo->type == RELO_SUBPROG_ADDR)
 				insn[0].src_reg = BPF_PSEUDO_FUNC;
 		}
+	}
+
+	/* Entry functions may also be direct or address-taken callees. Keep
+	 * their original link inputs before any root appends and relocates code.
+	 */
+	for (i = 0; i < obj->nr_programs; i++) {
+		prog = &obj->programs[i];
+		if (prog_is_subprog(obj, prog))
+			continue;
+		prog->subprog_insns = malloc(prog->sec_insn_cnt * BPF_INSN_SZ);
+		if (!prog->subprog_insns)
+			return -ENOMEM;
+		memcpy(prog->subprog_insns, prog->insns, prog->sec_insn_cnt * BPF_INSN_SZ);
+		if (prog->nr_reloc) {
+			prog->subprog_relocs = malloc(prog->nr_reloc * sizeof(*prog->reloc_desc));
+			if (!prog->subprog_relocs)
+				return -ENOMEM;
+			memcpy(prog->subprog_relocs, prog->reloc_desc,
+			       prog->nr_reloc * sizeof(*prog->reloc_desc));
+		}
+		prog->subprog_nr_relocs = prog->nr_reloc;
 	}
 
 	/* relocate subprogram calls and append used subprograms to main

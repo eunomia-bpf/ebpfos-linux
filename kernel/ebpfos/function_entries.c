@@ -84,7 +84,7 @@ static bool entry_export(struct btf *native, u32 prototype,
  unsigned int i;
  bool found = false;
  if (!aux->btf || !aux->func_info || !aux->func) return false;
- for (i = 1; i < aux->func_cnt && i < aux->func_info_cnt; ++i) {
+ for (i = bpf_native_func_entry(program) ? 0 : 1; i < aux->func_cnt && i < aux->func_info_cnt; ++i) {
   u32 id = aux->func_info[i].type_id;
   const struct btf_type *candidate = btf_type_by_id(aux->btf, id);
   if (!candidate || !btf_type_is_func(candidate) ||

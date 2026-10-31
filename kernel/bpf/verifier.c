@@ -6131,7 +6131,7 @@ process_func:
 
 	subprog_depth = round_up_stack_depth(env, subprog[idx].stack_depth);
 	if (subprog[idx].native_frame) {
-		u32 align = subprog[idx].native_stack_align;
+		u32 align = max_t(u32, subprog[idx].native_stack_align, 16);
 
 		subprog_depth += round_up(subprog[idx].native_arg_out, 8);
 		if (align > 8)
@@ -20203,7 +20203,7 @@ static int process_bpf_exit_full(struct bpf_verifier_env *env,
 	 * Exit from async callback implies return code restrictions
 	 * that depend on async scheduling mechanism.
 	 */
-	if (cur_frame->subprogno &&
+	if ((cur_frame->subprogno || bpf_native_func_entry(env->prog)) &&
 	    !cur_frame->in_async_callback_fn &&
 	    !cur_frame->in_exception_callback_fn)
 		err = check_global_subprog_return_code(env);
@@ -21688,7 +21688,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 	state->last_insn_idx = -1;
 
 	regs = state->frame[state->curframe]->regs;
-	if (subprog || env->prog->type == BPF_PROG_TYPE_EXT) {
+	if (subprog || env->prog->type == BPF_PROG_TYPE_EXT ||
+	    bpf_native_func_entry(env->prog)) {
 		const char *sub_name = subprog_name(env, subprog);
 		struct bpf_subprog_arg_info *arg;
 		struct bpf_reg_state *reg;
@@ -22008,9 +22009,12 @@ static int do_check_main(struct bpf_verifier_env *env)
 
 	env->insn_idx = 0;
 	ret = do_check_common(env, 0);
-	if (!ret)
+	if (!ret) {
 		env->prog->aux->stack_depth = max_t(u32, env->subprog_info[0].stack_depth,
 			env->subprog_info[0].native_local_stack);
+		if (bpf_native_func_entry(env->prog))
+			env->prog->aux->func_info_aux[0].verified = true;
+	}
 	return ret;
 }
 
@@ -22761,6 +22765,19 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	    prog->aux->ebpfos_component && prog->aux->trusted_kernel &&
 	    !btf_id && !tgt_prog) {
 		verbose(env, "trusted kernel tier: no resident native target; no entry binding\n");
+		return 0;
+	}
+
+	/* A function program is verified under its own C entry contract. The
+	 * entry journal compares its prototype and preconditions with the native
+	 * caller when publishing; no tracing context or trampoline is involved.
+	 */
+	if (bpf_native_func_entry(prog) && !tgt_prog) {
+		const struct btf_type *fn = btf_type_by_id(prog->aux->btf,
+			prog->aux->func_info[0].type_id);
+
+		prog->aux->attach_func_proto = btf_type_by_id(prog->aux->btf, fn->type);
+		prog->aux->attach_func_name = btf_name_by_offset(prog->aux->btf, fn->name_off);
 		return 0;
 	}
 

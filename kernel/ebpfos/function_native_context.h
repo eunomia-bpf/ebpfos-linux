@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef EBPFOS_FUNCTION_NATIVE_CONTEXT_H
 #define EBPFOS_FUNCTION_NATIVE_CONTEXT_H
+#include <linux/bpf_native_abi.h>
 static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bool pure)
 {
  const enum bpf_func_id helpers[] = { BPF_FUNC_per_cpu_ptr, BPF_FUNC_this_cpu_ptr,
@@ -14,7 +15,7 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
  queue = kvmalloc_array(count, sizeof(*queue), GFP_KERNEL);
  seen = kvcalloc(count, sizeof(*seen), GFP_KERNEL);
  if (!queue || !seen) goto out;
- for (i = 1; i < count; ++i)
+ for (i = bpf_native_func_entry(parent) ? 0 : 1; i < count; ++i)
   if (aux->func[i] && (unsigned long)aux->func[i]->bpf_func == entry) break;
  if (i == count) goto out;
  /* requires_rcu is closed over unprotected direct calls and all function

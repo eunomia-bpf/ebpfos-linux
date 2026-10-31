@@ -2051,7 +2051,11 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 		return err;
 
 	u32 native_depth = stack_depth;
-	bool native_realign = bpf_prog->aux->native_frame && bpf_prog->aux->native_stack_align > 8;
+	/* Kernel C callers may supply only 8-byte stack alignment. Preserve
+	 * their incoming frame, but align the native outgoing call area itself.
+	 */
+	u32 native_alignment = max_t(u32, bpf_prog->aux->native_stack_align, 16);
+	bool native_realign = bpf_prog->aux->native_frame;
 	u32 native_fp = native_realign ? X86_REG_R12 : BPF_REG_FP;
 	struct bpf_native_image *native = bpf_prog->aux->native_image;
 	u32 spill_size = native ? native->spill_size : 0;
@@ -2074,6 +2078,10 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 			native_depth += callee_regs_used[reg] ? 8 : 0;
 		if (native_realign)
 			native_depth += spill_size;
+		/* Keep an aligned outgoing area with either parity of saved GPRs.
+		 * The prologue also handles a merely 8-byte-aligned native caller.
+		 */
+		native_depth = round_up(native_depth, 16);
 	}
 	emit_prologue(&prog, image, native_depth + (native_realign ? 8 : 0),
 		      bpf_prog_was_classic(bpf_prog), tail_call_reachable,
@@ -2094,7 +2102,7 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 			 */
 			emit_stx(&prog, BPF_DW, BPF_REG_ARG_FP, X86_REG_R12, -8);
 			emit_native_frame_regs(&prog, callee_regs_used, 8, BPF_REG_ARG_FP, false);
-			EMIT3_off32(0x48, 0x81, 0xE4, -(s32)bpf_prog->aux->native_stack_align);
+			EMIT3_off32(0x48, 0x81, 0xE4, -(s32)native_alignment);
 			EMIT_mov(X86_REG_R12, BPF_REG_ARG_SP);
 			if (private_depth)
 				EMIT3_off32(0x49, 0x81, 0xC4, private_depth);

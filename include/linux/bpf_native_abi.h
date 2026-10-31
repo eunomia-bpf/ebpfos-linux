@@ -15,6 +15,16 @@ struct bpf_native_abi {
  bool result_buffer;
  struct bpf_native_arg args[MAX_BPF_FUNC_ARGS + 1];
 };
+/* A compiled native entry is checked as the function in func_info[0], not
+ * as a tracing context reader. Native frames require the x86 JIT and retain
+ * the complete C prototype; publication still checks the actual caller.
+ */
+static inline bool bpf_native_func_entry(const struct bpf_prog *prog)
+{
+ return prog->aux->ebpfos_component && prog->aux->native_frame &&
+        prog->type == BPF_PROG_TYPE_TRACING &&
+        prog->expected_attach_type == BPF_TRACE_REPLACE;
+}
 struct btf;
 struct bpf_subprog_arg_info;
 struct bpf_verifier_log;

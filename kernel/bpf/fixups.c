@@ -1515,7 +1515,7 @@ int bpf_jit_subprogs(struct bpf_verifier_env *env)
 	struct bpf_insn_aux_data *orig_insn_aux;
 	u32 *orig_subprog_starts;
 
-	if (env->subprog_cnt <= 1)
+	if (env->subprog_cnt <= 1 && !bpf_native_func_entry(env->prog))
 		return 0;
 
 	prog = orig_prog = env->prog;

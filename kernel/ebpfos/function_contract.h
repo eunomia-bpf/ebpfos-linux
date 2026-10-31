@@ -149,7 +149,7 @@ static bool cell_callable_proto(struct btf *native, u32 native_type,
   n = btf_type_by_id(native, native_proto_id);
  }
  if (!aux->btf || !aux->func || !aux->func_info_aux || !aux->func_info) return false;
- for (index = 1; index < aux->func_cnt && index < aux->func_info_cnt; ++index)
+ for (index = bpf_native_func_entry(parent) ? 0 : 1; index < aux->func_cnt && index < aux->func_info_cnt; ++index)
   if (aux->func_info[index].type_id == id) break;
  if (index >= aux->func_cnt || index >= aux->func_info_cnt ||
      (!trusted && (!aux->func_info_aux[index].verified || aux->func_info_aux[index].unreliable))) return false;
