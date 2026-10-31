@@ -10949,7 +10949,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			}
 			if (location->reg < 0) {
 				struct bpf_subprog_info *caller = &env->subprog_info[cur_func(env)->subprogno];
-				u32 bytes = !arg->has_scalar_max && native_named_input_bytes(btf, location) == 4 ? 4 : max(location->size, 8u);
+				u32 bytes = native_named_input_bytes(btf, location) == 4 ? 4 : max(location->size, 8u);
 
 				if (!caller->native_frame || location->stack_offset > caller->native_arg_out ||
 				    max(bytes, 8u) > caller->native_arg_out - location->stack_offset)
@@ -10958,7 +10958,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 					if (location->size > 8)
 						return -EOPNOTSUPP;
 					ret = native_stack_arg_at(env, location, &temporary, 13,
-						arg->has_scalar_max ? 8 : native_named_input_bytes(btf, location));
+						native_named_input_bytes(btf, location));
 					if (ret) return ret;
 					regno = 13;
 					goto native_argument;
@@ -10998,10 +10998,10 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
  native_argument:
 		reg = &regs[regno];
 		/* The declared scalar width is shared by the caller and independent
-		 * entry. Explicit full-register maximum contracts retain that promise.
+		 * entry, including arguments with explicit value bounds.
 		 */
 		ret = __check_reg_arg(env, regs, regno, SRC_OP,
-			location && !arg->has_scalar_max ? native_named_input_bytes(btf, location) : 8);
+			location ? native_named_input_bytes(btf, location) : 8);
 		if (ret) return ret;
 		if (location && location->words == 2) {
 			ret = __check_reg_arg(env, regs, bpf_arg_regno(location->reg + 1), SRC_OP, 8);
@@ -11090,7 +11090,11 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				return -EINVAL;
 			}
 			if (arg->has_scalar_max) {
-				if (reg->umax_value > arg->scalar_max) {
+				/* Match the declared C value, as Native kfuncs do. A
+				 * low-word constraint never initializes physical upper bits.
+				 */
+				if ((location && native_named_input_bytes(btf, location) == 4 ?
+				     reg->u32_max_value : reg->umax_value) > arg->scalar_max) {
 					bpf_log(log, "arg#%d scalar exceeds declared global maximum %u\n",
 						i, arg->scalar_max);
 					return -EACCES;
@@ -22024,8 +22028,9 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				reg->type = SCALAR_VALUE;
 				mark_reg_unknown(env, regs, i);
 				if (arg->has_scalar_max) {
-					/* Every ordinary caller checked this full-register
-					 * range. Keep its identity for byte-count pairings.
+					/* Every ordinary caller checked this C value range.
+					 * Keep its identity for byte-count pairings; the input
+					 * width below independently restricts physical reads.
 					 */
 					reg->var_off = tnum_range(0, arg->scalar_max);
 					reg->umin_value = reg->u32_min_value = 0;
@@ -22073,7 +22078,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				ret = -EFAULT;
 				goto out;
 			}
-			if (location && arg->arg_type == ARG_ANYTHING && !arg->has_scalar_max &&
+			if (location && arg->arg_type == ARG_ANYTHING &&
 			    native_named_input_bytes(env->prog->aux->btf, location) == 4) {
 				/* Bounds describe the defined low-word value. The permission
 				 * still rejects a physical full-register read before normalization.

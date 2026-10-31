@@ -8848,8 +8848,8 @@ skip_pointer:
 		}
 		if (btf_type_is_int(t) || btf_is_any_enum(t)) {
 			if (has_scalar_max) {
-				/* The ordinary call checks the entire register. Do not
-				 * invent cleared upper bits from a narrow C declaration.
+				/* Ordinary native calls check the declared C value.
+				 * Entry input permissions still exclude unproved upper bits.
 				 */
 				if (t->size != sizeof(u32) && t->size != sizeof(u64))
 					return -EINVAL;
