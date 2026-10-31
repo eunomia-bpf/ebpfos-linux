@@ -16,8 +16,9 @@ static inline unsigned long ebpfos_ftrace_entry(unsigned long address)
 #endif
  return ip;
 }
-/* Module BTF may label C globals STATIC. Require a unique global ELF FUNC
- * in ordinary module text; init/exit text cannot outlive preparation. */
+/* Module BTF may label C globals STATIC. Global and weak ELF definitions
+ * retain the public callable ABI; private definitions may have specialized
+ * arguments not described by source BTF. Init/exit text is not resident. */
 static inline unsigned long ebpfos_module_function(struct module *module, const char *name)
 {
  unsigned long target = 0;
@@ -29,8 +30,10 @@ static inline unsigned long ebpfos_module_function(struct module *module, const 
  for (i = 0; symbols && i < symbols->num_symtab; ++i) {
   const Elf_Sym *symbol = &symbols->symtab[i];
   if (strcmp(name, symbols->strtab + symbol->st_name)) continue;
-  if (target || ELF_ST_BIND(symbol->st_info) != STB_GLOBAL ||
-      ELF_ST_TYPE(symbol->st_info) != STT_FUNC || symbol->st_shndx == SHN_UNDEF) {
+  if (target || (ELF_ST_BIND(symbol->st_info) != STB_GLOBAL &&
+                 ELF_ST_BIND(symbol->st_info) != STB_WEAK) ||
+      ELF_ST_TYPE(symbol->st_info) != STT_FUNC ||
+      symbol->st_shndx == SHN_UNDEF) {
    target = 0;break;
   }
   target = kallsyms_symbol_value(symbol);
