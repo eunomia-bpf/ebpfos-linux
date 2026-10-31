@@ -263,8 +263,12 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   if (fd > INT_MAX) goto free;
   error = ebpfos_ptview_read_native(&original, ops->original + at, sizeof(original));
   if (error) goto free;
-  if (original && !(ops->module ? within_module_mem_type(original, ops->module, MOD_TEXT) :
-        core_kernel_text(original))) {error = -ENOENT;goto free;}
+  /* A module's table may call permanent Core text. The storage lease
+   * protects its own module text; another module still needs its own lease. */
+  if (original && !core_kernel_text(original) &&
+      !(ops->module && within_module_mem_type(original, ops->module, MOD_TEXT))) {
+   error = -ENOENT;goto free;
+  }
   name = original ? kallsyms_lookup(original, &bytes, &offset, NULL, symbol) : NULL;
   if (original && (!name || offset)) {error = -ENOENT;goto free;}
   id = name ? btf_find_by_name_kind(ops->types, name, BTF_KIND_FUNC) : 0;
