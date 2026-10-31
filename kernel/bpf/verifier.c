@@ -39,6 +39,7 @@
 
 #include "disasm.h"
 #include "../ebpfos/function_scalar_record_abi.h"
+#include "../ebpfos/function_native.h"
 
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type) \
@@ -14178,11 +14179,29 @@ static int check_kfunc_address_arg(struct bpf_verifier_env *env,
 	case PTR_TO_MAP_VALUE:
 	case PTR_TO_MEM:
 	case PTR_TO_BTF_ID:
+	case PTR_TO_BTF_FUNC:
 		return 0;
 	default:
 		verbose(env, "arg#%d expects an address value\n", arg);
 		return -EINVAL;
 	}
+}
+
+/* Field values carry a FUNC_PROTO; resolved Native symbols retain their FUNC.
+ * Keeping the declaration ID in the register also keeps distinct providers
+ * distinct during state comparison and stack spills.
+ */
+static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
+                                                  const struct btf_type **declaration)
+{
+	const struct btf_type *type = btf_type_by_id(btf, id);
+
+	*declaration = NULL;
+	if (type && btf_type_is_func(type)) {
+		*declaration = type;
+		type = btf_type_by_id(btf, type->type);
+	}
+	return type && btf_type_is_func_proto(type) ? type : NULL;
 }
 
 static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
@@ -14431,6 +14450,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
 		if (meta->func_id == U32_MAX && btf_type_is_func_proto(ref_t)) {
+			const struct btf_type *callback_decl, *callback_proto = NULL;
+
 			/* An unknown native method has no callback-verification
 			 * protocol for a BPF subprogram. A native callback already
 			 * loaded from a typed field retains that field's prototype.
@@ -14441,11 +14462,14 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 					return ret;
 				continue;
 			}
+			if (base_type(reg->type) == PTR_TO_BTF_FUNC)
+				callback_proto = native_callable_proto(reg->btf, reg->btf_id, &callback_decl);
 			if (base_type(reg->type) != PTR_TO_BTF_FUNC ||
 			    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
 			    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
 			    !tnum_is_const(reg->var_off) || reg->var_off.value ||
-			    !btf_types_are_same(reg->btf, reg->btf_id, btf, ref_id)) {
+			    !callback_proto || !btf_types_are_same(reg->btf,
+				callback_decl ? callback_decl->type : reg->btf_id, btf, ref_id)) {
 				verbose(env, "callx arg#%d requires a matching typed native callback\n", i);
 				return -EACCES;
 			}
@@ -15046,12 +15070,66 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	return 0;
 }
 
-/* A typed callback field supplies a prototype, not a registered target.
- * Reuse kfunc argument checking without inventing a FUNC or target set.
+static int check_native_function_call(struct bpf_verifier_env *env, struct btf *btf,
+                                      const struct btf_type *prototype,
+                                      const struct btf_type *declaration)
+{
+	struct bpf_verifier_state *state = env->cur_state;
+	u32 owner = cur_func(env)->subprogno;
+	int err;
+
+	/* An implicit current-task or global argument can also consume a
+	 * resource. A memory contract does not describe those effects.
+	 */
+	if (state->acquired_refs) {
+		verbose(env, "native prototype cannot transfer a modeled reference\n");
+		return -EACCES;
+	}
+	if (state->active_locks || state->active_preempt_locks ||
+	    state->active_irq_id || in_rcu_cs(env) ||
+	    env->subprog_info[owner].requires_rcu) {
+		verbose(env, "native call cannot establish a lock-held target contract\n");
+		return -EACCES;
+	}
+	err = check_native_prototype_call(env, btf, prototype, true, declaration);
+	if (!err) {
+		env->subprog_info[owner].has_native_call = true;
+		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+	}
+	return err;
+}
+
+/* Native code owns this declaration. A caller's BTF cannot supply missing
+ * preconditions for another function. With no inputs and no pointer result,
+ * the ABI itself supplies the complete memory interface.
+ */
+static bool native_memory_contract(const struct bpf_kfunc_meta *kfunc)
+{
+	const struct btf_type *function = btf_type_by_id(kfunc->btf, kfunc->id);
+	const struct btf_type *result;
+	const char *tag;
+
+	result = btf_type_skip_modifiers(kfunc->btf, kfunc->proto->type, NULL);
+	if (!btf_type_vlen(kfunc->proto) &&
+	    (btf_type_is_void(result) ||
+	     (btf_type_is_scalar(result) && result->size <= sizeof(u64)) ||
+	     btf_scalar_record_return(kfunc->btf, kfunc->proto->type)))
+		return true;
+	tag = btf_find_decl_tag_value(kfunc->btf, function, -1,
+				     "native:memory_contract");
+	return !IS_ERR(tag) && !*tag;
+}
+
+/* A field supplies only its prototype. A resolved Native symbol additionally
+ * retains its provider declaration; neither route invents a target set.
  */
 static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn)
 {
 	struct bpf_reg_state *regs = cur_regs(env), *target = &regs[insn->imm];
+	const struct btf_type *prototype, *declaration;
 	int err;
 
 	/* Unlike a registered kfunc, a field prototype does not carry a
@@ -15076,40 +15154,39 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	if (base_type(target->type) != PTR_TO_BTF_FUNC ||
 	    target->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
 	    !tnum_is_const(target->var_off) || target->var_off.value) {
-		verbose(env, "callx requires a non-NULL function pointer loaded from a trusted BTF field\n");
+		verbose(env, "callx requires a non-NULL trusted BTF function pointer\n");
 		return -EACCES;
 	}
 	if (target->type & MEM_RCU && !in_rcu_cs(env)) {
 		verbose(env, "callx function pointer is outside its RCU lifetime\n");
 		return -EACCES;
 	}
-	err = check_native_prototype_call(env, target->btf,
-			btf_type_by_id(target->btf, target->btf_id), false, NULL);
+	prototype = native_callable_proto(target->btf, target->btf_id, &declaration);
+	if (!prototype)
+		return -EINVAL;
+	if (declaration) {
+		struct bpf_kfunc_meta provider = {
+			.btf = target->btf, .id = target->btf_id, .proto = prototype,
+		};
+
+		/* An exact symbol may use the ordinary Native contract. Registered
+		 * effects still require their kfunc protocol, never a bare callx.
+		 */
+		if (!env->prog->aux->ebpfos_component ||
+		    !btf_is_kernel(target->btf) ||
+		    btf_kfunc_is_registered(target->btf, target->btf_id) ||
+		    !native_memory_contract(&provider)) {
+			verbose(env, "callx Native symbol requires its ordinary Native function contract\n");
+			return -EACCES;
+		}
+		err = check_native_function_call(env, target->btf, prototype, declaration);
+	} else {
+		err = check_native_prototype_call(env, target->btf, prototype, false, NULL);
+	}
 	if (err)
 		return err;
 	env->prog->aux->has_callx = true;
 	return 0;
-}
-
-/* Native code owns this declaration. A caller's BTF cannot supply missing
- * preconditions for another function. With no inputs and no pointer result,
- * the ABI itself supplies the complete memory interface.
- */
-static bool native_memory_contract(const struct bpf_kfunc_meta *kfunc)
-{
-	const struct btf_type *function = btf_type_by_id(kfunc->btf, kfunc->id);
-	const struct btf_type *result;
-	const char *tag;
-
-	result = btf_type_skip_modifiers(kfunc->btf, kfunc->proto->type, NULL);
-	if (!btf_type_vlen(kfunc->proto) &&
-	    (btf_type_is_void(result) ||
-	     (btf_type_is_scalar(result) && result->size <= sizeof(u64)) ||
-	     btf_scalar_record_return(kfunc->btf, kfunc->proto->type)))
-		return true;
-	tag = btf_find_decl_tag_value(kfunc->btf, function, -1,
-				     "native:memory_contract");
-	return !IS_ERR(tag) && !*tag;
 }
 
 int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
@@ -15569,34 +15646,9 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		verbose(env, "calling kernel function %s is not allowed\n", meta.func_name);
 	if (err)
 		return err;
-	if (meta.native_call) {
-		u32 owner = cur_func(env)->subprogno;
-		struct bpf_verifier_state *state = env->cur_state;
-
-		/* An implicit current-task or global argument can also consume a
-		 * resource. A memory contract does not describe those effects.
-		 */
-		if (state->acquired_refs) {
-			verbose(env, "native prototype cannot transfer a modeled reference\n");
-			return -EACCES;
-		}
-		if (state->active_locks || state->active_preempt_locks ||
-		    state->active_irq_id || in_rcu_cs(env) ||
-		    env->subprog_info[owner].requires_rcu) {
-			verbose(env, "native call cannot establish a lock-held target contract\n");
-			return -EACCES;
-		}
-		err = check_native_prototype_call(env, meta.btf, meta.func_proto, true,
-					  btf_type_by_id(meta.btf, meta.func_id));
-		if (!err) {
-			env->subprog_info[owner].has_native_call = true;
-			verbose(env, "func#%u relies on verifier option C; name='%s'\n",
-				owner, bpf_verifier_subprog_name(env, owner));
-			verbose(env, "func#%u relies on verifier option D; name='%s'\n",
-				owner, bpf_verifier_subprog_name(env, owner));
-		}
-		return err;
-	}
+	if (meta.native_call)
+		return check_native_function_call(env, meta.btf, meta.func_proto,
+			btf_type_by_id(meta.btf, meta.func_id));
 	desc_btf = meta.btf;
 	func_name = meta.func_name;
 	insn_aux = &env->insn_aux_data[insn_idx];
@@ -19197,6 +19249,7 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			dst_reg->mem_size = aux->btf_var.mem_size;
 			break;
 		case PTR_TO_BTF_ID:
+		case PTR_TO_BTF_FUNC:
 			dst_reg->btf = aux->btf_var.btf;
 			dst_reg->btf_id = aux->btf_var.btf_id;
 			break;
@@ -20774,7 +20827,23 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		source_name[length] = 0;
 		sym_name = source_name;
 	}
-	addr = kallsyms_lookup_name(sym_name);
+	if (btf_type_is_func(t) && !source_btf && env->prog->aux->ebpfos_component) {
+		struct module *module = NULL;
+
+		if (btf_is_module(btf)) {
+			module = btf_try_get_module(btf);
+			if (!module)
+				return -ENXIO;
+		}
+		/* A provider proof belongs to the resident definition in this BTF
+		 * image, never a same-named function in another module.
+		 */
+		addr = ebpfos_native_function(btf, id, module);
+		if (module)
+			module_put(module);
+	} else {
+		addr = kallsyms_lookup_name(sym_name);
+	}
 	if (!addr) {
 		verbose(env, "ldimm64 failed to find the address for kernel symbol '%s'.\n",
 			sym_name);
@@ -20788,6 +20857,12 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		return 0;
 	}
 
+	if (btf_type_is_func(t) && !source_btf && env->prog->aux->ebpfos_component) {
+		aux->btf_var.reg_type = PTR_TO_BTF_FUNC;
+		aux->btf_var.btf = btf;
+		aux->btf_var.btf_id = id;
+		return 0;
+	}
 	if (btf_type_is_func(t)) {
 		aux->btf_var.reg_type = PTR_TO_MEM | MEM_RDONLY;
 		aux->btf_var.mem_size = 0;
