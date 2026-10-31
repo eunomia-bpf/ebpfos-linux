@@ -10727,6 +10727,39 @@ static u32 native_scalar_bits(const struct btf_type *type, bool *sign)
  return bits && bits <= type->size * 8 ? bits : 0;
 }
 
+/* A C int/enum result promises EAX, not the unused upper native RAX word.
+ * Subword return conventions remain distinct from promoted input arguments.
+ */
+static bool native_word32_result(const struct btf_type *type)
+{
+ bool sign;
+
+ return type && type->size == 4 && native_scalar_bits(type, &sign) == 32;
+}
+
+static const struct btf_type *native_subprog_result_type(struct bpf_verifier_env *env, int subprog)
+{
+ const struct btf *btf = env->prog->aux->btf;
+ const struct btf_type *function, *proto;
+
+ if (!env->subprog_info[subprog].native_frame || !btf || !env->prog->aux->func_info)
+  return NULL;
+ function = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
+ proto = function ? btf_type_by_id(btf, function->type) : NULL;
+ return proto && btf_type_is_func_proto(proto) ?
+  btf_type_skip_modifiers(btf, proto->type, NULL) : NULL;
+}
+
+static void mark_native_word32_result(struct bpf_verifier_env *env, const struct btf_type *type)
+{
+ struct bpf_reg_state *reg = &cur_regs(env)[BPF_REG_0];
+
+ if (!env->subprog_info[cur_func(env)->subprogno].native_frame || !native_word32_result(type))
+  return;
+ coerce_reg_to_size(reg, 4);
+ reg->native_input_bits = 32;
+}
+
 /* The native C ABI promotes ordinary subword integers to their canonical low
  * word; none of these values defines the upper native register or stack slot.
  * Records, pointers and non-byte-width integers retain their prior contracts.
@@ -11541,6 +11574,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
+			mark_native_word32_result(env, native_subprog_result_type(env, subprog));
 			if (bpf_subprog_returns_two_regs(env, subprog)) {
 				mark_reg_unknown(env, caller->regs, BPF_REG_3);
 				caller->regs[BPF_REG_3].subreg_def = DEF_NOT_SUBREG;
@@ -15164,6 +15198,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		   btf_scalar_record_return(btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, type->size, sizeof(u64)));
+		mark_native_word32_result(env, type);
 		if (btf_record_return_words(btf, meta.func_proto->type) == 2) {
 			mark_reg_unknown(env, regs, BPF_REG_3);
 			mark_btf_func_reg_size(env, BPF_REG_3, type->size - sizeof(u64));
@@ -15989,6 +16024,7 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
 			__mark_reg_const_zero(env, &regs[BPF_REG_0]);
 		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, t->size, sizeof(u64)));
+		mark_native_word32_result(env, t);
 		if (btf_record_return_words(desc_btf, meta.func_proto->type) == 2) {
 			if (!env->prog->jit_requested || !bpf_jit_supports_native_args())
 				return -EOPNOTSUPP;
@@ -19902,7 +19938,11 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		u32 regno = i ? BPF_REG_3 : BPF_REG_0;
 		struct bpf_reg_state *reg = reg_state(env, regno);
 
-		err = check_reg_arg(env, regno, SRC_OP);
+		/* Forwarding a C int result needs only its promised low word.
+		 * Wider results and pointer/record contracts keep full-width reads.
+		 */
+		err = __check_reg_arg(env, frame->regs, regno, SRC_OP,
+			!i && native_word32_result(native_subprog_result_type(env, frame->subprogno)) ? 4 : 8);
 		if (err)
 			return err;
 		if (sub->readonly_record_result_size[i]) {
