@@ -10731,7 +10731,7 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 	int err;
 	bool zero = true;
 
-	if (!sub->native_frame || (input_bytes != 4 && input_bytes != 8) || arg->size > 8 || arg->stack_offset > sub->native_arg_out ||
+	if (!sub->native_frame || (!input_bytes || input_bytes > 8) || arg->size > 8 || arg->stack_offset > sub->native_arg_out ||
 	    8 > sub->native_arg_out - arg->stack_offset || sp->type != PTR_TO_STACK ||
 	    !tnum_is_const(sp->var_off))
 		return -EINVAL;
@@ -10762,7 +10762,7 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 static int native_stack_arg(struct bpf_verifier_env *env,
 			    const struct bpf_native_arg *arg, struct native_arg_scope *scope)
 {
-	return native_stack_arg_at(env, arg, scope, 13, 8);
+	return native_stack_arg_at(env, arg, scope, 13, arg->size);
 }
 
 /* Logical scalar precision and signedness are shared by native entries,
@@ -10964,7 +10964,7 @@ static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
   if (arg->reg >= 0) {
    if (!(arg->word_mask & BIT(offset / 8))) continue;
    regno = bpf_arg_regno(arg->reg + reg_index++);
-   err = check_reg_arg(env, regno, SRC_OP);
+   err = __check_reg_arg(env, cur_regs(env), regno, SRC_OP, min(8u, arg->size - offset));
   } else {
    word.stack_offset += offset;word.size = min(8u, arg->size - offset);
    err = native_stack_arg(env, &word, &temporary);regno = 13;
@@ -10984,7 +10984,8 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
  for (u32 offset = 0; offset < arg->size; offset += 8) {
   struct bpf_reg_state *reg;
   struct bpf_subprog_arg_info info;
-  u32 pointer;
+  struct bpf_stack_state *slot = NULL;
+  u32 pointer, bytes = min(8u, arg->size - offset);
   int err = btf_native_pointer_word(env->prog->aux->btf, arg->type_id, offset, &pointer);
   if (err) return err;
   if (arg->reg >= 0) {
@@ -10993,11 +10994,20 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
   } else {
    u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) + round_up(sub->native_arg_in, 8);
    s64 off = -(s64)end + arg->stack_offset + offset;
-   reg = &frame->stack[bpf_get_spi(off)].spilled_ptr;
+   slot = &frame->stack[bpf_get_spi(off)];
+   reg = &slot->spilled_ptr;
   }
   __mark_reg_unknown(env, reg);
   reg->precise = true;
-  if (!pointer) continue;
+  if (!pointer) {
+   if (bytes < 8) {
+    coerce_reg_to_size(reg, bytes);
+    reg->native_input_bits = bytes * 8;
+   }
+   if (slot) for (u32 byte = 0; byte < BPF_REG_SIZE; byte++)
+    slot->slot_type[7 - byte] = byte < bytes ? STACK_SPILL : STACK_NATIVE_PADDING;
+   continue;
+  }
   err = btf_native_pointer_arg(env->prog->aux->btf, pointer, &info, &env->log);
   if (err) return err;
   __mark_reg_known_zero(reg);
@@ -11012,22 +11022,14 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
 }
 
 /* Integer records carry bytes, not pointer capabilities. */
-static int native_scalar_record_arg(struct bpf_verifier_env *env,
+static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *btf,
 				    const struct bpf_native_arg *arg)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	int err;
 
-	if (arg->reg >= 0) {
-		for (u32 word = 0; word < arg->words; word++) {
-			u32 regno = bpf_arg_regno(arg->reg + word);
-
-			err = check_reg_arg(env, regno, SRC_OP);
-			if (err) return err;
-			if (regs[regno].type != SCALAR_VALUE) return -EACCES;
-		}
-		return 0;
-	}
+	if (arg->reg >= 0)
+		return native_record_arg(env, btf, arg, false);
 	struct bpf_subprog_info *sub = &env->subprog_info[cur_func(env)->subprogno];
 	struct bpf_reg_state *sp = &regs[BPF_REG_ARG_SP];
 	struct bpf_func_state *frame = bpf_func(env, sp);
@@ -11091,9 +11093,10 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
 
 		if (location) {
-			if (!btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0) &&
-			    btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
-				ret = native_record_arg(env, env->prog->aux->btf, location, true);
+			if (btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
+				ret = btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0) ?
+					native_scalar_record_arg(env, env->prog->aux->btf, location) :
+					native_record_arg(env, env->prog->aux->btf, location, true);
 				if (ret) return ret;
 				continue;
 			}
@@ -14530,7 +14533,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			    (btf_type_is_scalar(t) && t->size > 8)) {
 				if (!btf_native_value_storage(meta->btf, args[i].type)) return -EOPNOTSUPP;
 				ret = btf_native_scalar_storage(meta->btf, args[i].type, 0) ?
-					native_scalar_record_arg(env, location) :
+					native_scalar_record_arg(env, meta->btf, location) :
 					native_record_arg(env, meta->btf, location, meta->native_call);
 				if (ret) return ret;
 				continue;
@@ -22172,8 +22175,7 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			    (env->prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(ai)))
 				continue;
 
-			if (location && btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL)) &&
-			    !btf_native_scalar_storage(env->prog->aux->btf, location->type_id, 0)) {
+			if (location && btf_type_is_struct(btf_type_skip_modifiers(env->prog->aux->btf, location->type_id, NULL))) {
 				ret = init_native_record_arg(env, sub, state->frame[0], location);
 				if (ret) goto out;
 				continue;
