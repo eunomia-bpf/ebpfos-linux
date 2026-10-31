@@ -153,6 +153,23 @@ static u8 native_word_mask(struct btf *btf, u32 id)
  if (bpf_native_classes(btf, id, 0, classes, 0)) return 0;
  return (classes[0] == BPF_NC_INTEGER) | ((classes[1] == BPF_NC_INTEGER) << 1);
 }
+/* Map a physical result register through the existing INTEGER/NO_CLASS
+ * layout. Bytes beyond the complete object are not part of its C result.
+ * MEMORY results use their original hidden buffer instead.
+ */
+u32 bpf_native_result_bytes(const struct bpf_native_abi *abi, u32 size, u32 physical)
+{
+ if (abi->result_buffer) return 0;
+ for (u32 word = 0; word < 2; word++) {
+  u32 offset = word * 8;
+
+  if (!(abi->result_word_mask & BIT(word))) continue;
+  if (physical--) continue;
+  return offset < size ? min(8u, size - offset) : 0;
+ }
+ return 0;
+}
+
 int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  struct bpf_native_abi *abi, bool trusted_native)
 {

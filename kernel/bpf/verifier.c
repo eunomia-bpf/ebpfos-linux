@@ -4150,6 +4150,27 @@ static bool native_input_normalizes(const struct bpf_insn *insn, u32 regno, u32 
  return BPF_OP(insn->code) == BPF_LSH && insn->imm >= width - bits && insn->imm < width;
 }
 
+/* Copies and byte extraction can transport a partial value without
+ * observing or initializing its unavailable portion. Zero means the ordinary
+ * width check/transfer applies; a positive result is the remaining prefix.
+ */
+static u32 native_input_transport_bits(const struct bpf_insn *insn, u32 regno, u32 bits)
+{
+ u32 width = BPF_CLASS(insn->code) == BPF_ALU64 ? 64 : 32;
+
+ if (!bits || bits >= width ||
+     (BPF_CLASS(insn->code) != BPF_ALU && BPF_CLASS(insn->code) != BPF_ALU64))
+  return 0;
+ if (BPF_OP(insn->code) == BPF_MOV && BPF_SRC(insn->code) == BPF_X &&
+     !insn->off && !insn->imm && regno == insn->src_reg)
+  return bits;
+ if ((BPF_OP(insn->code) == BPF_RSH || BPF_OP(insn->code) == BPF_ARSH) &&
+     BPF_SRC(insn->code) == BPF_K && regno == insn->dst_reg &&
+     insn->imm >= 0 && insn->imm < bits)
+  return bits - insn->imm;
+ return 0;
+}
+
 static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *regs, u32 regno,
 			   enum bpf_reg_arg_type t, u32 input_bytes)
 {
@@ -4186,7 +4207,8 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 					bits = 64;
 			}
 			if (bits > reg->native_input_bits &&
-			    (input_bytes || !native_input_normalizes(insn, regno, reg->native_input_bits))) {
+			    (input_bytes || (!native_input_normalizes(insn, regno, reg->native_input_bits) &&
+					     !native_input_transport_bits(insn, regno, reg->native_input_bits)))) {
 				verbose(env, "R%d native input has only its low %u bits initialized\n", regno, reg->native_input_bits);
 				return -EACCES;
 			}
@@ -10785,6 +10807,17 @@ static const struct btf_type *native_subprog_result_type(struct bpf_verifier_env
   btf_type_skip_modifiers(btf, proto->type, NULL) : NULL;
 }
 
+static void mark_native_result_prefix(struct bpf_verifier_env *env, u32 regno, u32 bytes)
+{
+ struct bpf_reg_state *reg = &cur_regs(env)[regno];
+
+ if (!env->subprog_info[cur_func(env)->subprogno].native_frame ||
+     reg->type != SCALAR_VALUE || !bytes || bytes >= 8)
+  return;
+ coerce_reg_to_size(reg, bytes);
+ reg->native_input_bits = bytes * 8;
+}
+
 static void mark_native_scalar_result(struct bpf_verifier_env *env, const struct btf_type *type)
 {
  struct bpf_reg_state *reg = &cur_regs(env)[BPF_REG_0];
@@ -10794,7 +10827,7 @@ static void mark_native_scalar_result(struct bpf_verifier_env *env, const struct
 
  if (!env->subprog_info[cur_func(env)->subprogno].native_frame || bytes == 8)
   return;
- coerce_reg_to_size(reg, bytes);
+ mark_native_result_prefix(env, BPF_REG_0, bytes);
  if (native_scalar_bits(type, &sign) == 1) {
   reg->var_off = tnum_range(0, 1);
   reg->umax_value = reg->u32_max_value = 1;
@@ -11625,7 +11658,12 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			}
 			for (u32 word = 0; word < 2; word++) {
 				u32 regno = word ? BPF_REG_3 : BPF_REG_0;
+				const struct btf_type *result = native_subprog_result_type(env, subprog);
 				u32 bytes = sub->readonly_record_result_size[word];
+
+				if (result && btf_type_is_struct(result))
+					mark_native_result_prefix(env, regno,
+						bpf_native_result_bytes(&sub->native_abi, result->size, word));
 				if (!bytes) continue;
 				mark_reg_known_zero(env, caller->regs, regno);
 				caller->regs[regno].type = PTR_TO_MEM | MEM_RDONLY;
@@ -14347,6 +14385,9 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 			if (err)
 				return err;
 			mark_btf_func_reg_size(env, regno, min(8u, type->size - offset));
+			if (!pointer)
+				mark_native_result_prefix(env, regno,
+					bpf_native_result_bytes(&abi, type->size, physical - 1));
 			offset += 8;
 		}
 	}
@@ -18147,6 +18188,8 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 		if (BPF_SRC(insn->code) == BPF_X) {
 			struct bpf_reg_state *src_reg = regs + insn->src_reg;
 			struct bpf_reg_state *dst_reg = regs + insn->dst_reg;
+			u32 transport_bits = native_input_transport_bits(insn, insn->src_reg,
+								       src_reg->native_input_bits);
 
 			if (BPF_CLASS(insn->code) == BPF_ALU64) {
 				if (insn->imm) {
@@ -18224,6 +18267,8 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 							 insn->dst_reg);
 				}
 				zext_32_to_64(dst_reg);
+				if (transport_bits)
+					dst_reg->native_input_bits = transport_bits;
 				reg_bounds_sync(dst_reg);
 			}
 		} else {
@@ -18274,6 +18319,8 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 		bool normalizes_native = native_input_normalizes(insn, insn->dst_reg,
 							       regs[insn->dst_reg].native_input_bits);
+		u32 transport_bits = native_input_transport_bits(insn, insn->dst_reg,
+							        regs[insn->dst_reg].native_input_bits);
 
 		/* check dest operand */
 		err = check_reg_arg(env, insn->dst_reg, DST_OP_NO_MARK);
@@ -18282,6 +18329,8 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			return err;
 		if (normalizes_native)
 			regs[insn->dst_reg].native_input_bits = 0;
+		else if (transport_bits)
+			regs[insn->dst_reg].native_input_bits = transport_bits;
 	}
 
 	return reg_bounds_sanity_check(env, &regs[insn->dst_reg], "alu");
@@ -19987,10 +20036,12 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		u32 regno = i ? BPF_REG_3 : BPF_REG_0;
 		struct bpf_reg_state *reg = reg_state(env, regno);
 
-		const struct btf_type *result = i ? NULL : native_subprog_result_type(env, frame->subprogno);
-		u32 bytes = native_scalar_result_bytes(result);
+		const struct btf_type *result = native_subprog_result_type(env, frame->subprogno);
+		u32 bytes = i ? 8 : native_scalar_result_bytes(result);
 
-		/* Forward only the scalar bytes promised by this C return ABI. */
+		if (result && btf_type_is_struct(result))
+			bytes = bpf_native_result_bytes(&sub->native_abi, result->size, i) ?: 8;
+		/* Forward only the bytes promised for this physical C result. */
 		err = __check_reg_arg(env, frame->regs, regno, SRC_OP, bytes);
 		if (err)
 			return err;

@@ -17,6 +17,7 @@ struct bpf_native_abi {
  bool result_buffer;
  struct bpf_native_arg args[MAX_BPF_FUNC_ARGS + 1];
 };
+u32 bpf_native_result_bytes(const struct bpf_native_abi *abi, u32 size, u32 physical);
 struct bpf_native_arg bpf_native_tail_arg(const struct bpf_native_abi *abi, u32 index);
 /* A compiled native entry is checked as the function in func_info[0], not
  * as a tracing context reader. Native frames require the x86 JIT and retain
