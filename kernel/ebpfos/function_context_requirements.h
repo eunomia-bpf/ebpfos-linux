@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef EBPFOS_FUNCTION_CONTEXT_REQUIREMENTS_H
 #define EBPFOS_FUNCTION_CONTEXT_REQUIREMENTS_H
+#include "../../include/linux/btf_context.h"
 /* A register-compatible entry is not necessarily context-compatible. Retain
  * the native interface's declared requirements and transfers at every cold
  * binding, including name-resolved later generations and record transports.
@@ -10,9 +11,7 @@
  */
 static inline bool cell_context_precondition(const char *name)
 {
- return !strncmp(name, "context_require:", sizeof("context_require:") - 1) ||
-        !strncmp(name, "context_require_shared:", sizeof("context_require_shared:") - 1) ||
-        !strncmp(name, "context_exclude:", sizeof("context_exclude:") - 1);
+ return btf_context_precondition(btf_context_decode(name, strlen(name)).operation);
 }
 static inline bool cell_context_direction(const struct btf *from,
  const struct btf_type *function, const struct btf *to,
