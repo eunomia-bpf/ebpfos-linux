@@ -35,6 +35,55 @@ static inline bool cell_function_parameters(const struct btf_type *prototype,
  }
  return true;
 }
+/* Actual source scalar types, separate from the C ellipsis. These facts
+ * grant no register or memory capability. Zero is absent, ~0U malformed. */
+static inline unsigned int cell_variadic_scalar_tail_tag(const char *name)
+{
+ const char prefix[] = "native:variadic_scalar_tail:";
+ unsigned int count = 0;
+ if (strncmp(name, prefix, sizeof(prefix) - 1)) return 0;
+ name += sizeof(prefix) - 1;
+ for (;;) {
+  if (strncmp(name, "s32", 3) && strncmp(name, "u32", 3) &&
+      strncmp(name, "s64", 3) && strncmp(name, "u64", 3)) return ~0U;
+  if (count == ~0U - 1) return ~0U;
+  ++count; name += 3;
+  if (!*name) return count;
+  if (*name++ != ',' || !*name) return ~0U;
+ }
+}
+static inline unsigned int cell_variadic_scalar_tail_info(const struct btf *btf,
+ const struct btf_type *function, const char **types)
+{
+ unsigned int id, fixed, result = 0;
+ bool variadic, unused = false;
+ if (types) *types = NULL;
+ if (!function || BTF_INFO_KIND(function->info) != BTF_KIND_FUNC) return 0;
+ for (id = 1; id < cell_layout_count(btf); ++id) {
+  const struct btf_type *tag = cell_layout_type(btf, id);
+  const char *name;
+  unsigned int value;
+  if (!tag || BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG ||
+      cell_layout_type(btf, tag->type) != function) continue;
+  name = cell_layout_name(btf, tag->name_off);
+  if (!BTF_INFO_KFLAG(tag->info) && btf_decl_tag(tag)->component_idx == -1 &&
+      !strcmp(name, "native:variadic_tail_unused")) unused = true;
+  value = cell_variadic_scalar_tail_tag(name);
+  if (!value) continue;
+  if (value == ~0U || result || BTF_INFO_KFLAG(tag->info) ||
+      btf_decl_tag(tag)->component_idx != -1 ||
+      !cell_function_parameters(cell_layout_type(btf, function->type), &fixed, &variadic) ||
+      !variadic) return ~0U;
+  result = value;
+  if (types) *types = name;
+ }
+ return result && unused ? ~0U : result;
+}
+static inline unsigned int cell_variadic_scalar_tail(const struct btf *btf,
+ const struct btf_type *function)
+{
+ return cell_variadic_scalar_tail_info(btf, function, NULL);
+}
 /* This provider-body guarantee is emitted only after the complete Native
  * footprint proof. It grants no type or extent to an anonymous value.
  */
@@ -59,6 +108,13 @@ static inline bool cell_variadic_tail_unused(const struct btf *btf,
 static inline bool cell_variadic_tail_compatible(const struct btf *native,
  const struct btf_type *nf, const struct btf *compiled, const struct btf_type *cf)
 {
+ const char prefix[] = "native:variadic_scalar_tail:";
+ const char *native_types, *compiled_types;
+ unsigned int supplied = cell_variadic_scalar_tail_info(native, nf, &native_types);
+ unsigned int required = cell_variadic_scalar_tail_info(compiled, cf, &compiled_types);
+ if (supplied == ~0U || required == ~0U || required > supplied) return false;
+ if (required && strncmp(native_types + sizeof(prefix) - 1,
+      compiled_types + sizeof(prefix) - 1, strlen(compiled_types + sizeof(prefix) - 1))) return false;
  return !cell_variadic_tail_unused(native, nf) || cell_variadic_tail_unused(compiled, cf);
 }
 /* A record's alignment is C type information, not its byte size. In
