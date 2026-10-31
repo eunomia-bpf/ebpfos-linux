@@ -198,7 +198,7 @@ static bool cell_callable_proto(struct btf *native, u32 native_type,
    for (i = 0; i < btf_type_vlen(prototype); i++) {
     u32 type = btf_params(prototype)[i].type;
     const struct btf_type *value = btf_type_skip_modifiers(aux->btf, type, NULL);
-    if (btf_type_is_struct(value) && !btf_native_scalar_storage(aux->btf, type, 0) &&
+    if (type && btf_type_is_struct(value) && !btf_native_scalar_storage(aux->btf, type, 0) &&
         !btf_native_record_entry_contract(aux->btf, type)) return false;
    }
   if (!trusted && !cell_argument_requirements(native, native_function, n, aux->btf, id)) return false;

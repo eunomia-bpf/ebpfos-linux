@@ -162,10 +162,11 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  memset(abi, 0, sizeof(*abi));
  if (!proto || !btf_type_is_func_proto(proto)) return -EINVAL;
  nargs = btf_type_vlen(proto);
- /* Trusted x86 native entries carry their variadic operands directly.
-  * Only named arguments contribute to the incoming fixed frame.
+ /* An ellipsis describes no named argument or incoming fixed storage.
+  * This layout grants no register or memory capability to a variadic tail;
+  * normal verification must still prove every actual operand read.
   */
- if (trusted_native && IS_ENABLED(CONFIG_X86_64) && nargs &&
+ if (IS_ENABLED(CONFIG_X86_64) && nargs &&
      !btf_params(proto)[nargs - 1].type)
   nargs--;
  if (nargs > MAX_BPF_FUNC_ARGS && !trusted_native) return -E2BIG;
