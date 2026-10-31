@@ -113,7 +113,8 @@ static int entry_program_address(struct btf *btf, u32 prototype,
   return 0;
  }
  if (!program->aux->ebpfos_component ||
-     !((program->type == BPF_PROG_TYPE_TRACING && !program->sleepable &&
+     !((program->type == BPF_PROG_TYPE_TRACING &&
+        (!program->sleepable || (task && bpf_native_func_entry(program))) &&
         program->expected_attach_type == BPF_TRACE_REPLACE) ||
        (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
         !program->expected_attach_type))) return -EOPNOTSUPP;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/bpf.h>
+#include <linux/bpf_native_abi.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/init.h>
@@ -59,6 +60,8 @@ static int ebpfos_native_filter(const struct bpf_prog *prog, u32 id)
 	if (!prog || !prog->aux || !prog->aux->ebpfos_component)
 		return 1;
 	if (prog->type == BPF_PROG_TYPE_SYSCALL)
+		return 0;
+	if (bpf_native_func_entry(prog))
 		return 0;
 	/* Replacement keeps the original Linux call context. Ordinary tracing
 	 * observers cannot acquire the component's native dependency boundary.

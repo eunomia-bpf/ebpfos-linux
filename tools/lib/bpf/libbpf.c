@@ -10299,6 +10299,11 @@ static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("iter+",		TRACING, BPF_TRACE_ITER, SEC_ATTACH_BTF, attach_iter),
 	SEC_DEF("iter.s+",		TRACING, BPF_TRACE_ITER, SEC_ATTACH_BTF | SEC_SLEEPABLE, attach_iter),
 	SEC_DEF("syscall",		SYSCALL, 0, SEC_SLEEPABLE),
+	/* Native function programs use their own BTF entry prototype. Preserve
+	 * the recorded sleepable context through the standard load preparation.
+	 */
+	SEC_DEF("component/",		TRACING, BPF_TRACE_REPLACE, 0),
+	SEC_DEF("component.s/",		TRACING, BPF_TRACE_REPLACE, SEC_SLEEPABLE),
 	SEC_DEF("kernel_rule", KERNEL_RULE, BPF_KERNEL_RULE, SEC_NONE),
 	SEC_DEF("xdp.frags/devmap",	XDP, BPF_XDP_DEVMAP, SEC_XDP_FRAGS),
 	SEC_DEF("xdp/devmap",		XDP, BPF_XDP_DEVMAP, SEC_ATTACHABLE),

@@ -22701,6 +22701,11 @@ BTF_SET_END(noreturn_deny)
 
 static bool can_be_sleepable(struct bpf_prog *prog)
 {
+	/* Function programs carry their own entry contract. Cold publication
+	 * must supply a task context before such a program becomes callable.
+	 */
+	if (bpf_native_func_entry(prog))
+		return true;
 	if (prog->type == BPF_PROG_TYPE_TRACING) {
 		switch (prog->expected_attach_type) {
 		case BPF_TRACE_FENTRY:

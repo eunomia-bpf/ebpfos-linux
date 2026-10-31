@@ -170,6 +170,12 @@ static struct ebpfos_task_view_request *task_view_prepare(
   /* Private members retain code with their syscall roots. They acquire no
    * per-process direct-call dispatch of their own. */
   if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
+  /* A private member can escape into an asynchronous callback. The view
+   * proves a task entry only for an actual native syscall-table root.
+   */
+  if (slot < 0 && bpf_native_func_entry(program) && program->sleepable) {
+   error = -EOPNOTSUPP;goto fail;
+  }
   bpf_prog_inc(program);
   view->bindings[i].program = program;
   view->bindings[i].address = sources[i].address;

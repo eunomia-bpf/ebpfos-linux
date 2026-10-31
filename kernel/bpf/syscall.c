@@ -3,6 +3,7 @@
  */
 #include <crypto/sha2.h>
 #include <linux/bpf.h>
+#include <linux/bpf_native_abi.h>
 #include <linux/bpf_kernel_rule.h>
 #include <linux/bpf_entry.h>
 #include <linux/bpf_aot.h>
@@ -3041,7 +3042,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (type == BPF_PROG_TYPE_TRACING &&
 	    attr->expected_attach_type == BPF_TRACE_REPLACE &&
 	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
-	     (attr->prog_flags & BPF_F_SLEEPABLE) || !capable(CAP_SYS_ADMIN)))
+	     !capable(CAP_SYS_ADMIN)))
 		return -EPERM;
 	bpf_prog_load_fixup_attach_type(attr);
 
@@ -3277,13 +3278,14 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		goto free_used_maps;
 
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
-	/* Component entry loading already names its native target. Reuse the
-	 * publication contract after JIT preparation, so an incompatible whole
-	 * component can remain native without aborting independent components.
-	 * Publication repeats the same contract; no call-path check is added.
+	/* Legacy replacement loads may already name their native target. A
+	 * sleepable function program is checked under its own entry contract;
+	 * its caller context is established by task publication, not this load.
+	 * All publication paths retain the complete callable/context check.
 	 */
 	if (prog->aux->ebpfos_component && type == BPF_PROG_TYPE_TRACING &&
 	    prog->expected_attach_type == BPF_TRACE_REPLACE &&
+	    !(prog->sleepable && bpf_native_func_entry(prog)) &&
 	    prog->aux->attach_btf && prog->aux->attach_btf_id &&
 	    btf_type_is_func(btf_type_by_id(prog->aux->attach_btf,
 					   prog->aux->attach_btf_id))) {
