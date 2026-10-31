@@ -3089,12 +3089,6 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		return 0;
 	}
 
-	if (tab->nr_descs == MAX_KFUNC_DESCS) {
-		verbose(env, "too many different kernel %s calls\n",
-			kop_call ? "KOperation" : "function");
-		return -E2BIG;
-	}
-
 	err = fetch_kfunc_meta(env, func_id, offset, &kfunc);
 	if (err)
 		return err;
@@ -3104,6 +3098,20 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		return -EACCES;
 	}
 
+	/* A whole-image body can call every native entry. Retain one descriptor
+	 * for each distinct call instead of a separate fixed callee budget.
+	 * The completed table keeps its existing verifier/JIT lookup ordering.
+	 */
+	{
+		struct bpf_kfunc_desc_tab *grown;
+
+		grown = krealloc(tab, struct_size(tab, descs, tab->nr_descs + 1),
+				 GFP_KERNEL_ACCOUNT);
+		if (!grown)
+			return -ENOMEM;
+		tab = grown;
+		prog_aux->kfunc_tab = tab;
+	}
 	desc = &tab->descs[tab->nr_descs++];
 	memset(desc, 0, sizeof(*desc));
 	desc->func_id = func_id;

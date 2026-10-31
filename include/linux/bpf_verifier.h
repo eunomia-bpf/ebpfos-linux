@@ -1576,8 +1576,6 @@ enum bpf_reg_arg_type {
 	DST_OP_NO_MARK	/* same as above, check only, don't mark */
 };
 
-#define MAX_KFUNC_DESCS 256
-
 struct bpf_kfunc_desc {
 	struct btf_func_model func_model;
 	const struct bpf_kop *kop;
@@ -1595,8 +1593,8 @@ struct bpf_kfunc_desc_tab {
 	 * available, therefore at the end of verification do_misc_fixups()
 	 * sorts this by imm and offset.
 	 */
-	struct bpf_kfunc_desc descs[MAX_KFUNC_DESCS];
 	u32 nr_descs;
+	struct bpf_kfunc_desc descs[];
 };
 
 /* Functions exported from verifier.c, used by fixups.c */
