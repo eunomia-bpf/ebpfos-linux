@@ -137,7 +137,12 @@ static unsigned long operations_storage_symbol(struct module *module, const char
 static unsigned long operations_storage(struct btf *btf, u32 variable, struct module *module, u32 size)
 {
  const struct btf_type *target = btf_type_by_id(btf, variable);
+ unsigned long named = operations_storage_symbol(module, btf_name_by_offset(btf, target->name_off), size);
  u32 i, j;
+ /* Final linking can move later allocations after BTF generation. A unique
+  * resident allocation is its own relocation anchor; duplicate local names
+  * still require the provider's section coordinates below. */
+ if (named) return named;
  for (i = 1; i < btf_nr_types(btf); ++i) {
   const struct btf_type *section = btf_type_by_id(btf, i);
   const struct btf_var_secinfo *entries;
