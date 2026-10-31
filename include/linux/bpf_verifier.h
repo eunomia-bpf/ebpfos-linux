@@ -120,7 +120,7 @@ struct bpf_reg_state {
 	 */
 	u8 native_stack_region; /* 0: locals, 1: outgoing, 2: incoming */
 	u8 mem_stable; /* enum bpf_mem_stability */
-	/* Native scalar input: 32 means only its low word is initialized.
+	/* Native scalar value: 8/16/32 means only those low bits are initialized.
 	 * Zero retains the ordinary complete-register state.
 	 */
 	u8 native_input_bits;

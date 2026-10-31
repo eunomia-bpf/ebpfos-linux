@@ -4131,6 +4131,25 @@ static void mark_insn_zext(struct bpf_verifier_env *env,
 	reg->subreg_def = DEF_NOT_SUBREG;
 }
 
+/* These executed operations discard every unproved input bit. Range
+ * refinement alone never initializes a native register's unused portion.
+ */
+static bool native_input_normalizes(const struct bpf_insn *insn, u32 regno, u32 bits)
+{
+ u32 width = BPF_CLASS(insn->code) == BPF_ALU64 ? 64 : 32;
+ u64 mask;
+
+ if (!bits || bits >= width || regno != insn->dst_reg ||
+     (BPF_CLASS(insn->code) != BPF_ALU && BPF_CLASS(insn->code) != BPF_ALU64) ||
+     BPF_SRC(insn->code) != BPF_K)
+  return false;
+ if (BPF_OP(insn->code) == BPF_AND) {
+  mask = width == 64 ? (u64)(s64)insn->imm : (u32)insn->imm;
+  return !(mask >> bits);
+ }
+ return BPF_OP(insn->code) == BPF_LSH && insn->imm >= width - bits && insn->imm < width;
+}
+
 static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *regs, u32 regno,
 			   enum bpf_reg_arg_type t, u32 input_bytes)
 {
@@ -4148,17 +4167,29 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 			verbose(env, "R%d !read_ok\n", regno);
 			return -EACCES;
 		}
-		/* MOVSX reads only its encoded low source width. Other full-width
-		 * operations cannot consume the unproved high half of a native input.
-		 * Typed calls supply their actual argument width explicitly.
+		/* Typed calls/exits, stores and MOVSX consume their actual width.
+		 * Other operations may not observe unproved native result bits.
 		 */
-		if (reg->native_input_bits &&
-		    (input_bytes ? input_bytes > 4 :
-		     (rw64 || (BPF_CLASS(insn->code) == BPF_JMP && BPF_OP(insn->code) == BPF_CALL)) &&
-		     !(BPF_CLASS(insn->code) == BPF_ALU64 && BPF_OP(insn->code) == BPF_MOV &&
-		       BPF_SRC(insn->code) == BPF_X && insn->off > 0 && insn->off <= 32))) {
-			verbose(env, "R%d native input has only its low 32 bits initialized\n", regno);
-			return -EACCES;
+		if (reg->native_input_bits) {
+			u32 bits = input_bytes ? input_bytes * 8 : rw64 ? 64 : 32;
+			u8 class = BPF_CLASS(insn->code);
+
+			if (!input_bytes) {
+				if (class == BPF_STX && regno == insn->src_reg)
+					bits = bpf_size_to_bytes(BPF_SIZE(insn->code)) * 8;
+				else if ((class == BPF_ALU || class == BPF_ALU64) &&
+					 BPF_OP(insn->code) == BPF_MOV && BPF_SRC(insn->code) == BPF_X && insn->off > 0)
+					bits = insn->off;
+				else if ((class == BPF_ALU || class == BPF_ALU64) && BPF_OP(insn->code) == BPF_END)
+					bits = insn->imm;
+				else if (class == BPF_JMP && BPF_OP(insn->code) == BPF_CALL)
+					bits = 64;
+			}
+			if (bits > reg->native_input_bits &&
+			    (input_bytes || !native_input_normalizes(insn, regno, reg->native_input_bits))) {
+				verbose(env, "R%d native input has only its low %u bits initialized\n", regno, reg->native_input_bits);
+				return -EACCES;
+			}
 		}
 		/* We don't need to worry about FP liveness because it's read-only */
 		if (regno == BPF_REG_FP)
@@ -10727,14 +10758,18 @@ static u32 native_scalar_bits(const struct btf_type *type, bool *sign)
  return bits && bits <= type->size * 8 ? bits : 0;
 }
 
-/* A C int/enum result promises EAX, not the unused upper native RAX word.
- * Subword return conventions remain distinct from promoted input arguments.
+/* Native scalar results define AL, AX or EAX, independently of promoted
+ * argument conventions. Non-byte-width values and records retain prior rules.
  */
-static bool native_word32_result(const struct btf_type *type)
+static u32 native_scalar_result_bytes(const struct btf_type *type)
 {
  bool sign;
+ u32 bits = native_scalar_bits(type, &sign);
 
- return type && type->size == 4 && native_scalar_bits(type, &sign) == 32;
+ if (!bits || (type->size != 1 && type->size != 2 && type->size != 4)) return 8;
+ if (bits == 1 && btf_type_is_int(type) && (btf_int_encoding(type) & BTF_INT_BOOL))
+  return type->size == 1 ? 1 : 8;
+ return bits == type->size * 8 ? type->size : 8;
 }
 
 static const struct btf_type *native_subprog_result_type(struct bpf_verifier_env *env, int subprog)
@@ -10750,14 +10785,23 @@ static const struct btf_type *native_subprog_result_type(struct bpf_verifier_env
   btf_type_skip_modifiers(btf, proto->type, NULL) : NULL;
 }
 
-static void mark_native_word32_result(struct bpf_verifier_env *env, const struct btf_type *type)
+static void mark_native_scalar_result(struct bpf_verifier_env *env, const struct btf_type *type)
 {
  struct bpf_reg_state *reg = &cur_regs(env)[BPF_REG_0];
 
- if (!env->subprog_info[cur_func(env)->subprogno].native_frame || !native_word32_result(type))
+ u32 bytes = native_scalar_result_bytes(type);
+ bool sign;
+
+ if (!env->subprog_info[cur_func(env)->subprogno].native_frame || bytes == 8)
   return;
- coerce_reg_to_size(reg, 4);
- reg->native_input_bits = 32;
+ coerce_reg_to_size(reg, bytes);
+ if (native_scalar_bits(type, &sign) == 1) {
+  reg->var_off = tnum_range(0, 1);
+  reg->umax_value = reg->u32_max_value = 1;
+  reg->smax_value = reg->s32_max_value = 1;
+  reg_bounds_sync(reg);
+ }
+ reg->native_input_bits = bytes * 8;
 }
 
 /* The native C ABI promotes ordinary subword integers to their canonical low
@@ -11574,7 +11618,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
-			mark_native_word32_result(env, native_subprog_result_type(env, subprog));
+			mark_native_scalar_result(env, native_subprog_result_type(env, subprog));
 			if (bpf_subprog_returns_two_regs(env, subprog)) {
 				mark_reg_unknown(env, caller->regs, BPF_REG_3);
 				caller->regs[BPF_REG_3].subreg_def = DEF_NOT_SUBREG;
@@ -15198,7 +15242,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		   btf_scalar_record_return(btf, meta.func_proto->type)) {
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, type->size, sizeof(u64)));
-		mark_native_word32_result(env, type);
+		mark_native_scalar_result(env, type);
 		if (btf_record_return_words(btf, meta.func_proto->type) == 2) {
 			mark_reg_unknown(env, regs, BPF_REG_3);
 			mark_btf_func_reg_size(env, BPF_REG_3, type->size - sizeof(u64));
@@ -16024,7 +16068,7 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		    meta.func_id == special_kfunc_list[KF_bpf_res_spin_lock_irqsave]))
 			__mark_reg_const_zero(env, &regs[BPF_REG_0]);
 		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, t->size, sizeof(u64)));
-		mark_native_word32_result(env, t);
+		mark_native_scalar_result(env, t);
 		if (btf_record_return_words(desc_btf, meta.func_proto->type) == 2) {
 			if (!env->prog->jit_requested || !bpf_jit_supports_native_args())
 				return -EOPNOTSUPP;
@@ -18228,11 +18272,16 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			}
 		}
 
+		bool normalizes_native = native_input_normalizes(insn, insn->dst_reg,
+							       regs[insn->dst_reg].native_input_bits);
+
 		/* check dest operand */
 		err = check_reg_arg(env, insn->dst_reg, DST_OP_NO_MARK);
 		err = err ?: adjust_reg_min_max_vals(env, insn);
 		if (err)
 			return err;
+		if (normalizes_native)
+			regs[insn->dst_reg].native_input_bits = 0;
 	}
 
 	return reg_bounds_sanity_check(env, &regs[insn->dst_reg], "alu");
@@ -19938,11 +19987,11 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		u32 regno = i ? BPF_REG_3 : BPF_REG_0;
 		struct bpf_reg_state *reg = reg_state(env, regno);
 
-		/* Forwarding a C int result needs only its promised low word.
-		 * Wider results and pointer/record contracts keep full-width reads.
-		 */
-		err = __check_reg_arg(env, frame->regs, regno, SRC_OP,
-			!i && native_word32_result(native_subprog_result_type(env, frame->subprogno)) ? 4 : 8);
+		const struct btf_type *result = i ? NULL : native_subprog_result_type(env, frame->subprogno);
+		u32 bytes = native_scalar_result_bytes(result);
+
+		/* Forward only the scalar bytes promised by this C return ABI. */
+		err = __check_reg_arg(env, frame->regs, regno, SRC_OP, bytes);
 		if (err)
 			return err;
 		if (sub->readonly_record_result_size[i]) {
@@ -19954,6 +20003,20 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			verbose(env, "At subprogram exit R%u is not a scalar result (%s)\n",
 				regno, reg_type_str(env, reg->type));
 			return -EACCES;
+		}
+		if (bytes == 1 && btf_type_is_int(result) && (btf_int_encoding(result) & BTF_INT_BOOL)) {
+			struct bpf_reg_state value = *reg;
+
+			/* Check the declared byte, without pretending its projection
+			 * initialized any of the original register's unused bits.
+			 */
+			coerce_reg_to_size(&value, 1);
+			if (value.umax_value > 1) {
+				verbose(env, "Boolean result is not zero or one\n");
+				return -EACCES;
+			}
+			err = mark_chain_precision(env, regno);
+			if (err) return err;
 		}
 	}
 	return 0;
