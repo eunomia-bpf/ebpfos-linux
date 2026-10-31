@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef EBPFOS_FUNCTION_SCALAR_RECORD_ABI_H
 #define EBPFOS_FUNCTION_SCALAR_RECORD_ABI_H
+#include "function_layout.h"
 /* x86-64 INTEGER input records occupying complete argument-register words.
  * This is cold ABI matching, not a verifier or a pointer capability rule.
  */
@@ -22,7 +23,13 @@ static inline bool cell_record_tags(const struct btf *btf, const struct btf_type
   if (!tag) break;
   if (BTF_INFO_KIND(tag->info) == BTF_KIND_DECL_TAG &&
       btf_type_by_id(btf, tag->type) == target &&
-      (!parameter || btf_decl_tag(tag)->component_idx >= 0)) return true;
+      (!parameter || btf_decl_tag(tag)->component_idx >= 0)) {
+   unsigned int alignment = cell_abi_decl_alignment(btf, tag);
+   if (alignment && alignment != ~0U && !BTF_INFO_KFLAG(tag->info) &&
+       btf_decl_tag(tag)->component_idx == -1 &&
+       cell_abi_type_alignment(btf, tag->type) != ~0U) continue;
+   return true;
+  }
  }
  return false;
 }

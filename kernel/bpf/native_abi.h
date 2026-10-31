@@ -5,6 +5,7 @@
 #include <linux/bpf.h>
 #include <linux/filter.h>
 #include <linux/bpf_native_abi.h>
+#include "../ebpfos/function_layout.h"
 /* The x86 integer ABI assigns whole aggregate arguments to registers or to
  * the caller's argument area. This is load-time layout, with no call adapter.
  */
@@ -202,7 +203,14 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
    arg->reg = next_reg;next_reg += words;
   } else {
    arg->reg = -1;
-   abi->stack_size = round_up(abi->stack_size, size == 16 && !err ? 16 : 8);
+   const struct btf_type *value = btf_type_skip_modifiers(btf, params[i].type, NULL);
+   u32 alignment = cell_abi_type_alignment(btf, params[i].type);
+   if (alignment == ~0U) return -EINVAL;
+   if (!btf_type_is_struct(value)) alignment = 0;
+   if (!alignment) alignment = size == 16 && !err ? 16 : 8;
+   alignment = max(alignment, 8u);
+   if (alignment > MAX_BPF_STACK) return -E2BIG;
+   abi->stack_size = round_up(abi->stack_size, alignment);
    arg->stack_offset = abi->stack_size;
    if (size > MAX_BPF_STACK - abi->stack_size) return -E2BIG;
    abi->stack_size += round_up(size, 8u);

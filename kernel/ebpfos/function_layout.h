@@ -19,6 +19,89 @@
 #define cell_layout_name btf__name_by_offset
 #define cell_layout_count btf__type_cnt
 #endif
+/* A record's alignment is C type information, not its byte size. In
+ * particular a packed i128 and a naturally aligned i128 wrapper can have
+ * identical BTF members. Keep the frontend fact in an ordinary declaration
+ * tag. Zero means absent legacy metadata; ~0U means malformed/conflicting.
+ */
+static inline unsigned int cell_abi_alignment_tag(const char *name)
+{
+ unsigned int value = 0;
+ const char *p = name;
+ if (strncmp(p, "bpf:abi-align:", 14)) return 0;
+ p += 14;
+ if (*p < '1' || *p > '9') return ~0U;
+ for (; *p; ++p) {
+  unsigned int digit = *p - '0';
+  if (digit > 9 || value > (~0U - digit) / 10) return ~0U;
+  value = value * 10 + digit;
+ }
+ return value && !(value & (value - 1)) ? value : ~0U;
+}
+static inline bool cell_abi_record_value(const struct btf *types, __u32 id)
+{
+ unsigned int depth;
+ for (depth = 0; depth < 64; ++depth) {
+  const struct btf_type *type = cell_layout_type(types, id);
+  unsigned int kind;
+  if (!type) return false;
+  kind = BTF_INFO_KIND(type->info);
+  if (kind == BTF_KIND_STRUCT || kind == BTF_KIND_UNION) return true;
+  if (kind != BTF_KIND_TYPEDEF && kind != BTF_KIND_CONST &&
+      kind != BTF_KIND_VOLATILE && kind != BTF_KIND_RESTRICT) return false;
+  id = type->type;
+ }
+ return false;
+}
+static inline unsigned int cell_abi_decl_alignment(const struct btf *types,
+ const struct btf_type *tag)
+{
+ unsigned int alignment;
+ if (!tag || BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG) return 0;
+ alignment = cell_abi_alignment_tag(cell_layout_name(types, tag->name_off));
+ if (!alignment) return 0;
+ if (alignment == ~0U || BTF_INFO_KFLAG(tag->info) ||
+     btf_decl_tag(tag)->component_idx != -1 ||
+     !cell_abi_record_value(types, tag->type)) return ~0U;
+ return alignment;
+}
+static inline unsigned int cell_abi_type_alignment(const struct btf *types, __u32 id)
+{
+ unsigned int depth;
+ for (depth = 0; depth < 64; ++depth) {
+  const struct btf_type *type = cell_layout_type(types, id);
+  unsigned int alignment = 0;
+  __u32 tag_id;
+  if (!type) return ~0U;
+  for (tag_id = 1; tag_id < cell_layout_count(types); ++tag_id) {
+   const struct btf_type *tag = cell_layout_type(types, tag_id);
+   unsigned int next;
+   if (!tag || BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG || tag->type != id) continue;
+   next = cell_abi_decl_alignment(types, tag);
+   if (!next) continue;
+   if (next == ~0U || (alignment && alignment != next)) return ~0U;
+   alignment = next;
+  }
+  if (alignment) return cell_abi_record_value(types, id) ? alignment : ~0U;
+  switch (BTF_INFO_KIND(type->info)) {
+  case BTF_KIND_TYPEDEF: case BTF_KIND_CONST: case BTF_KIND_VOLATILE: case BTF_KIND_RESTRICT:
+   id = type->type; break;
+  default: return 0;
+  }
+ }
+ return ~0U;
+}
+static inline bool cell_abi_value_alignment(const struct btf *a, __u32 ai,
+ const struct btf *b, __u32 bi)
+{
+ if (!ai || !bi) return ai == bi;
+ /* Pointer pointee alignment does not change the pointer's calling class. */
+ if (cell_abi_record_value(a, ai) && cell_abi_record_value(b, bi)) {
+  unsigned int left = cell_abi_type_alignment(a, ai), right = cell_abi_type_alignment(b, bi);
+  return left != ~0U && right != ~0U && left == right;
+ }
+ return true;
+}
 /* A flexible member's type size is only its prefix. A concrete VAR's DATASEC
  * entry describes its allocated storage; neither a neighboring variable nor
  * an arbitrary caller-supplied extent can complete that allocation. */
@@ -75,9 +158,11 @@ static inline bool cell_layout(const struct btf *a, __u32 ai, const struct btf *
  case BTF_KIND_FUNC_PROTO: {
   const struct btf_param *xp = btf_params(x), *yp = btf_params(y);
   if (BTF_INFO_VLEN(x->info) != BTF_INFO_VLEN(y->info) ||
+      !cell_abi_value_alignment(a, x->type, b, y->type) ||
       !cell_layout(a, x->type, b, y->type, depth + 1, false)) return false;
   for (i = 0; i < BTF_INFO_VLEN(x->info); ++i)
-   if (!cell_layout(a, xp[i].type, b, yp[i].type, depth + 1, false)) return false;
+   if (!cell_abi_value_alignment(a, xp[i].type, b, yp[i].type) ||
+       !cell_layout(a, xp[i].type, b, yp[i].type, depth + 1, false)) return false;
   return true;
  }
  case BTF_KIND_STRUCT: case BTF_KIND_UNION: {
