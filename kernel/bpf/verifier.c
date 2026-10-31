@@ -14996,7 +14996,8 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		regs[BPF_REG_0] = native_result;
 	} else if (btf_type_is_void(type)) {
 		/* R0 is not readable after a void call. */
-	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame && btf_type_is_struct(type)) {
+	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame &&
+		   (btf_type_is_struct(type) || (btf_type_is_int(type) && type->size > 8))) {
 		err = native_prototype_record_result(env, btf, meta.func_proto, false);
 		if (err) return err;
 	} else if ((btf_type_is_scalar(type) && type->size <= sizeof(u64)) ||
@@ -15789,7 +15790,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 	if (native_result_size) {
 		regs[BPF_REG_0] = native_result;
-	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame && btf_type_is_struct(t)) {
+	} else if (env->subprog_info[cur_func(env)->subprogno].native_frame &&
+		   (btf_type_is_struct(t) || (btf_type_is_int(t) && t->size > 8))) {
 		err = native_prototype_record_result(env, desc_btf, meta.func_proto, false);
 		if (err) return err;
 	} else if (btf_type_is_scalar(t) ||
