@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_LIFETIME_H
 #define EBPFOS_FUNCTION_LIFETIME_H
 #include <linux/bpf.h>
+#include <linux/btf.h>
 #include <linux/cpu.h>
 #include <linux/filter.h>
 #include <linux/rcupdate.h>
@@ -77,6 +78,18 @@ static inline bool ebpfos_program_addresses(struct bpf_prog *program)
 {
  unsigned int i, j;
  if (!program) return false;
+ /* A Native descriptor has no BPF instructions to scan. A typed code
+  * result can escape its module just as a PSEUDO_FUNC can escape a JIT
+  * graph; the absence of a live stack frame cannot retire either one.
+  * Other Native escape paths still need their source/lifetime facts. */
+ if (program->type == BPF_PROG_TYPE_NATIVE && program->aux->mod) {
+  struct btf *btf = program->aux->attach_btf;
+  const struct btf_type *function = btf_type_by_id(btf, program->aux->attach_btf_id);
+  const struct btf_type *prototype = function && btf_type_is_func(function) ?
+   btf_type_by_id(btf, function->type) : NULL;
+  if (prototype && btf_type_is_func_proto(prototype) &&
+      btf_type_resolve_func_ptr(btf, prototype->type, NULL)) return true;
+ }
  for (j = 0; j < program->len; ++j)
   if (bpf_pseudo_func(&program->insnsi[j])) return true;
  for (i = 0; program->aux->func && i < program->aux->func_cnt; ++i) {
