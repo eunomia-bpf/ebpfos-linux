@@ -16,10 +16,14 @@ int ebpfos_ptview_pointer_change(unsigned long, const void *, ebpfos_ptview_visi
 #ifdef CONFIG_EBPFOS_PTVIEW
 /* Cold preparation reads the original kernel, independent of the caller's view. */
 int ebpfos_ptview_read_native(void *, const void *, size_t);
+/* Architecture patchers own text_mutex, or KGDB's full stop. */
+void ebpfos_ptview_text_poke(unsigned long, const void *, size_t,
+ void (*)(void *, const void *, size_t), bool);
 /* Cold preparation and owner-serialized binding. No entry dispatch helper.
  * This prototype requires four-level paging, no PCID, and one mm user.
  * The caller retains referenced code and serializes changes against its work.
- * Original mappings and text on copied paths stay fixed while attached. */
+ * Text changes cover complete instruction regions. The architecture patcher
+ * propagates changes outside the selected regions to prepared/bound views. */
 struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *, unsigned int, struct module *);
 void ebpfos_ptview_put(struct ebpfos_ptview *);
 int ebpfos_ptview_bind(struct ebpfos_ptview *);
@@ -43,6 +47,8 @@ void ebpfos_ptview_irq_exit(void);
 #include <linux/uaccess.h>
 static inline int ebpfos_ptview_read_native(void *to, const void *from, size_t size)
 { return copy_from_kernel_nofault(to, from, size); }
+static inline void ebpfos_ptview_text_poke(unsigned long at, const void *bytes,
+ size_t size, void (*write)(void *, const void *, size_t), bool stopped) {}
 static inline bool ebpfos_ptview_mm(const struct mm_struct *mm) { return false; }
 static inline void ebpfos_ptview_mm_free(struct mm_struct *mm) {}
 static inline void ebpfos_ptview_nmi_enter(struct ebpfos_ptview_nmi_state *state) {}

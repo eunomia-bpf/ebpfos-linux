@@ -6,13 +6,16 @@
 #include <linux/ftrace.h>
 #include <linux/kallsyms.h>
 #include <linux/mm.h>
+#include <linux/memory.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/irqflags.h>
 #include <linux/uaccess.h>
 #include <linux/refcount.h>
+#include <linux/rculist.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
+#include <linux/spinlock.h>
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
 #include <asm/set_memory.h>
@@ -24,11 +27,84 @@ struct ptview_page {
  DECLARE_BITMAP(changed, PAGE_SIZE);
 };
 struct ebpfos_ptview {
+ struct list_head text;
  struct module *owner;
  refcount_t refs;
  unsigned int count;
  struct ptview_page pages[];
 };
+/* Normal patchers and snapshot preparation hold text_mutex. Final puts may
+ * run during page-table teardown, so the list uses a short spin lock. KGDB
+ * stops other CPUs and may interrupt its owner: publish complete nodes and
+ * unlink before freeing. Its sequence detects interrupted cold copies. */
+static LIST_HEAD(text_views);
+static DEFINE_RAW_SPINLOCK(text_views_lock);
+static unsigned long text_stop_sequence;
+
+/* Selected cells cover complete instruction regions and retain their binding. */
+static void notrace copy_text_view(struct ebpfos_ptview *view, unsigned long address,
+ const void *bytes, size_t size, void (*write)(void *, const void *, size_t))
+{
+ unsigned int i;
+ for (i = 0; i < view->count; ++i) {
+  struct ptview_page *page = &view->pages[i];
+  size_t at = 0, source = 0, start, end, run;
+  if (address >= page->address) {
+   at = address - page->address;
+   if (at >= PAGE_SIZE) continue;
+  } else {
+   source = page->address - address;
+   if (source >= size) continue;
+  }
+  start = at;end = at + min_t(size_t, size - source, PAGE_SIZE - at);
+  while (at < end) {
+   while (at < end && test_bit(at, page->changed)) ++at;
+   run = at;
+   while (at < end && !test_bit(at, page->changed)) ++at;
+   if (run < at) write(page_address(page->copy) + run, bytes + source + run - start, at - run);
+  }
+ }
+}
+
+/* The source is the Native physical backing, including for memset patching.
+ * Reuse each stock patching phase and its memcpy primitive. If KGDB interrupted
+ * this copy, repeat from that backing rather than replaying an obsolete input. */
+void notrace ebpfos_ptview_text_poke(unsigned long address, const void *bytes,
+ size_t size, void (*write)(void *, const void *, size_t), bool stopped)
+{
+ struct list_head *node;
+ unsigned long flags = 0, sequence;
+ if (stopped) WRITE_ONCE(text_stop_sequence, text_stop_sequence + 1);
+ else raw_spin_lock_irqsave(&text_views_lock, flags);
+ do {
+  sequence = READ_ONCE(text_stop_sequence);
+  for (node = READ_ONCE(text_views.next); node != &text_views; node = READ_ONCE(node->next))
+   copy_text_view(list_entry(node, struct ebpfos_ptview, text), address, bytes, size, write);
+ } while (sequence != READ_ONCE(text_stop_sequence));
+ if (!stopped) raw_spin_unlock_irqrestore(&text_views_lock, flags);
+}
+
+static void notrace copy_view_bytes(void *to, const void *from, size_t size)
+{ memcpy(to, from, size); }
+
+/* Called only after the complete node is published. A debugger interrupting
+ * preparation before publication cannot otherwise see the new snapshot. */
+static void refresh_text_view(struct ebpfos_ptview *view)
+{
+ unsigned long flags, sequence;
+ unsigned int i;
+ raw_spin_lock_irqsave(&text_views_lock, flags);
+ do {
+  sequence = READ_ONCE(text_stop_sequence);
+  for (i = 0; i < view->count; ++i) {
+   unsigned int level;
+   unsigned long address = view->pages[i].address;
+   pte_t *pte = lookup_address(address, &level);
+   copy_text_view(view, address, page_address(pfn_to_page(pte_pfn(*pte))), PAGE_SIZE, copy_view_bytes);
+  }
+ } while (sequence != READ_ONCE(text_stop_sequence));
+ raw_spin_unlock_irqrestore(&text_views_lock, flags);
+}
 struct ptview_table { struct list_head node; void *page; };
 struct ptview_mm {
  struct ebpfos_ptview *view;
@@ -65,7 +141,11 @@ int ebpfos_ptview_pointer_change(unsigned long address, const void *bytes,
 void ebpfos_ptview_put(struct ebpfos_ptview *view)
 {
  unsigned int i;
+ unsigned long flags;
  if (!view || !refcount_dec_and_test(&view->refs)) return;
+ raw_spin_lock_irqsave(&text_views_lock, flags);
+ if (!list_empty(&view->text)) list_del_rcu(&view->text);
+ raw_spin_unlock_irqrestore(&text_views_lock, flags);
  for (i = 0; i < view->count; ++i) __free_page(view->pages[i].copy);
  kfree(view);
 }
@@ -85,12 +165,15 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
  struct ebpfos_ptview *view;
  unsigned int i, j;
  int error = -EINVAL;
+ unsigned long flags, sequence;
  /* These are admission restrictions, not checks in the replaced code. */
  if (!count || pgtable_l5_enabled() ||
      boot_cpu_has(X86_FEATURE_PCID)) return ERR_PTR(-EOPNOTSUPP);
  view = kzalloc(struct_size(view, pages, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
- refcount_set(&view->refs, 1);view->owner = owner;
+ refcount_set(&view->refs, 1);view->owner = owner;INIT_LIST_HEAD(&view->text);
+ mutex_lock(&text_mutex);
+ sequence = READ_ONCE(text_stop_sequence);
  for (i = 0; i < count; ++i) {
   unsigned long address = changes[i].address & PAGE_MASK;
   size_t offset = offset_in_page(changes[i].address);
@@ -117,8 +200,13 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
   memcpy(page_address(view->pages[j].copy) + offset, changes[i].bytes, changes[i].size);
   bitmap_set(view->pages[j].changed, offset, changes[i].size);
  }
- return view;
+ raw_spin_lock_irqsave(&text_views_lock, flags);
+ list_add_tail_rcu(&view->text, &text_views);
+ raw_spin_unlock_irqrestore(&text_views_lock, flags);
+ if (sequence != READ_ONCE(text_stop_sequence)) refresh_text_view(view);
+ mutex_unlock(&text_mutex);return view;
 fail:
+ mutex_unlock(&text_mutex);
  ebpfos_ptview_put(view);return ERR_PTR(error);
 }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_prepare);
@@ -129,12 +217,16 @@ struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsign
 {
  struct ebpfos_ptview *result;
  unsigned int n, i, j, maximum = 0;
+ unsigned long flags, sequence;
  for (n = 0; n < count; ++n) maximum += views[n]->count;
  if (!maximum) return NULL;
  if (count == 1) return ebpfos_ptview_get(views[0]);
  result = kzalloc(struct_size(result, pages, maximum), GFP_KERNEL);
  if (!result) return ERR_PTR(-ENOMEM);
  refcount_set(&result->refs, 1);
+ INIT_LIST_HEAD(&result->text);
+ mutex_lock(&text_mutex);
+ sequence = READ_ONCE(text_stop_sequence);
  for (n = 0; n < count; ++n) for (i = 0; i < views[n]->count; ++i) {
   struct ptview_page *page = &views[n]->pages[i], *target;
   unsigned long bit;
@@ -143,7 +235,7 @@ struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsign
   target = &result->pages[j];
   if (j == result->count) {
    target->copy = alloc_page(GFP_KERNEL);
-   if (!target->copy) {ebpfos_ptview_put(result);return ERR_PTR(-ENOMEM);}
+   if (!target->copy) {mutex_unlock(&text_mutex);ebpfos_ptview_put(result);return ERR_PTR(-ENOMEM);}
    target->address = page->address;
    memcpy(page_address(target->copy), page_address(page->copy), PAGE_SIZE);
    ++result->count;
@@ -151,7 +243,11 @@ struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsign
    ((u8 *)page_address(target->copy))[bit] = ((u8 *)page_address(page->copy))[bit];
   bitmap_or(target->changed, target->changed, page->changed, PAGE_SIZE);
  }
- return result;
+ raw_spin_lock_irqsave(&text_views_lock, flags);
+ list_add_tail_rcu(&result->text, &text_views);
+ raw_spin_unlock_irqrestore(&text_views_lock, flags);
+ if (sequence != READ_ONCE(text_stop_sequence)) refresh_text_view(result);
+ mutex_unlock(&text_mutex);return result;
 }
 bool ebpfos_ptview_overlap(struct ebpfos_ptview *a, struct ebpfos_ptview *b)
 {

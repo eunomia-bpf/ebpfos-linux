@@ -6,6 +6,7 @@
 #include <linux/vmalloc.h>
 #include <linux/memory.h>
 #include <linux/execmem.h>
+#include <linux/ebpfos_ptview.h>
 
 #include <asm/text-patching.h>
 #include <asm/insn.h>
@@ -2543,7 +2544,7 @@ static void text_poke_memset(void *dst, const void *src, size_t len)
 
 typedef void text_poke_f(void *dst, const void *src, size_t len);
 
-static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len)
+static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len, bool stopped)
 {
 	bool cross_page_boundary = offset_in_page(addr) + len > PAGE_SIZE;
 	struct page *pages[2] = {NULL};
@@ -2609,6 +2610,20 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 
 	kasan_disable_current();
 	func((u8 *)text_poke_mm_addr + offset_in_page(addr), src, len);
+	/* Verify and mirror the Native backing, not the caller's selected map. */
+	{
+		size_t first = min_t(size_t, len, PAGE_SIZE - offset_in_page(addr));
+		void *native = page_address(pages[0]) + offset_in_page(addr);
+		if (func == text_poke_memcpy) {
+			BUG_ON(memcmp(native, src, first));
+			if (len > first)
+				BUG_ON(memcmp(page_address(pages[1]), src + first, len - first));
+		}
+		ebpfos_ptview_text_poke((unsigned long)addr, native, first, text_poke_memcpy, stopped);
+		if (len > first)
+			ebpfos_ptview_text_poke((unsigned long)addr + first, page_address(pages[1]),
+					 len - first, text_poke_memcpy, stopped);
+	}
 	kasan_enable_current();
 
 	/*
@@ -2636,14 +2651,6 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 			   (cross_page_boundary ? 2 : 1) * PAGE_SIZE,
 			   PAGE_SHIFT, false);
 
-	if (func == text_poke_memcpy) {
-		/*
-		 * If the text does not match what we just wrote then something is
-		 * fundamentally screwy; there's nothing we can really do about that.
-		 */
-		BUG_ON(memcmp(addr, src, len));
-	}
-
 	local_irq_restore(flags);
 	pte_unmap_unlock(ptep, ptl);
 	return addr;
@@ -2669,7 +2676,7 @@ void *text_poke(void *addr, const void *opcode, size_t len)
 {
 	lockdep_assert_held(&text_mutex);
 
-	return __text_poke(text_poke_memcpy, addr, opcode, len);
+	return __text_poke(text_poke_memcpy, addr, opcode, len, false);
 }
 
 /**
@@ -2688,7 +2695,7 @@ void *text_poke(void *addr, const void *opcode, size_t len)
  */
 void *text_poke_kgdb(void *addr, const void *opcode, size_t len)
 {
-	return __text_poke(text_poke_memcpy, addr, opcode, len);
+	return __text_poke(text_poke_memcpy, addr, opcode, len, true);
 }
 
 void *text_poke_copy_locked(void *addr, const void *opcode, size_t len,
@@ -2706,7 +2713,7 @@ void *text_poke_copy_locked(void *addr, const void *opcode, size_t len,
 
 		s = min_t(size_t, PAGE_SIZE * 2 - offset_in_page(ptr), len - patched);
 
-		__text_poke(text_poke_memcpy, (void *)ptr, opcode + patched, s);
+		__text_poke(text_poke_memcpy, (void *)ptr, opcode + patched, s, false);
 		patched += s;
 	}
 	return addr;
@@ -2756,7 +2763,7 @@ void *text_poke_set(void *addr, int c, size_t len)
 
 		s = min_t(size_t, PAGE_SIZE * 2 - offset_in_page(ptr), len - patched);
 
-		__text_poke(text_poke_memset, (void *)ptr, (void *)&c, s);
+		__text_poke(text_poke_memset, (void *)ptr, (void *)&c, s, false);
 		patched += s;
 	}
 	mutex_unlock(&text_mutex);
