@@ -8694,25 +8694,46 @@ static int libbpf_kallsyms_parse(kallsyms_cb_t cb, void *ctx)
 	return err;
 }
 
+struct ksym_extern {
+	const char *name;
+	struct extern_desc *ext;
+};
+
+struct ksym_externs {
+	struct ksym_extern *entries;
+	int count;
+};
+
+static int cmp_ksym_externs(const void *a, const void *b)
+{
+	const struct ksym_extern *left = a, *right = b;
+
+	return strcmp(left->name, right->name);
+}
+
 static int kallsyms_cb(unsigned long long sym_addr, char sym_type,
 		       const char *sym_name, void *ctx)
 {
-	struct bpf_object *obj = ctx;
-	int i;
+	struct ksym_externs *index = ctx;
+	int left = 0, right = index->count, i;
+
+	while (left < right) {
+		int middle = left + (right - left) / 2;
+
+		if (strcmp(index->entries[middle].name, sym_name) < 0)
+			left = middle + 1;
+		else
+			right = middle;
+	}
 
 	/* Multiple compiler operands may name the same native address. An alias
 	 * tag gives its exact target; ordinary VARs retain their full spelling.
 	 */
-	for (i = 0; i < obj->nr_extern; i++) {
-		struct extern_desc *ext = &obj->externs[i];
-		const struct btf_type *t;
+	for (i = left; i < index->count; i++) {
+		struct extern_desc *ext = index->entries[i].ext;
 
-		if (ext->type != EXT_KSYM ||
-		    strcmp(ext->essent_name ?: ext->name, sym_name))
-			continue;
-		t = btf__type_by_id(obj->btf, ext->btf_id);
-		if (!btf_is_var(t))
-			continue;
+		if (strcmp(index->entries[i].name, sym_name))
+			break;
 		if (ext->is_set && ext->ksym.addr != sym_addr) {
 			pr_warn("extern (ksym) '%s': resolution is ambiguous: 0x%llx or 0x%llx\n",
 				sym_name, ext->ksym.addr, sym_addr);
@@ -8730,7 +8751,27 @@ static int kallsyms_cb(unsigned long long sym_addr, char sym_type,
 
 static int bpf_object__read_kallsyms_file(struct bpf_object *obj)
 {
-	return libbpf_kallsyms_parse(kallsyms_cb, obj);
+	struct ksym_externs index = {};
+	int i, err;
+
+	index.entries = libbpf_reallocarray(NULL, obj->nr_extern, sizeof(*index.entries));
+	if (!index.entries && obj->nr_extern)
+		return -ENOMEM;
+	for (i = 0; i < obj->nr_extern; i++) {
+		struct extern_desc *ext = &obj->externs[i];
+
+		if (ext->type != EXT_KSYM ||
+		    !btf_is_var(btf__type_by_id(obj->btf, ext->btf_id)))
+			continue;
+		index.entries[index.count++] = (struct ksym_extern) {
+			.name = ext->essent_name ?: ext->name,
+			.ext = ext,
+		};
+	}
+	qsort(index.entries, index.count, sizeof(*index.entries), cmp_ksym_externs);
+	err = libbpf_kallsyms_parse(kallsyms_cb, &index);
+	free(index.entries);
+	return err;
 }
 
 static int find_ksym_btf_id(struct bpf_object *obj, const char *ksym_name,
