@@ -659,6 +659,10 @@ static const struct latch_tree_ops bpf_tree_ops = {
 
 static DEFINE_SPINLOCK(bpf_lock);
 static LIST_HEAD(bpf_kallsyms);
+/* Sequential symbol readers retain their position under the writer lock.
+ * A removal invalidates the position before its node can be retired. */
+static struct bpf_ksym *bpf_kallsyms_cursor;
+static unsigned int bpf_kallsyms_position;
 static struct latch_tree_root bpf_tree __cacheline_aligned;
 
 void bpf_ksym_add(struct bpf_ksym *ksym)
@@ -675,6 +679,7 @@ static void __bpf_ksym_del(struct bpf_ksym *ksym)
 	if (list_empty(&ksym->lnode))
 		return;
 
+	bpf_kallsyms_cursor = NULL;
 	latch_tree_erase(&ksym->tnode, &bpf_tree, &bpf_tree_ops);
 	list_del_rcu(&ksym->lnode);
 }
@@ -827,14 +832,25 @@ int bpf_get_kallsym(unsigned int symnum, unsigned long *value, char *type,
 		    char *sym)
 {
 	struct bpf_ksym *ksym;
+	unsigned long flags;
 	unsigned int it = 0;
+	bool locked;
 	int ret = -ERANGE;
 
 	if (!bpf_jit_kallsyms_enabled())
 		return ret;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(ksym, &bpf_kallsyms, lnode) {
+	/* Debugger readers can interrupt a writer. Never wait for its lock;
+	 * those readers use the same RCU traversal from the list head. */
+	locked = spin_trylock_irqsave(&bpf_lock, flags);
+	if (locked && bpf_kallsyms_cursor && symnum >= bpf_kallsyms_position) {
+		ksym = bpf_kallsyms_cursor;
+		it = bpf_kallsyms_position;
+	} else {
+		ksym = list_entry_rcu(bpf_kallsyms.next, struct bpf_ksym, lnode);
+	}
+	list_for_each_entry_from_rcu(ksym, &bpf_kallsyms, lnode) {
 		if (it++ != symnum)
 			continue;
 
@@ -844,8 +860,14 @@ int bpf_get_kallsym(unsigned int symnum, unsigned long *value, char *type,
 		*type  = BPF_SYM_ELF_TYPE;
 
 		ret = 0;
+		if (locked) {
+			bpf_kallsyms_cursor = ksym;
+			bpf_kallsyms_position = symnum;
+		}
 		break;
 	}
+	if (locked)
+		spin_unlock_irqrestore(&bpf_lock, flags);
 	rcu_read_unlock();
 
 	return ret;
