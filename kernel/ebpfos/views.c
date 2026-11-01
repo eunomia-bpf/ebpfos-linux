@@ -33,7 +33,7 @@
 #include "function_native.h"
 #include "entry_slot_instruction.h"
 
-struct task_text_entry { unsigned long ip; u8 bytes[MCOUNT_INSN_SIZE]; bool ftrace; };
+struct task_text_entry { unsigned long ip; u8 bytes[sizeof(entry_native_nop)]; bool ftrace; };
 
 struct task_view {
  u64 generation;
