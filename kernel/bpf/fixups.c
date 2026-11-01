@@ -1524,12 +1524,13 @@ int bpf_jit_subprogs(struct bpf_verifier_env *env)
 	u32 *orig_subprog_starts;
 
 	if (env->subprog_cnt <= 1 && !bpf_native_func_entry(env->prog)) {
-		/* A sole entry can take its own address. It still needs the
-		 * subprogram index and final JIT address fixups below, including
-		 * when a source-trusted program retains a callback cycle.
+		/* A sole entry can take its own address or call itself. Both
+		 * operands still need the subprogram index and final JIT address
+		 * fixups below when source-trusted loading retains the cycle.
 		 */
 		for (i = 0; i < env->prog->len; i++)
-			if (bpf_pseudo_func(&env->prog->insnsi[i]))
+			if (bpf_pseudo_func(&env->prog->insnsi[i]) ||
+			    bpf_pseudo_call(&env->prog->insnsi[i]))
 				break;
 		if (i == env->prog->len)
 			return 0;
