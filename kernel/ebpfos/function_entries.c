@@ -107,7 +107,7 @@ unsigned long bpf_entry_text_location(struct module *module, unsigned long addre
 {
  unsigned long ip;
  *ftrace = false;*canonical_nop = false;
- if (module && entry_module_noinstr(module, address)) return 0;
+ if (entry_module_noinstr(module, address)) return 0;
  ip = ebpfos_ftrace_entry(address);
  if (ip) {*ftrace = true;return ip;}
  return module ? entry_module_native_location(module, address, canonical_nop) :

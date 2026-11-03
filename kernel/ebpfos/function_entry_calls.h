@@ -2,11 +2,16 @@
 #ifndef EBPFOS_FUNCTION_ENTRY_CALLS_H
 #define EBPFOS_FUNCTION_ENTRY_CALLS_H
 #include <asm/insn.h>
+#include <asm/sections.h>
 #include <linux/module_symbol.h>
 
 static bool entry_module_noinstr(struct module *module, unsigned long address)
 {
- unsigned long begin = (unsigned long)module->noinstr_text_start;
+ unsigned long begin;
+ if (!module)
+  return address >= (unsigned long)__noinstr_text_start &&
+   address < (unsigned long)__noinstr_text_end;
+ begin = (unsigned long)module->noinstr_text_start;
  return address >= begin && address - begin < module->noinstr_text_size;
 }
 
