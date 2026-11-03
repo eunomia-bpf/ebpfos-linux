@@ -19,6 +19,27 @@
 #define cell_layout_name btf__name_by_offset
 #define cell_layout_count btf__type_cnt
 #endif
+/* One decl-tag walk for cold callable metadata in kernel and libbpf readers.
+ * The cursor preserves all aliases and their order, including split BTF. */
+static inline const char *cell_next_decl_tag(const struct btf *btf,
+ const struct btf_type *function, int argument, unsigned int *cursor)
+{
+ while (++*cursor < cell_layout_count(btf)) {
+  const struct btf_type *tag = cell_layout_type(btf, *cursor);
+  if (tag && BTF_INFO_KIND(tag->info) == BTF_KIND_DECL_TAG &&
+      cell_layout_type(btf, tag->type) == function &&
+      btf_decl_tag(tag)->component_idx == argument)
+   return cell_layout_name(btf, tag->name_off);
+ }
+ return NULL;
+}
+/* LLVM annotations are byte strings, unlike BTF's NUL-terminated names. */
+static inline const char *cell_component_target(const char *tag, size_t size)
+{
+ const char prefix[] = "component.target/";
+ return size >= sizeof(prefix) - 1 && !memcmp(tag, prefix, sizeof(prefix) - 1) ?
+  tag + sizeof(prefix) - 1 : NULL;
+}
 /* BTF represents C ellipsis as an unnamed trailing type-zero parameter, not
  * a physical argument. Share the shape check with compiler and call readers.
  */

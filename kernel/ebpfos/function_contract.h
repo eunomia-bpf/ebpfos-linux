@@ -46,17 +46,15 @@ static bool cell_register_type(struct btf *native, u32 a, struct btf *compiled,
  * This selects an export only; its ABI/context/proof checks remain below. */
 static bool cell_export_name(const char *name, struct btf *compiled, u32 id, bool native_aliases)
 {
- const struct btf_type *function = btf_type_by_id(compiled, id), *tag;
- u32 at;
+ const struct btf_type *function = btf_type_by_id(compiled, id);
+ unsigned int cursor = 0;
+ const char *text;
  if (!function || !btf_type_is_func(function)) return false;
  if (!strcmp(name, btf_name_by_offset(compiled, function->name_off))) return true;
  if (!native_aliases) return false;
- for (at = 1; (tag = btf_type_by_id(compiled, at)); ++at) {
-  const char *text;
-  if (BTF_INFO_KIND(tag->info) != BTF_KIND_DECL_TAG || tag->type != id ||
-      btf_decl_tag(tag)->component_idx != -1) continue;
-  text = btf_name_by_offset(compiled, tag->name_off);
-  if (!strncmp(text, "component.target/", 17) && !strcmp(text + 17, name)) return true;
+ while ((text = cell_next_decl_tag(compiled, function, -1, &cursor))) {
+  const char *target = cell_component_target(text, strlen(text));
+  if (target && !strcmp(target, name)) return true;
  }
  return false;
 }

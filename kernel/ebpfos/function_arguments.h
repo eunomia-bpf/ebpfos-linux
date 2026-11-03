@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef EBPFOS_FUNCTION_ARGUMENTS_H
 #define EBPFOS_FUNCTION_ARGUMENTS_H
+#include "function_layout.h"
 /* Bare native calls do not pass through the BPF call checker. Any additional
  * argument requirement of the verified export must already belong to the
  * native interface. This is cold metadata matching, not another verifier.
@@ -8,14 +9,10 @@
 static inline bool cell_argument_tag(const struct btf *btf, const struct btf_type *function, int argument,
  const char *name)
 {
- u32 id;
- for (id = 1; ; ++id) {
-  const struct btf_type *type = btf_type_by_id(btf, id);
-  if (!type) break;
-  if (BTF_INFO_KIND(type->info) == BTF_KIND_DECL_TAG && btf_type_by_id(btf, type->type) == function &&
-      btf_decl_tag(type)->component_idx == argument &&
-      !strcmp(btf_name_by_offset(btf, type->name_off), name)) return true;
- }
+ unsigned int cursor = 0;
+ const char *tag;
+ while ((tag = cell_next_decl_tag(btf, function, argument, &cursor)))
+  if (!strcmp(tag, name)) return true;
  return false;
 }
 static inline bool cell_argument_nullable(const struct btf *btf, const struct btf_type *function,
