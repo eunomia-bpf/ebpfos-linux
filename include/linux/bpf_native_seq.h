@@ -49,6 +49,26 @@ static inline struct bpf_native_seq *bpf_native_seq_get(const struct bpf_prog *p
 	return seq;
 }
 
+/* Kernel C callers guarantee eight-byte alignment. A wider compiler frame
+ * or explicit alignstack assembly needs a separately aligned local base.
+ * Use the same requirement for verifier stack accounting and JIT emission.
+ */
+static inline u32 bpf_native_stack_alignment(const struct bpf_prog *prog,
+					   u32 start, u32 end, u32 alignment)
+{
+	alignment = max_t(u32, alignment, 8);
+	for (u32 i = start; i < end; i++) {
+		struct bpf_native_seq *seq;
+
+		if (!bpf_native_seq_insn(&prog->insnsi[i]))
+			continue;
+		seq = bpf_native_seq_get(prog, prog->insnsi[i].imm);
+		if (seq && (seq->flags & 8))
+			alignment = max_t(u32, alignment, 16);
+	}
+	return alignment;
+}
+
 /* Each marker owns its goto deltas. The same source record may be referenced
  * more than once, but instruction rewriting can move those instances apart.
  */

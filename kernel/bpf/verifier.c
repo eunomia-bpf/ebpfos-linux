@@ -6207,7 +6207,9 @@ process_func:
 
 	subprog_depth = round_up_stack_depth(env, subprog[idx].stack_depth);
 	if (subprog[idx].native_frame) {
-		u32 align = max_t(u32, subprog[idx].native_stack_align, 16);
+		u32 align = bpf_native_stack_alignment(env->prog, subprog[idx].start,
+						      subprog[idx + 1].start,
+						      subprog[idx].native_stack_align);
 
 		subprog_depth += round_up(subprog[idx].native_arg_out, 8);
 		if (align > 8)
