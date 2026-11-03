@@ -8347,6 +8347,13 @@ static bool btf_global_pointer_arg_unused(struct bpf_prog *prog, int subprog,
 	return !(env->insn_aux_data[sub->start].live_regs_before & BIT(regno));
 }
 
+static bool btf_native_opaque_arg(const struct bpf_subprog_info *sub,
+				  const struct btf_type *type)
+{
+	return sub->native_frame &&
+	       (btf_type_is_void(type) || btf_type_is_fwd(type));
+}
+
 static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				     struct bpf_subprog_info *sub,
 				     struct bpf_verifier_log *log,
@@ -8824,7 +8831,17 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			}
 
 			t = btf_type_skip_modifiers(btf, t->type, NULL);
-			ref_t = btf_resolve_size(btf, t, &mem_size);
+			/* A Native C void/incomplete pointer declares no accessible
+			 * object extent. Keep the address usable, but let each actual
+			 * access fail against zero bytes rather than refusing the ABI.
+			 * Sized/qualified contracts above retain their ordinary checks.
+			 */
+			if (btf_native_opaque_arg(sub, t)) {
+				mem_size = 0;
+				ref_t = t;
+			} else {
+				ref_t = btf_resolve_size(btf, t, &mem_size);
+			}
 			if (IS_ERR(ref_t)) {
 				bpf_log(log, "arg#%d reference type('%s %s') size cannot be determined: %ld\n",
 					i, btf_type_str(t), btf_name_by_offset(btf, t->name_off),
