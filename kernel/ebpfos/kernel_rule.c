@@ -480,7 +480,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  for (i = 0; i < count; ++i) {
   u32 *fds;
   if (versions[i].reserved ||
-      (versions[i].function_flags & ~BPF_KERNEL_RULE_SCOPED_FUNCTIONS)) {
+      versions[i].function_flags) {
    error = -EINVAL;goto fail;
   }
   if (versions[i].function_count) {
