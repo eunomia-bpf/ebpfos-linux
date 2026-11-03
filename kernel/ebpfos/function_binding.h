@@ -22,5 +22,6 @@ struct ebpfos_function_binding {
  struct module *source_module;
  unsigned long address;
  unsigned long native_address;
+ int syscall_slot;
 };
 #endif

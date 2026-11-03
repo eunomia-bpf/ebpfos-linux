@@ -208,6 +208,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
   view->bindings[i].program = program;
   view->bindings[i].address = sources[i].address;
   view->bindings[i].native_address = sources[i].native_address;
+  view->bindings[i].syscall_slot = slot;
   if (sources[i].source_module) {
    __module_get(sources[i].source_module);
    view->bindings[i].source_module = sources[i].source_module;
@@ -219,13 +220,9 @@ static struct ebpfos_task_view_request *task_view_prepare(
   if (slot >= 0) ++roots;
  }
  /* Discover against one Native snapshot before replacing any value. */
- for (i = 0; i < NR_syscalls; ++i) if (test_bit(i, view->selected)) {
-  u32 binding;
-  for (binding = 0; binding < count; ++binding)
-   if (view->bindings[binding].native_address == (unsigned long)view->table[i]) {
-    view->table[i] = (sys_call_ptr_t)view->bindings[binding].address;break;
-   }
- }
+ for (i = 0; i < count; ++i)
+  if (view->bindings[i].syscall_slot >= 0)
+   view->table[view->bindings[i].syscall_slot] = (sys_call_ptr_t)view->bindings[i].address;
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
  if (view->text_count) {
   unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
