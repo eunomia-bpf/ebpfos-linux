@@ -19,7 +19,8 @@ static inline unsigned long ebpfos_ftrace_entry(unsigned long address)
 /* Module BTF may label C globals STATIC. Global and weak ELF definitions
  * retain the public callable ABI; private definitions may have specialized
  * arguments not described by source BTF. Init/exit text is not resident. */
-static inline unsigned long ebpfos_module_function(struct module *module, const char *name)
+static inline unsigned long ebpfos_module_symbol(struct module *module, const char *name,
+ bool text, u32 min_size)
 {
  unsigned long target = 0;
 #if defined(CONFIG_MODULES) && defined(CONFIG_KALLSYMS)
@@ -30,19 +31,21 @@ static inline unsigned long ebpfos_module_function(struct module *module, const 
  for (i = 0; symbols && i < symbols->num_symtab; ++i) {
   const Elf_Sym *symbol = &symbols->symtab[i];
   if (strcmp(name, symbols->strtab + symbol->st_name)) continue;
-  if (target || (ELF_ST_BIND(symbol->st_info) != STB_GLOBAL &&
-                 ELF_ST_BIND(symbol->st_info) != STB_WEAK) ||
-      ELF_ST_TYPE(symbol->st_info) != STT_FUNC ||
-      symbol->st_shndx == SHN_UNDEF) {
+  if (target || ELF_ST_TYPE(symbol->st_info) != (text ? STT_FUNC : STT_OBJECT) ||
+      (text ? ((ELF_ST_BIND(symbol->st_info) != STB_GLOBAL &&
+                ELF_ST_BIND(symbol->st_info) != STB_WEAK) || symbol->st_shndx == SHN_UNDEF) :
+              symbol->st_size < min_size)) {
    target = 0;break;
   }
   target = kallsyms_symbol_value(symbol);
  }
  rcu_read_unlock();
- if (!within_module_mem_type(target, module, MOD_TEXT)) target = 0;
+ if (text && !within_module_mem_type(target, module, MOD_TEXT)) target = 0;
 #endif
  return target;
 }
+static inline unsigned long ebpfos_module_function(struct module *module, const char *name)
+{ return ebpfos_module_symbol(module, name, true, 0); }
 struct ebpfos_core_symbol { unsigned long address; bool found, ambiguous, text; };
 static int ebpfos_core_match(void *opaque, unsigned long address)
 {

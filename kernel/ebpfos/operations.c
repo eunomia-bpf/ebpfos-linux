@@ -121,21 +121,7 @@ static unsigned long operations_storage_symbol(struct module *module, const char
  unsigned long address = 0;
  if (!module) address = ebpfos_core_symbol_address(name, false);
 #ifdef CONFIG_MODULES
- else {
-  struct mod_kallsyms *symbols;
-  unsigned int i;
-  rcu_read_lock();
-  symbols = rcu_dereference(module->kallsyms);
-  for (i = 0; symbols && i < symbols->num_symtab; ++i) {
-   const Elf_Sym *symbol = &symbols->symtab[i];
-   if (strcmp(name, symbols->strtab + symbol->st_name)) continue;
-   if (address || ELF_ST_TYPE(symbol->st_info) != STT_OBJECT || symbol->st_size < size) {
-    address = 0;break;
-   }
-   address = kallsyms_symbol_value(symbol);
-  }
-  rcu_read_unlock();
- }
+ else address = ebpfos_module_symbol(module, name, false, size);
 #endif
  return operations_storage_range(module, address, size) ? address : 0;
 }
