@@ -2062,15 +2062,23 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 		return err;
 
 	u32 native_depth = stack_depth;
-	/* Kernel C callers may supply only 8-byte stack alignment. Preserve
-	 * their incoming frame, but align the native outgoing call area itself.
-	 */
-	u32 native_alignment = max_t(u32, bpf_prog->aux->native_stack_align, 16);
-	bool native_realign = bpf_prog->aux->native_frame;
-	u32 native_fp = native_realign ? X86_REG_R12 : BPF_REG_FP;
 	struct bpf_native_image *native = bpf_prog->aux->native_image;
+	u32 native_alignment = max_t(u32, bpf_prog->aux->native_stack_align, 8);
+	bool native_realign;
+	u32 native_fp;
 	u32 spill_size = native ? native->spill_size : 0;
 	s32 spill_offset = -(s32)round_up(stack_depth, 8) - 8;
+
+	/* Kernel C callers guarantee eight-byte alignment. Only a wider
+	 * compiler requirement needs a separate aligned local-frame base.
+	 * Explicit alignstack assembly retains its minimum ABI alignment.
+	 */
+	if (native)
+		for (int seq = 0; seq < native->count; seq++)
+			if (native->sequences[seq].record->flags & 8)
+				native_alignment = max_t(u32, native_alignment, 16);
+	native_realign = bpf_prog->aux->native_frame && native_alignment > 8;
+	native_fp = native_realign ? X86_REG_R12 : BPF_REG_FP;
 
 	if (native_realign) {
 		spill_offset = -16;
