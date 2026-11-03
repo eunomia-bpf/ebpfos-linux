@@ -268,23 +268,9 @@ struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kerne
  int error = 0;
  if (!count) return NULL;
  if (IS_ERR_OR_NULL(native)) return ERR_PTR(-EOPNOTSUPP);
- if (version->function_flags & BPF_KERNEL_RULE_SCOPED_FUNCTIONS) {
-  if (version->function_prog_fds) return ERR_PTR(-EINVAL);
-  targets = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(*targets));
-  if (IS_ERR(targets)) return ERR_CAST(targets);
- } else {
-  u32 *ids, *fds;
-  ids = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(u32));
-  if (IS_ERR(ids)) return ERR_CAST(ids);
-  fds = memdup_array_user(u64_to_user_ptr(version->function_prog_fds), count, sizeof(u32));
-  if (IS_ERR(fds)) {kfree(ids);return ERR_CAST(fds);}
-  targets = kvcalloc(count, sizeof(*targets), GFP_KERNEL);
-  if (!targets) {kfree(ids);kfree(fds);return ERR_PTR(-ENOMEM);}
-  for (i = 0; i < count; ++i) {
-   targets[i].btf_id = ids[i];targets[i].prog_fd = fds[i];
-  }
-  kfree(ids);kfree(fds);
- }
+ if (version->function_prog_fds) return ERR_PTR(-EINVAL);
+ targets = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(*targets));
+ if (IS_ERR(targets)) return ERR_CAST(targets);
  sources = kvcalloc(count, sizeof(*sources), GFP_KERNEL);
  if (!sources) {kvfree(targets);return ERR_PTR(-ENOMEM);}
  for (i = 0; i < count; ++i) {

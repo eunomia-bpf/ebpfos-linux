@@ -25,11 +25,10 @@ struct bpf_kernel_rule_version {
  __u32 operations_count;
  __u32 reserved;
  __aligned_u64 operations_fds;
- /* With SCOPED_FUNCTIONS, function_btf_ids points to function records and
-  * function_prog_fds is zero. Otherwise these are the legacy vmlinux ID
-  * and program-FD arrays. The version's load context never names a target. */
+ /* function_btf_ids points to function records; function_prog_fds is zero.
+  * The version's load context never names a target. */
  __u32 function_count;
- union { __u32 function_flags; __u32 reserved2; };
+ __u32 function_flags;
  __aligned_u64 function_btf_ids;
  __aligned_u64 function_prog_fds;
 };
