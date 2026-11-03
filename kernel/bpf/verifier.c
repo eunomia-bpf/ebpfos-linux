@@ -39,6 +39,7 @@
 
 #include "disasm.h"
 #include "../ebpfos/function_scalar_record_abi.h"
+#include "../ebpfos/function_arguments.h"
 #include "../ebpfos/function_native.h"
 
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
@@ -6881,6 +6882,9 @@ static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
  * the scalar ABI. Check modeled resources without inventing a lifetime model
  * for borrowed Linux objects; their lifetime follows source synchronization.
  */
+static bool native_callback_types_match(struct btf *source, u32 source_id,
+					struct btf *target, u32 target_id);
+
 static int check_btf_pointer_store(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *dst,
 				   struct bpf_reg_state *value,
@@ -6889,7 +6893,8 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 	enum bpf_type_flag flags = 0;
 	const char *field_name = NULL;
 	u32 pointee = 0;
-	bool nullable = true;
+	const struct btf_type *pointee_type;
+	bool nullable = true, callable;
 	int ret;
 
 	ret = btf_struct_store_access(&env->log, dst, off, size,
@@ -6924,8 +6929,13 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 		verbose(env, "pointer store: NULL violates read-side nonnull field\n");
 		return -EACCES;
 	}
-	if (base_type(value->type) != PTR_TO_BTF_ID) {
-		verbose(env, "pointer store: stored value is not a BTF pointer\n");
+	/* A code field requires a callable value, never a data-pointer cast. */
+	pointee_type = btf_type_skip_modifiers(dst->btf, pointee, NULL);
+	callable = pointee_type && btf_type_is_func_proto(pointee_type);
+
+	if (base_type(value->type) != (callable ? PTR_TO_BTF_FUNC : PTR_TO_BTF_ID)) {
+		verbose(env, "pointer store: stored value is not a BTF %s\n",
+			callable ? "function pointer" : "pointer");
 		return -EACCES;
 	}
 	if (!nullable && type_may_be_null(value->type)) {
@@ -6944,9 +6954,10 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 		return -EACCES;
 	}
 	if (!tnum_is_const(value->var_off) || !pointee ||
-	    !btf_struct_ids_match(&env->log, value->btf, value->btf_id,
-				 value->var_off.value,
-				 dst->btf, pointee, false)) {
+	    (callable ? value->var_off.value ||
+		!native_callback_types_match(value->btf, value->btf_id, dst->btf, pointee) :
+		!btf_struct_ids_match(&env->log, value->btf, value->btf_id,
+				     value->var_off.value, dst->btf, pointee, false))) {
 		verbose(env, "pointer store: incompatible BTF pointee\n");
 		return -EACCES;
 	}
@@ -11080,6 +11091,39 @@ static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
 	return type && btf_type_is_func_proto(type) ? type : NULL;
 }
 
+/* BTF IDs identify one namespace. A Native symbol and a compiled interface
+ * can carry equivalent prototypes in different namespaces. Reuse the cold
+ * callable-layout and argument-protocol checks; shape grants no target effects.
+ */
+static bool native_callback_types_match(struct btf *source, u32 source_id,
+					struct btf *target, u32 target_id)
+{
+	const struct btf_type *declaration, *actual, *expected;
+	const struct btf_param *ap, *ep;
+	u32 actual_id, i;
+
+	actual = native_callable_proto(source, source_id, &declaration);
+	expected = btf_type_by_id(target, target_id);
+	if (!actual || !expected || !btf_type_is_func_proto(expected))
+		return false;
+	actual_id = declaration ? declaration->type : source_id;
+	if (!btf_types_are_same(source, actual_id, target, target_id) &&
+	    !cell_layout(source, actual_id, target, target_id, 0, false))
+		return false;
+	ap = btf_params(actual);
+	ep = btf_params(expected);
+	for (i = 0; i < btf_type_vlen(expected); i++)
+		if (btf_type_is_ptr(btf_type_skip_modifiers(target, ep[i].type, NULL)) &&
+		    cell_argument_nullable(target, NULL, ep, i) &&
+		    !cell_argument_nullable(source, declaration, ap, i))
+			return false;
+	/* A resolved target must accept the interface's inputs. Preserve stronger
+	 * bounds, trust and other argument requirements instead of erasing them.
+	 */
+	return !declaration ||
+		cell_argument_requirements(target, NULL, expected, source, source_id);
+}
+
 /* Share the typed callback contract across Native calls and globals. NULL
  * satisfies only a nullable interface; no byte span or provider effect is
  * inferred from a function prototype.
@@ -11088,19 +11132,15 @@ static int check_native_callback_arg(struct bpf_verifier_env *env, struct btf *b
 				    u32 type_id, u32 regno, bool nullable, u32 arg)
 {
 	struct bpf_reg_state *reg = &cur_regs(env)[regno];
-	const struct btf_type *declaration, *prototype = NULL;
 
 	if (nullable && bpf_register_is_null(reg))
 		return mark_chain_precision(env, regno);
-	if (base_type(reg->type) == PTR_TO_BTF_FUNC)
-		prototype = native_callable_proto(reg->btf, reg->btf_id, &declaration);
 	if ((!nullable && type_may_be_null(reg->type)) ||
 	    base_type(reg->type) != PTR_TO_BTF_FUNC ||
 	    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
 	    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
 	    !tnum_is_const(reg->var_off) || reg->var_off.value ||
-	    !prototype || !btf_types_are_same(reg->btf,
-		declaration ? declaration->type : reg->btf_id, btf, type_id)) {
+	    !native_callback_types_match(reg->btf, reg->btf_id, btf, type_id)) {
 		verbose(env, "arg#%u requires a matching typed native callback\n", arg);
 		return -EACCES;
 	}
