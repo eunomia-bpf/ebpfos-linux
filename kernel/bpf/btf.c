@@ -8136,9 +8136,17 @@ int btf_check_type_match(struct bpf_verifier_log *log, const struct bpf_prog *pr
 	return btf_check_func_type_match(log, btf1, t1, btf2, t2);
 }
 
-static bool btf_is_dynptr_ptr(const struct btf *btf, const struct btf_type *t)
+static bool btf_is_dynptr_ptr(const struct bpf_subprog_info *sub,
+			      const struct btf *btf, const struct btf_type *t)
 {
 	const char *name;
+
+	/* A dynptr stack handle belongs to the BPF calling convention.
+	 * Native C formals retain their ordinary declared pointer contract,
+	 * including the public opaque carrier's fixed object size.
+	 */
+	if (sub->native_frame)
+		return false;
 
 	t = btf_type_by_id(btf, t->type); /* skip PTR */
 
@@ -8653,7 +8661,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (is_global && !tags && size_arg < 0 && !read_only &&
 		    !user_address && !has_btf_offset && !has_scalar_max &&
 		    !btf_is_prog_ctx_type(log, btf, t, prog_type, i) &&
-		    !btf_is_dynptr_ptr(btf, t) &&
+		    !btf_is_dynptr_ptr(sub, btf, t) &&
 		    btf_global_pointer_arg_unused(prog, subprog, sub, env, t, i)) {
 			sub->args[i].arg_type = ARG_DONTCARE;
 			if (env)
@@ -8733,7 +8741,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			}
 			if (pointer_flags && ((tags & (ARG_TAG_CTX | ARG_TAG_ARENA)) ||
 					      btf_is_prog_ctx_type(log, btf, t, prog_type, i) ||
-					      btf_is_dynptr_ptr(btf, t))) {
+					      btf_is_dynptr_ptr(sub, btf, t))) {
 				bpf_log(log, "arg#%d qualified pointer has incompatible argument contract\n", i);
 				return -EINVAL;
 			}
@@ -8751,7 +8759,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			sub->args[i].arg_type = ARG_PTR_TO_CTX;
 			continue;
 		}
-		if (btf_is_dynptr_ptr(btf, t)) {
+		if (btf_is_dynptr_ptr(sub, btf, t)) {
 			if (tags) {
 				bpf_log(log, "arg#%d has invalid combination of tags\n", i);
 				return -EINVAL;
