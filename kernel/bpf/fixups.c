@@ -2419,10 +2419,18 @@ patch_map_ops_generic:
 			 * way, it's fine to back out this inlining logic
 			 */
 #ifdef CONFIG_SMP
-			insn_buf[0] = BPF_MOV64_IMM(BPF_REG_0, (u32)(unsigned long)&cpu_number);
-			insn_buf[1] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_0);
-			insn_buf[2] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_0, 0);
-			cnt = 3;
+			/* This is a kernel-owned address, not a scalar constant.
+			 * The final pseudo conversion retains its symbolic role
+			 * for AOT while ordinary JIT emission stays unchanged.
+			 */
+			struct bpf_insn address[] = {
+				BPF_LD_IMM64_RAW(BPF_REG_0, BPF_PSEUDO_BTF_ID,
+						(unsigned long)&cpu_number),
+			};
+			memcpy(insn_buf, address, sizeof(address));
+			insn_buf[2] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_0);
+			insn_buf[3] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_0, 0);
+			cnt = 4;
 #else
 			insn_buf[0] = BPF_ALU32_REG(BPF_XOR, BPF_REG_0, BPF_REG_0);
 			cnt = 1;
@@ -2440,10 +2448,14 @@ patch_map_ops_generic:
 		/* Implement bpf_get_current_task() and bpf_get_current_task_btf() inline. */
 		if ((insn->imm == BPF_FUNC_get_current_task || insn->imm == BPF_FUNC_get_current_task_btf) &&
 		    bpf_verifier_inlines_helper_call(env, insn->imm)) {
-			insn_buf[0] = BPF_MOV64_IMM(BPF_REG_0, (u32)(unsigned long)&current_task);
-			insn_buf[1] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_0);
-			insn_buf[2] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 0);
-			cnt = 3;
+			struct bpf_insn address[] = {
+				BPF_LD_IMM64_RAW(BPF_REG_0, BPF_PSEUDO_BTF_ID,
+						(unsigned long)&current_task),
+			};
+			memcpy(insn_buf, address, sizeof(address));
+			insn_buf[2] = BPF_MOV64_PERCPU_REG(BPF_REG_0, BPF_REG_0);
+			insn_buf[3] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 0);
+			cnt = 4;
 
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)

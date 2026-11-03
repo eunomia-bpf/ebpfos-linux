@@ -24004,14 +24004,13 @@ skip_full_check:
 		       sizeof(env->used_btfs[0]) * env->used_btf_cnt);
 		env->prog->aux->used_btf_cnt = env->used_btf_cnt;
 	}
-	if (env->used_map_cnt || env->used_btf_cnt) {
-		/* program is valid. Convert pseudo bpf_ld_imm64 into generic
-		 * bpf_ld_imm64 instructions
-		 */
-		ret = convert_pseudo_ld_imm64(env);
-		if (ret)
-			goto err_release_maps;
-	}
+	/* Helper fixups can introduce symbolic addresses even when the source
+	 * program used no maps or external BTF. Record all such operands before
+	 * clearing their pseudo encoding for execution.
+	 */
+	ret = convert_pseudo_ld_imm64(env);
+	if (ret)
+		goto err_release_maps;
 
 	adjust_btf_func(env);
 
