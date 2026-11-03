@@ -8354,6 +8354,12 @@ static bool btf_native_opaque_arg(const struct bpf_subprog_info *sub,
 	       (btf_type_is_void(type) || btf_type_is_fwd(type));
 }
 
+static bool btf_native_func_arg(const struct bpf_subprog_info *sub,
+				const struct btf_type *type)
+{
+	return sub->native_frame && btf_type_is_func_proto(type);
+}
+
 static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				     struct bpf_subprog_info *sub,
 				     struct bpf_verifier_log *log,
@@ -8823,14 +8829,26 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			continue;
 		}
 		if (is_global) { /* generic user data pointer */
-			u32 mem_size;
+			u32 mem_size, pointee;
 
 			if (tags & ARG_TAG_NULLABLE) {
 				bpf_log(log, "arg#%d has invalid combination of tags\n", i);
 				return -EINVAL;
 			}
 
-			t = btf_type_skip_modifiers(btf, t->type, NULL);
+			t = btf_type_skip_modifiers(btf, t->type, &pointee);
+			/* A callable has a prototype, not a data extent. The existing
+			 * BTF argument descriptor retains its namespace; initialization
+			 * and every compiled caller distinguish it from a data pointer.
+			 */
+			if (!read_only && btf_native_func_arg(sub, t)) {
+				sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | pointer_flags;
+				if (!(tags & ARG_TAG_NONNULL))
+					sub->args[i].arg_type |= PTR_MAYBE_NULL;
+				sub->args[i].btf = btf;
+				sub->args[i].btf_id = pointee;
+				continue;
+			}
 			/* A Native C void/incomplete pointer declares no accessible
 			 * object extent. Keep the address usable, but let each actual
 			 * access fail against zero bytes rather than refusing the ABI.

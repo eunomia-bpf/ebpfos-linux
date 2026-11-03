@@ -11061,6 +11061,50 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 	return 0;
 }
 
+/* Field values carry a FUNC_PROTO; resolved Native symbols retain their FUNC.
+ * Keeping the declaration ID in the register also keeps distinct providers
+ * distinct during state comparison and stack spills.
+ */
+static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
+                                                  const struct btf_type **declaration)
+{
+	const struct btf_type *type = btf_type_by_id(btf, id);
+
+	*declaration = NULL;
+	if (type && btf_type_is_func(type)) {
+		*declaration = type;
+		type = btf_type_by_id(btf, type->type);
+	}
+	return type && btf_type_is_func_proto(type) ? type : NULL;
+}
+
+/* Share the typed callback contract across Native calls and globals. NULL
+ * satisfies only a nullable interface; no byte span or provider effect is
+ * inferred from a function prototype.
+ */
+static int check_native_callback_arg(struct bpf_verifier_env *env, struct btf *btf,
+				    u32 type_id, u32 regno, bool nullable, u32 arg)
+{
+	struct bpf_reg_state *reg = &cur_regs(env)[regno];
+	const struct btf_type *declaration, *prototype = NULL;
+
+	if (nullable && bpf_register_is_null(reg))
+		return mark_chain_precision(env, regno);
+	if (base_type(reg->type) == PTR_TO_BTF_FUNC)
+		prototype = native_callable_proto(reg->btf, reg->btf_id, &declaration);
+	if ((!nullable && type_may_be_null(reg->type)) ||
+	    base_type(reg->type) != PTR_TO_BTF_FUNC ||
+	    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
+	    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
+	    !tnum_is_const(reg->var_off) || reg->var_off.value ||
+	    !prototype || !btf_types_are_same(reg->btf,
+		declaration ? declaration->type : reg->btf_id, btf, type_id)) {
+		verbose(env, "arg#%u requires a matching typed native callback\n", arg);
+		return -EACCES;
+	}
+	return 0;
+}
+
 static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				    const struct btf *btf,
 				    struct bpf_reg_state *regs)
@@ -11384,6 +11428,14 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				 * scalar branch cannot reuse the accepted NULL state.
 				 */
 				err = mark_chain_precision(env, regno);
+				if (err)
+					return err;
+				continue;
+			}
+
+			if (arg->btf && btf_type_is_func_proto(btf_type_by_id(arg->btf, arg->btf_id))) {
+				err = check_native_callback_arg(env, arg->btf, arg->btf_id,
+					regno, type_may_be_null(arg->arg_type), i);
 				if (err)
 					return err;
 				continue;
@@ -14436,23 +14488,6 @@ static int check_kfunc_address_arg(struct bpf_verifier_env *env,
 	}
 }
 
-/* Field values carry a FUNC_PROTO; resolved Native symbols retain their FUNC.
- * Keeping the declaration ID in the register also keeps distinct providers
- * distinct during state comparison and stack spills.
- */
-static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
-                                                  const struct btf_type **declaration)
-{
-	const struct btf_type *type = btf_type_by_id(btf, id);
-
-	*declaration = NULL;
-	if (type && btf_type_is_func(type)) {
-		*declaration = type;
-		type = btf_type_by_id(btf, type->type);
-	}
-	return type && btf_type_is_func_proto(type) ? type : NULL;
-}
-
 static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
  const struct btf_type *prototype, const struct btf_type *declaration, u32 *named)
 {
@@ -14698,29 +14733,9 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
 		if (meta->func_id == U32_MAX && btf_type_is_func_proto(ref_t)) {
-			const struct btf_type *callback_decl, *callback_proto = NULL;
-
-			/* An unknown native method has no callback-verification
-			 * protocol for a BPF subprogram. A native callback already
-			 * loaded from a typed field retains that field's prototype.
-			 */
-			if (nullable && bpf_register_is_null(reg)) {
-				ret = mark_chain_precision(env, regno);
-				if (ret)
-					return ret;
-				continue;
-			}
-			if (base_type(reg->type) == PTR_TO_BTF_FUNC)
-				callback_proto = native_callable_proto(reg->btf, reg->btf_id, &callback_decl);
-			if (base_type(reg->type) != PTR_TO_BTF_FUNC ||
-			    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-			    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
-			    !tnum_is_const(reg->var_off) || reg->var_off.value ||
-			    !callback_proto || !btf_types_are_same(reg->btf,
-				callback_decl ? callback_decl->type : reg->btf_id, btf, ref_id)) {
-				verbose(env, "callx arg#%d requires a matching typed native callback\n", i);
-				return -EACCES;
-			}
+			ret = check_native_callback_arg(env, meta->btf, ref_id, regno, nullable, i);
+			if (ret)
+				return ret;
 			continue;
 		}
 		if (size_arg >= 0) {
@@ -22272,6 +22287,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				mark_reg_known_zero(env, regs, i);
 				reg->btf = arg->btf ?: bpf_get_btf_vmlinux();
 				reg->btf_id = arg->btf_id;
+				if (btf_type_is_func_proto(btf_type_by_id(reg->btf, reg->btf_id)))
+					reg->type = (reg->type & ~BPF_BASE_TYPE_MASK) | PTR_TO_BTF_FUNC;
 				if (arg->has_btf_offset)
 					___mark_reg_known(reg, arg->btf_offset);
 				reg->id = ++env->id_gen;
