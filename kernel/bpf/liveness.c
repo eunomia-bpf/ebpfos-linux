@@ -1050,6 +1050,57 @@ static bool can_be_local_fp(int depth, int regno, struct arg_track *at)
 	       (at->frame == ARG_IMPRECISE && (at->mask & BIT(depth)));
 }
 
+/* Model only a declared global result here. The independent verifier pass
+ * proves that relationship before the program can execute.
+ */
+static struct arg_track argument_result_track(struct bpf_verifier_env *env,
+		struct bpf_insn *insn, int insn_idx, struct arg_track *regs,
+		struct arg_track *stack, int depth)
+{
+	struct arg_track none = { .frame = ARG_NONE }, result;
+	const struct bpf_subprog_info *sub;
+	const struct btf_type *fn;
+	u32 argument;
+	s32 offset;
+	int callee;
+
+	if (!bpf_pseudo_call(insn) || !env->prog->aux->btf || !env->prog->aux->func_info)
+		return none;
+	callee = bpf_find_subprog(env, insn_idx + insn->imm + 1);
+	if (callee < 0)
+		return none;
+	fn = btf_type_by_id(env->prog->aux->btf, env->prog->aux->func_info[callee].type_id);
+	if (!fn || !btf_type_is_func(fn) || btf_type_vlen(fn) != BTF_FUNC_GLOBAL ||
+	    btf_argument_result(env->prog->aux->btf, fn, &argument, &offset))
+		return none;
+	sub = &env->subprog_info[callee];
+	if (sub->native_frame) {
+		const struct bpf_native_arg *arg;
+
+		argument += sub->native_abi.result_buffer;
+		if (argument >= sub->native_abi.nr_args)
+			return none;
+		arg = &sub->native_abi.args[argument];
+		if (arg->reg >= 0) {
+			if (arg->reg >= MAX_BPF_NATIVE_REG_ARGS)
+				return none;
+			result = regs[bpf_arg_regno(arg->reg)];
+		} else {
+			struct bpf_insn load = { .off = arg->stack_offset };
+
+			if (arg->stack_offset > S16_MAX)
+				return none;
+			result = fill_from_stack(&load, regs, BPF_REG_ARG_SP, stack, depth);
+		}
+	} else {
+		if (argument >= MAX_BPF_NATIVE_REG_ARGS)
+			return none;
+		result = regs[bpf_arg_regno(argument)];
+	}
+	arg_padd(&result, offset);
+	return result;
+}
+
 /*
  * Pure dataflow transfer function for arg_track state.
  * Updates at_out[] based on how the instruction modifies registers.
@@ -1099,6 +1150,10 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		 */
 		*dst = none;
 	} else if (class == BPF_JMP && code == BPF_CALL) {
+		struct arg_track result = none;
+
+		result = argument_result_track(env, insn, insn_idx, at_out,
+					       at_stack_out, depth);
 		/*
 		 * at_stack_out[slot] is not cleared by the helper and subprog calls.
 		 * The fill_from_stack() may return the stale spill — which is an FP-derived arg_track
@@ -1118,6 +1173,10 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		for (r = 0; r < MAX_BPF_REG; r++)
 			if (r == BPF_REG_0 || bpf_is_arg_reg(r))
 				at_out[r] = none;
+		/* Preserve the returned caller-frame address across the call. The
+		 * normal verifier still proves the declaration on every callee exit.
+		 */
+		at_out[BPF_REG_0] = result;
 	} else if (class == BPF_LDX) {
 		u32 sz = bpf_size_to_bytes(BPF_SIZE(insn->code));
 		bool src_is_local_fp = can_be_local_fp(depth, insn->src_reg, src);

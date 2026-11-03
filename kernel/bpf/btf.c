@@ -8368,6 +8368,34 @@ static bool btf_native_func_arg(const struct bpf_subprog_info *sub,
 	return sub->native_frame && btf_type_is_func_proto(type);
 }
 
+/* Decode the same address relationship for liveness and exit verification.
+ * This describes an obligation; it establishes no pointer capability.
+ */
+int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
+			u32 *argument, s32 *offset)
+{
+	const struct btf_type *proto, *result;
+	const char *tag;
+	char trailing;
+
+	if (!fn || !btf_type_is_func(fn))
+		return -EINVAL;
+	tag = btf_find_decl_tag_value(btf, fn, -1, "ret:arg:");
+	if (IS_ERR(tag))
+		return PTR_ERR(tag);
+	proto = btf_type_by_id(btf, fn->type);
+	if (!proto || !btf_type_is_func_proto(proto))
+		return -EINVAL;
+	result = btf_type_skip_modifiers(btf, proto->type, NULL);
+	if (!btf_type_is_ptr(result) ||
+	    sscanf(tag, "%u:%d%c", argument, offset, &trailing) != 2 ||
+	    *argument >= btf_type_vlen(proto) ||
+	    !btf_type_is_ptr(btf_type_skip_modifiers(btf,
+						   btf_params(proto)[*argument].type, NULL)))
+		return -EINVAL;
+	return 0;
+}
+
 static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				     struct bpf_subprog_info *sub,
 				     struct bpf_verifier_log *log,
@@ -8519,6 +8547,21 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			return PTR_ERR(tag);
 		}
 	}
+	{
+		u32 argument;
+		s32 offset;
+		int err = btf_argument_result(btf, fn_t, &argument, &offset);
+
+		if (err != -ENOENT) {
+			if (err || !is_global || sub->null_result ||
+			    sub->readonly_result_btf_id || sub->readonly_result_size) {
+				bpf_log(log, "invalid argument-derived result contract\n");
+				return err ?: -EINVAL;
+			}
+			sub->result_argument = argument + 1;
+			sub->result_argument_offset = offset;
+		}
+	}
 	/* A record pointer result has the same checked stable-storage contract
 	 * as a scalar byte-pointer result, independently for each occupied word.
 	 */
@@ -8548,7 +8591,9 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	t = btf_type_by_id(btf, t->type);
 	while (btf_type_is_modifier(t))
 		t = btf_type_by_id(btf, t->type);
-	if (!sub->null_result && !sub->readonly_result_btf_id && !sub->readonly_result_size && !sub->readonly_record_result_size[0] &&
+	if (!sub->result_argument && !sub->null_result &&
+	    !sub->readonly_result_btf_id && !sub->readonly_result_size &&
+	    !sub->readonly_record_result_size[0] &&
 	    !sub->readonly_record_result_size[1] && !sub->readonly_stack_result && !btf_type_is_void(t) && !btf_type_is_int(t) && !btf_is_any_enum(t) &&
 	    !(prog->jit_requested && bpf_jit_supports_native_args() &&
 	      (btf_scalar_record_return(btf, btf_type_by_id(btf, fn_t->type)->type) ||

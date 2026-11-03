@@ -11732,11 +11732,26 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			err = native_result_buffer_state(env, *insn_idx, subprog);
 			if (err) return err;
 		}
+		if (sub->result_argument) {
+			struct native_arg_scope temporary __free(native_arg) = {};
+			u32 argument = sub->result_argument - 1;
+			int regno = sub->native_frame ?
+				native_call_arg_reg(env, env->prog->aux->btf, &sub->native_abi,
+						    argument, &temporary) : bpf_arg_regno(argument);
+
+			if (regno < 0)
+				return regno;
+			result_buffer = caller->regs[regno];
+			result_buffer.var_off = tnum_add(result_buffer.var_off,
+					tnum_const((s64)sub->result_argument_offset));
+			__mark_reg_unbounded(&result_buffer);
+			reg_bounds_sync(&result_buffer);
+		}
 		/* mark global subprog for verifying after main prog */
 		subprog_aux(env, subprog)->called = true;
 		clear_caller_saved_regs(env, caller->regs);
 
-		if (sub->native_frame && sub->native_abi.result_buffer) {
+		if (sub->result_argument || (sub->native_frame && sub->native_abi.result_buffer)) {
 			caller->regs[BPF_REG_0] = result_buffer;
 		} else if (sub->null_result) {
 			__mark_reg_const_zero(env, &caller->regs[BPF_REG_0]);
@@ -20076,6 +20091,28 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		}
 		return 0;
 	}
+	if (sub->result_argument) {
+		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
+		const struct bpf_reg_state *input = &frame->result_argument;
+		u64 offset = input->var_off.value + (s64)sub->result_argument_offset;
+
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		if (err)
+			return err;
+		/* The contract transfers only an existing input capability. A type
+		 * match alone cannot establish its origin, bounds or lifetime.
+		 */
+		if (input->id && result->id == input->id &&
+		    result->type == input->type &&
+		    tnum_equals_const(result->var_off, offset) &&
+		    result->raw.raw1 == input->raw.raw1 && result->raw.raw2 == input->raw.raw2 &&
+		    result->mem_size_id == input->mem_size_id &&
+		    result->mem_stable == input->mem_stable &&
+		    result->ref_obj_id == input->ref_obj_id)
+			return 0;
+		verbose(env, "result must retain its declared input pointer and offset\n");
+		return -EACCES;
+	}
 	if (sub->readonly_result_btf_id) {
 		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
 		u32 id;
@@ -22176,6 +22213,12 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 		 * which do not establish this ordinary global-call precondition.
 		 */
 		if (sub->is_cb || subprog_is_exc_cb(env, subprog)) {
+			if (sub->result_argument) {
+				verbose(env,
+					"argument result contracts are unsupported for callbacks\n");
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
 			if (sub->null_result) {
 				verbose(env, "NULL result contracts are unsupported for callbacks\n");
 				ret = -EOPNOTSUPP;
@@ -22423,6 +22466,23 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				count->precise = true;
 			}
 			pointer->mem_size_id = count->id;
+		}
+		if (sub->result_argument) {
+			struct bpf_reg_state *input = native_global_arg_state(sub, state->frame[0],
+								    sub->result_argument - 1);
+
+			if ((base_type(input->type) != PTR_TO_BTF_ID &&
+			     base_type(input->type) != PTR_TO_BTF_FUNC &&
+			     base_type(input->type) != PTR_TO_MEM) ||
+			    !tnum_is_const(input->var_off)) {
+				verbose(env,
+					"argument result requires a typed pointer input\n");
+				ret = -EACCES;
+				goto out;
+			}
+			if (!input->id)
+				input->id = ++env->id_gen;
+			state->frame[0]->result_argument = *input;
 		}
 	} else {
 		/* if main BPF program has associated BTF info, validate that

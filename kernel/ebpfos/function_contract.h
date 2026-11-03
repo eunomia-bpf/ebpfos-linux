@@ -77,8 +77,9 @@ static bool cell_trusted_native_scalar_proto(struct btf *native, const struct bt
       (a.arg_flags[i] & BTF_FMODEL_STRUCT_ARG)) return false;
  return true;
 }
-/* Independently checked NULL or permanent read-only results may cross the
- * native pointer-result boundary. Program-held map storage is too short-lived.
+/* Independently checked input-relative, NULL or permanent read-only results
+ * may cross the native pointer-result boundary. A borrowed result retains the
+ * native caller's input lifetime; it cannot expose a new program-local object.
  */
 static bool cell_checked_pointer_result(struct btf *native, const struct btf_type *n,
  struct btf *compiled, const struct btf_type *function)
@@ -118,6 +119,25 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
   tag = btf_find_decl_tag_value(compiled, function, -1, "ret:null");
   described = !IS_ERR(tag) && !*tag;
  }
+	if (!described) {
+		const struct btf_type *input;
+		u32 argument;
+		s32 offset;
+
+		/* Native callers carry the declared input object, not a BPF register's
+		 * larger enclosing view. Export only that identical object here; interior
+		 * and enclosing results still need their separate Native scope contract.
+		 */
+		if (!btf_argument_result(compiled, function, &argument, &offset) &&
+		    !offset && argument < btf_type_vlen(n)) {
+			input = btf_type_skip_modifiers(native, btf_params(n)[argument].type, NULL);
+			described = input && btf_type_is_ptr(input) &&
+				result && btf_type_is_ptr(result) &&
+				btf_type_skip_modifiers(native, input->type, NULL) ==
+				btf_type_skip_modifiers(native, result->type, NULL) &&
+				cell_layout(native, input->type, native, result->type, 0, false);
+		}
+	}
  return result && btf_type_is_ptr(result) && described &&
   cell_layout(native, n->type, compiled, prototype->type, 0, false);
 }

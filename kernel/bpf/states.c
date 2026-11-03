@@ -933,6 +933,13 @@ static bool func_states_equal(struct bpf_verifier_env *env, struct bpf_func_stat
 	if (old->callback_depth > cur->callback_depth)
 		return false;
 
+	/* Anchor the immutable entry identity before matching live registers.
+	 * Two same-typed arguments must not become interchangeable at a join.
+	 */
+	if (old->result_argument.id &&
+	    !regs_exact(&old->result_argument, &cur->result_argument, &env->idmap_scratch))
+		return false;
+
 	for (i = 0; i < MAX_BPF_REG; i++)
 		if (((1 << i) & live_regs) &&
 		    !regsafe(env, &old->regs[i], &cur->regs[i],

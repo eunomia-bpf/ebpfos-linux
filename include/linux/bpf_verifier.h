@@ -363,6 +363,8 @@ struct bpf_retval_range {
  */
 struct bpf_func_state {
 	struct bpf_reg_state regs[MAX_BPF_REG];
+	/* Immutable entry witness for an argument-derived result. */
+	struct bpf_reg_state result_argument;
 	/* index of call instruction that called into this func */
 	int callsite;
 	/* stack frame number of this function state from pov of
@@ -805,6 +807,8 @@ struct bpf_subprog_info {
 	u32 linfo_idx; /* The idx to the main_prog->aux->linfo */
 	u32 postorder_start; /* The idx to the env->cfg.insn_postorder */
 	u32 exit_idx; /* Index of one of the BPF_EXIT instructions in this subprogram */
+	u32 result_argument; /* one-based BTF parameter, independently checked */
+	s32 result_argument_offset; /* exact byte displacement from that input */
 	u32 readonly_result_size; /* independently checked stable byte buffer */
 	bool readonly_kernel_result; /* permanent native storage, beyond program lifetime */
 	bool null_result; /* every independently checked exit returns NULL */
