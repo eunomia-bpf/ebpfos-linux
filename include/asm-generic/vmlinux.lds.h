@@ -536,7 +536,7 @@
 									\
 	/* __*init sections */						\
 	__init_rodata : AT(ADDR(__init_rodata) - LOAD_OFFSET) {		\
-		*(.ref.rodata)						\
+		*(.ref.rodata .ref.rodata.*)				\
 	}								\
 									\
 	/* Built-in module parameters. */				\
