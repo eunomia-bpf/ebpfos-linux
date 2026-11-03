@@ -19518,10 +19518,18 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			dst_reg->btf = aux->btf_var.btf;
 			dst_reg->btf_id = aux->btf_var.btf_id;
 			break;
-		case SCALAR_VALUE:
-			/* An address-only VAR has no memory view. */
-			__mark_reg_known(dst_reg, ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm);
+		case SCALAR_VALUE: {
+			const struct btf_type *symbol = btf_type_by_id(env->prog->aux->btf, aux->native_symbol_id);
+			const char *weak = btf_find_decl_tag_value(env->prog->aux->btf, symbol, -1, "ksym:weak");
+
+			/* Optional addresses can bind at the final link. Verify both
+			 * paths without granting a pointer or callable type. */
+			if (!IS_ERR(weak) && !*weak)
+				mark_reg_unknown(env, regs, insn->dst_reg);
+			else
+				__mark_reg_known(dst_reg, ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm);
 			break;
+		}
 		default:
 			verifier_bug(env, "pseudo btf id: unexpected dst reg type");
 			return -EFAULT;
@@ -21130,9 +21138,14 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		addr = kallsyms_lookup_name(sym_name);
 	}
 	if (!addr) {
-		verbose(env, "ldimm64 failed to find the address for kernel symbol '%s'.\n",
-			sym_name);
-		return -ENOENT;
+		const char *weak = source_btf && source_scalar_symbol(btf, id) ?
+			btf_find_decl_tag_value(btf, t, -1, "ksym:weak") : ERR_PTR(-ENOENT);
+
+		if (IS_ERR(weak) || *weak) {
+			verbose(env, "ldimm64 failed to find the address for kernel symbol '%s'.\n",
+				sym_name);
+			return -ENOENT;
+		}
 	}
 	insn[0].imm = (u32)addr;
 	insn[1].imm = addr >> 32;

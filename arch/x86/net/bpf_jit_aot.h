@@ -12,6 +12,7 @@
 
 struct bpf_aot_record {
 	Elf64_Rela rela;
+	bool weak;
 	char name[BPF_AOT_SYMBOL_LEN];
 };
 
@@ -184,7 +185,7 @@ static int aot_validate_operand(const struct bpf_aot_reloc *operand,
 
 
 static int aot_record(struct bpf_aot_context *aot, u32 offset, u32 type,
-		      const char *name, s64 addend)
+		      const char *name, s64 addend, bool weak)
 {
 	struct bpf_aot_record *record;
 
@@ -204,6 +205,7 @@ static int aot_record(struct bpf_aot_context *aot, u32 offset, u32 type,
 	record->rela.r_offset = offset;
 	record->rela.r_info = (u64)type;
 	record->rela.r_addend = addend;
+	record->weak = weak;
 	if (strscpy(record->name, name, sizeof(record->name)) < 0)
 		return aot->error = -ENAMETOOLONG;
 	return 0;
@@ -221,7 +223,7 @@ static int aot_record_address(struct bpf_aot_context *aot, u32 offset,
 	err = aot_address_name(aot, address, name, &addend);
 	if (err)
 		return aot->error = err;
-	return aot_record(aot, offset, type, name, addend + bias);
+	return aot_record(aot, offset, type, name, addend + bias, false);
 }
 
 /* Every record has a symbol. Duplicates are legal ELF symbols and leave the
@@ -365,7 +367,7 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 
 		relocations[i] = record->rela;
 		relocations[i].r_info = ((u64)(i + 3) << 32) | ELF64_R_TYPE(record->rela.r_info);
-		symbols[i + 3].st_info = ((STB_GLOBAL << 4) | STT_NOTYPE);
+		symbols[i + 3].st_info = (((record->weak ? STB_WEAK : STB_GLOBAL) << 4) | STT_NOTYPE);
 		symbols[i + 3].st_name = names;
 		strcpy(data + positions[STRTAB] + names, record->name);
 		names += strlen(record->name) + 1;

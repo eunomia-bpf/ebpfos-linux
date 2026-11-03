@@ -399,6 +399,7 @@ enum kern_feature_id {
 	/* Kernel supports BTF layout information */
 	FEAT_BTF_LAYOUT,
 	FEAT_SOURCE_SCALAR_SYMBOL,
+	FEAT_SOURCE_WEAK_SYMBOL,
 	__FEAT_CNT,
 };
 

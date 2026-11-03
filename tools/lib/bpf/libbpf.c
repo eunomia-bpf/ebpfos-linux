@@ -4581,6 +4581,11 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 		id = btf__add_decl_tag(obj->btf, "ksym:scalar", ext->btf_id, -1);
 		if (id < 0)
 			return id;
+		if (ext->is_weak) {
+			id = btf__add_decl_tag(obj->btf, "ksym:weak", ext->btf_id, -1);
+			if (id < 0)
+				return id;
+		}
 	}
 	return 0;
 }
@@ -6547,8 +6552,9 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 					insn[0].imm = ext->ksym.kernel_btf_id;
 					insn[1].imm = ext->ksym.kernel_btf_obj_fd;
 				} else { /* typeless ksyms or unresolved typed ksyms */
-					if (!ext->ksym.type_id && ext->is_set &&
-					    kernel_supports(obj, FEAT_SOURCE_SCALAR_SYMBOL)) {
+					if (!ext->ksym.type_id && (ext->is_set || ext->is_weak) &&
+					    kernel_supports(obj, ext->is_set ? FEAT_SOURCE_SCALAR_SYMBOL :
+							FEAT_SOURCE_WEAK_SYMBOL)) {
 						insn[0].src_reg = BPF_PSEUDO_BTF_ID;
 						insn[0].imm = ext->btf_id;
 						insn[1].imm = BPF_BTF_SOURCE;

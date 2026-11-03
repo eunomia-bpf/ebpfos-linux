@@ -617,9 +617,11 @@ static int probe_kern_btf_layout(int token_fd)
 						 (char *)layout, token_fd));
 }
 
-static int probe_source_scalar_symbol(int token_fd)
+static int probe_source_symbol(int token_fd, bool weak)
 {
-	static const char strs[] = "\0int\0_stext\0ksym:scalar\0probe";
+	enum { weak_name = sizeof("\0int\0_stext\0ksym:scalar\0probe"),
+	       weak_tag = weak_name + sizeof("__libbpf_absent_weak") };
+	static const char strs[] = "\0int\0_stext\0ksym:scalar\0probe\0__libbpf_absent_weak\0ksym:weak";
 	__u32 types[] = {
 		BTF_TYPE_INT_ENC(1, BTF_INT_SIGNED, 0, 32, 4),
 		BTF_TYPE_ENC(5, BTF_INFO_ENC(BTF_KIND_VAR, 0, 0), 1),
@@ -628,6 +630,8 @@ static int probe_source_scalar_symbol(int token_fd)
 		(__u32)-1,
 		BTF_TYPE_ENC(0, BTF_INFO_ENC(BTF_KIND_FUNC_PROTO, 0, 0), 1),
 		BTF_TYPE_ENC(24, BTF_INFO_ENC(BTF_KIND_FUNC, 0, BTF_FUNC_GLOBAL), 4),
+		BTF_TYPE_ENC(weak_tag, BTF_INFO_ENC(BTF_KIND_DECL_TAG, 0, 0), 2),
+		(__u32)-1,
 	};
 	struct bpf_insn insns[] = {
 		BPF_LD_IMM64_RAW(BPF_REG_1, BPF_PSEUDO_BTF_ID, 2),
@@ -648,7 +652,10 @@ static int probe_source_scalar_symbol(int token_fd)
 	);
 	int btf_fd, fd;
 
-	btf_fd = libbpf__load_raw_btf((char *)types, sizeof(types), strs, sizeof(strs), token_fd);
+	types[4] = weak ? weak_name : 5;
+	btf_fd = libbpf__load_raw_btf((char *)types,
+			weak ? sizeof(types) : sizeof(types) - 4 * sizeof(__u32),
+			strs, sizeof(strs), token_fd);
 	if (btf_fd < 0)
 		return 0;
 	opts.prog_btf_fd = btf_fd;
@@ -662,6 +669,16 @@ static int probe_source_scalar_symbol(int token_fd)
 		pr_debug("source scalar symbol probe: %d: %s\n", fd, log);
 	close(btf_fd);
 	return probe_fd(fd);
+}
+
+static int probe_source_scalar_symbol(int token_fd)
+{
+	return probe_source_symbol(token_fd, false);
+}
+
+static int probe_source_weak_symbol(int token_fd)
+{
+	return probe_source_symbol(token_fd, true);
 }
 
 typedef int (*feature_probe_fn)(int /* token_fd */);
@@ -750,6 +767,9 @@ static struct kern_feature_desc {
 	},
 	[FEAT_SOURCE_SCALAR_SYMBOL] = {
 		"source BTF address-only symbols", probe_source_scalar_symbol,
+	},
+	[FEAT_SOURCE_WEAK_SYMBOL] = {
+		"source BTF weak address-only symbols", probe_source_weak_symbol,
 	},
 };
 

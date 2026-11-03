@@ -594,7 +594,7 @@ static int emit_aot_named_branch(u8 **pprog, u8 *ip, const char *name,
 
 	err = aot_record(ctx->aot, ip - ctx->aot->image + 1,
 			opcode == 0xe8 ? R_X86_64_PLT32 : R_X86_64_PC32,
-			name, addend - 4);
+			name, addend - 4, false);
 	if (err)
 		return err;
 	EMIT1_off32(opcode, 0);
@@ -716,7 +716,7 @@ static int emit_kop_desc_call(u8 **pprog,
 			else
 				return -EOPNOTSUPP;
 			ret = aot_record(ctx->aot, final_ip - ctx->aot->image + reloc.offset,
-					 type, reloc.symbol, reloc.addend);
+					 type, reloc.symbol, reloc.addend, false);
 			if (ret)
 				return ret;
 			memset(*pprog + reloc.offset, 0, reloc.size);
@@ -1172,6 +1172,7 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 	s64 addend = 0;
 	u8 *prog = *pprog;
 	u32 type = R_X86_64_64, i;
+	bool weak = false;
 	int err;
 
 	if (aot) {
@@ -1204,6 +1205,15 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 			if (type && btf_type_is_var(type)) {
 				const char *symbol = btf_name_by_offset(aot->root->aux->btf, type->name_off);
 				const char *target = btf_find_decl_tag_value(aot->root->aux->btf, type, -1, "ksym:name:");
+				const char *binding = btf_find_decl_tag_value(aot->root->aux->btf, type, -1, "ksym:weak");
+
+				if (IS_ERR(binding) && PTR_ERR(binding) != -ENOENT)
+					return PTR_ERR(binding);
+				if (!IS_ERR(binding)) {
+					if (*binding)
+						return -EINVAL;
+					weak = true;
+				}
 
 				if (IS_ERR(target) && PTR_ERR(target) != -ENOENT)
 					return PTR_ERR(target);
@@ -1230,22 +1240,23 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 	if (type != R_X86_64_64 && type != R_X86_64_32)
 		return -EOPNOTSUPP;
 	if (type == R_X86_64_64 && aot->position_independent) {
-		/* lea symbol(%rip), dst preserves the source code model even
-		 * before the image's final virtual mappings have been installed.
-		 * Literal integers and native-assembly relocations keep their own
-		 * encoders; only symbolic BPF address materialization comes here.
+		/* Keep source PIC addressing. A weak reference uses a GOT load
+		 * so an undefined symbol stays zero when the image moves.
+		 * Ordinary symbols retain RIP-relative lea. Literal integers and
+		 * native-assembly relocations keep their existing encoders.
 		 */
-		err = aot_record(aot, ip - aot->image + 3, R_X86_64_PC32,
-				 name, addend - 4);
+		err = aot_record(aot, ip - aot->image + 3,
+				 weak ? R_X86_64_REX_GOTPCRELX : R_X86_64_PC32,
+				 name, addend - 4, weak);
 		if (err)
 			return err;
-		EMIT3(is_ereg(dst_reg) ? 0x4c : 0x48, 0x8d,
+		EMIT3(is_ereg(dst_reg) ? 0x4c : 0x48, weak ? 0x8b : 0x8d,
 		      add_2reg(0x05, BPF_REG_0, dst_reg));
 		EMIT(0, 4);
 		*pprog = prog;
 		return 0;
 	}
-	err = aot_record(aot, ip - aot->image + 2, type, name, addend);
+	err = aot_record(aot, ip - aot->image + 2, type, name, addend, weak);
 	if (err)
 		return err;
 	/* movabs avoids sizing an unresolved address as a signed immediate. A
@@ -2225,7 +2236,7 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 				EMIT3(0x03, add_2reg(0x04, 0, dst_reg), 0x25);
 				if (ctx->aot) {
 					err = aot_record(ctx->aot, addrs[i - 1] + (prog - temp),
-							 R_X86_64_32S, "this_cpu_off", 0);
+							 R_X86_64_32S, "this_cpu_off", 0, false);
 					if (err)
 						return err;
 					EMIT(0, 4);
