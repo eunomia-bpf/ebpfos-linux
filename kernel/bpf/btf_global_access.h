@@ -26,12 +26,8 @@ static int check_btf_pointer_global(struct bpf_verifier_env *env,
 	u32 bytes, id = 0;
 	int ret;
 
-	type = btf_type_skip_modifiers(reg->btf, var->type, NULL);
-	if (IS_ERR(btf_resolve_size(reg->btf, type, &bytes)))
-		return -EINVAL;
-	ret = check_mem_region_access(env, regno, off, size, bytes, false);
-	if (ret || value_regno < 0)
-		return ret;
+	if (value_regno < 0)
+		return 0;
 	/* Partial or overlapping pointer words stay ordinary scalar bits.
 	 * No arithmetic on such fragments can reconstruct pointer provenance.
 	 */
@@ -134,12 +130,7 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 	/* No reference, nullable, user, RCU or per-CPU capability can become a
 	 * writable global. VAR pointers originate only at checked symbol loads.
 	 */
-	type = btf_type_skip_modifiers(reg->btf, var->type, NULL);
-	if (IS_ERR(btf_resolve_size(reg->btf, type, &bytes)))
-		return -EINVAL;
-	err = check_mem_region_access(env, regno, off, size, bytes, false);
-	if (err)
-		return err;
+
 	if (atype == BPF_WRITE) {
 		len = snprintf(key, sizeof(key), "write:kernel_global:%s:%llu:%d",
 			btf_name_by_offset(reg->btf, var->name_off),

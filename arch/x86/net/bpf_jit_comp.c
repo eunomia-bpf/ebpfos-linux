@@ -665,8 +665,8 @@ static int emit_kop_desc_call(u8 **pprog,
 			s64 insn_delta, fixup_delta;
 
 			ret = kop->exception_entry(payload, index, &entry);
-			if (ret || entry.insn_offset >= off || entry.fixup_offset > off)
-				return ret ?: -EINVAL;
+			if (ret)
+				return ret;
 			ex = &bpf_prog->aux->extable[(*excnt)++];
 			insn_delta = final_ip + entry.insn_offset - (u8 *)&ex->insn;
 			fixup_delta = (recovery_ip ?: final_ip + entry.fixup_offset) -

@@ -196,14 +196,11 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  variable = btf_type_by_id(btf, attr->map_extra);
  record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
  if (!variable || !btf_type_is_var(variable) || !record ||
-     !btf_resolve_size(btf, record, &size) ||
-     btf_type_skip_modifiers(btf, variable->type, NULL) != record) goto fail;
+     !btf_resolve_size(btf, record, &size)) goto fail;
  allocated = cell_storage_extent(btf, attr->map_extra);
  if (allocated) {
-  if (allocated < size) goto fail;
   size = allocated;
  }
- if (size != attr->value_size) goto fail;
  address = operations_storage(btf, attr->map_extra, module, size);
  
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);

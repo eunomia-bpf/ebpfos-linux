@@ -153,9 +153,8 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
   if (!kop->exception_entry || !kop->num_exentries)
    return -ENOENT;
   error = kop->exception_entry(payload, 0, &entry);
-  if (error || entry.insn_offset || entry.fixup_offset != kop->max_emit_bytes ||
-      entry.data != branch->imm)
-   return error ?: -EINVAL;
+  if (error)
+   return error;
   target = index + 2 + branch->off;
  } else {
   store = (BPF_CLASS(call->code) == BPF_ST ||

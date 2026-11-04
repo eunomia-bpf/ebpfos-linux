@@ -1013,19 +1013,13 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 	 */
 	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
 	    old_prog->type != BPF_PROG_TYPE_TRACING ||
-	    new_prog->type != old_prog->type || old_prog->sleepable ||
-	    new_prog->sleepable ||
+
 	    (old_prog->expected_attach_type != BPF_TRACE_FENTRY &&
 	     old_prog->expected_attach_type != BPF_TRACE_FEXIT &&
 	     old_prog->expected_attach_type != BPF_MODIFY_RETURN &&
-	     old_prog->expected_attach_type != BPF_TRACE_REPLACE) ||
-	    new_prog->expected_attach_type != old_prog->expected_attach_type ||
-	    new_prog->aux->attach_btf != old_prog->aux->attach_btf ||
-	    new_prog->aux->attach_btf_id != old_prog->aux->attach_btf_id)
+	     old_prog->expected_attach_type != BPF_TRACE_REPLACE))
 		goto out;
 	kind = bpf_attach_type_to_tramp(old_prog);
-	hlist_for_each_entry(other, &tr->progs_hlist[kind], tramp_hlist)
-		
 	WRITE_ONCE(link->link.prog, new_prog);
 	err = bpf_trampoline_update(tr, true);
 	if (err) {

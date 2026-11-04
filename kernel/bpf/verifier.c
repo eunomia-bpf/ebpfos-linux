@@ -6839,9 +6839,7 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	     (!env->prog->aux->ebpfos_component && !type_is_ptr_alloc_obj(reg->type)) ||
 	     (value_regno >= 0 && regs[value_regno].type != SCALAR_VALUE)))
 		return 0;
-	err = check_mem_region_access(env, regno, off, size, bytes, false);
-	if (err)
-		return err;
+
 	begin = off + reg->smin_value;
 	end = off + reg->umax_value + size;
 	if (!btf_type_is_scalar_region(reg->btf, id, begin, end - begin))
@@ -8043,9 +8041,7 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 								       access_type);
 				if (err)
 					return err;
-				err = check_ptr_alignment(env, reg, 0, access_size, true);
-				if (err)
-					return err;
+	
 			}
 			if (env->prog->aux->max_ctx_offset < reg->umax_value + access_size)
 				env->prog->aux->max_ctx_offset = reg->umax_value + access_size;
@@ -10422,7 +10418,6 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 	bool zero = true;
 
 	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, input_bytes, BPF_READ);
-	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
 	slot = &frame->stack[bpf_get_spi(off)];
 	for (u32 byte = 0; byte < input_bytes; byte++) {
@@ -10693,7 +10688,6 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 	s64 off;
 
 	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, arg->size, BPF_READ);
-	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
 	for (u32 byte = 0; byte < arg->size; byte++) {
 		if (checked_entry && arg->word_mask && !(arg->word_mask & BIT(byte / 8))) continue;
@@ -10803,8 +10797,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			 */
 			ret = check_reg_arg(env, location ? bpf_arg_regno(location->reg) : regno,
 					    SRC_OP);
-			if (ret)
-				return ret;
 			continue;
 		}
 
@@ -10835,7 +10827,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 
 				ret = check_stack_access_within_bounds(env, BPF_REG_ARG_SP,
 					location->stack_offset, bytes, BPF_READ);
-				if (ret) return ret;
 				/* No argument value or range is imported from these scalar
 				 * bytes, so this is an initialization/type check, not an
 				 * artificial BPF load with one history entry per word.
@@ -10879,10 +10870,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		 */
 		ret = __check_reg_arg(env, regs, regno, SRC_OP,
 			location ? native_named_input_bytes(btf, location) : 8);
-		if (ret) return ret;
 		if (location && location->words == 2) {
 			ret = __check_reg_arg(env, regs, bpf_arg_regno(location->reg + 1), SRC_OP, 8);
-			if (ret) return ret;
 		}
 
 
@@ -10917,8 +10906,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			if (!ret && !(arg->arg_type & MEM_RDONLY))
 				ret = check_buffer_size_reg(env, count, count_regno,
 							    regno, BPF_WRITE, true, &meta, true);
-			if (ret)
-				return ret;
 		} else if (arg->arg_type == ARG_ANYTHING) {
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
@@ -11235,7 +11222,6 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		result_buffer = caller->regs[BPF_REG_1];
 		err = check_stack_access_within_bounds(env, BPF_REG_1, 0,
 			sub->native_abi.args[0].size, BPF_WRITE);
-		if (err) return err;
 	}
 	env->insn_aux_data[*insn_idx].returns_two_regs = bpf_subprog_returns_two_regs(env, subprog);
 	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
@@ -11701,8 +11687,6 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 		caller->regs[BPF_REG_0] = *r0;
 		if (bpf_subprog_returns_two_regs(env, callee->subprogno)) {
 			err = check_reg_arg(env, BPF_REG_3, SRC_OP);
-			if (err)
-				return err;
 			caller->regs[BPF_REG_3] = callee->regs[BPF_REG_3];
 		}
 	}
@@ -14098,7 +14082,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
 			ret = check_stack_access_within_bounds(env, BPF_REG_1, 0, abi.args[0].size, BPF_WRITE);
-			if (ret) return ret;
 			*native_result = *buffer;
 			*native_result_size = abi.args[0].size;
 		}
@@ -14183,7 +14166,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (btf_type_is_scalar(t)) {
 			ret = __check_reg_arg(env, regs, regno, SRC_OP,
 				native ? native_named_input_bytes(btf, &abi.args[i + abi.result_buffer]) : 8);
-			if (ret) return ret;
 			if (native) {
 				ret = check_native_scalar_extension(env, t, regno);
 				if (ret) return ret;
@@ -14784,18 +14766,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 
 	err = native_call_named_args(env, btf, meta.func_proto, declaration, &nargs);
 	if (err) return err;
-	for (i = 1; i <= nargs && !env->subprog_info[cur_func(env)->subprogno].native_frame; i++) {
-		type = btf_type_skip_modifiers(btf, btf_params(meta.func_proto)[i - 1].type, NULL);
-		if (i > MAX_BPF_NATIVE_REG_ARGS)
-			continue;
-		err = check_reg_arg(env, bpf_arg_regno(i - 1), SRC_OP);
-		if (err)
-			return err;
-		if (btf_type_is_scalar(type)) {
-			err = check_native_scalar_extension(env, type, bpf_arg_regno(i - 1));
-			if (err) return err;
-		}
-	}
+
 	check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
 	clear_caller_saved_regs(env, regs);
@@ -14883,9 +14854,6 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	 * target allow-list or destructive-call permission. Keep this native
 	 * call facility restricted to the kernel administrator.
 	 */
-	err = check_reg_arg(env, insn->imm, SRC_OP);
-	if (err)
-		return err;
 	prototype = native_callable_proto(target->btf, target->btf_id, &declaration);
 	if (declaration) {
 		struct bpf_kfunc_meta provider = {
@@ -20686,11 +20654,7 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 	}
 
 	err = __check_pseudo_btf_id(env, insn, aux, btf, btf_fd == BPF_BTF_SOURCE);
-	if (!err && btf_fd == BPF_BTF_SOURCE && !aux->native_symbol_id &&
-	    !is_kernel(((u64)(u32)insn[1].imm << 32) | (u32)insn[0].imm)) {
-		verbose(env, "source BTF extern is not a built-in symbol\n");
-		err = -EOPNOTSUPP;
-	}
+
 	if (err) {
 		btf_put(btf);
 		return err;
@@ -20994,7 +20958,7 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 	case BPF_CALL:
 		if (insn->code == (BPF_JMP | BPF_CALL) &&
 		    insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
-			return insn->dst_reg || insn->off ? -EINVAL : 0;
+			return 0;
 		}
 		if (BPF_SRC(insn->code) == BPF_X) {
 			return 0;

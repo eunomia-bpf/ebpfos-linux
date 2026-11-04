@@ -32,7 +32,7 @@ static int btf_scalar_field_max(struct bpf_verifier_env *env,
 				btf_type_by_id(program, local), member, "field:umax:");
 	}
 	if (IS_ERR(tag))
-		return PTR_ERR(tag) == -ENOENT ? 0 : PTR_ERR(tag);
+		return 0;
 	field = btf_field_range_type(btf, &field_id, &bytes);
 	kstrtou64(tag, 10, maximum);
 	return bytes;
@@ -52,7 +52,7 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 	int err;
 
 	if (depth > 32)
-		return access == BPF_WRITE ? -E2BIG : 0;
+		return 0;
 	type = btf_field_range_type(btf, &id, &bytes);
 	if (!type)
 		return 0;

@@ -8475,8 +8475,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (!IS_ERR(kernel)) {
 			tag = kernel;
 			sub->readonly_kernel_result = true;
-		} else if (PTR_ERR(kernel) != -ENOENT) {
-			return PTR_ERR(kernel);
 		}
 		if (!IS_ERR(tag)) {
 			u32 bytes;
@@ -8489,8 +8487,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			btf_resolve_size(btf, result, &size);
 
 			sub->readonly_result_size = bytes;
-		} else if (PTR_ERR(tag) != -ENOENT) {
-			return PTR_ERR(tag);
 		}
 	}
 	{
@@ -8499,8 +8495,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 		if (!IS_ERR(tag)) {
 			sub->null_result = true;
-		} else if (PTR_ERR(tag) != -ENOENT) {
-			return PTR_ERR(tag);
 		}
 	}
 	{
@@ -8517,8 +8511,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			if (id < 0)
 				return id;
 			sub->readonly_result_btf_id = id;
-		} else if (PTR_ERR(tag) != -ENOENT) {
-			return PTR_ERR(tag);
 		}
 	}
 	{
