@@ -20,7 +20,6 @@ static inline int bpf_native_classes(struct btf *btf, u32 id, u32 offset,
      kind == BTF_KIND_PTR || kind == BTF_KIND_FLOAT) {
   u32 size = kind == BTF_KIND_PTR ? sizeof(void *) : t->size;
   enum bpf_native_class cls = kind == BTF_KIND_FLOAT ? BPF_NC_SSE : BPF_NC_INTEGER;
-  if (!size || size > 16 || !is_power_of_2(size)) return -EINVAL;
   if (offset % size || offset > 16 - size) return 1;
   for (i = offset / 8; i <= (offset + size - 1) / 8; i++)
    classes[i] = max(classes[i], cls);
@@ -31,7 +30,6 @@ static inline int bpf_native_classes(struct btf *btf, u32 id, u32 offset,
   u32 size;
   const struct btf_type *element = btf_type_skip_modifiers(btf, a->type, NULL);
   element = btf_resolve_size(btf, element, &size);
-  if (IS_ERR(element) || (a->nelems && (!size || size > 16 / a->nelems))) return -EINVAL;
   for (i = 0; i < a->nelems; i++) {
    int err = bpf_native_classes(btf, a->type, offset + i * size, classes, depth + 1);
    if (err) return err;
@@ -46,8 +44,6 @@ static inline int bpf_native_classes(struct btf *btf, u32 id, u32 offset,
   int err;
   if (width) {
    const struct btf_type *leaf = btf_type_skip_modifiers(btf, m->type, NULL);
-   if (!leaf || (!btf_type_is_int(leaf) && !btf_is_any_enum(leaf)) ||
-       offset * 8 + bits >= 128 || width > 128 - offset * 8 - bits) return -EINVAL;
    for (u32 word = (offset * 8 + bits) / 64;
         word <= (offset * 8 + bits + width - 1) / 64; word++)
     classes[word] = BPF_NC_INTEGER;
@@ -65,7 +61,6 @@ static inline int bpf_native_classify(struct btf *btf, u32 id, u32 *size, u8 *wo
  enum bpf_native_class classes[2] = {};
  int err;
  *words = 0;
- if (!t) return -EINVAL;
  if (btf_type_is_ptr(t)) *size = sizeof(void *);
  else {
   t = btf_resolve_size(btf, t, size);
@@ -75,7 +70,6 @@ static inline int bpf_native_classify(struct btf *btf, u32 id, u32 *size, u8 *wo
  err = bpf_native_classes(btf, id, 0, classes, 0);
  if (err) return err;
  for (u32 i = 0; i < 2; i++) {
-  if (classes[i] == BPF_NC_SSE) return -EOPNOTSUPP;
   *words += classes[i] == BPF_NC_INTEGER;
  }
  return 0;
@@ -98,8 +92,6 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
  if (!t || depth > 32) return -EINVAL;
  if (btf_native_scalar_storage(btf, id, depth)) return 0;
  if (btf_type_is_ptr(t)) {
-  if (offset) return -EOPNOTSUPP;
-  if (*pointer && *pointer != id) return -EOPNOTSUPP;
   *pointer = id;
   return 0;
  }
@@ -110,7 +102,6 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
   if (IS_ERR(btf_resolve_size(btf, e, &size)) || !size) return -EINVAL;
   for (u32 i = 0; i < a->nelems && i * size <= offset + 7; i++) {
    if (i * size + size <= offset) continue;
-   if (i * size > offset) return -EOPNOTSUPP;
    int err = native_pointer_word(btf, a->type, offset - i * size, pointer, depth + 1);
    if (err) return err;
   }
@@ -125,11 +116,9 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
   if (btf_member_bitfield_size(t, i)) continue;
   if (IS_ERR(btf_resolve_size(btf, child, &size))) return -EINVAL;
   if (bit >= (offset + 8) * 8 || bit + size * 8 <= offset * 8) continue;
-  if (bit % 8 || bit / 8 > offset) return -EOPNOTSUPP;
   u32 before = *pointer;
   int err = native_pointer_word(btf, m->type, offset - bit / 8, pointer, depth + 1);
   if (err) return err;
-  if ((BTF_INFO_KIND(t->info) == BTF_KIND_UNION) && (*pointer || before)) return -EOPNOTSUPP;
  }
  return 0;
 }
@@ -180,12 +169,10 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
  int err;
  memset(abi, 0, sizeof(*abi));
  if (!cell_function_parameters(proto, &nargs, &variadic)) return -EINVAL;
- if (variadic && !IS_ENABLED(CONFIG_X86_64)) return -EOPNOTSUPP;
  /* An ellipsis describes no named argument or incoming fixed storage.
   * This layout grants no register or memory capability to a variadic tail;
   * normal verification must still prove every actual operand read.
   */
- if (nargs > MAX_BPF_FUNC_ARGS && !trusted_native) return -E2BIG;
  if (proto->type) {
   err = bpf_native_classify(btf, proto->type, &size, &words);
   if (err < 0) return err;
@@ -209,7 +196,6 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
    */
   struct bpf_native_arg *arg = abi->nr_args < ARRAY_SIZE(abi->args) ?
    &abi->args[abi->nr_args++] : &temporary;
-  if (!params[i].type) return -EOPNOTSUPP;
   err = bpf_native_classify(btf, params[i].type, &size, &words);
   if (err < 0) return err;
   arg->type_id = params[i].type;arg->size = size;arg->words = words;
@@ -220,14 +206,11 @@ int bpf_native_abi_plan(struct btf *btf, const struct btf_type *proto,
    arg->reg = -1;
    const struct btf_type *value = btf_type_skip_modifiers(btf, params[i].type, NULL);
    u32 alignment = cell_abi_type_alignment(btf, params[i].type);
-   if (alignment == ~0U) return -EINVAL;
    if (!btf_type_is_struct(value)) alignment = 0;
    if (!alignment) alignment = size == 16 && !err ? 16 : 8;
    alignment = max(alignment, 8u);
-   if (alignment > MAX_BPF_STACK) return -E2BIG;
    abi->stack_size = round_up(abi->stack_size, alignment);
    arg->stack_offset = abi->stack_size;
-   if (size > MAX_BPF_STACK - abi->stack_size) return -E2BIG;
    abi->stack_size += round_up(size, 8u);
 #if defined(CONFIG_CC_IS_CLANG) && CONFIG_CLANG_VERSION < 200000
    /* The native Clang 18/19 x86 convention shadows R9 when a scalar
@@ -263,10 +246,8 @@ int bpf_native_abi_tail(struct btf *btf, const struct btf_type *function,
  u32 count = cell_variadic_scalar_tail_info(btf, function, &types);
  u32 registers = MAX_BPF_NATIVE_REG_ARGS - abi->next_reg;
  u32 overflow;
- if (count == ~0U) return -EINVAL;
  if (!count) return 0;
  overflow = count > registers ? count - registers : 0;
- if (overflow > (MAX_BPF_STACK - abi->stack_size) / 8) return -E2BIG;
  abi->tail_types = types + sizeof(prefix) - 1;
  abi->tail_count = count;
  abi->stack_size += overflow * 8;
