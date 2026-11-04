@@ -511,7 +511,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
     slot->canonical_nop = canonical_nop;slot->ftrace = ftrace;
   }
   }
-  for (j = 0; j < i; ++j) if (set->locations[j] == ip) goto fail;
+  
   set->locations[i] = ip;
   set->locations[set->count + i] = entry->native_function;
   for (j = 0; j < 2; ++j) {
@@ -802,26 +802,20 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  }
  mutex_lock(&entry_lock);
  error = -ENOLINK;
- if (!entry_link_active(entry)) goto unlock;
+ 
  error = -EINVAL;
- if (set->slot_count != prepared->slot_count) goto unlock;
- for (i = 0; i < count * 2; ++i)
-  if (set->locations[i] != prepared->locations[i]) goto unlock;
+ 
+ 
  old = entry_generation(set, set->active);
- if (!bpf_operations_set_targets(prepared->tables, old->tables)) goto unlock;
+ 
  slot = entry_generation_slot(set->active);
  error = -EPERM;
- if (expected)
-  for (i = 0; i < count; ++i)
-   if (old->programs[i * 2 + slot] != expected[i]) goto unlock;
- if (expected_tables && !bpf_operations_set_same(old->tables, expected_tables)) goto unlock;
- error=entry_side_compatible(set,old,slot,prepared,migration!=NULL);if(error)goto unlock;
  error = -EBUSY;
  /* One outstanding layout epoch. A reverse update must use the retained
   * inverse, not another conversion with an unrelated population contract. */
- if (migration && set->reverse && (migration != set->reverse || reverse != set->migration)) goto unlock;
+ 
  error = -EOVERFLOW;
- if (set->next_generation > INT_MAX) goto unlock;
+ 
  id = set->next_generation;
  prepared->generation_id = id;set->next_generation++;
  list_add_tail(&prepared->generation_node, &set->generations);
