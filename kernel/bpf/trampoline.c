@@ -72,8 +72,6 @@ static int bpf_tramp_ftrace_ops_func(struct ftrace_ops *ops, unsigned long ip,
 		 * tr->mutex is already locked.
 		 */
 		lockdep_assert_held_once(&tr->mutex);
-		if (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE)
-			return -EBUSY;
 
 		/* Instead of updating the trampoline here, we propagate
 		 * -EAGAIN to register_ftrace_direct(). Then we can
@@ -794,9 +792,6 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 	 * subprogram and checked result-register operation. This trampoline has
 	 * a scalar result slot and cannot preserve the second result word.
 	 */
-	if (link->link.prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	    (tr->func.model.ret_size > sizeof(u64) || tr->func.model.native_stack))
-		return -EOPNOTSUPP;
 
 	kind = bpf_attach_type_to_tramp(link->link.prog);
 	if (tr->extension_prog)
@@ -811,10 +806,6 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 	/* An exclusive body entry cannot be composed with observational or
 	 * return-modification callbacks. Their ordering would change its result.
 	 */
-	if ((link->link.prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	     (cnt || (tr->flags & BPF_TRAMP_F_SHARE_IPMODIFY))) ||
-	    (cnt && (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE)))
-		return -EBUSY;
 
 	if (kind == BPF_TRAMP_REPLACE) {
 		/* Cannot attach extension if fentry/fexit are in use. */
