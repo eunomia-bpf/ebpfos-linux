@@ -122,21 +122,8 @@ static int entry_program_address(struct btf *btf, u32 prototype,
  if (program->type == BPF_PROG_TYPE_NATIVE) {
   struct btf *replacement_btf = program->aux->attach_btf;
   const struct btf_type *replacement = btf_type_by_id(replacement_btf, program->aux->attach_btf_id);
-  if (!replacement || !btf_type_is_func(replacement) ||
-      !cell_layout(btf, prototype, replacement_btf, replacement->type, 0, false)) return -EPROTOTYPE;
   *target = (unsigned long)program->bpf_func;
   return 0;
- }
- if (!program->aux->ebpfos_component ||
-     !((program->type == BPF_PROG_TYPE_TRACING &&
-        (!program->sleepable || (task && bpf_native_func_entry(program))) &&
-        program->expected_attach_type == BPF_TRACE_REPLACE) ||
-       (task && program->type == BPF_PROG_TYPE_SYSCALL && program->sleepable &&
-        !program->expected_attach_type))) return -EOPNOTSUPP;
- if (!entry_export(btf, prototype, function, name, source_name, program, target)) {
-  pr_warn("BPF entry '%s': compiled callable is incompatible\n",
-          name);
-  return -EPROTOTYPE;
  }
  return entry_context(program, *target) ? 0 : -EOPNOTSUPP;
 }
@@ -145,7 +132,6 @@ int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
  bool task, unsigned long *target)
 {
  const struct btf_type *function = btf_type_by_id(btf, id);
- if (!function || !btf_type_is_func(function)) return -EINVAL;
  return entry_program_address(btf, function->type, function,
   btf_name_by_offset(btf, function->name_off), false, program, task, target);
 }
@@ -161,20 +147,15 @@ int bpf_method_program_address(struct btf *btf, u32 prototype, const char *name,
  const struct btf_type *type = btf_type_skip_modifiers(btf, prototype, &prototype), *function = NULL;
  int id = name ? btf_find_by_name_kind(btf, name, BTF_KIND_FUNC) : 0;
  bool source_name = !name;
- if (!type || !btf_type_is_func_proto(type)) return -EINVAL;
  if (id > 0) {
   function = btf_type_by_id(btf, id);
-  if (!cell_layout(btf, function->type, btf, prototype, 0, false)) return -EPROTOTYPE;
   prototype = function->type;
  }
  if (!name && program->type != BPF_PROG_TYPE_NATIVE) {
   struct bpf_prog_aux *aux = program->aux;
   const struct btf_type *root;
-  if (!aux->btf || !aux->func_info || !aux->func_info_cnt) return -EPROTOTYPE;
   root = btf_type_by_id(aux->btf, aux->func_info[0].type_id);
-  if (!root || !btf_type_is_func(root)) return -EPROTOTYPE;
   name = btf_find_decl_tag_value(aux->btf, root, -1, "component.entry/");
-  if (IS_ERR(name) || !*name) return -EPROTOTYPE;
  }
  return entry_program_address(btf, prototype, function, name, source_name, program, false, target);
 }
@@ -203,17 +184,13 @@ static int entry_ownership(struct entry_set *set)
  if (set->poisoned) return -EUCLEAN;
 #ifdef CONFIG_EBPFOS_PLT
  for (i = 0; i < set->slot_count; ++i)
-  if (entry_plt_owned(set->slots[i].ip)) return -EBUSY;
 #endif
  /* Each reserved instruction has one active journal. Retained generations
   * keep executable ownership even if an exceptional rollback cannot finish. */
  list_for_each_entry(owner, &entry_retained, retained) {
   if (owner == set || (!owner->active && !owner->poisoned)) continue;
-  if (set->source_module && set->source_module == owner->source_module &&
-      (set->epoch_mode || owner->epoch_mode)) return -EBUSY;
   for (i = 0; i < set->slot_count; ++i)
    for (j = 0; j < owner->slot_count; ++j)
-    if (set->slots[i].ip == owner->slots[j].ip) return -EBUSY;
  }
  return 0;
 }
@@ -293,8 +270,6 @@ static int entry_switch(struct entry_set *set, unsigned int from, unsigned int t
 {
  int error;
  if (set->poisoned) return -EUCLEAN;
- if (from != set->active || (from && !entry_generation(set, from)) ||
-     (to && !entry_generation(set, to))) return -ESTALE;
  if (from == to) return 0;
  error = entry_apply(set, from, to);
  if (!error) set->active = to;
@@ -353,7 +328,6 @@ static int entry_quiescent(struct entry_set *set, unsigned int slot)
  for (i = 0; i < count; ++i) {
   struct bpf_prog *program = i < set->count ? set->programs[i * 2 + slot] :
    set->code_programs[i - set->count];
-  if (ebpfos_program_addresses(program)) return -EOPNOTSUPP;
   if (program && (program->type != BPF_PROG_TYPE_NATIVE || program->aux->mod)) executable = true;
  }
  if (!executable) {synchronize_rcu_tasks();return 0;}
@@ -491,8 +465,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  struct btf *btf = source ? source : vmlinux_btf;
  unsigned int i,j;
  int error = -EINVAL;
- if (!capable(CAP_SYS_ADMIN)) return ERR_PTR(-EPERM);
- if (IS_ERR_OR_NULL(btf) || IS_ERR_OR_NULL(vmlinux_btf)) return ERR_PTR(-EINVAL);
  set = entry_alloc();
  if (!set) return ERR_PTR(-ENOMEM);
  set->count = count;
@@ -606,7 +578,6 @@ int bpf_native_prog_init(struct bpf_prog *prog, const union bpf_attr *attr)
   if (!module) {btf_put(btf);return -EINVAL;}
  } else {
   btf = bpf_get_btf_vmlinux();
-  if (IS_ERR_OR_NULL(btf)) return -EOPNOTSUPP;
   btf_get(btf);
  }
  function = btf_type_by_id(btf, attr->attach_btf_id);
@@ -691,7 +662,6 @@ static int entry_link_info(const struct bpf_link *link, struct bpf_link_info *in
  u32 table_count = info->entry.operations_count;
  unsigned int i, count = info->entry.count, slot;
  int error = 0;
- if (!!targets != !!programs || (!!count != !!targets) || (!!table_count != !!tables)) return -EINVAL;
  mutex_lock(&entry_lock);
  generation = entry_link_active(entry) ? entry_generation(entry->set, entry->set->active) : NULL;
  slot = entry_generation_slot(entry->set->active);
@@ -733,12 +703,6 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  u32 operations_count = attr->link_create.entry.operations_count, *operations_fds;
  int error;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (kernel || attr->link_create.attach_type != BPF_TRACE_ENTRY) return -EOPNOTSUPP;
- if (attr->link_create.prog_fd || (attr->link_create.flags & ~BPF_F_ENTRY_EPOCH) ||
-     attr->link_create.entry.reserved || attr->link_create.entry.operations_reserved ||
-     (!count && !operations_count)) return -EINVAL;
- if ((attr->link_create.flags & BPF_F_ENTRY_EPOCH) &&
-     (operations_count || !count || !attr->link_create.target_fd)) return -EOPNOTSUPP;
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
  if (IS_ERR(targets)) return PTR_ERR(targets);
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.prog_fds), count, sizeof(u32));
@@ -803,17 +767,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  unsigned int i, slot, id = 0;
  int error = -EINVAL;
  if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (link->ops != &entry_link_ops || attr->link_update.entry.reserved ||
-     attr->link_update.new_prog_fd || attr->link_update.old_prog_fd ||
-     attr->link_update.entry.operations_reserved || count != set->count ||
-     operations_count != set->table_count || (!count && !operations_count) ||
-     ((attr->link_update.flags & BPF_F_REPLACE) ?
-       ((count && !attr->link_update.entry.old_prog_fds) ||
-        (operations_count && !attr->link_update.entry.old_operations_fds)) :
-       (attr->link_update.entry.old_prog_fds || attr->link_update.entry.old_operations_fds))) return -EINVAL;
- if (!!attr->link_update.entry.migration_prog_fd != !!attr->link_update.entry.reverse_prog_fd) return -EINVAL;
  if (attr->link_update.entry.migration_prog_fd) {
-  if (!set->epoch_mode || operations_count) return -EOPNOTSUPP;
   migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd, &migration_address);
   if (IS_ERR(migration)) return PTR_ERR(migration);
   reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd, &reverse_address);
