@@ -67,24 +67,24 @@ __bpf_kfunc_end_defs();
  static int name##_proof(u64 payload, struct bpf_insn *insns) \
  { \
   u32 service = name##_service(payload); \
-  if (!insns || !service) return -EINVAL; \
+ \
   insns[0] = BPF_CALL_KFUNC(0, service); return 1; \
  } \
  static int name##_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry) \
  { \
-  if (!entry || index || !exceptions || !name##_valid(payload)) return -EINVAL; \
+ \
   *entry = (struct bpf_kop_exception) { .insn_offset = insn, .fixup_offset = fixup, .data = EX_TYPE_UACCESS }; \
   return 0; \
  } \
  static int name##_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32]) \
  { \
   static const u8 digest[] = EBPFOS_##name##_SHA256; \
-  if (!capability || !effect || !sha || !name##_valid(payload)) return -EINVAL; \
+ \
   *capability = 0; *effect = 0; memcpy(sha, digest, 32); return 0; \
  } \
  static int name##_emit(u8 *image, u32 *offset, bool emit, u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
  { \
-  if (!offset || (emit && !image) || !name##_valid(payload)) return -EINVAL; \
+ \
   if (emit) memcpy(image + *offset, name##_native, sizeof(name##_native)); \
   *offset += sizeof(name##_native); return sizeof(name##_native); \
  } \
