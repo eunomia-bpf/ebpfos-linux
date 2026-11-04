@@ -307,6 +307,100 @@ static inline bool cell_layout(const struct btf *a, __u32 ai, const struct btf *
  default: return false;
  }
 }
+/* Only a complete declared subobject can extend an input-relative result
+ * beyond identity. This proves no enclosing allocation, flexible tail or
+ * object reached through a pointer field. Aggregate qualifiers are inherited.
+ */
+static inline __u32 cell_result_extent(const struct btf *types, __u32 id)
+{
+#ifdef __KERNEL__
+	const struct btf_type *type = cell_layout_type(types, id);
+	__u32 size;
+
+	if (!type || IS_ERR(btf_resolve_size(types, type, &size)))
+		return 0;
+	return size;
+#else
+	__s64 size = btf__resolve_size(types, id);
+
+	return size > 0 && size <= (__u32)~0U ? size : 0;
+#endif
+}
+
+static inline bool cell_result_subobject(const struct btf *types, __u32 object,
+		__u32 result, __u32 offset, unsigned int depth, unsigned int inherited)
+{
+	const struct btf_type *type, *target;
+	__u32 size = cell_result_extent(types, object);
+	__u32 required = cell_result_extent(types, result);
+	__u32 declared_result = result;
+	unsigned int qualifiers = 0, i, kind;
+
+	if (!size || !required || offset > size || required > size - offset)
+		return false;
+	for (;;) {
+		if (++depth > 64)
+			return false;
+		type = cell_layout_type(types, object);
+		if (!type)
+			return false;
+		kind = BTF_INFO_KIND(type->info);
+		if (kind == BTF_KIND_CONST)
+			inherited |= 1;
+		else if (kind == BTF_KIND_VOLATILE)
+			inherited |= 2;
+		else if (kind == BTF_KIND_RESTRICT)
+			inherited |= 4;
+		else if (kind != BTF_KIND_TYPEDEF)
+			break;
+		object = type->type;
+	}
+	for (;;) {
+		if (++depth > 64)
+			return false;
+		target = cell_layout_type(types, result);
+		if (!target)
+			return false;
+		kind = BTF_INFO_KIND(target->info);
+		if (kind == BTF_KIND_CONST)
+			qualifiers |= 1;
+		else if (kind == BTF_KIND_VOLATILE)
+			qualifiers |= 2;
+		else if (kind == BTF_KIND_RESTRICT)
+			qualifiers |= 4;
+		else if (kind != BTF_KIND_TYPEDEF)
+			break;
+		result = target->type;
+	}
+	if (!offset && inherited == qualifiers &&
+	    cell_layout(types, object, types, result, 0, false))
+		return true;
+	if (BTF_INFO_KIND(type->info) == BTF_KIND_STRUCT) {
+		const struct btf_member *members = btf_members(type);
+
+		for (i = 0; i < BTF_INFO_VLEN(type->info); ++i) {
+			__u32 bit = btf_member_bit_offset(type, i), bytes;
+
+			if (btf_member_bitfield_size(type, i) || bit % 8 || bit / 8 > size)
+				continue;
+			bytes = cell_result_extent(types, members[i].type);
+			if (!bytes || bytes > size - bit / 8 || offset < bit / 8)
+				continue;
+			if (cell_result_subobject(types, members[i].type, declared_result,
+						  offset - bit / 8, depth, inherited))
+				return true;
+		}
+	} else if (BTF_INFO_KIND(type->info) == BTF_KIND_ARRAY) {
+		const struct btf_array *array = btf_array(type);
+		__u32 bytes = cell_result_extent(types, array->type);
+
+		if (array->nelems && bytes && size / bytes == array->nelems &&
+		    offset / bytes < array->nelems)
+			return cell_result_subobject(types, array->type, declared_result,
+						     offset % bytes, depth, inherited);
+	}
+	return false;
+}
 #undef cell_layout_type
 #undef cell_layout_name
 #undef cell_layout_count

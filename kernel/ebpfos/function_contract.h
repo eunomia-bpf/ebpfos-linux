@@ -124,18 +124,19 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
 		u32 argument;
 		s32 offset;
 
-		/* Native callers carry the declared input object, not a BPF register's
-		 * larger enclosing view. Export only that identical object here; interior
-		 * and enclosing results still need their separate Native scope contract.
+		/* Preserve the declared Native input allocation. A BTF member or
+		 * fixed array element can justify a complete result inside it;
+		 * an enclosing object or flexible tail needs separate authority.
 		 */
 		if (!btf_argument_result(compiled, function, &argument, &offset) &&
-		    !offset && argument < btf_type_vlen(n)) {
+		    offset >= 0 && argument < btf_type_vlen(n)) {
 			input = btf_type_skip_modifiers(native, btf_params(n)[argument].type, NULL);
 			described = input && btf_type_is_ptr(input) &&
 				result && btf_type_is_ptr(result) &&
-				btf_type_skip_modifiers(native, input->type, NULL) ==
-				btf_type_skip_modifiers(native, result->type, NULL) &&
-				cell_layout(native, input->type, native, result->type, 0, false);
+				((!offset && cell_layout(native, input->type, native,
+						       result->type, 0, false)) ||
+				 cell_result_subobject(native, input->type, result->type,
+						       offset, 0, 0));
 		}
 	}
  return result && btf_type_is_ptr(result) && described &&
