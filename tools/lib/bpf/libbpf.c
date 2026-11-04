@@ -8668,8 +8668,10 @@ typedef int (*kallsyms_cb_t)(unsigned long long sym_addr, char sym_type,
 
 static int libbpf_kallsyms_parse(kallsyms_cb_t cb, void *ctx)
 {
-	char sym_type, sym_name[500];
+	char sym_type, sym_name[500], *line = NULL, *cursor, *end;
 	unsigned long long sym_addr;
+	size_t capacity = 0, length;
+	ssize_t bytes, consumed;
 	int ret, err = 0;
 	FILE *f;
 
@@ -8679,23 +8681,70 @@ static int libbpf_kallsyms_parse(kallsyms_cb_t cb, void *ctx)
 		pr_warn("failed to open /proc/kallsyms: %s\n", errstr(err));
 		return err;
 	}
-
-	while (true) {
-		ret = fscanf(f, "%llx %c %499s%*[^\n]\n",
-			     &sym_addr, &sym_type, sym_name);
-		if (ret == EOF && feof(f))
-			break;
-		if (ret != 3) {
-			pr_warn("failed to read kallsyms entry: %d\n", ret);
-			err = -EINVAL;
-			break;
+	/* Keep each scan fresh for module/JIT lifetimes and later conflicts.
+	 * Buffer physical lines, retaining scanf's numeric conversion and
+	 * whitespace across line boundaries for the remaining fields.
+	 */
+	while ((bytes = getline(&line, &capacity, f)) >= 0) {
+		cursor = line;
+		end = line + bytes;
+		while (cursor < end && isspace((unsigned char)*cursor))
+			cursor++;
+		if (cursor == end)
+			continue;
+		consumed = 0;
+		ret = sscanf(cursor, "%llx%zn", &sym_addr, &consumed);
+		if (ret != 1) {
+			ret = 0;
+			goto invalid;
 		}
-
+		cursor += consumed;
+read_type:
+		while (cursor < end && isspace((unsigned char)*cursor))
+			cursor++;
+		if (cursor == end) {
+			bytes = getline(&line, &capacity, f);
+			if (bytes < 0) {
+				ret = 1;
+				goto invalid;
+			}
+			cursor = line;
+			end = line + bytes;
+			goto read_type;
+		}
+		sym_type = *cursor++;
+read_name:
+		while (cursor < end && isspace((unsigned char)*cursor))
+			cursor++;
+		if (cursor == end) {
+			bytes = getline(&line, &capacity, f);
+			if (bytes < 0) {
+				ret = 2;
+				goto invalid;
+			}
+			cursor = line;
+			end = line + bytes;
+			goto read_name;
+		}
+		length = 0;
+		while (cursor < end && !isspace((unsigned char)*cursor) &&
+		       length < sizeof(sym_name) - 1)
+			sym_name[length++] = *cursor++;
+		sym_name[length] = '\0';
 		err = cb(sym_addr, sym_type, sym_name, ctx);
 		if (err)
 			break;
 	}
-
+	if (bytes < 0 && !feof(f)) {
+		ret = EOF;
+		goto invalid;
+	}
+	goto done;
+invalid:
+	pr_warn("failed to read kallsyms entry: %d\n", ret);
+	err = -EINVAL;
+done:
+	free(line);
 	fclose(f);
 	return err;
 }
