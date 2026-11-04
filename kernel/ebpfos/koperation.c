@@ -1118,6 +1118,8 @@ static int ebpfos_kop_tzcnt64_emit_x86(u8 *image, u32 *offset,
 	(void)prog;
 	(void)final_ip;
 #ifdef CONFIG_X86
+	if (!boot_cpu_has(X86_FEATURE_BMI1))
+		return -EOPNOTSUPP;
 #else
 	return -EOPNOTSUPP;
 #endif

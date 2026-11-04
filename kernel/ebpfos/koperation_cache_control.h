@@ -12,6 +12,8 @@ __bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos
 }
 __bpf_kfunc u64 bpf_ebpfos_x86_wbnoinvd(void)
 {
+	if (!boot_cpu_has(X86_FEATURE_WBNOINVD))
+		return -EOPNOTSUPP;
 	asm volatile("wbnoinvd" : : : "memory");
 	return 0;
 }
