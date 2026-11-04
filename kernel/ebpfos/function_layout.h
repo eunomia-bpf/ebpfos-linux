@@ -309,7 +309,8 @@ static inline bool cell_layout(const struct btf *a, __u32 ai, const struct btf *
 }
 /* Only a complete declared subobject can extend an input-relative result
  * beyond identity. This proves no enclosing allocation, flexible tail or
- * object reached through a pointer field. Aggregate qualifiers are inherited.
+ * object reached through a pointer field. A zero-offset void result describes
+ * no extent; it retains the input qualifiers. Aggregate qualifiers are inherited.
  */
 static inline __u32 cell_result_extent(const struct btf *types, __u32 id)
 {
@@ -336,11 +337,11 @@ static inline bool cell_result_subobject(const struct btf *types, __u32 object,
 	__u32 declared_result = result;
 	unsigned int qualifiers = 0, i, kind;
 
-	if (!size || !required || offset > size || required > size - offset)
-		return false;
 	for (;;) {
 		if (++depth > 64)
 			return false;
+		if (!object)
+			break;
 		type = cell_layout_type(types, object);
 		if (!type)
 			return false;
@@ -358,6 +359,8 @@ static inline bool cell_result_subobject(const struct btf *types, __u32 object,
 	for (;;) {
 		if (++depth > 64)
 			return false;
+		if (!result)
+			break;
 		target = cell_layout_type(types, result);
 		if (!target)
 			return false;
@@ -372,6 +375,26 @@ static inline bool cell_result_subobject(const struct btf *types, __u32 object,
 			break;
 		result = target->type;
 	}
+	/* Erasing a data pointee at its original address creates no object
+	 * or bounds. The verifier still proves this exact input identity.
+	 * Code pointers and type-tag protocols are not data-object views.
+	 */
+	if (!result) {
+		if (offset || inherited != qualifiers)
+			return false;
+		if (!object)
+			return true;
+		switch (BTF_INFO_KIND(type->info)) {
+		case BTF_KIND_INT: case BTF_KIND_ENUM: case BTF_KIND_ENUM64:
+		case BTF_KIND_FLOAT: case BTF_KIND_STRUCT: case BTF_KIND_UNION:
+		case BTF_KIND_ARRAY: case BTF_KIND_PTR: case BTF_KIND_FWD:
+			return true;
+		default:
+			return false;
+		}
+	}
+	if (!object || !size || !required || offset > size || required > size - offset)
+		return false;
 	if (!offset && inherited == qualifiers &&
 	    cell_layout(types, object, types, result, 0, false))
 		return true;
