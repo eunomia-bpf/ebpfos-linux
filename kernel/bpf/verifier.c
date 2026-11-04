@@ -11746,6 +11746,22 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 					tnum_const((s64)sub->result_argument_offset));
 			__mark_reg_unbounded(&result_buffer);
 			reg_bounds_sync(&result_buffer);
+			if (sub->result_argument_nullable &&
+			    !bpf_register_is_null(&result_buffer)) {
+				/* Nullable pointers use a zero-offset base in the ordinary
+				 * verifier. An interior nullable view needs a separate base
+				 * representation; do not erase its offset or enlarge bounds.
+				 */
+				if (!tnum_equals_const(result_buffer.var_off, 0) ||
+				    base_type(result_buffer.type) == PTR_TO_BTF_FUNC) {
+					verbose(env,
+						"nullable input result requires a zero-offset data pointer\n");
+					return -EACCES;
+				}
+				result_buffer.type |= PTR_MAYBE_NULL;
+				/* A NULL result says nothing about the original input. */
+				result_buffer.id = ++env->id_gen;
+			}
 		}
 		/* mark global subprog for verifying after main prog */
 		subprog_aux(env, subprog)->called = true;
@@ -20099,6 +20115,9 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
 			return err;
+		/* A declared nullable alternative carries no pointer capability. */
+		if (sub->result_argument_nullable && bpf_register_is_null(result))
+			return mark_chain_precision(env, BPF_REG_0);
 		/* The contract transfers only an existing input capability. A type
 		 * match alone cannot establish its origin, bounds or lifetime.
 		 */

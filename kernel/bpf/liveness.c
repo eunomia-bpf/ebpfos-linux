@@ -1071,7 +1071,7 @@ static struct arg_track argument_result_track(struct bpf_verifier_env *env,
 		return none;
 	fn = btf_type_by_id(env->prog->aux->btf, env->prog->aux->func_info[callee].type_id);
 	if (!fn || !btf_type_is_func(fn) || btf_type_vlen(fn) != BTF_FUNC_GLOBAL ||
-	    btf_argument_result(env->prog->aux->btf, fn, &argument, &offset))
+	    btf_argument_result(env->prog->aux->btf, fn, &argument, &offset, NULL))
 		return none;
 	sub = &env->subprog_info[callee];
 	if (sub->native_frame) {

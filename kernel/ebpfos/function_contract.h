@@ -128,7 +128,7 @@ static bool cell_checked_pointer_result(struct btf *native, const struct btf_typ
 		 * fixed array element can justify a complete result inside it;
 		 * an enclosing object or flexible tail needs separate authority.
 		 */
-		if (!btf_argument_result(compiled, function, &argument, &offset) &&
+		if (!btf_argument_result(compiled, function, &argument, &offset, NULL) &&
 		    offset >= 0 && argument < btf_type_vlen(n)) {
 			input = btf_type_skip_modifiers(native, btf_params(n)[argument].type, NULL);
 			described = input && btf_type_is_ptr(input) &&

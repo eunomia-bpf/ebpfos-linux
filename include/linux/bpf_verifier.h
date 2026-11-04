@@ -809,6 +809,7 @@ struct bpf_subprog_info {
 	u32 exit_idx; /* Index of one of the BPF_EXIT instructions in this subprogram */
 	u32 result_argument; /* one-based BTF parameter, independently checked */
 	s32 result_argument_offset; /* exact byte displacement from that input */
+	bool result_argument_nullable; /* NULL or the independently checked input */
 	u32 readonly_result_size; /* independently checked stable byte buffer */
 	bool readonly_kernel_result; /* permanent native storage, beyond program lifetime */
 	bool null_result; /* every independently checked exit returns NULL */

@@ -8372,7 +8372,7 @@ static bool btf_native_func_arg(const struct bpf_subprog_info *sub,
  * This describes an obligation; it establishes no pointer capability.
  */
 int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
-			u32 *argument, s32 *offset)
+			u32 *argument, s32 *offset, bool *nullable)
 {
 	const struct btf_type *proto, *result;
 	const char *tag;
@@ -8381,8 +8381,22 @@ int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 	if (!fn || !btf_type_is_func(fn))
 		return -EINVAL;
 	tag = btf_find_decl_tag_value(btf, fn, -1, "ret:arg:");
-	if (IS_ERR(tag))
-		return PTR_ERR(tag);
+	if (nullable)
+		*nullable = false;
+	if (IS_ERR(tag)) {
+		if (PTR_ERR(tag) != -ENOENT)
+			return PTR_ERR(tag);
+		tag = btf_find_decl_tag_value(btf, fn, -1, "ret:arg_or_null:");
+		if (IS_ERR(tag))
+			return PTR_ERR(tag);
+		if (nullable)
+			*nullable = true;
+	} else {
+		const char *other = btf_find_decl_tag_value(btf, fn, -1, "ret:arg_or_null:");
+
+		if (!IS_ERR(other) || PTR_ERR(other) != -ENOENT)
+			return -EINVAL;
+	}
 	proto = btf_type_by_id(btf, fn->type);
 	if (!proto || !btf_type_is_func_proto(proto))
 		return -EINVAL;
@@ -8550,7 +8564,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	{
 		u32 argument;
 		s32 offset;
-		int err = btf_argument_result(btf, fn_t, &argument, &offset);
+		int err = btf_argument_result(btf, fn_t, &argument, &offset,
+					      &sub->result_argument_nullable);
 
 		if (err != -ENOENT) {
 			if (err || !is_global || sub->null_result ||
