@@ -1515,8 +1515,18 @@ int bpf_jit_subprogs(struct bpf_verifier_env *env)
 	struct bpf_insn_aux_data *orig_insn_aux;
 	u32 *orig_subprog_starts;
 
-	if (env->subprog_cnt <= 1)
-		return 0;
+	if (env->subprog_cnt <= 1) {
+		/* A sole entry can take its own address or call itself. Both
+		 * operands still need the subprogram index and final JIT address
+		 * fixups below when source-trusted loading retains the cycle.
+		 */
+		for (i = 0; i < env->prog->len; i++)
+			if (bpf_pseudo_func(&env->prog->insnsi[i]) ||
+			    bpf_pseudo_call(&env->prog->insnsi[i]))
+				break;
+		if (i == env->prog->len)
+			return 0;
+	}
 
 	prog = orig_prog = env->prog;
 	if (bpf_prog_need_blind(prog)) {
