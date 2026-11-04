@@ -36,26 +36,22 @@ static u32 prefetch_service(u64 payload)
 static int prefetch_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service=prefetch_service(payload);
- if (!insns || !service) return -EINVAL;
  insns[0]=BPF_CALL_KFUNC(0,service); return 1;
 }
 static int prefetch_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- if (!entry || index || !prefetch_service(payload)) return -EINVAL;
  *entry=(struct bpf_kop_exception) { .insn_offset=0,
   .fixup_offset=EBPFOS_FAULT_PREFETCHT0_FIXUP, .data=EX_TYPE_DEFAULT }; return 0;
 }
 static int prefetch_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
 {
  static const u8 digest[]=EBPFOS_FAULT_PREFETCHT0_SHA256;
- if (!capability || !effect || !sha || !prefetch_service(payload)) return -EINVAL;
  *capability=prefetch_capability; *effect=prefetch_effect;
  memcpy(sha,payload==prefetch_id ? prefetch_typed_sha : digest,32); return 0;
 }
 static int prefetch_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                         const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !prefetch_service(payload)) return -EINVAL;
  if (emit) memcpy(image+*offset,prefetch_native,sizeof(prefetch_native));
  *offset+=sizeof(prefetch_native); return sizeof(prefetch_native);
 }
