@@ -77,7 +77,6 @@ static int rep_proof(u64 payload, struct bpf_insn *insns)
 }
 static int rep_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- if (!entry || index || !rep_valid(payload)) return -EINVAL;
  *entry = (struct bpf_kop_exception) {
   .insn_offset = EBPFOS_FAULT_REP_MOVSB_INSN,
   .fixup_offset = EBPFOS_FAULT_REP_MOVSB_FIXUP, .data = payload & 255 };
@@ -87,7 +86,6 @@ static int rep_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32
 {
  static const u8 ordinary[] = EBPFOS_FAULT_REP_MOVSB_SHA256_3;
  static const u8 machine_check[] = EBPFOS_FAULT_REP_MOVSB_SHA256_14;
- if (!capability || !effect || !sha || !rep_valid(payload)) return -EINVAL;
  *capability = 0; *effect = 0;
  memcpy(sha, (payload & 255) == EX_TYPE_UACCESS ? ordinary : machine_check, 32);
  return 0;
@@ -95,7 +93,6 @@ static int rep_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32
 static int rep_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                     const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !rep_valid(payload)) return -EINVAL;
  if (emit) memcpy(image + *offset, rep_native, sizeof(rep_native));
  *offset += sizeof(rep_native); return sizeof(rep_native);
 }
@@ -142,7 +139,6 @@ static int repq_proof(u64 payload, struct bpf_insn *insns)
 }
 static int repq_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- if (!entry || index || !repq_valid(payload)) return -EINVAL;
  *entry = (struct bpf_kop_exception) {
   .insn_offset = EBPFOS_FAULT_REP_MOVSQ_INSN,
   .fixup_offset = EBPFOS_FAULT_REP_MOVSQ_FIXUP, .data = payload & 255 };
@@ -152,7 +148,6 @@ static int repq_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[3
 {
  static const u8 ordinary[] = EBPFOS_FAULT_REP_MOVSQ_SHA256_3;
  static const u8 machine_check[] = EBPFOS_FAULT_REP_MOVSQ_SHA256_14;
- if (!capability || !effect || !sha || !repq_valid(payload)) return -EINVAL;
  *capability = 0; *effect = 0;
  memcpy(sha, (payload & 255) == EX_TYPE_UACCESS ? ordinary : machine_check, 32);
  return 0;
@@ -160,7 +155,6 @@ static int repq_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[3
 static int repq_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                     const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !repq_valid(payload)) return -EINVAL;
  if (emit) memcpy(image + *offset, repq_native, sizeof(repq_native));
  *offset += sizeof(repq_native); return sizeof(repq_native);
 }
