@@ -19,9 +19,7 @@ int ebpfos_code_stopped_ranges(const struct ebpfos_code_range *ranges, unsigned 
 {
  struct stopped_code_ranges code = { .ranges = ranges, .count = count };
  unsigned int i;
- if (!ranges || !count) return -EINVAL;
  for (i = 0; i < count; ++i)
-  if (ranges[i].begin >= ranges[i].end) return -EINVAL;
  return ebpfos_code_stopped(stopped_code_contains, &code);
 }
 EXPORT_SYMBOL_GPL(ebpfos_code_stopped_ranges);
