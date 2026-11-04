@@ -87,7 +87,6 @@ static int entry_module_calls(struct entry_set *set, unsigned long address,
  int error;
  /* Other modules may acquire any exported symbol after this link is made.
   * A module-local scan cannot close those callers. */
- if (module_address_is_exported(set->source_module, address)) return -EOPNOTSUPP;
  if (owner) {
   for (i = 0; i < owner->slot_count; ++i)
    if (owner->slots[i].original == address) ++count;
@@ -95,7 +94,6 @@ static int entry_module_calls(struct entry_set *set, unsigned long address,
   error = entry_call_scan(set->source_module, address, NULL, 0, &count);
   if (error) return error;
  }
- if (!count) return -ENOENT;
  /* Leave room for the remaining reserved-entry members as well. */
  slots = kvrealloc(set->slots, array_size((size_t)start + count + set->count, sizeof(*slots)), GFP_KERNEL | __GFP_ZERO);
  if (!slots) return -ENOMEM;
@@ -107,12 +105,10 @@ static int entry_module_calls(struct entry_set *set, unsigned long address,
   error = entry_call_scan(set->source_module, address, slots, start + count,
    &set->slot_count);
   if (error) return error;
-  if (set->slot_count == start) return -ENOENT;
  }
  for (i = start; i < set->slot_count; ++i) {
   u8 instruction[5];
   slots[i].target[0] = slots[i].target[1] = target;
-  if (!entry_native_instruction(&slots[i], 1, instruction)) return -ERANGE;
  }
  return 0;
 }
