@@ -77,7 +77,7 @@ static inline int ebpfos_function_binding_open_pure(
 {
  struct bpf_prog *program;
  unsigned long address;
- program = bpf_prog_get_type_dev(fd, type, false);
+ program = bpf_prog_get(fd);
  if (IS_ERR(program)) return PTR_ERR(program);
  if (!cell_callable(native, function, program, compiled_id, &address)) goto invalid;
  out->program = program;out->address = address;

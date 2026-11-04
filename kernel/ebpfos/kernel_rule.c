@@ -478,7 +478,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  versions = memdup_array_user(u64_to_user_ptr(attr->link_create.kernel_rule.versions),
                              count, sizeof(*versions));
  if (IS_ERR(versions)) return PTR_ERR(versions);
- program = bpf_prog_get_type(attr->link_create.prog_fd, BPF_PROG_TYPE_KERNEL_RULE);
+ program = bpf_prog_get(attr->link_create.prog_fd);
  if (IS_ERR(program)) {error = PTR_ERR(program);kfree(versions);return error;}
  
  generation = kzalloc(sizeof(*generation), GFP_KERNEL);
