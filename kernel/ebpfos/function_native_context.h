@@ -2,6 +2,7 @@
 #ifndef EBPFOS_FUNCTION_NATIVE_CONTEXT_H
 #define EBPFOS_FUNCTION_NATIVE_CONTEXT_H
 #include <linux/bpf_native_abi.h>
+#include <linux/bpf_native_seq.h>
 static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bool pure)
 {
  const enum bpf_func_id helpers[] = { BPF_FUNC_per_cpu_ptr, BPF_FUNC_this_cpu_ptr,
@@ -66,7 +67,7 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     * upstream JIT's operand/relocation checks. Their execution context has
     * the same stated source/compiler trust as native indirect calls. */
    if (insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
-    if (pure || !aux->trusted_kernel) goto out;
+    if (pure || (!aux->trusted_kernel && !bpf_native_seq_ablation())) goto out;
     continue;
    }
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||

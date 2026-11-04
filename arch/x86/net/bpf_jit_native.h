@@ -265,7 +265,7 @@ static int native_image_prepare(struct bpf_prog *prog)
 		count += bpf_native_seq_insn(&prog->insnsi[i]);
 	if (!count)
 		return 0;
-	if (!prog->aux->trusted_kernel)
+	if (!prog->aux->trusted_kernel && !bpf_native_seq_ablation())
 		return -EACCES;
 	native = kzalloc(sizeof(*native), GFP_KERNEL);
 	if (!native)

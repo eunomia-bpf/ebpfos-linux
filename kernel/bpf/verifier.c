@@ -42,6 +42,15 @@
 #include "../ebpfos/function_arguments.h"
 #include "../ebpfos/function_native.h"
 
+#ifdef CONFIG_EBPFOS_VERIFIER_ABLATION
+#include <linux/moduleparam.h>
+unsigned int ebpfos_verifier_ablation;
+core_param(ebpfos_verifier_ablation, ebpfos_verifier_ablation, uint, 0400);
+#define verifier_ablation(arm) (ebpfos_verifier_ablation >= (arm))
+#else
+#define verifier_ablation(arm) false
+#endif
+
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type) \
 	[_id] = & _name ## _verifier_ops,
@@ -14337,6 +14346,11 @@ static int kfunc_mem_arg_tag(const struct bpf_kfunc_call_arg_meta *meta,
 	const char *value = btf_find_decl_tag_value(meta->btf,
 			kfunc_arg_contract(meta), arg, name);
 
+	if (IS_ERR(value) && PTR_ERR(value) == -ENOENT && verifier_ablation(1)) {
+		char diagnostic[80];
+		snprintf(diagnostic, sizeof(diagnostic), "ablation:%s", name);
+		value = btf_find_decl_tag_value(meta->btf, kfunc_arg_contract(meta), arg, diagnostic);
+	}
 	if (IS_ERR(value))
 		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
 	return *value ? -EINVAL : 1;
@@ -14352,6 +14366,8 @@ static int kfunc_arg_size_index(const struct bpf_kfunc_call_arg_meta *meta,
 			kfunc_arg_contract(meta), arg, "arg:sz:");
 	u32 index;
 
+	if (IS_ERR(value) && PTR_ERR(value) == -ENOENT && verifier_ablation(1))
+		value = btf_find_decl_tag_value(meta->btf, kfunc_arg_contract(meta), arg, "ablation:arg:sz:");
 	if (IS_ERR(value))
 		return PTR_ERR(value) == -ENOENT ? -1 : PTR_ERR(value);
 	if (kstrtouint(value, 10, &index) || index >= nargs || index == arg)
@@ -14789,6 +14805,18 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		    !nullable) {
 			verbose(env, "Possibly NULL pointer passed to trusted arg%d\n", i);
 			return -EACCES;
+		}
+
+		if (verifier_ablation(1) && meta->native_call) {
+			const struct btf_type *declaration = kfunc_arg_contract(meta);
+			const char *span = btf_find_decl_tag_value(btf, declaration, i, "ablation:arg:bytes:");
+			u32 bytes;
+			if (!IS_ERR(span)) {
+				if (kstrtouint(span, 10, &bytes)) return -EINVAL;
+				ret = check_mem_reg(env, reg, regno, bytes,
+					kfunc_mem_arg_tag(meta, i, "arg:readonly") > 0);
+				if (ret) return ret;
+			}
 		}
 
 		if (reg->ref_obj_id) {
@@ -15440,6 +15468,12 @@ static bool native_memory_contract(const struct bpf_kfunc_meta *kfunc)
 	const struct btf_type *function = btf_type_by_id(kfunc->btf, kfunc->id);
 	const struct btf_type *result;
 	const char *tag;
+
+	if (verifier_ablation(1)) {
+		tag = btf_find_decl_tag_value(kfunc->btf, function, -1,
+					     "ablation:direct-contract");
+		if (!IS_ERR(tag) && !*tag) return true;
+	}
 
 	result = btf_type_skip_modifiers(kfunc->btf, kfunc->proto->type, NULL);
 	if (!btf_type_vlen(kfunc->proto) &&
@@ -20806,6 +20840,55 @@ static int check_indirect_jump(struct bpf_verifier_env *env, struct bpf_insn *in
 	return INSN_IDX_UPDATED;
 }
 
+#ifdef CONFIG_EBPFOS_VERIFIER_ABLATION
+static int check_ablation_sequence(struct bpf_verifier_env *env, struct bpf_insn *insn)
+{
+ struct bpf_native_seq *sequence = bpf_native_seq_get(env->prog, insn->imm);
+ struct binding { u16 operand; u8 reg, width; u16 flags, reserved; } *bindings;
+ struct bpf_native_goto *targets;
+ u32 i;
+ int err;
+ if (!sequence) return -EINVAL;
+ bindings = (void *)sequence + sequence->bindings_offset;
+ for (i = 0; i < sequence->bindings_count; i++) {
+  if (bindings[i].reg >= MAX_BPF_REG ||
+      (bindings[i].reg == BPF_REG_FP && (bindings[i].flags & 2) && !(bindings[i].flags & 16)) ||
+      bindings[i].reg == 13 || bindings[i].reserved || !bindings[i].width)
+   return -EINVAL;
+  if (bindings[i].flags & 1) {
+   err = check_reg_arg(env, bindings[i].reg, SRC_OP);
+   if (err) return err;
+  }
+ }
+ for (i = 0; i < MAX_BPF_REG; i++)
+  if ((sequence->write_mask & BIT(i)) && i != BPF_REG_FP && i != 13) {
+   mark_reg_unknown(env, cur_regs(env), i);
+   mark_reg_scratched(env, i);
+  }
+ for (i = 0; i < sequence->bindings_count; i++)
+  if ((bindings[i].flags & 2) && !(bindings[i].flags & 16) && bindings[i].width <= 64) {
+   struct bpf_reg_state *reg = &cur_regs(env)[bindings[i].reg];
+   u32 width = bindings[i].width;
+   if (width < 64) {
+    reg->var_off = tnum_range(0, (1ULL << width) - 1);
+    reg->umin_value = 0; reg->umax_value = (1ULL << width) - 1;
+    reg->smin_value = 0; reg->smax_value = reg->umax_value;
+    __update_reg_bounds(reg);
+   }
+  }
+ targets = (void *)sequence + sequence->gotos_offset;
+ for (i = 0; i < sequence->gotos_count; i++) {
+  s64 target = (s64)env->insn_idx + 1 + targets[i].delta;
+  u32 owner = cur_func(env)->subprogno;
+  if (target < env->subprog_info[owner].start || target >= env->subprog_info[owner + 1].start)
+   return -EINVAL;
+  if (!push_stack(env, target, env->insn_idx, false)) return -ENOMEM;
+ }
+ verbose(env, "E10 diagnostic assembly assumption: constraint outputs only; machine effects are not proved\n");
+ return 0;
+}
+#endif
+
 static int do_check_insn(struct bpf_verifier_env *env, bool *do_print_state)
 {
 	int err;
@@ -20850,6 +20933,10 @@ static int do_check_insn(struct bpf_verifier_env *env, bool *do_print_state)
 
 		env->jmps_processed++;
 		if (opcode == BPF_CALL) {
+#ifdef CONFIG_EBPFOS_VERIFIER_ABLATION
+			if (verifier_ablation(2) && bpf_native_seq_insn(insn))
+				return check_ablation_sequence(env, insn);
+#endif
 			if (BPF_SRC(insn->code) == BPF_X)
 				return check_callx(env, insn);
 			if (env->cur_state->active_locks) {
@@ -21707,7 +21794,7 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 	case BPF_CALL:
 		if (insn->code == (BPF_JMP | BPF_CALL) &&
 		    insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
-			if (!env->prog->aux->trusted_kernel) {
+			if (!env->prog->aux->trusted_kernel && !verifier_ablation(2)) {
 				verbose(env, "native sequence requires the privileged trusted kernel tier; x86 bytes are not verified\n");
 				return -EACCES;
 			}
@@ -23921,7 +24008,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 			goto skip_full_check;
 	}
 
-	if (env->prog->aux->trusted_kernel) {
+	if (env->prog->aux->trusted_kernel || verifier_ablation(2)) {
 		ret = bpf_native_seq_clone_records(env->prog);
 		if (ret)
 			goto skip_full_check;
