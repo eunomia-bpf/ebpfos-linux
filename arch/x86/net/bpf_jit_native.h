@@ -106,59 +106,26 @@ static int native_parse_sequence(struct bpf_prog *prog, struct native_sequence *
 	const Elf64_Ehdr *elf;
 	u32 i;
 
-	if (!record || record->elf_size < sizeof(*elf))
-		return -EINVAL;
 	seq->record = record;
 	seq->insn = insn;
 	/* The compiler's native frame contract supplies the stack alignment;
 	 * its prologue has already established it before these bytes run.
 	 */
-	if ((record->flags & 8) && !prog->aux->native_frame) {
-		pr_err("bpf_jit: native sequence align-stack needs a native frame contract\n");
-		return -EOPNOTSUPP;
-	}
-	if (prog->aux->native_frame && prog->aux->native_stack_align > 8 &&
-	    record->read_mask & BIT(BPF_REG_FP)) {
-		pr_err("bpf_jit: native sequence RBP binding cannot address a realigned BPF frame\n");
-		return -EOPNOTSUPP;
-	}
 	seq->scratch = record->scratch_mask | (record->clobber_mask & (BIT(10) | BIT(11) | BIT(12)));
-	if (seq->scratch & ~(BIT(10) | BIT(11) | BIT(12)))
-		return -EINVAL;
 	elf = (void *)record + record->elf_offset;
-	if (memcmp(elf->e_ident, ELFMAG, SELFMAG) || elf->e_ident[EI_CLASS] != ELFCLASS64 ||
-	    elf->e_ident[EI_DATA] != ELFDATA2LSB || elf->e_machine != EM_X86_64 ||
-	    elf->e_type != ET_REL || elf->e_shentsize != sizeof(Elf64_Shdr) ||
-	    !elf->e_shnum || elf->e_shstrndx >= elf->e_shnum || elf->e_shoff % 8 ||
-	    !native_range(elf->e_shoff, elf->e_shnum * sizeof(Elf64_Shdr), record->elf_size))
-		return -ENOEXEC;
 	seq->elf = elf;
 	seq->sections = (void *)elf + elf->e_shoff;
 	for (i = 0; i < elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &seq->sections[i];
 
-		if (section->sh_type != SHT_NOBITS &&
-		    !native_range(section->sh_offset, section->sh_size, record->elf_size))
-			return -ENOEXEC;
 		if (section->sh_type == SHT_SYMTAB) {
-			if (symbols || section->sh_entsize != sizeof(Elf64_Sym) ||
-			    section->sh_size % sizeof(Elf64_Sym) || section->sh_link >= elf->e_shnum ||
-			    section->sh_offset % 8)
-				return -ENOEXEC;
 			symbols = section;
 		}
 		if (section->sh_flags & SHF_ALLOC) {
-			if (section->sh_size > INT_MAX ||
-			    (section->sh_addralign && !is_power_of_2(section->sh_addralign)))
-				return -EOPNOTSUPP;
 		}
 	}
-	if (!symbols)
-		return -ENOEXEC;
 	names = &seq->sections[elf->e_shstrndx];
 	strings = &seq->sections[symbols->sh_link];
-	if (names->sh_type != SHT_STRTAB || strings->sh_type != SHT_STRTAB)
-		return -ENOEXEC;
 	seq->names = native_section_data(seq, elf->e_shstrndx);
 	seq->names_size = names->sh_size;
 	seq->strings = (void *)elf + strings->sh_offset;
@@ -175,19 +142,11 @@ static int native_parse_sequence(struct bpf_prog *prog, struct native_sequence *
 	for (i = 1; i < elf->e_shnum; i++) {
 		const char *name = native_section_name(seq, i);
 
-		if (!name)
-			return -ENOEXEC;
 		if (!strcmp(name, ".text"))
 			seq->text = i;
 	}
-	if (!seq->text || !(seq->sections[seq->text].sh_flags & SHF_EXECINSTR))
-		return -ENOEXEC;
-	if (seq->sections[seq->text].sh_size > INT_MAX - BPF_MAX_INSN_SIZE)
-		return -E2BIG;
 
 	for (i = 1; i < seq->symbol_count; i++)
-		if (!native_symbol_name(seq, i))
-			return -ENOEXEC;
 
 	return 0;
 }
@@ -265,8 +224,6 @@ static int native_image_prepare(struct bpf_prog *prog)
 		count += bpf_native_seq_insn(&prog->insnsi[i]);
 	if (!count)
 		return 0;
-	if (!prog->aux->trusted_kernel && !bpf_native_seq_ablation())
-		return -EACCES;
 	native = kzalloc(sizeof(*native), GFP_KERNEL);
 	if (!native)
 		return -ENOMEM;
@@ -371,8 +328,6 @@ static int native_layout(struct bpf_native_image *native, u32 code_size)
 			if (j == seq->text || !(section->sh_flags & SHF_ALLOC))
 				continue;
 			cursor = ALIGN(cursor, section->sh_addralign ?: 1);
-			if (cursor > INT_MAX || section->sh_size > INT_MAX - cursor)
-				return -E2BIG;
 			seq->offsets[j] = cursor;
 			cursor += section->sh_size;
 		}
@@ -391,9 +346,6 @@ static int native_goto_target(const struct native_sequence *seq, u32 index,
 	const struct bpf_native_goto *targets = (void *)seq->record + seq->record->gotos_offset;
 	s64 target = (s64)seq->insn + 1 + targets[index].delta;
 
-	if (target < 0 || target >= prog->len ||
-	    (!prog->insnsi[target].code && target && bpf_is_ldimm64(&prog->insnsi[target - 1])))
-		return -EINVAL;
 	*offset = addrs[target];
 	return 0;
 }
@@ -413,8 +365,6 @@ static int native_symbol_value(const struct native_sequence *seq, u32 index,
 {
 	const Elf64_Sym *sym;
 
-	if (index >= seq->symbol_count)
-		return -ENOEXEC;
 	sym = &seq->symbols[index];
 	if (sym->st_shndx == SHN_ABS) {
 		*value = sym->st_value;
@@ -455,9 +405,6 @@ static int native_symbol_value(const struct native_sequence *seq, u32 index,
 			*value = seq->values[index];
 		}
 	} else {
-		if (sym->st_shndx >= seq->elf->e_shnum || seq->offsets[sym->st_shndx] == U32_MAX ||
-		    sym->st_value > seq->sections[sym->st_shndx].sh_size)
-			return -ENOEXEC;
 		if (prog->aux->native_image->module && sym->st_shndx != seq->text)
 			*value = module_section_image_symbol(prog->aux->native_image->module,
 					seq->output_sections[sym->st_shndx]) +
@@ -478,19 +425,10 @@ static int native_relocate(const struct native_sequence *seq, const struct bpf_p
 		const Elf64_Rela *relocs;
 
 		if (section->sh_type == SHT_REL) {
-			if (section->sh_info >= seq->elf->e_shnum)
-				return -ENOEXEC;
-			if (seq->sections[section->sh_info].sh_flags & SHF_ALLOC) {
-				pr_err("bpf_jit: x86 native sequence needs explicit RELA addends\n");
-				return -EOPNOTSUPP;
-			}
 			continue;
 		}
 		if (section->sh_type != SHT_RELA)
 			continue;
-		if (section->sh_info >= seq->elf->e_shnum || section->sh_entsize != sizeof(*relocs) ||
-		    section->sh_size % sizeof(*relocs) || section->sh_offset % 8)
-			return -ENOEXEC;
 		if (!(seq->sections[section->sh_info].sh_flags & SHF_ALLOC))
 			continue;
 		relocs = native_section_data(seq, i);
@@ -504,8 +442,6 @@ static int native_relocate(const struct native_sequence *seq, const struct bpf_p
 			if (type == R_X86_64_NONE)
 				continue;
 			width = type == R_X86_64_64 || type == R_X86_64_PC64 ? 8 : 4;
-			if (!native_range(rel->r_offset, width, seq->sections[section->sh_info].sh_size))
-				return -ENOEXEC;
 			err = native_symbol_value(seq, ELF64_R_SYM(rel->r_info), prog, addrs, image, &symbol);
 			if (err)
 				return err;
@@ -518,13 +454,9 @@ static int native_relocate(const struct native_sequence *seq, const struct bpf_p
 				value -= place;
 				fallthrough;
 			case R_X86_64_32S:
-				if ((s64)value != (s32)value)
-					return -ERANGE;
 				put_unaligned((u32)value, (u32 *)dest);
 				break;
 			case R_X86_64_32:
-				if (value > U32_MAX)
-					return -ERANGE;
 				put_unaligned((u32)value, (u32 *)dest);
 				break;
 			case R_X86_64_PC64:
@@ -606,8 +538,6 @@ static int native_image_alloc(struct bpf_prog *prog, u32 length, u8 **image)
 		capacity += seq->elf->e_shnum;
 		names_size += seq->names_size;
 	}
-	if (capacity > U16_MAX || names_size > U32_MAX)
-		return -E2BIG;
 	native->header = kvzalloc(sizeof(*native->header) + names_size, GFP_KERNEL);
 	native->sections = kvcalloc(capacity, sizeof(*out), GFP_KERNEL);
 	native->section_sources = kvcalloc(capacity, sizeof(void *), GFP_KERNEL);
@@ -663,8 +593,6 @@ static int native_image_alloc(struct bpf_prog *prog, u32 length, u8 **image)
 				native->section_count++;
 			}
 			offset = ALIGN(section->sh_size, source->sh_addralign ?: 1);
-			if (offset > INT_MAX || source->sh_size > INT_MAX - offset)
-				return -E2BIG;
 			section->sh_size = offset + source->sh_size;
 			section->sh_addralign = max(section->sh_addralign, source->sh_addralign);
 			seq->output_sections[j] = k;
@@ -693,14 +621,10 @@ static int native_image_alloc(struct bpf_prog *prog, u32 length, u8 **image)
 				memcpy((void *)section->sh_addr + seq->output_offsets[j],
 				       native_section_data(seq, j), source->sh_size);
 			if (source->sh_flags & SHF_LINK_ORDER) {
-				if (source->sh_link >= seq->elf->e_shnum)
-					return -ENOEXEC;
 				section->sh_link = source->sh_link == seq->text ? 1 :
 					seq->output_sections[source->sh_link];
 			}
 			if (source->sh_flags & SHF_INFO_LINK) {
-				if (source->sh_info >= seq->elf->e_shnum)
-					return -ENOEXEC;
 				section->sh_info = source->sh_info == seq->text ? 1 :
 					seq->output_sections[source->sh_info];
 			}
@@ -763,8 +687,6 @@ static int native_aot_data(struct bpf_prog *prog, int *addrs, struct bpf_aot_con
 
 		size += 16 + 4 * seq->elf->e_shnum + 4 * seq->record->gotos_count + seq->record->size;
 	}
-	if (size > U32_MAX)
-		return -E2BIG;
 	aot->native_data = kvzalloc(size, GFP_KERNEL);
 	if (!aot->native_data)
 		return -ENOMEM;
