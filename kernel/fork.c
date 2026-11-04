@@ -2527,6 +2527,9 @@ __latent_entropy struct task_struct *copy_process(
 	 * hook. cgroup_post_fork() should come before sched_post_fork().
 	 */
 	cgroup_post_fork(p, args);
+#ifdef CONFIG_EBPFOS_PLT
+	ebpfos_task_rule_started(p);
+#endif
 	sched_post_fork(p);
 	perf_event_fork(p);
 

@@ -248,6 +248,22 @@ bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *decision)
   if (decision->choices[i].generation->has_tasks) return true;
  return false;
 }
+#ifdef CONFIG_EBPFOS_PLT
+int ebpfos_rule_selected_bindings(struct ebpfos_rule_decision *decision,
+ ebpfos_rule_binding_visit visit, void *opaque)
+{
+ u32 i;
+ int error;
+ for (i = 0; decision && i < decision->count; ++i) {
+  struct rule_choice *choice = &decision->choices[i];
+  u32 selected = choice->selection;
+  if (!selected || selected > choice->generation->count) continue;
+  error = ebpfos_rule_task_bindings(choice->generation->tasks[selected - 1], visit, opaque);
+  if (error) return error;
+ }
+ return 0;
+}
+#endif
 void ebpfos_rule_task_table(struct ebpfos_rule_decision *decision, void *table)
 {
  u32 i;
@@ -320,6 +336,12 @@ static bool rule_decision_same(const struct ebpfos_rule_decision *a,
       a->choices[i].selection != b->choices[i].selection) return false;
  return true;
 }
+#ifdef CONFIG_EBPFOS_PLT
+u64 ebpfos_rule_decision_epoch(const struct ebpfos_rule_decision *decision)
+{ return decision ? decision->epoch : 0; }
+bool ebpfos_rule_decision_same(const struct ebpfos_rule_decision *a,
+ const struct ebpfos_rule_decision *b) { return rule_decision_same(a, b); }
+#endif
 void ebpfos_rule_cache_quiescent_inherit(struct ebpfos_rule_cache *cache,
  struct ebpfos_rule_decision *inherited)
 {

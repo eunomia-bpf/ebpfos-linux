@@ -10,6 +10,9 @@
 #include <linux/slab.h>
 #include <asm/syscall.h>
 
+#ifdef CONFIG_EBPFOS_PLT
+#include "rule_tasks_plt.h"
+#else
 struct ebpfos_task_rule {
  struct ebpfos_rule_decision *decision;
  sys_call_ptr_t table[NR_syscalls];
@@ -127,3 +130,5 @@ void ebpfos_task_rule_fork(struct task_struct *task)
 }
 void ebpfos_task_rule_free(struct task_struct *task)
 { task_rule_put(task->ebpfos_task_rule); }
+
+#endif /* CONFIG_EBPFOS_PLT */

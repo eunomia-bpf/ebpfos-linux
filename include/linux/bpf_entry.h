@@ -3,6 +3,13 @@
 #define _LINUX_BPF_ENTRY_H
 #include <linux/bpf.h>
 struct entry_set;
+#ifdef CONFIG_EBPFOS_PLT
+struct ebpfos_function_binding;
+struct bpf_entry_scope;
+struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding *, u32);
+void bpf_entry_scope_put(struct bpf_entry_scope *);
+u32 bpf_entry_scope_id(const struct bpf_entry_scope *);
+#endif
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 struct entry_set *bpf_entry_code_get(struct bpf_prog *const *, u32);
 void bpf_entry_code_put(struct entry_set *);

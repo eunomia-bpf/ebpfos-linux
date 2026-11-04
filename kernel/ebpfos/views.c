@@ -179,6 +179,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
  for (i = 0; i < count; ++i) {
   struct bpf_prog *program = sources[i].program;
   int slot = task_view_slot(sources[i].native_address, view->selected, view->table);
+  bool syscall_entry = slot >= 0;
   if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
   /* A private member can escape into an asynchronous callback. The view
    * proves a task entry only for an actual native syscall-table root.
@@ -186,6 +187,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
   if (slot < 0 && bpf_native_func_entry(program) && program->sleepable) {
    error = -EOPNOTSUPP;goto fail;
   }
+  if (IS_ENABLED(CONFIG_EBPFOS_PLT)) slot = -ENOENT;
   if (slot < 0) {
    bool ftrace, canonical_nop;
    unsigned long ip = bpf_entry_text_location(sources[i].source_module,
@@ -195,10 +197,10 @@ static struct ebpfos_task_view_request *task_view_prepare(
     unsigned int j;
     /* A generic entry can also run outside a task. Its callable cannot
      * acquire syscall-only sleepable authority from this request. */
-    if (program->sleepable) {error = -EOPNOTSUPP;goto fail;}
+    if (program->sleepable && !(IS_ENABLED(CONFIG_EBPFOS_PLT) && syscall_entry)) {error = -EOPNOTSUPP;goto fail;}
     for (j = 0; j < view->text_count; ++j)
      if (view->text[j].ip == ip) {error = -ENOTUNIQ;goto fail;}
-    if (!entry_native_jump(ip, sources[i].address, entry->bytes)) {error = -ERANGE;goto fail;}
+    if (!IS_ENABLED(CONFIG_EBPFOS_PLT) && !entry_native_jump(ip, sources[i].address, entry->bytes)) {error = -ERANGE;goto fail;}
     entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
    }
    /* An entry without its own instruction stays private to its holders.
@@ -224,7 +226,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
   if (view->bindings[i].syscall_slot >= 0)
    view->table[view->bindings[i].syscall_slot] = (sys_call_ptr_t)view->bindings[i].address;
  if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
- if (view->text_count) {
+ if (view->text_count && !IS_ENABLED(CONFIG_EBPFOS_PLT)) {
   unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
   unsigned int count = 0;
   if (!ips) {error = -ENOMEM;goto fail;}
@@ -300,6 +302,27 @@ struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kerne
  }
  kvfree(sources);kvfree(targets);return request;
 }
+
+#ifdef CONFIG_EBPFOS_PLT
+int ebpfos_rule_task_bindings(struct ebpfos_task_view_request *request,
+ ebpfos_rule_binding_visit visit, void *opaque)
+{
+ struct task_view *view;
+ u32 i;
+ int error;
+ if (!request) return 0;
+ view = request->next->private_data;
+ for (i = 0; i < view->count; ++i) {
+  bool ftrace, canonical;
+  if (view->bindings[i].address == view->bindings[i].native_address) continue;
+  if (!bpf_entry_text_location(view->bindings[i].source_module,
+       view->bindings[i].native_address, &ftrace, &canonical)) continue;
+  error = visit(&view->bindings[i], opaque);
+  if (error) return error;
+ }
+ return 0;
+}
+#endif
 
 bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *a,
  struct ebpfos_task_view_request *b)

@@ -193,11 +193,18 @@ static struct entry_set *entry_generation(struct entry_set *set, unsigned int id
 static unsigned int entry_generation_slot(unsigned int id)
 { return 0; }
 #include "function_entry_side.h"
+#ifdef CONFIG_EBPFOS_PLT
+static bool entry_plt_owned(unsigned long ip);
+#endif
 static int entry_ownership(struct entry_set *set)
 {
  struct entry_set *owner;
  unsigned int i, j;
  if (set->poisoned) return -EUCLEAN;
+#ifdef CONFIG_EBPFOS_PLT
+ for (i = 0; i < set->slot_count; ++i)
+  if (entry_plt_owned(set->slots[i].ip)) return -EBUSY;
+#endif
  /* Each reserved instruction has one active journal. Retained generations
   * keep executable ownership even if an exceptional rollback cannot finish. */
  list_for_each_entry(owner, &entry_retained, retained) {
@@ -899,3 +906,7 @@ out:
  kvfree(expected);kvfree(old_fds);kvfree(programs);
  return error;
 }
+
+#ifdef CONFIG_EBPFOS_PLT
+#include "function_entry_plt.h"
+#endif

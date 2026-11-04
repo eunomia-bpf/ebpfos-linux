@@ -1651,7 +1651,11 @@ struct task_struct {
 #if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
 	/* Task-owned syscall and object-selection references. Objects retain
 	 * their own operations independently after creation. */
+#ifdef CONFIG_EBPFOS_PLT
+	u32 ebpfos_version;
+#else
 	long (* const *ebpfos_syscalls)(const struct pt_regs *);
+#endif
 	struct ebpfos_task_rule *ebpfos_task_rule;
 	bool ebpfos_task_rule_pending;
 #endif

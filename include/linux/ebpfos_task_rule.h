@@ -8,6 +8,13 @@ struct ebpfos_rule_decision;
 struct ebpfos_task_view_request;
 struct bpf_kernel_rule_version;
 struct bpf_operations_set;
+#ifdef CONFIG_EBPFOS_PLT
+struct ebpfos_function_binding;
+typedef int (*ebpfos_rule_binding_visit)(const struct ebpfos_function_binding *, void *);
+int ebpfos_rule_task_bindings(struct ebpfos_task_view_request *, ebpfos_rule_binding_visit, void *);
+int ebpfos_rule_selected_bindings(struct ebpfos_rule_decision *, ebpfos_rule_binding_visit, void *);
+void ebpfos_task_rule_started(struct task_struct *);
+#endif
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 void ebpfos_task_rule_claim(void);
 void ebpfos_task_rule_unclaim(void);

@@ -16,6 +16,10 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr);
 struct ebpfos_rule_decision *ebpfos_rule_resolve(const struct bpf_kernel_rule_ctx *, gfp_t);
 struct ebpfos_rule_decision *ebpfos_rule_decision_get(struct ebpfos_rule_decision *);
 void ebpfos_rule_decision_put(struct ebpfos_rule_decision *);
+#ifdef CONFIG_EBPFOS_PLT
+u64 ebpfos_rule_decision_epoch(const struct ebpfos_rule_decision *);
+bool ebpfos_rule_decision_same(const struct ebpfos_rule_decision *, const struct ebpfos_rule_decision *);
+#endif
 struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *,
  const void *original, u32 type, size_t size);
 u64 ebpfos_rule_epoch(void);
