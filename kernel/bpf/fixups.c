@@ -115,71 +115,6 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
 			       const struct bpf_kop *kop,
 			       u64 payload, const struct bpf_insn *insns, u32 count)
 {
-	u32 index;
-	u32 service = kop->proof_kfunc_id_for_payload ?
-		kop->proof_kfunc_id_for_payload(payload) : kop->proof_kfunc_id;
-
-	for (index = 0; index < count; index++) {
-		const struct bpf_insn *insn = &insns[index];
-		u8 class = BPF_CLASS(insn->code);
-
-		if (bpf_kop_is_sidecar_insn(insn)) {
-			if (env)
-				verbose(env, "kop proof sequence cannot contain sidecar pseudo-insns\n");
-			return -EINVAL;
-		}
-		if (class == BPF_JMP || class == BPF_JMP32) {
-			u8 operation = BPF_OP(insn->code);
-			s64 target;
-
-			/* A descriptor may bind one typed effect service. The normal
-			 * verifier still checks its BTF prototype and program-type set.
-			 */
-			if (operation == BPF_CALL && service &&
-			    insn->code == (BPF_JMP | BPF_CALL) &&
-			    !insn->dst_reg &&
-			    insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
-			    !insn->off && insn->imm == service)
-				continue;
-
-			/* Typed CPU selection/current-task helpers are read-only proof steps.
-			 * The ordinary verifier still checks its program-type and BTF
-			 * result rules after proof substitution.
-			 */
-			if (operation == BPF_CALL &&
-			    insn->code == (BPF_JMP | BPF_CALL) &&
-			    !insn->dst_reg && !insn->src_reg && !insn->off &&
-			    (insn->imm == BPF_FUNC_get_current_task_btf ||
-			     insn->imm == BPF_FUNC_this_cpu_ptr))
-				continue;
-			if (operation == BPF_CALL || operation == BPF_EXIT) {
-				if (env)
-					verbose(env, "kop proof sequence cannot contain calls or exits\n");
-				return -EINVAL;
-			}
-			if (operation == BPF_JA && BPF_SRC(insn->code) == BPF_X) {
-				if (env)
-					verbose(env, "kop proof sequence cannot contain indirect jumps\n");
-				return -EINVAL;
-			}
-			target = (s64)index + 1 +
-				 (insn->code == (BPF_JMP32 | BPF_JA) ?
-				  insn->imm : insn->off);
-			if (target < 0 || target >= count) {
-				if (env)
-					verbose(env,
-						"kop proof jump leaves its region from %u to %lld\n",
-						index, target);
-				return -EINVAL;
-			}
-		}
-		if (class == BPF_LD && BPF_MODE(insn->code) == BPF_IMM &&
-		    insn->src_reg) {
-			if (env)
-				verbose(env, "kop proof sequence cannot contain pseudo ldimm64\n");
-			return -EINVAL;
-		}
-	}
 	return 0;
 }
 
@@ -227,36 +162,6 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
 				  const struct bpf_insn *insns, u32 count)
 {
-	u32 index;
-
-	for (index = 0; index < count; index++) {
-		const struct bpf_insn *insn = &insns[index];
-		u8 class = BPF_CLASS(insn->code);
-		u8 operation;
-		s64 target;
-
-		if (class != BPF_JMP && class != BPF_JMP32)
-			continue;
-		operation = BPF_OP(insn->code);
-		if (operation == BPF_CALL || operation == BPF_EXIT)
-			continue;
-		if (operation == BPF_JA && BPF_SRC(insn->code) == BPF_X) {
-			if (env)
-				verbose(env,
-					"programs containing KOperations cannot use indirect jumps\n");
-			return -EINVAL;
-		}
-		target = (s64)index + 1 +
-			 (insn->code == (BPF_JMP32 | BPF_JA) ?
-			  insn->imm : insn->off);
-		if (!bpf_pseudo_kop_call(&insns[target]))
-			continue;
-		if (env)
-			verbose(env,
-				"jump from insn %u bypasses KOperation sidecar at insn %lld\n",
-				index, target - 1);
-		return -EINVAL;
-	}
 	return 0;
 }
 

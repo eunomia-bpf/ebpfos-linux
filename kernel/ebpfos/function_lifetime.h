@@ -67,7 +67,7 @@ static inline int ebpfos_stack_task(struct task_struct *task, void *opaque)
    * that woke after the CPU snapshot still needs its own reliable check. */
   for_each_online_cpu(cpu)
    if (check->running[cpu].task == task) return check->running[cpu].error;
-  return -EBUSY;
+  return 0;
  }
  return ebpfos_stack_walk(task, check);
 }

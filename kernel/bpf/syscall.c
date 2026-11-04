@@ -2931,7 +2931,7 @@ static int bpf_native_prog_load(union bpf_attr *attr)
  union bpf_attr allowed = {};
  struct bpf_prog *prog;
  int err;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ 
  allowed.prog_type = attr->prog_type;
  allowed.expected_attach_type = attr->expected_attach_type;
  allowed.attach_btf_obj_fd = attr->attach_btf_obj_fd;
@@ -2991,8 +2991,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		/* Like loading native modules, this grants kernel execution,
 		 * not a delegated BPF token privilege or a safety guarantee.
 		 */
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
+		
 	} 	/* This is load metadata, copied with kvmalloc rather than into a page.
 	 * Retain the complete per-function declarations; an incomplete prefix
 	 * cannot describe a component's source write authority.

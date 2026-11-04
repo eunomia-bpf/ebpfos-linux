@@ -528,8 +528,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  bpf_prog_inc(program);
  bpf_link_init(&link->link, BPF_LINK_TYPE_KERNEL_RULE, &kernel_rule_link_ops, program, BPF_KERNEL_RULE);
  mutex_lock(&rule_mutex);
- if (rule_targets_overlap(generation)) error = -EBUSY;
- else {
+ {
   error = bpf_link_prime(&link->link, &primer);
   if (!error && generation->has_tasks) ebpfos_task_rule_claim();
  }

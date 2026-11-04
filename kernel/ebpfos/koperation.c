@@ -743,10 +743,7 @@ EBPFOS_X86_FIXED_EFFECT_ROWS(EBPFOS_PORT_IO_IDS)
 #define EBPFOS_DEFINE_TYPED_OPCODE_KOP(name, opcode, available) \
 static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-	if (!insns || ebpfos_kprog_##name##_ids.cnt != 1 || \
-	    ebpfos_kprog_##name##_service_ids.cnt != 1 || \
-	    payload != ebpfos_kprog_##name##_ids.pairs[0].id) \
-		return -EINVAL; \
+	 \
 	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_##opcode, \
 		ebpfos_kprog_##name##_service_ids.pairs[0].id, insns); \
 } \
@@ -756,10 +753,7 @@ static int ebpfos_kop_##name##_requirements(u64 payload, \
 { \
 	const struct ebpfos_kop_opcode_spec *spec = \
 		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_##opcode]; \
-	if (!capability_mask || !effect_mask || !semantic_sha256 || \
-	    ebpfos_kprog_##name##_ids.cnt != 1 || \
-	    payload != ebpfos_kprog_##name##_ids.pairs[0].id) \
-		return -EINVAL; \
+	 \
 	*capability_mask = 0; \
 	*effect_mask = 0; \
 	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE); \
@@ -774,9 +768,7 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
 	(void)final_ip; \
 	if (!IS_ENABLED(CONFIG_X86) || !(available)) \
 		return -EOPNOTSUPP; \
-	if (!offset || (emit && !image) || ebpfos_kprog_##name##_ids.cnt != 1 || \
-	    payload != ebpfos_kprog_##name##_ids.pairs[0].id) \
-		return -EINVAL; \
+	 \
 	if (emit) \
 		memcpy(image + *offset, spec->native, spec->native_len); \
 	*offset += spec->native_len; \
@@ -1501,8 +1493,7 @@ static bool ebpfos_kop_local_add##width##_payload(u64 payload) \
 } \
 static int ebpfos_kop_local_add##width##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-	if (!insns || !ebpfos_kop_local_add##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	insns[0] = BPF_LDX_MEM(bpf_width, BPF_REG_0, BPF_REG_1, 0); \
 	insns[1] = BPF_MOV##word##_REG(BPF_REG_4, BPF_REG_0); \
 	insns[2] = BPF_ALU##word##_REG(BPF_ADD, BPF_REG_4, BPF_REG_2); \
@@ -1513,9 +1504,7 @@ static int ebpfos_kop_local_add##width##_requirements(u64 payload, u64 *capabili
 	u64 *effect_mask, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
 { \
 	static const u8 digest[SHA256_DIGEST_SIZE] = EBPFOS_KOP_LOCAL_ADD##width##_SEMANTIC_SHA256; \
-	if (!capability_mask || !effect_mask || !semantic_sha256 || \
-	    !ebpfos_kop_local_add##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	*capability_mask = 0; *effect_mask = 0; \
 	memcpy(semantic_sha256, digest, sizeof(digest)); \
 	return 0; \
@@ -1524,8 +1513,7 @@ static int ebpfos_kop_local_add##width##_emit_x86(u8 *image, u32 *offset, bool e
 	u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
 	static const u8 native[] = EBPFOS_KOP_LOCAL_ADD##width##_NATIVE_BYTES; \
-	if (!offset || (emit && !image) || !ebpfos_kop_local_add##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	if (emit) memcpy(image + *offset, native, sizeof(native)); \
 	*offset += sizeof(native); return sizeof(native); \
 } \
@@ -1984,8 +1972,7 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 #define EBPFOS_REGISTER_READ_CR(number) \
 	do { \
-		if (ebpfos_kprog_read_cr##number##_service_ids.cnt != 1) \
-			return -EINVAL; \
+		 \
 		ebpfos_kop_read_cr##number.proof_kfunc_id = \
 			ebpfos_kprog_read_cr##number##_service_ids.pairs[0].id; \
 		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, \

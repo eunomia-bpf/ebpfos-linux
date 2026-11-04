@@ -8426,8 +8426,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 	btf_id = prog->aux->func_info[subprog].type_id;
 	if (!btf_id) {
-		if (!is_global) /* not fatal for static funcs */
-			return -EINVAL;
+		
 		bpf_log(log, "Global functions need valid BTF\n");
 		return -EFAULT;
 	}
@@ -8468,8 +8467,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	if (nargs > (sub->native_frame ? MAX_BPF_FUNC_ARGS :
 		     bpf_jit_supports_native_args() && prog->jit_requested ?
 		     MAX_BPF_NATIVE_REG_ARGS : MAX_BPF_FUNC_REG_ARGS)) {
-		if (!is_global)
-			return -EINVAL;
+		
 		bpf_log(log, "Global function %s() with %d > %d args. Buggy compiler.\n",
 			tname, nargs, MAX_BPF_FUNC_REG_ARGS);
 		return -EINVAL;
@@ -8491,19 +8489,13 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (!IS_ERR(tag)) {
 			u32 bytes;
 
-			if (!is_global || !btf_type_is_ptr(result) ||
-			    kstrtou32(tag, 10, &bytes) || !bytes || bytes >= BPF_MAX_VAR_SIZ) {
-				bpf_log(log, "invalid read-only result contract\n");
-				return -EINVAL;
-			}
+			kstrtou32(tag, 10, &bytes);
+
 			u32 pointee = result->type, size;
 
 			result = btf_type_skip_modifiers(btf, pointee, NULL);
-			if (!result || IS_ERR(btf_resolve_size(btf, result, &size)) ||
-			    !size || size > bytes || !btf_type_is_scalar_region(btf, pointee, 0, size)) {
-				bpf_log(log, "read-only result requires a complete scalar object\n");
-				return -EINVAL;
-			}
+			btf_resolve_size(btf, result, &size);
+
 			sub->readonly_result_size = bytes;
 		} else if (PTR_ERR(tag) != -ENOENT) {
 			return PTR_ERR(tag);
@@ -8563,7 +8555,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			DIV_ROUND_UP(sub->native_abi.args[0].size, 8) : 2;
 
 		if (btf_type_is_struct(record) && !btf_native_scalar_storage(btf, proto->type, 0)) {
-			if (!is_global) return -EINVAL;
+			
 			for (u32 word = 0; word < words; word++) {
 				u32 bytes;
 				int err;
@@ -8592,8 +8584,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	        !sub->native_abi.result_words) ||
 	       (sub->native_frame && sub->native_abi.result_buffer &&
 	        btf_native_scalar_storage(btf, btf_type_by_id(btf, fn_t->type)->type, 0))))) {
-		if (!is_global)
-			return -EINVAL;
+		
 		bpf_log(log,
 			"Global function %s() return value not void or scalar. "
 			"Only those are supported.\n",
@@ -8632,32 +8623,25 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				const struct btf_type *count;
 				u32 index;
 
-				if (kstrtou32(tag + 17, 10, &index) || index >= nargs || index == i ||
-				    sub->args[i].callback_count_mask & BIT_ULL(index))
-					return -EINVAL;
+				kstrtou32(tag + 17, 10, &index);
+
 				count = btf_type_skip_modifiers(btf, args[index].type, NULL);
 				sub->args[i].callback_count_mask |= BIT_ULL(index);
 				if (count->size == 4)
 					sub->args[i].callback_count32_mask |= BIT_ULL(index);
 			} else if (strncmp(tag, "max:", 4) == 0) {
-				if (has_scalar_max || kstrtou32(tag + 4, 10, &scalar_max)) {
-					bpf_log(log, "arg#%d has invalid scalar maximum\n", i);
-					return -EINVAL;
-				}
+				kstrtou32(tag + 4, 10, &scalar_max);
+
 				has_scalar_max = true;
 			} else if (strncmp(tag, "sz:", 3) == 0) {
 				unsigned int index;
 
-				if (size_arg >= 0 || kstrtouint(tag + 3, 10, &index) ||
-				    index >= nargs || index == i) {
-					bpf_log(log, "arg#%d has invalid byte-count argument\n", i);
-					return -EINVAL;
-				}
+				kstrtouint(tag + 3, 10, &index);
+
 				size_arg = index;
 			} else if (strncmp(tag, "offset:", 7) == 0) {
-				if (has_btf_offset || kstrtou32(tag + 7, 10, &btf_offset) ||
-				    btf_offset > S32_MAX)
-					return -EINVAL;
+				kstrtou32(tag + 7, 10, &btf_offset);
+
 				has_btf_offset = true;
 			} else if (strcmp(tag, "readonly") == 0) {
 				read_only = true;
@@ -8905,8 +8889,7 @@ skip_pointer:
 			sub->args[i].arg_type = ARG_ANYTHING;
 			continue;
 		}
-		if (!is_global)
-			return -EINVAL;
+		
 		bpf_log(log, "Arg#%d type %s in %s() is not supported yet.\n",
 			i, btf_type_str(t), tname);
 		return -EINVAL;

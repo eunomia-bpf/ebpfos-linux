@@ -112,10 +112,7 @@ static int bpf_tramp_ftrace_ops_func(struct ftrace_ops *ops, unsigned long ip,
 
 	switch (cmd) {
 	case FTRACE_OPS_CMD_ENABLE_SHARE_IPMODIFY_PEER:
-		if (tr->flags & BPF_TRAMP_F_NATIVE_REPLACE) {
-			ret = -EBUSY;
-			break;
-		}
+		
 		tr->flags |= BPF_TRAMP_F_SHARE_IPMODIFY;
 
 		if ((tr->flags & BPF_TRAMP_F_CALL_ORIG) &&

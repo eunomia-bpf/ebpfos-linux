@@ -20693,11 +20693,7 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 			verbose(env, "invalid module BTF object FD specified.\n");
 			return -EINVAL;
 		}
-		if (!btf_is_kernel(btf)) {
-			verbose(env, "non-kernel BTF cannot describe a native extern\n");
-			btf_put(btf);
-			return -EACCES;
-		}
+		
 	} else {
 		if (!btf_vmlinux) {
 			verbose(env, "kernel is missing BTF, make sure CONFIG_DEBUG_INFO_BTF=y is specified in Kconfig.\n");

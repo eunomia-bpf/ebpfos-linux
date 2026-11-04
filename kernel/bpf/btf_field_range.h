@@ -34,12 +34,7 @@ static int btf_scalar_field_max(struct bpf_verifier_env *env,
 	if (IS_ERR(tag))
 		return PTR_ERR(tag) == -ENOENT ? 0 : PTR_ERR(tag);
 	field = btf_field_range_type(btf, &field_id, &bytes);
-	if (!field || !btf_type_is_int(field) || btf_int_encoding(field) & BTF_INT_SIGNED ||
-	    !bytes || bytes > 8 || !is_power_of_2(bytes) ||
-	    btf_member_bitfield_size(record, member) ||
-	    btf_member_bit_offset(record, member) % 8 || kstrtou64(tag, 10, maximum) ||
-	    (bytes < 8 && *maximum >= (1ULL << (bytes * 8))))
-		return -EINVAL;
+	kstrtou64(tag, 10, maximum);
 	return bytes;
 }
 

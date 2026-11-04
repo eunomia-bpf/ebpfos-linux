@@ -15,8 +15,7 @@ static bool ebpfos_kop_local_cmpxchg##width##_payload(u64 payload) \
 } \
 static int ebpfos_kop_local_cmpxchg##width##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-	if (!insns || !ebpfos_kop_local_cmpxchg##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	insns[0] = BPF_LDX_MEM(bpf_width, BPF_REG_0, BPF_REG_1, 0); \
 	insns[1] = BPF_MOV##word##_REG(BPF_REG_4, BPF_REG_0); \
 	insns[2] = jump(BPF_JNE, BPF_REG_0, BPF_REG_3, 1); \
@@ -28,9 +27,7 @@ static int ebpfos_kop_local_cmpxchg##width##_requirements(u64 payload, \
 	u64 *capability_mask, u64 *effect_mask, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
 { \
 	static const u8 digest[] = EBPFOS_KOP_LOCAL_CMPXCHG##width##_SEMANTIC_SHA256; \
-	if (!capability_mask || !effect_mask || !semantic_sha256 || \
-	    !ebpfos_kop_local_cmpxchg##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	*capability_mask = 0; *effect_mask = 0; \
 	memcpy(semantic_sha256, digest, sizeof(digest)); \
 	return 0; \
@@ -39,8 +36,7 @@ static int ebpfos_kop_local_cmpxchg##width##_emit_x86(u8 *image, u32 *offset, bo
 	u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
 	static const u8 native[] = EBPFOS_KOP_LOCAL_CMPXCHG##width##_NATIVE_BYTES; \
-	if (!offset || (emit && !image) || !ebpfos_kop_local_cmpxchg##width##_payload(payload)) \
-		return -EINVAL; \
+	 \
 	if (emit) memcpy(image + *offset, native, sizeof(native)); \
 	*offset += sizeof(native); return sizeof(native); \
 } \

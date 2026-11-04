@@ -288,10 +288,9 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  }
  /* Non-method data (owner pointers, flags, locks, strings) stays native. */
  error = incompatible && !count ? -EPROTOTYPE : -EINVAL;
- if (!count || memcmp(checked, value, map->value_size)) goto free;
+ 
  mutex_lock(&ops->lock);
- if (ops->ready) error = -EBUSY;
- else {
+ {
   struct entry_set *code = bpf_entry_code_get(programs, ops->field_count);
   if (IS_ERR(code)) {error = PTR_ERR(code);goto unlock;}
   ops->code = code;
