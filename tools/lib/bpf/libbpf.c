@@ -652,6 +652,7 @@ struct extern_desc {
 		} kcfg;
 		struct {
 			unsigned long long addr;
+			bool source_btf;
 
 			/* target btf_id of the corresponding kernel var. */
 			int kernel_btf_obj_fd;
@@ -6552,9 +6553,10 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 					insn[0].imm = ext->ksym.kernel_btf_id;
 					insn[1].imm = ext->ksym.kernel_btf_obj_fd;
 				} else { /* typeless ksyms or unresolved typed ksyms */
-					if (!ext->ksym.type_id && (ext->is_set || ext->is_weak) &&
-					    kernel_supports(obj, ext->is_set ? FEAT_SOURCE_SCALAR_SYMBOL :
-							FEAT_SOURCE_WEAK_SYMBOL)) {
+					if (ext->ksym.source_btf ||
+					    (!ext->ksym.type_id && (ext->is_set || ext->is_weak) &&
+					     kernel_supports(obj, ext->is_set ? FEAT_SOURCE_SCALAR_SYMBOL :
+							 FEAT_SOURCE_WEAK_SYMBOL))) {
 						insn[0].src_reg = BPF_PSEUDO_BTF_ID;
 						insn[0].imm = ext->btf_id;
 						insn[1].imm = BPF_BTF_SOURCE;
@@ -8815,7 +8817,7 @@ static int bpf_object__read_kallsyms_file(struct bpf_object *obj)
 	for (i = 0; i < obj->nr_extern; i++) {
 		struct extern_desc *ext = &obj->externs[i];
 
-		if (ext->type != EXT_KSYM ||
+		if (ext->type != EXT_KSYM || ext->ksym.source_btf ||
 		    !btf_is_var(btf__type_by_id(obj->btf, ext->btf_id)))
 			continue;
 		index.entries[index.count++] = (struct ksym_extern) {
@@ -9129,10 +9131,19 @@ static int bpf_object__resolve_externs(struct bpf_object *obj,
 		ext = &obj->externs[i];
 
 		if (ext->type == EXT_KSYM) {
-			if (ext->ksym.type_id)
+			if (ext->ksym.type_id) {
 				need_vmlinux_btf = true;
-			else
-				need_kallsyms = true;
+			} else {
+				/* The source operand retains its name and weak role for
+				 * the verifier's kernel symbol lookup. A preliminary
+				 * flat kallsyms scan must not reject core/module aliases.
+				 * Older kernels still need the immediate-address path.
+				 */
+				ext->ksym.source_btf = kernel_supports(obj, ext->is_weak ?
+						FEAT_SOURCE_WEAK_SYMBOL : FEAT_SOURCE_SCALAR_SYMBOL);
+				if (!ext->ksym.source_btf)
+					need_kallsyms = true;
+			}
 			continue;
 		} else if (ext->type == EXT_KCFG) {
 			void *ext_ptr = kcfg_data + ext->kcfg.data_off;
@@ -9208,6 +9219,8 @@ static int bpf_object__resolve_externs(struct bpf_object *obj,
 	for (i = 0; i < obj->nr_extern; i++) {
 		ext = &obj->externs[i];
 
+		if (ext->type == EXT_KSYM && ext->ksym.source_btf)
+			continue;
 		if (!ext->is_set && !ext->is_weak) {
 			pr_warn("extern '%s' (strong): not resolved\n", ext->name);
 			return -ESRCH;
