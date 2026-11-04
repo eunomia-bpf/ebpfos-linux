@@ -51,16 +51,12 @@ static u32 stos_service(u64 payload)
 static int stos_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service = stos_service(payload);
- if (!insns || !service)
-  return -EINVAL;
  insns[0] = BPF_CALL_KFUNC(0, service);
  return 1;
 }
 static int stos_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
 {
  static const u8 digest[] = EBPFOS_BUFFER_STOSB_SHA256;
- if (!capability || !effect || !sha || !stos_valid(payload))
-  return -EINVAL;
  *capability = 0;
  *effect = 0;
  memcpy(sha, digest, 32);
@@ -69,8 +65,6 @@ static int stos_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[3
 static int stos_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                      const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !stos_valid(payload))
-  return -EINVAL;
  if (emit)
   memcpy(image + *offset, stos_native, sizeof(stos_native));
  *offset += sizeof(stos_native);
