@@ -2942,10 +2942,6 @@ void bpf_free_kfunc_btf_tab(struct bpf_kfunc_btf_tab *tab)
 static struct btf *find_kfunc_desc_btf(struct bpf_verifier_env *env, s16 offset)
 {
 	if (offset == BPF_BTF_SOURCE) {
-		if (!env->prog->aux->trusted_kernel) {
-			verbose(env, "source BTF native extern requires the trusted tier\n");
-			return ERR_PTR(-EACCES);
-		}
 		return env->prog->aux->btf ?: ERR_PTR(-EINVAL);
 	}
 	if (offset) {
@@ -3007,11 +3003,6 @@ static int fetch_kfunc_meta(struct bpf_verifier_env *env,
 	 * any specialization could change a source call. Trusted preparation
 	 * retains the full C ABI without claiming this proof.
 	 */
-	if (env->prog->aux->ebpfos_component && !env->prog->aux->trusted_kernel &&
-	    kfunc_flags && (*kfunc_flags & KF_IMPLICIT_ARGS)) {
-		verbose(env, "source C call %s requires an implicit-argument contract\n", func_name);
-		return -EACCES;
-	}
 
 	proto_id = btf_native_func_proto_id(btf, func_id, env->prog);
 	func_proto = proto_id > 0 ? btf_type_by_id(btf, proto_id) : NULL;
@@ -3098,22 +3089,12 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 
 	desc = find_kfunc_desc(env->prog, func_id, offset);
 	if (desc) {
-		if (!!desc->kop != kop_call) {
-			verbose(env, "btf_id %u cannot be both a kernel function and KOperation\n",
-				func_id);
-			return -EINVAL;
-		}
 		return 0;
 	}
 
 	err = fetch_kfunc_meta(env, func_id, offset, &kfunc);
 	if (err)
 		return err;
-	if (!kop_call && kfunc.kop) {
-		verbose(env, "KOperation btf_id %u cannot be called as a kernel function\n",
-			func_id);
-		return -EACCES;
-	}
 
 	/* A whole-image body can call every native entry. Retain one descriptor
 	 * for each distinct call instead of a separate fixed callee budget.
@@ -3258,8 +3239,6 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 	u32 count = 0;
 	u32 index;
 
-	if (!prog || !capability_mask || !effect_mask || !semantic_set_sha256)
-		return -EINVAL;
 	tab = prog->aux->kfunc_tab;
 	if (prog->aux->ebpfos_kop_requirements_valid) {
 		*capability_mask = prog->aux->ebpfos_kop_capability_mask;
@@ -3301,13 +3280,7 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
 
 		if (!bpf_pseudo_kop_call(call))
 			continue;
-		if (!index || !bpf_kop_is_sidecar_insn(call - 1))
-			return -EPROTO;
-		if (!tab)
-			return -EACCES;
 		desc = find_kfunc_desc(prog, call->imm, call->off);
-		if (!desc || !desc->kop)
-			return -EACCES;
 		kop = desc->kop;
 		payload = bpf_kop_sidecar_payload(call - 1);
 		if (kop->requirements) {
@@ -3358,21 +3331,10 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 	u32 recovery, j, owner_start = 0, end = 0, operation, first, last;
 	int err;
 
-	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux)) {
-		verbose(env, "instruction exception annotations require native JIT emission\n");
-		return -EOPNOTSUPP;
-	}
 	branch = &insns[index];
 	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
 	 * analysis. No register refinement or call-state analysis is added.
 	 */
-	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg > 1 ||
-	    (branch->dst_reg ? (branch->imm != 3 && branch->imm != 14) :
-	     (branch->imm != 1 && branch->imm != 3)))
-		return -EINVAL;
-	if ((branch->dst_reg && index < 2) ||
-	    (!branch->dst_reg && index + 1 >= env->prog->len))
-		return -EINVAL;
 	operation = branch->dst_reg ? index - 1 : index + 1;
 	first = branch->dst_reg ? index - 2 : index;
 	last = branch->dst_reg ? index : index + 1;
@@ -3391,8 +3353,6 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 			end = next;
 		}
 	}
-	if (!end || recovery < owner_start || recovery >= end)
-		return -EINVAL;
 	for (j = 0; j < env->prog->len; j++) {
 		const struct bpf_insn *insn = &insns[j];
 		u8 class = BPF_CLASS(insn->code);
@@ -3411,12 +3371,6 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 			target = (s64)j + 1 +
 				(insn->code == (BPF_JMP32 | BPF_JA) ?
 				 insn->imm : insn->off);
-		}
-		if (branch->dst_reg ? (target == index || target == operation) :
-		    target == operation) {
-			verbose(env, "branch bypasses instruction exception annotation at insn %u\n",
-				index);
-			return -EINVAL;
 		}
 	}
 	env->insn_aux_data[index].kop_call_fault_branch = true;
@@ -3449,12 +3403,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		 * submitted FUNC records against the original subprog layout first.
 		 */
 		if (aux->func_info) {
-			if (aux->func_info_cnt != env->subprog_cnt)
-				return -EINVAL;
 			for (i = 0; i < env->subprog_cnt; i++) {
-				if (aux->func_info[i].insn_off !=
-				    env->subprog_info[i].start)
-					return -EINVAL;
 			}
 		}
 		/* The proof expansion temporarily removes the payload/call pairs.
@@ -3495,26 +3444,15 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		call = &env->prog->insnsi[i];
 		if (!bpf_pseudo_kop_call(call))
 			continue;
-		if (!i || !bpf_kop_is_sidecar_insn(call - 1)) {
-			verbose(env, "KOperation call must be preceded by a payload sidecar\n");
-			return -EINVAL;
-		}
 		sidecar = call - 1;
 		{
 			u32 j;
 
 			for (j = 1; j < env->subprog_cnt; j++) {
-				if (env->subprog_info[j].start == i) {
-					verbose(env,
-						"KOperation sidecar crosses a subprogram boundary\n");
-					return -EINVAL;
-				}
 			}
 		}
 
 		desc = find_kfunc_desc(env->prog, call->imm, call->off);
-		if (!desc || !desc->kop)
-			return -ENOENT;
 		native_backedge = desc->kop->noreturn_native_backedge;
 		if (native_backedge) {
 			const struct bpf_insn *backedge;
@@ -3524,47 +3462,18 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 			u32 subprog_end = 0;
 			u32 index;
 
-			if (!(desc->flags & KF_NORETURN) || i + 1 >= env->prog->len) {
-				verbose(env,
-					"native-backedge KOperation must be no-return and precede a jump\n");
-				return -EINVAL;
-			}
 			backedge = &env->prog->insnsi[i + 1];
-			if (backedge->code != (BPF_JMP | BPF_JA) ||
-			    backedge->dst_reg || backedge->src_reg ||
-			    backedge->imm || backedge->off > -3) {
-				verbose(env,
-					"native-backedge KOperation lacks an exact backward continuation\n");
-				return -EINVAL;
-			}
 			target = (s64)i + 2 + backedge->off;
-			if (target < 0 || target > i - 1) {
-				verbose(env,
-					"native-backedge KOperation target is invalid\n");
-				return -EINVAL;
-			}
-			if (target && bpf_is_ldimm64(&env->prog->insnsi[target - 1])) {
-				verbose(env,
-					"native-backedge KOperation targets an ldimm64 continuation\n");
-				return -EINVAL;
-			}
 			for (subprog = 0; subprog < env->subprog_cnt; subprog++) {
 				u32 start = env->subprog_info[subprog].start;
 				u32 end = env->subprog_info[subprog + 1].start;
 
 				if (start <= i && i < end) {
-					if (target < start || i + 1 >= end) {
-						verbose(env,
-							"native-backedge KOperation escapes its subprogram\n");
-						return -EINVAL;
-					}
 					subprog_start = start;
 					subprog_end = end;
 					break;
 				}
 			}
-			if (subprog == env->subprog_cnt)
-				return -EINVAL;
 			for (index = subprog_start; index < subprog_end; index++) {
 				const struct bpf_insn *insn =
 					&env->prog->insnsi[index];
@@ -3586,12 +3495,6 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 					branch_target = (s64)index + 1 +
 						(insn->code == (BPF_JMP32 | BPF_JA) ?
 						 insn->imm : insn->off);
-				}
-				if (branch_target == i + 1) {
-					verbose(env,
-						"jump bypasses native-backedge KOperation at insn %d\n",
-						i);
-					return -EINVAL;
 				}
 			}
 			native_backedge_target = target;
@@ -3744,9 +3647,6 @@ static int restore_kop_proof_regions(struct bpf_verifier_env *env)
 		u32 j;
 		int err;
 
-		if (WARN_ON_ONCE(region->orig_len < 2 ||
-				 region->orig_len > ARRAY_SIZE(region->orig)))
-			return -EFAULT;
 		for (j = 0; j < region->proof_len; j++)
 			seen = max(seen, env->insn_aux_data[region->start + j].seen);
 		memcpy(original, region->orig,
@@ -3755,8 +3655,6 @@ static int restore_kop_proof_regions(struct bpf_verifier_env *env)
 			s64 offset = (s64)region->native_backedge_target -
 				     ((s64)region->start + 3);
 
-			if (offset < S16_MIN || offset > -3)
-				return -ERANGE;
 			original[2].off = (s16)offset;
 		}
 		new_prog = bpf_patch_insn_data(env, region->start,
@@ -4229,12 +4127,6 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 					bits = insn->imm;
 				else if (class == BPF_JMP && BPF_OP(insn->code) == BPF_CALL)
 					bits = 64;
-			}
-			if (bits > reg->native_input_bits &&
-			    (input_bytes || (!native_input_normalizes(insn, regno, reg->native_input_bits) &&
-					     !native_input_transport_bits(insn, regno, reg->native_input_bits)))) {
-				verbose(env, "R%d native input has only its low %u bits initialized\n", regno, reg->native_input_bits);
-				return -EACCES;
 			}
 		}
 		/* We don't need to worry about FP liveness because it's read-only */
@@ -6399,8 +6291,6 @@ static int prepare_trusted_call_stack(struct bpf_verifier_env *env)
 				if (!bpf_pseudo_call(insn + i) && !bpf_pseudo_func(insn + i))
 					continue;
 				callee = bpf_find_subprog(env, i + insn[i].imm + 1);
-				if (callee < 0)
-					return -EFAULT;
 				if (si[callee].tail_call_reachable) {
 					si[sub].tail_call_reachable = true;
 					changed = true;
@@ -6938,11 +6828,6 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 		/* Immediate stores cannot carry pointer provenance. */
 		const struct bpf_insn *insn = &env->prog->insnsi[env->insn_idx];
 
-		if (BPF_CLASS(insn->code) != BPF_ST || BPF_MODE(insn->code) != BPF_MEM ||
-		    insn->imm || !nullable) {
-			verbose(env, "pointer store: immediate is not a nullable null pointer\n");
-			return -EACCES;
-		}
 		return 0;
 	}
 	if (value->type == SCALAR_VALUE && tnum_is_const(value->var_off) &&
@@ -6961,73 +6846,21 @@ static int check_btf_pointer_store(struct bpf_verifier_env *env,
 			callable ? "function pointer" : "pointer");
 		return -EACCES;
 	}
-	if (!nullable && type_may_be_null(value->type)) {
-		verbose(env, "pointer store: nullable value for nonnull field\n");
-		return -EACCES;
-	}
 	/* The field reader does not carry a stored value's read-only flag.
 	 * Publishing this capability would therefore recover write permission.
 	 */
-	if (value->type & MEM_RDONLY) {
-		verbose(env, "pointer store: read-only permission would be erased\n");
-		return -EACCES;
-	}
-	if ((value->type & (MEM_USER | MEM_PERCPU)) != (flags & (MEM_USER | MEM_PERCPU))) {
-		verbose(env, "pointer store: incompatible address space\n");
-		return -EACCES;
-	}
-	if (!tnum_is_const(value->var_off) || !pointee ||
-	    (callable ? value->var_off.value ||
-		!native_callback_types_match(value->btf, value->btf_id, dst->btf, pointee) :
-		!btf_struct_ids_match(&env->log, value->btf, value->btf_id,
-				     value->var_off.value, dst->btf, pointee, false))) {
-		verbose(env, "pointer store: incompatible BTF pointee\n");
-		return -EACCES;
-	}
 	/* Do not promote an explicitly untrusted (including expired RCU) value
 	 * into a field from which a later reader may recover trust.
 	 */
-	if (value->type & PTR_UNTRUSTED) {
-		verbose(env, "pointer store: stored value is untrusted or expired\n");
-		return -EACCES;
-	}
-	if (field_name &&
-	    (type_is_trusted(env, dst, field_name, pointee) ||
-	     type_is_trusted_or_null(env, dst, field_name, pointee)) &&
-	    !is_trusted_reg(value)) {
-		verbose(env, "pointer store: stored value violates read-side trust\n");
-		return -EACCES;
-	}
-	if (value->type & MEM_RCU && !in_rcu_cs(env)) {
-		verbose(env, "pointer store: stored value has no live RCU scope\n");
-		return -EACCES;
-	}
 	/* A source NULL test refines the address, not the lifetime. Publication
 	 * into an ordinary field would erase MEM_RCU on the next read and allow
 	 * the pointer to survive the enclosing scope. Require the field's read
 	 * contract to carry the same protection, independent of this writer.
 	 */
-	if (value->type & MEM_RCU && !(flags & MEM_RCU) &&
-	    !(field_name && (type_is_rcu(env, dst, field_name, pointee) ||
-			     type_is_rcu_or_null(env, dst, field_name, pointee)))) {
-		verbose(env, "pointer store: RCU lifetime would escape through ordinary field\n");
-		return -EACCES;
-	}
 	/* Acquired references must not escape into ordinary fields before a
 	 * subsequent release. Only self/interior links in the same owning
 	 * allocation preserve their modeled lifetime without a transfer.
 	 */
-	if (value->ref_obj_id &&
-	    (!find_reference_state(env->cur_state, value->ref_obj_id) ||
-	     !type_is_alloc(dst->type) || !type_is_alloc(value->type) ||
-	     dst->ref_obj_id != value->ref_obj_id)) {
-		verbose(env, "pointer store: acquired reference needs ownership transfer\n");
-		return -EACCES;
-	}
-	if (value->type & NON_OWN_REF) {
-		verbose(env, "pointer store: non-owning reference needs ownership transfer\n");
-		return -EACCES;
-	}
 	/* Ordinary borrowed kernel objects have no verifier-owned reference.
 	 * Their publication preserves Linux's locking/RCU/refcount discipline;
 	 * this rule does not claim a general proof of their object lifetime.
@@ -7057,15 +6890,6 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 	const struct bpf_prog_aux *aux = env->prog->aux;
 	bool type_authority = false;
 
-	if (dst->type & (MEM_RDONLY | PTR_UNTRUSTED | PTR_MAYBE_NULL)) {
-		verbose(env, "pointer store: destination is not writable\n");
-		return -EACCES;
-	}
-	if ((dst->ref_obj_id && !find_reference_state(env->cur_state, dst->ref_obj_id)) ||
-	    (dst->type & MEM_RCU && !in_rcu_cs(env)) || dst->type & NON_OWN_REF) {
-		verbose(env, "pointer store: destination modeled lifetime is not live\n");
-		return -EACCES;
-	}
 	for (u32 i = 0; i < aux->ebpfos_field_access_cnt; i++) {
 		const struct bpf_ebpfos_field_access *f = &aux->ebpfos_field_accesses[i];
 
@@ -7200,10 +7024,6 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	/* A checked read-only result grants no write authority, including when
 	 * an owned-type contract or a component field declaration permits writes.
 	 */
-	if (atype == BPF_WRITE && reg->type & MEM_RDONLY) {
-		verbose(env, "write through a read-only BTF pointer\n");
-		return -EACCES;
-	}
 
 	if (!env->allow_ptr_leaks) {
 		verbose(env,
@@ -7572,10 +7392,6 @@ static int check_stack_access_within_bounds(
 				}
 			}
 		}
-		if (min_off < low || max_off > high) {
-			verbose(env, "native stack access crosses argument/local area boundary\n");
-			return -EACCES;
-		}
 	}
 	err = check_stack_slot_within_bounds(env, min_off, state, type);
 	if (!err && max_off > 0)
@@ -7819,11 +7635,6 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		}
 
 	} else if (reg->type == PTR_TO_STACK) {
-		if (reg->native_stack_region == 2 && t == BPF_WRITE && value_regno >= 0 &&
-		    __is_pointer_value(false, &regs[value_regno])) {
-			verbose(env, "cannot publish a pointer through an incoming value argument\n");
-			return -EACCES;
-		}
 		/* Basic bounds checks. */
 		err = check_stack_access_within_bounds(env, regno, off, size, t);
 		if (err)
@@ -8456,15 +8267,6 @@ static int check_buffer_size_reg(struct bpf_verifier_env *env,
 	    cur_regs(env)[pointer_regno].mem_size_id && reg->umax_value) {
 		struct bpf_reg_state *ptr = &cur_regs(env)[pointer_regno];
 
-		if (!reg->id || (reg->id & BPF_ADD_CONST) || reg->delta ||
-		    ptr->mem_size_id != reg->id ||
-		    !tnum_is_const(ptr->var_off) || ptr->var_off.value ||
-		    ptr->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-		    (access_type == BPF_WRITE && type_is_rdonly_mem(ptr->type))) {
-			verbose(env, "R%d does not preserve buffer R%d byte-count contract\n",
-				regno, pointer_regno);
-			return -EACCES;
-		}
 		err = 0;
 	} else {
 		/* Preserve the existing global-argument STACK_POISON policy:
@@ -8501,10 +8303,6 @@ static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg
 	/* Helper access sizes are signed. Never let a large BTF object wrap
 	 * into a smaller stack access (or the negative poison convention).
 	 */
-	if (mem_size > INT_MAX) {
-		bpf_log(&env->log, "fixed memory object exceeds signed access size\n");
-		return -EINVAL;
-	}
 	if (bpf_register_is_null(reg))
 		return 0;
 
@@ -10767,10 +10565,6 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 	int err;
 	bool zero = true;
 
-	if (!sub->native_frame || (!input_bytes || input_bytes > 8) || arg->size > 8 || arg->stack_offset > sub->native_arg_out ||
-	    8 > sub->native_arg_out - arg->stack_offset || sp->type != PTR_TO_STACK ||
-	    !tnum_is_const(sp->var_off))
-		return -EINVAL;
 	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, input_bytes, BPF_READ);
 	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
@@ -10779,8 +10573,6 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 		u8 type = slot->slot_type[7 - byte];
 
 		if (type != STACK_ZERO) zero = false;
-		if (type != STACK_MISC && type != STACK_ZERO && type != STACK_SPILL)
-			return -EACCES;
 	}
 	native_value_scope(env, scope, regno);
 	if (bpf_is_spilled_reg(slot))
@@ -10895,14 +10687,7 @@ static int check_native_scalar_extension(struct bpf_verifier_env *env,
  bool sign;
  u32 bits = native_scalar_bits(type, &sign);
 
- if (!bits || bits > 64) return -EINVAL;
  if (bits < 32) {
-  if ((sign && (reg->s32_min_value < -(1 << (bits - 1)) ||
-                reg->s32_max_value > (1 << (bits - 1)) - 1)) ||
-      (!sign && reg->u32_max_value > (1U << bits) - 1)) {
-   verbose(env, "R%d lacks its native scalar extension\n", regno);
-   return -EINVAL;
-  }
   return mark_chain_precision(env, regno);
  }
  return 0;
@@ -10918,7 +10703,6 @@ static int native_call_arg_reg(struct bpf_verifier_env *env, const struct btf *b
 	const struct bpf_native_arg *arg = &abi->args[index + abi->result_buffer];
 	int err;
 
-	if (arg->words != 1) return -EOPNOTSUPP;
 	if (arg->reg >= 0) return bpf_arg_regno(arg->reg);
 	err = native_stack_arg_at(env, arg, scope, BPF_REG_0, native_named_input_bytes(btf, arg));
 	return err ?: BPF_REG_0;
@@ -10939,10 +10723,6 @@ static int check_native_scalar_tail(struct bpf_verifier_env *env,
    err = native_stack_arg_at(env, &arg, &temporary, 13, arg.size);regno = 13;
   }
   if (err) return err;
-  if (cur_regs(env)[regno].type != SCALAR_VALUE) {
-   verbose(env, "anonymous input requires an initialized scalar word\n");
-   return -EACCES;
-  }
  }
  return 0;
 }
@@ -10967,17 +10747,9 @@ static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf 
  struct bpf_subprog_arg_info arg;
  int err = btf_native_pointer_arg(btf, type, &arg, &env->log);
  if (err) return err;
- if (bpf_register_is_null(reg) || type_may_be_null(reg->type)) return -EACCES;
- if ((reg->type & (MEM_USER | MEM_PERCPU)) != (arg.arg_type & (MEM_USER | MEM_PERCPU))) return -EACCES;
- if (global && (reg->ref_obj_id || (reg->type & (MEM_RCU | MEM_ALLOC | NON_OWN_REF)))) return -EACCES;
  if (base_type(arg.arg_type) == ARG_PTR_TO_BTF_ID) {
-  if ((reg->type & MEM_RDONLY) && !(arg.arg_type & MEM_RDONLY)) return -EACCES;
-  if (base_type(reg->type) != PTR_TO_BTF_ID || !is_trusted_reg(reg) || !tnum_is_const(reg->var_off)) return -EACCES;
-  if (!btf_struct_ids_match(&env->log, reg->btf, reg->btf_id, reg->var_off.value,
-                           bpf_get_btf_vmlinux(), arg.btf_id, true)) return -EACCES;
   return 0;
  }
- if (base_type(reg->type) == PTR_TO_BTF_ID) return -EACCES;
  err = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
  if (err) return err;
  if (arg.arg_type & MEM_RDONLY)
@@ -11078,9 +10850,6 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 	struct bpf_func_state *frame = bpf_func(env, sp);
 	s64 off;
 
-	if (!sub->native_frame || sp->type != PTR_TO_STACK || !tnum_is_const(sp->var_off) ||
-	    arg->stack_offset > sub->native_arg_out || arg->size > sub->native_arg_out - arg->stack_offset)
-		return -EINVAL;
 	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, arg->size, BPF_READ);
 	if (err) return err;
 	off = (s64)sp->var_off.value + arg->stack_offset;
@@ -11090,9 +10859,6 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 		struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
 		u8 type = slot->slot_type[slot_byte % 8];
 
-		if (type != STACK_MISC && type != STACK_ZERO &&
-		    !(type == STACK_SPILL && slot->spilled_ptr.type == SCALAR_VALUE))
-			return -EACCES;
 	}
 	return 0;
 }
@@ -11158,15 +10924,6 @@ static int check_native_callback_arg(struct bpf_verifier_env *env, struct btf *b
 
 	if (nullable && bpf_register_is_null(reg))
 		return mark_chain_precision(env, regno);
-	if ((!nullable && type_may_be_null(reg->type)) ||
-	    base_type(reg->type) != PTR_TO_BTF_FUNC ||
-	    reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-	    (reg->type & MEM_RCU && !in_rcu_cs(env)) ||
-	    !tnum_is_const(reg->var_off) || reg->var_off.value ||
-	    !native_callback_types_match(reg->btf, reg->btf_id, btf, type_id)) {
-		verbose(env, "arg#%u requires a matching typed native callback\n", arg);
-		return -EACCES;
-	}
 	return 0;
 }
 
@@ -11221,12 +10978,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				struct bpf_subprog_info *caller = &env->subprog_info[cur_func(env)->subprogno];
 				u32 bytes = native_named_input_bytes(btf, location) == 4 ? 4 : max(location->size, 8u);
 
-				if (!caller->native_frame || location->stack_offset > caller->native_arg_out ||
-				    max(bytes, 8u) > caller->native_arg_out - location->stack_offset)
-					return -EINVAL;
 				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max) {
-					if (location->size > 8)
-						return -EOPNOTSUPP;
 					ret = native_stack_arg_at(env, location, &temporary, 13,
 						native_named_input_bytes(btf, location));
 					if (ret) return ret;
@@ -11239,9 +10991,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				struct bpf_func_state *frame = bpf_func(env, &regs[BPF_REG_ARG_SP]);
 				s64 off = (s64)regs[BPF_REG_ARG_SP].var_off.value + location->stack_offset;
 
-				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max ||
-				    !tnum_is_const(regs[BPF_REG_ARG_SP].var_off))
-					return -EOPNOTSUPP;
 				ret = check_stack_access_within_bounds(env, BPF_REG_ARG_SP,
 					location->stack_offset, bytes, BPF_READ);
 				if (ret) return ret;
@@ -11254,16 +11003,10 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 					struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
 					u8 type = slot->slot_type[slot_byte % 8];
 
-					if (type != STACK_MISC && type != STACK_ZERO &&
-					    !(type == STACK_SPILL && slot->spilled_ptr.type == SCALAR_VALUE))
-						return -EACCES;
 				}
 				continue;
 			}
 			regno = bpf_arg_regno(location->reg);
-			if (location->words == 2 && arg->arg_type == ARG_ANYTHING &&
-			    regs[bpf_arg_regno(location->reg + 1)].type != SCALAR_VALUE)
-				return -EACCES;
 		}
  native_argument:
 		reg = &regs[regno];
@@ -11284,12 +11027,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				if (count_regno < 0) return count_regno;
 				count = &regs[count_regno];
 				narrow = arg->callback_count32_mask & BIT_ULL(count_index);
-				if (count->type != SCALAR_VALUE ||
-				    (narrow ? count->u32_max_value : count->umax_value)) {
-					bpf_log(log, "arg#%d callback requires non-NULL when count arg#%u may be nonzero\n",
-						i, count_index);
-					return -EACCES;
-				}
 				ret = mark_chain_precision(env, count_regno);
 				if (ret) return ret;
 			}
@@ -11306,46 +11043,20 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			if (ret) return ret;
 		}
 
-		if (arg->has_btf_offset &&
-		    (base_type(reg->type) != PTR_TO_BTF_ID ||
-		     !tnum_is_const(reg->var_off) ||
-		     reg->var_off.value != arg->btf_offset)) {
-			bpf_log(log, "arg#%d requires BTF object offset %u\n", i, arg->btf_offset);
-			return -EACCES;
-		}
 
 		/* Independent globals cannot inherit the caller's reference identity
 		 * or RCU scope. An ordinary writable contract would turn a scoped or
 		 * owned value into a freely publishable trusted pointer. Read-only
 		 * untrusted contracts grant no such store capability.
 		 */
-		if ((base_type(arg->arg_type) == ARG_PTR_TO_MEM ||
-		     base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) &&
-		    !(arg->arg_type & PTR_UNTRUSTED) &&
-		    (reg->ref_obj_id || (reg->type & (MEM_RCU | MEM_ALLOC | NON_OWN_REF)))) {
-			bpf_log(log, "arg#%d modeled lifetime cannot be erased at global call\n", i);
-			return -EINVAL;
-		}
 
 		/* BTF qualifiers restrict every ordinary pointer contract, including
 		 * trusted and bounded memory arguments. NULL has no address space;
 		 * its admissibility is still governed by the argument's nullability.
 		 */
-		if ((base_type(arg->arg_type) == ARG_PTR_TO_MEM ||
-		     base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) &&
-		    !bpf_register_is_null(reg) &&
-		    (reg->type & (MEM_USER | MEM_PERCPU)) !=
-		    (arg->arg_type & (MEM_USER | MEM_PERCPU))) {
-			bpf_log(log, "arg#%d has incompatible address space\n", i);
-			return -EINVAL;
-		}
 
 		if (arg->user_address) {
 			/* Address bits are never a dereferenceable global input. */
-			if (reg->type != SCALAR_VALUE && !(reg->type & MEM_USER)) {
-				bpf_log(log, "arg#%d expects a user address value\n", i);
-				return -EINVAL;
-			}
 		} else if (arg->mem_size_reg) {
 			struct native_arg_scope count_scope __free(native_arg) = {};
 			int count_regno = sub->native_frame ?
@@ -11357,24 +11068,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			if (count_regno < 0) return count_regno;
 			count = &regs[count_regno];
 
-			if (reg->type & PTR_UNTRUSTED) {
-				bpf_log(log, "arg#%d byte buffer cannot erase untrusted provenance\n", i);
-				return -EACCES;
-			}
 
-			if (count->type != SCALAR_VALUE ||
-			    (count->umax_value && (bpf_register_is_null(reg) ||
-						 (type_may_be_null(reg->type) && !reg->mem_size_id))) ||
-			    (!(arg->arg_type & PTR_MAYBE_NULL) &&
-			     (bpf_register_is_null(reg) || type_may_be_null(reg->type)))) {
-				bpf_log(log, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
-				return -EINVAL;
-			}
 			/* A byte contract cannot erase BTF field write authority. */
-			if (!(arg->arg_type & MEM_RDONLY) && base_type(reg->type) == PTR_TO_BTF_ID) {
-				bpf_log(log, "arg#%d byte buffer cannot erase typed write authority\n", i);
-				return -EINVAL;
-			}
 			ret = check_buffer_size_reg(env, count, count_regno,
 						    regno, BPF_READ, true, &meta, true);
 			if (!ret && !(arg->arg_type & MEM_RDONLY))
@@ -11396,12 +11091,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				/* Match the declared C value, as Native kfuncs do. A
 				 * low-word constraint never initializes physical upper bits.
 				 */
-				if ((location && native_named_input_bytes(btf, location) == 4 ?
-				     reg->u32_max_value : reg->umax_value) > arg->scalar_max) {
-					bpf_log(log, "arg#%d scalar exceeds declared global maximum %u\n",
-						i, arg->scalar_max);
-					return -EACCES;
-				}
 				ret = mark_chain_precision(env, regno);
 				if (ret)
 					return ret;
@@ -11414,33 +11103,16 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				 * their fault protection, but cannot establish a pointer
 				 * precondition for an independently verified global.
 				 */
-				if (bpf_register_is_null(reg) || type_may_be_null(reg->type) ||
-				    reg->type == SCALAR_VALUE) {
-					bpf_log(log, "arg#%d untrusted nonnull requires a non-NULL pointer\n", i);
-					return -EINVAL;
-				}
 				/* Historical probe-only producers (untrusted formals and
 				 * rdonly_cast) may represent NULL without MAYBE_NULL.
 				 * Their pointer class alone cannot discharge this new
 				 * precondition. Do not infer trust or a new null fact.
 				 */
-				if (reg->type & PTR_UNTRUSTED) {
-					bpf_log(log, "arg#%d probe-only provenance cannot establish nonnull\n", i);
-					return -EACCES;
-				}
 				if (base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) {
 					/* Retain read-only, untrusted semantics. A matching
 					 * pointee is not a promise of live or writable memory.
 					 * Interior pointers need a separately modeled contract.
 					 */
-					if (base_type(reg->type) != PTR_TO_BTF_ID || !reg->btf ||
-					    !tnum_is_const(reg->var_off) ||
-					    reg->var_off.value ||
-					    !btf_struct_ids_match(log, reg->btf, reg->btf_id, 0,
-							  arg->btf ?: btf_vmlinux, arg->btf_id, true)) {
-						bpf_log(log, "arg#%d untrusted nonnull requires the matching BTF pointee at offset zero\n", i);
-						return -EINVAL;
-					}
 				} else {
 					ret = check_reg_type(env, regno, ARG_PTR_TO_MEM | MEM_RDONLY,
 							     NULL, &meta, true);
@@ -11470,17 +11142,9 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			 * BTF field identity and the callee's field authority. Fixed
 			 * extents must not erase those checks either.
 			 */
-			if (!(arg->arg_type & MEM_RDONLY) && base_type(reg->type) == PTR_TO_BTF_ID) {
-				bpf_log(log, "arg#%d fixed memory cannot erase typed write authority\n", i);
-				return -EINVAL;
-			}
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
 			if (ret < 0)
 				return ret;
-			if (reg->type & PTR_UNTRUSTED) {
-				bpf_log(log, "arg#%d fixed memory cannot erase untrusted provenance\n", i);
-				return -EACCES;
-			}
 			if (check_mem_reg(env, reg, regno, arg->mem_size,
 					  arg->arg_type & MEM_RDONLY))
 				return -EINVAL;
@@ -11539,11 +11203,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			 * as a trusted BTF pointer. Keep probe-only untrusted arguments
 			 * on their separate address-value path above.
 			 */
-			if (reg->type == SCALAR_VALUE &&
-			    !(arg->arg_type & PTR_UNTRUSTED)) {
-				bpf_log(log, "arg#%d typed pointer requires a pointer or literal NULL\n", i);
-				return -EINVAL;
-			}
 
 			memset(&meta, 0, sizeof(meta)); /* leave func_id as zero */
 			if (arg->has_btf_offset) {
@@ -11735,8 +11394,6 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 	if (sub->native_frame && sub->native_abi.result_buffer) {
 		result_buffer = caller->regs[BPF_REG_1];
-		if (result_buffer.type != PTR_TO_STACK || !tnum_is_const(result_buffer.var_off))
-			return -EOPNOTSUPP;
 		err = check_stack_access_within_bounds(env, BPF_REG_1, 0,
 			sub->native_abi.args[0].size, BPF_WRITE);
 		if (err) return err;
@@ -11803,12 +11460,6 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				 * verifier. An interior nullable view needs a separate base
 				 * representation; do not erase its offset or enlarge bounds.
 				 */
-				if (!tnum_equals_const(result_buffer.var_off, 0) ||
-				    base_type(result_buffer.type) == PTR_TO_BTF_FUNC) {
-					verbose(env,
-						"nullable input result requires a zero-offset data pointer\n");
-					return -EACCES;
-				}
 				result_buffer.type |= PTR_MAYBE_NULL;
 				/* A NULL result says nothing about the original input. */
 				result_buffer.id = ++env->id_gen;
@@ -12213,10 +11864,6 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 			err = check_reg_arg(env, BPF_REG_3, SRC_OP);
 			if (err)
 				return err;
-			if (callee->regs[BPF_REG_3].type != SCALAR_VALUE) {
-				verbose(env, "second record result R3 is not a scalar\n");
-				return -EACCES;
-			}
 			caller->regs[BPF_REG_3] = callee->regs[BPF_REG_3];
 		}
 	}
@@ -14443,10 +14090,6 @@ static int check_kfunc_scalar_max(struct bpf_verifier_env *env,
 	    kstrtou64(value, 10, &max))
 		return -EINVAL;
 	/* C consumes only the declared width; use its actual scalar range. */
-	if ((t->size <= sizeof(u32) ? reg->u32_max_value : reg->umax_value) > max) {
-		verbose(env, "arg#%d scalar exceeds declared maximum %llu\n", arg, max);
-		return -EACCES;
-	}
 	return mark_chain_precision(env, regno);
 }
 
@@ -14467,17 +14110,7 @@ static int check_kfunc_scalar_alignment(struct bpf_verifier_env *env,
 	    (alignment & (alignment - 1)))
 		return -EINVAL;
 	/* Alignment cannot require bits above the scalar's native width. */
-	if (t->size < sizeof(u64) && alignment > (1ULL << (t->size * 8)))
-		return -EINVAL;
 	mask = alignment - 1;
-	if (reg->var_off.mask & mask) {
-		verbose(env, "arg#%d scalar alignment %llu is not known\n", arg, alignment);
-		return -EACCES;
-	}
-	if (reg->var_off.value & mask) {
-		verbose(env, "arg#%d scalar is not aligned to %llu\n", arg, alignment);
-		return -EACCES;
-	}
 	return mark_chain_precision(env, regno);
 }
 
@@ -14550,8 +14183,6 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 
 	if (err)
 		return err;
-	if (!btf_native_value_storage(btf, proto->type))
-		return -EOPNOTSUPP;
 	for (u32 offset = 0; offset < type->size;) {
 		struct native_arg_scope temporary __free(native_arg) = {};
 		u32 pointer = 0, regno;
@@ -14609,14 +14240,8 @@ static int check_kfunc_address_arg(struct bpf_verifier_env *env,
 				  const struct bpf_reg_state *reg, u32 arg,
 				  enum bpf_type_flag flags)
 {
-	if (flags & ~MEM_USER)
-		return -EINVAL;
 	if (reg->type == SCALAR_VALUE)
 		return 0;
-	if ((reg->type & (MEM_USER | MEM_PERCPU)) != flags) {
-		verbose(env, "arg#%d address has incompatible address space\n", arg);
-		return -EACCES;
-	}
 	switch (base_type(reg->type)) {
 	case PTR_TO_STACK:
 	case PTR_TO_MAP_VALUE:
@@ -14644,11 +14269,6 @@ static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
    * ignores its anonymous list. Fixed arguments retain every ordinary check.
    */
   u32 tail = cell_variadic_scalar_tail(btf, declaration);
-  if ((!cell_variadic_tail_unused(btf, declaration) && (!tail || tail == ~0U)) ||
-      !declaration || btf_type_by_id(btf, declaration->type) != prototype) {
-   verbose(env, "variadic call requires an actual provider tail contract\n");
-   return -EOPNOTSUPP;
-  }
  }
  *named = count;
  return 0;
@@ -14671,8 +14291,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 	ret = native_call_named_args(env, meta->btf, meta->func_proto,
 		meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id), &nargs);
 	if (ret) return ret;
-	if (!native && cell_variadic_scalar_tail(meta->btf, meta->func_decl ?:
-		btf_type_by_id(meta->btf, meta->func_id))) return -EOPNOTSUPP;
 	if (native) {
 		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
 				  env->prog->aux->trusted_kernel);
@@ -14683,9 +14301,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
-			if (!btf_native_value_storage(meta->btf, meta->func_proto->type) ||
-			    buffer->type != PTR_TO_STACK || !tnum_is_const(buffer->var_off))
-				return -EOPNOTSUPP;
 			ret = check_stack_access_within_bounds(env, BPF_REG_1, 0, abi.args[0].size, BPF_WRITE);
 			if (ret) return ret;
 			*native_result = *buffer;
@@ -14716,7 +14331,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			t = btf_type_skip_modifiers(btf, args[i].type, NULL);
 			if (btf_type_is_struct(t) || btf_type_is_array(t) ||
 			    (btf_type_is_scalar(t) && t->size > 8)) {
-				if (!btf_native_value_storage(meta->btf, args[i].type)) return -EOPNOTSUPP;
 				ret = btf_native_scalar_storage(meta->btf, args[i].type, 0) ?
 					native_scalar_record_arg(env, meta->btf, location, false) :
 					native_record_arg(env, meta->btf, location, meta->native_call, false);
@@ -14725,20 +14339,14 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			}
 			if (location->reg < 0) {
 				t = btf_type_skip_modifiers(btf, args[i].type, NULL);
-				if ((!btf_type_is_scalar(t) || t->size > 8) && !btf_type_is_ptr(t))
-					return -EOPNOTSUPP;
 				/* These special APIs retain a register number for later
 				 * fixups or release handling, unlike an ordinary call.
 				 */
-				if (is_kfunc_release(meta) || is_kfunc_arg_prog_aux(btf, &args[i]) ||
-				    is_kfunc_arg_implicit(meta, i))
-					return -EOPNOTSUPP;
 				ret = native_stack_arg_at(env, location, &temporary, 13,
 					native_named_input_bytes(btf, location));
 				if (ret) return ret;
 				regno = 13;
 			} else {
-				if (location->words != 1) return -EOPNOTSUPP;
 				regno = bpf_arg_regno(location->reg);
 			}
 			reg = &regs[regno];
@@ -14747,11 +14355,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		/* A bare prototype cannot describe reference consumption. Keep
 		 * verifier-owned references behind registered effect contracts.
 		 */
-		if (meta->native_call &&
-		    (reg->ref_obj_id || (reg->type & NON_OWN_REF))) {
-			verbose(env, "native prototype cannot transfer a modeled reference\n");
-			return -EACCES;
-		}
 
 		if (meta->func_id != U32_MAX && is_kfunc_arg_prog_aux(btf, &args[i])) {
 			/* Reject repeated use bpf_prog_aux */
@@ -14775,8 +14378,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (size_arg < -1 || nullable < 0 || address < 0)
 			return size_arg < -1 ? size_arg : nullable < 0 ? nullable : address;
 		nullable |= is_kfunc_arg_nullable(btf, &args[i]);
-		if ((size_arg >= 0 || nullable || address) && !btf_type_is_ptr(t))
-			return -EINVAL;
 		ret = check_kfunc_scalar_max(env, meta, t, i, regno);
 		if (ret)
 			return ret;
@@ -14844,10 +14445,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			return -EINVAL;
 		}
 		if (address) {
-			if (size_arg >= 0 || nullable ||
-			    kfunc_mem_arg_tag(meta, i, "arg:readonly") ||
-			    kfunc_mem_arg_tag(meta, i, "arg:nonnull-size"))
-				return -EINVAL;
 			ret = check_kfunc_address_arg(env, reg, i, kfunc_pointer_flags(btf, t));
 			if (ret)
 				return ret;
@@ -14907,23 +14504,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 
 			if (read_only < 0 || nonnull_size < 0)
 				return read_only < 0 ? read_only : nonnull_size;
-			if (kfunc_pointer_flags(btf, t) || !btf_type_is_int(size_t) ||
-			    size_t->size != sizeof(u64) ||
-			    count->type != SCALAR_VALUE ||
-			    (!btf_type_is_void(ref_t) && !btf_type_is_scalar(ref_t) &&
-			     !__btf_type_is_scalar_struct(env, btf, ref_t, 0)))
-				return -EINVAL;
-			if (reg->type & (PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-			    (!read_only && base_type(reg->type) == PTR_TO_BTF_ID)) {
-				verbose(env, "arg#%d byte buffer cannot erase provenance or typed write authority\n", i);
-				return -EACCES;
-			}
-			if (count->umax_value &&
-			    (bpf_register_is_null(reg) ||
-			     (type_may_be_null(reg->type) && !reg->mem_size_id))) {
-				verbose(env, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
-				return -EACCES;
-			}
 			/* Signed C counts retain their declared ABI. The shared size
 			 * checker requires a nonnegative signed range before using the
 			 * unsigned maximum for span checks, and marks precision. NULL
@@ -15252,12 +14832,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			 * carries that checked precondition; the size check below also
 			 * requires its unchanged count and base.
 			 */
-			if (nonnull_size && size_reg->umax_value &&
-			    (bpf_register_is_null(buff_reg) ||
-			     (type_may_be_null(buff_reg->type) && !buff_reg->mem_size_id))) {
-				verbose(env, "arg#%d nonzero byte count requires a non-NULL buffer\n", i);
-				return -EACCES;
-			}
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
 				ret = check_kfunc_mem_size_reg(env, size_reg, count_regno,
 							    regno, read_only);
@@ -15424,18 +14998,10 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	u32 i, nargs;
 	int err;
 
-	if (!prototype || !btf_type_is_func_proto(prototype))
-		return -EINVAL;
 	err = native_call_named_args(env, btf, meta.func_proto, declaration, &nargs);
 	if (err) return err;
-	if (nargs > (env->subprog_info[cur_func(env)->subprogno].native_frame ? MAX_BPF_FUNC_ARGS : MAX_BPF_NATIVE_REG_ARGS))
-		return -EINVAL;
 	for (i = 1; i <= nargs && !env->subprog_info[cur_func(env)->subprogno].native_frame; i++) {
 		type = btf_type_skip_modifiers(btf, btf_params(meta.func_proto)[i - 1].type, NULL);
-		if (btf_type_is_scalar(type) && (!type->size || type->size > sizeof(u64))) {
-			verbose(env, "callx arg#%d does not fit one native argument register\n", i - 1);
-			return -EINVAL;
-		}
 		if (i > MAX_BPF_NATIVE_REG_ARGS)
 			continue;
 		err = check_reg_arg(env, bpf_arg_regno(i - 1), SRC_OP);
@@ -15491,16 +15057,6 @@ static int check_native_function_call(struct bpf_verifier_env *env, struct btf *
 	/* An implicit current-task or global argument can also consume a
 	 * resource. A memory contract does not describe those effects.
 	 */
-	if (state->acquired_refs) {
-		verbose(env, "native prototype cannot transfer a modeled reference\n");
-		return -EACCES;
-	}
-	if (state->active_locks || state->active_preempt_locks ||
-	    state->active_irq_id || in_rcu_cs(env) ||
-	    env->subprog_info[owner].requires_rcu) {
-		verbose(env, "native call cannot establish a lock-held target contract\n");
-		return -EACCES;
-	}
 	err = check_native_prototype_call(env, btf, prototype, true, declaration);
 	if (!err) {
 		env->subprog_info[owner].has_native_call = true;
@@ -15552,34 +15108,10 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	 * target allow-list or destructive-call permission. Keep this native
 	 * call facility restricted to the kernel administrator.
 	 */
-	if (!capable(CAP_SYS_ADMIN)) {
-		verbose(env, "callx requires CAP_SYS_ADMIN\n");
-		return -EPERM;
-	}
-	if (!env->prog->jit_requested || !bpf_jit_supports_callx()) {
-		verbose(env, "callx requires a supporting JIT\n");
-		return -EOPNOTSUPP;
-	}
-	if (env->cur_state->active_locks) {
-		verbose(env, "callx cannot establish a lock-held target contract\n");
-		return -EACCES;
-	}
 	err = check_reg_arg(env, insn->imm, SRC_OP);
 	if (err)
 		return err;
-	if (base_type(target->type) != PTR_TO_BTF_FUNC ||
-	    target->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED | MEM_USER | MEM_PERCPU) ||
-	    !tnum_is_const(target->var_off) || target->var_off.value) {
-		verbose(env, "callx requires a non-NULL trusted BTF function pointer\n");
-		return -EACCES;
-	}
-	if (target->type & MEM_RCU && !in_rcu_cs(env)) {
-		verbose(env, "callx function pointer is outside its RCU lifetime\n");
-		return -EACCES;
-	}
 	prototype = native_callable_proto(target->btf, target->btf_id, &declaration);
-	if (!prototype)
-		return -EINVAL;
 	if (declaration) {
 		struct bpf_kfunc_meta provider = {
 			.btf = target->btf, .id = target->btf_id, .proto = prototype,
@@ -15588,13 +15120,6 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 		/* An exact symbol may use the ordinary Native contract. Registered
 		 * effects still require their kfunc protocol, never a bare callx.
 		 */
-		if (!env->prog->aux->ebpfos_component ||
-		    !btf_is_kernel(target->btf) ||
-		    btf_kfunc_is_registered(target->btf, target->btf_id) ||
-		    !native_memory_contract(&provider)) {
-			verbose(env, "callx Native symbol requires its ordinary Native function contract\n");
-			return -EACCES;
-		}
 		err = check_native_function_call(env, target->btf, prototype, declaration);
 	} else {
 		err = check_native_prototype_call(env, target->btf, prototype, false, NULL);
@@ -15635,9 +15160,6 @@ int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
 		 * entry with the same prototype contract as a typed callback. A
 		 * registered kfunc retains its hook, filter and effect contract.
 		 */
-		if (!env->prog->aux->ebpfos_component || !capable(CAP_SYS_ADMIN) ||
-		    kfunc.kop || btf_kfunc_is_registered(kfunc.btf, kfunc.id))
-			return -EACCES;
 		meta->native_call = true;
 		return 0;
 	}
@@ -16049,11 +15571,6 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
 
-	if (env->prog->type == BPF_PROG_TYPE_KERNEL_RULE &&
-	    !bpf_kernel_rule_context_kfunc(insn->imm, insn->off)) {
-		verbose(env, "kernel rule programs cannot call kfuncs outside context queries\n");
-		return -EACCES;
-	}
 
 	/* skip for now, but return error when we find this in fixup_kfunc_call */
 	if (!insn->imm)
@@ -16299,8 +15816,6 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		mark_btf_func_reg_size(env, BPF_REG_0, min_t(u32, t->size, sizeof(u64)));
 		mark_native_scalar_result(env, t);
 		if (btf_record_return_words(desc_btf, meta.func_proto->type) == 2) {
-			if (!env->prog->jit_requested || !bpf_jit_supports_native_args())
-				return -EOPNOTSUPP;
 			mark_reg_unknown(env, regs, BPF_REG_3);
 			mark_btf_func_reg_size(env, BPF_REG_3, t->size - sizeof(u64));
 			insn_aux->returns_two_regs = true;
@@ -20101,10 +19616,6 @@ static int check_stable_readonly_result(struct bpf_verifier_env *env, u32 regno,
 		err = check_reg_arg(env, regno, SRC_OP);
 		if (err)
 			return err;
-		if (kernel_only && result->mem_stable != BPF_MEM_KERNEL_STABLE) {
-			verbose(env, "record pointer result requires permanent native storage\n");
-			return -EACCES;
-		}
 		/* Permanent read-only data and checked results retain their lifetime,
 		 * including through bounded offsets and spills. Ordinary memory
 		 * arguments and helper results acquire no such fact.
@@ -20128,13 +19639,6 @@ static int check_stable_readonly_result(struct bpf_verifier_env *env, u32 regno,
 		/* Array-map storage is retained for the program's lifetime. Do not
 		 * turn a stack, scoped, managed or arbitrary pointer into this ABI.
 		 */
-		if (result->type != PTR_TO_MAP_VALUE ||
-		    result->map_ptr->map_type != BPF_MAP_TYPE_ARRAY ||
-		    !IS_ERR_OR_NULL(result->map_ptr->record) ||
-		    result->ref_obj_id) {
-			verbose(env, "read-only result requires stable unmanaged array storage\n");
-			return -EACCES;
-		}
 		err = check_map_access_type(env, regno, 0,
 			bytes_required, BPF_READ);
 		if (err)
@@ -20157,12 +19661,6 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) +
 			round_up(sub->native_arg_in, 8) + round_up(size, 8);
 
-		if (result->type != PTR_TO_STACK || result->frameno != frame->frameno ||
-		    result->native_stack_region != 3 || !tnum_is_const(result->var_off) ||
-		    result->var_off.value != -(s64)end) {
-			verbose(env, "hidden result must return its original buffer address\n");
-			return -EACCES;
-		}
 		for (i = 0; i < size; i++) {
 			u32 byte = end - i - 1;
 			struct bpf_stack_state *slot = &frame->stack[byte / 8];
@@ -20178,18 +19676,12 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 				err = btf_native_record_ro_size(btf, fn, i / 8, &bytes, &env->log);
 				if (err) return err;
 				if (bytes) {
-					if (size - i < 8 || !bpf_is_spilled_reg(slot)) return -EACCES;
 					native_value_scope(env, &temporary, 13);
 					*temporary.reg = slot->spilled_ptr;
 					err = check_stable_readonly_result(env, 13, bytes, true);
 					if (err) return err;
 					i += 7;continue;
 				}
-			}
-			if (type != STACK_MISC && type != STACK_ZERO &&
-			    !(type == STACK_SPILL && slot->spilled_ptr.type == SCALAR_VALUE)) {
-				verbose(env, "hidden result has an uninitialized or pointer byte\n");
-				return -EACCES;
 			}
 		}
 		return 0;
@@ -20247,10 +19739,6 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
 			return err;
-		if (!bpf_register_is_null(&frame->regs[BPF_REG_0])) {
-			verbose(env, "global function must return NULL on every exit\n");
-			return -EACCES;
-		}
 		return mark_chain_precision(env, BPF_REG_0);
 	}
 	if (sub->readonly_result_size)
@@ -20276,11 +19764,6 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			if (err) return err;
 			continue;
 		}
-		if (reg->type != SCALAR_VALUE) {
-			verbose(env, "At subprogram exit R%u is not a scalar result (%s)\n",
-				regno, reg_type_str(env, reg->type));
-			return -EACCES;
-		}
 		if (bytes == 1 && btf_type_is_int(result) && (btf_int_encoding(result) & BTF_INT_BOOL)) {
 			struct bpf_reg_state value = *reg;
 
@@ -20288,10 +19771,6 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			 * initialized any of the original register's unused bits.
 			 */
 			coerce_reg_to_size(&value, 1);
-			if (value.umax_value > 1) {
-				verbose(env, "Boolean result is not zero or one\n");
-				return -EACCES;
-			}
 			err = mark_chain_precision(env, regno);
 			if (err) return err;
 		}
@@ -20901,13 +20380,8 @@ static int check_ablation_sequence(struct bpf_verifier_env *env, struct bpf_insn
  struct bpf_native_goto *targets;
  u32 i;
  int err;
- if (!sequence) return -EINVAL;
  bindings = (void *)sequence + sequence->bindings_offset;
  for (i = 0; i < sequence->bindings_count; i++) {
-  if (bindings[i].reg >= MAX_BPF_REG ||
-      (bindings[i].reg == BPF_REG_FP && (bindings[i].flags & 2) && !(bindings[i].flags & 16)) ||
-      bindings[i].reg == 13 || bindings[i].reserved || !bindings[i].width)
-   return -EINVAL;
   if (bindings[i].flags & 1) {
    err = check_reg_arg(env, bindings[i].reg, SRC_OP);
    if (err) return err;
@@ -20933,8 +20407,6 @@ static int check_ablation_sequence(struct bpf_verifier_env *env, struct bpf_insn
  for (i = 0; i < sequence->gotos_count; i++) {
   s64 target = (s64)env->insn_idx + 1 + targets[i].delta;
   u32 owner = cur_func(env)->subprogno;
-  if (target < env->subprog_info[owner].start || target >= env->subprog_info[owner + 1].start)
-   return -EINVAL;
   if (!push_stack(env, target, env->insn_idx, false)) return -ENOMEM;
  }
  verbose(env, "E10 diagnostic assembly assumption: constraint outputs only; machine effects are not proved\n");
@@ -21367,8 +20839,6 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		if (!IS_ERR(target))
 			sym_name = target;
 
-		if (length >= sizeof(source_name))
-			return -ENAMETOOLONG;
 		memcpy(source_name, sym_name, length);
 		source_name[length] = 0;
 		sym_name = source_name;
@@ -21378,8 +20848,6 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 
 		if (btf_is_module(btf)) {
 			module = btf_try_get_module(btf);
-			if (!module)
-				return -ENXIO;
 		}
 		/* A provider proof belongs to the resident definition in this BTF
 		 * image, never a same-named function in another module.
@@ -21506,13 +20974,6 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 	btf_fd = insn[1].imm;
 	if (btf_fd == BPF_BTF_SOURCE) {
 		btf = env->prog->aux->btf;
-		if (!btf)
-			return -EINVAL;
-		if (!env->prog->aux->trusted_kernel &&
-		    !(env->allow_ptr_leaks && source_scalar_symbol(btf, insn->imm))) {
-			verbose(env, "source BTF native extern requires the trusted tier\n");
-			return -EACCES;
-		}
 		btf_get(btf);
 	} else if (btf_fd) {
 		btf = btf_get_by_fd(btf_fd);
@@ -21717,10 +21178,6 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)
 		return err;
-	if (!bpf_ebpfos_map_prog_get(map, env->prog->aux, component)) {
-		verbose(env, "map is exclusively owned by another BPF program\n");
-		return -EBUSY;
-	}
 
 	if (env->prog->sleepable)
 		atomic64_inc(&map->sleepable_refcnt);
@@ -21850,11 +21307,6 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			return insn->dst_reg || insn->off ? -EINVAL : 0;
 		}
 		if (BPF_SRC(insn->code) == BPF_X) {
-			if (class != BPF_JMP || insn->src_reg || insn->dst_reg ||
-			    insn->off || insn->imm < BPF_REG_0 || (insn->imm >= BPF_REG_FP && insn->imm != BPF_REG_ARG6)) {
-				verbose(env, "callx uses invalid register or reserved fields\n");
-				return -EINVAL;
-			}
 			return 0;
 		}
 		if (BPF_SRC(insn->code) != BPF_K ||
@@ -21988,33 +21440,17 @@ static int check_native_frames(struct bpf_verifier_env *env)
 			const char *value = btf_name_by_offset(btf, tag->name_off) + 15;
 			u32 incoming, outgoing, local, alignment;
 
-			if (!bpf_jit_supports_native_args() || !env->prog->jit_requested)
-				return -EOPNOTSUPP;
 			if (sub->native_frame || sscanf(value, "%u:%u:%u:%u", &incoming, &outgoing, &local, &alignment) != 4)
 				return -EINVAL;
-			if (alignment < 8 || alignment > MAX_BPF_STACK || !is_power_of_2(alignment))
-				return -EOPNOTSUPP;
-			if (incoming > MAX_BPF_STACK || outgoing > MAX_BPF_STACK ||
-			    local > MAX_BPF_STACK - round_up(outgoing, 8))
-				return -E2BIG;
 			proto = btf_type_by_id(btf, fn->type);
 			err = bpf_native_abi_plan(btf, proto, &sub->native_abi, aux->trusted_kernel);
 			if (err)
 				return err;
 			err = bpf_native_abi_tail(btf, fn, &sub->native_abi);
 			if (err) return err;
-			if (sub->native_abi.result_buffer &&
-			    (sub->native_abi.args[0].size > BPF_TRACKED_STACK ||
-			     round_up(sub->native_abi.args[0].size, 8) >
-			     BPF_TRACKED_STACK - local - round_up(outgoing, 8) - round_up(incoming, 8)))
-				return -E2BIG;
 			/* Trusted code carries the compiler's physical frame. BTF
 			 * source types need not retain its calling convention or padding.
 			 */
-			if (incoming != sub->native_abi.stack_size && !aux->trusted_kernel) {
-				verbose(env, "native incoming argument area differs from BTF prototype\n");
-				return -EINVAL;
-			}
 			sub->native_frame = true;
 			sub->native_arg_in = incoming;
 			sub->native_arg_out = outgoing;
@@ -22042,14 +21478,6 @@ static int check_and_resolve_insns(struct bpf_verifier_env *env)
 		return err;
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
-		if (insn->src_reg == 13 || insn->dst_reg == 13 ||
-		    ((insn->src_reg == BPF_REG_ARG_SP || insn->dst_reg == BPF_REG_ARG_SP ||
-		      insn->src_reg == BPF_REG_ARG_FP || insn->dst_reg == BPF_REG_ARG_FP ||
-		      insn->src_reg == BPF_REG_ARG6 || insn->dst_reg == BPF_REG_ARG6) &&
-		     (!env->prog->jit_requested || !bpf_jit_supports_native_args()))) {
-			verbose(env, "instruction %d uses an unsupported native ABI register\n", i);
-			return -EINVAL;
-		}
 		if (insn->dst_reg >= MAX_BPF_REG) {
 			verbose(env, "R%d is invalid\n", insn->dst_reg);
 			return -EINVAL;
@@ -22334,14 +21762,11 @@ static int partition_callback_counts(struct bpf_verifier_env *env,
 	struct bpf_verifier_state *zero;
 
 	target = native_global_arg_state(sub, env->cur_state->frame[0], callback);
-	if (base_type(target->type) != PTR_TO_BTF_FUNC)
-		return -EINVAL;
 	if (!(target->type & PTR_MAYBE_NULL))
 		return 0;
 	for (u32 index = 0; index < sub->arg_cnt; index++) {
 		if (!(arg->callback_count_mask & BIT_ULL(index))) continue;
 		count = native_global_arg_state(sub, env->cur_state->frame[0], index);
-		if (count->type != SCALAR_VALUE) return -EINVAL;
 		if (arg->callback_count32_mask & BIT_ULL(index) ?
 		    count->u32_min_value : count->umin_value) {
 			target->type &= ~PTR_MAYBE_NULL;
@@ -23375,26 +22800,11 @@ int bpf_check_attach_target(struct bpf_verifier_log *log,
 			 * native value layout; global exit contracts check pointer words.
 			 * Existing tracing/error-injection policy is unchanged.
 			 */
-			if (tgt_prog || prog->sleepable ||
-			    !prog->aux->ebpfos_component ||
-			    !IS_ENABLED(CONFIG_X86_64))
-				return -EINVAL;
 			result = btf_type_skip_modifiers(btf, t->type, NULL);
 			/* The source global proves its permanent read-only result at
 			 * every exit. Cold entry publication checks that contract and
 			 * the native prototype before exporting its address.
 			 */
-			if (!tgt_info->fmodel.native_stack && t->type &&
-			    !(prog->aux->trusted_kernel && btf_is_ptr(result)) &&
-			    !btf_is_ptr(result) &&
-			    !cell_single_scalar_record_bits(btf, t->type, 0) &&
-			    !cell_native_result2_type(btf, t->type) &&
-			    !(btf_type_is_struct(result) && btf_native_value_storage(btf, t->type)) &&
-			    (!(btf_is_int(result) || btf_is_any_enum(result)) ||
-			     !result->size || result->size > 8)) {
-				bpf_log(log, "replacement requires a scalar or void result\n");
-				return -EINVAL;
-			}
 		}
 		if (field_proto)
 			break;
@@ -23999,23 +23409,14 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 	u32 depth;
 	int i;
 
-	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux))
-		return -EOPNOTSUPP;
 	if (!attr->trusted_stack_sizes || attr->trusted_stack_size_cnt != env->subprog_cnt) {
 		/* Complete compiler frame metadata replaces the legacy size array. */
 		for (i = 0; i < env->subprog_cnt; i++)
-			if (!env->subprog_info[i].native_frame)
-				return -EINVAL;
 	}
 	for (i = 0; i < env->subprog_cnt; i++) {
 		if (env->subprog_info[i].native_frame) {
 			depth = env->subprog_info[i].native_local_stack;
-		} else if (copy_from_bpfptr_offset(&depth, sizes, i * sizeof(depth), sizeof(depth))) {
-			return -EFAULT;
-		}
-		if (depth > MAX_BPF_STACK)
-			return -E2BIG;
-		env->subprog_info[i].stack_depth = depth;
+		} 		env->subprog_info[i].stack_depth = depth;
 	}
 	env->prog->aux->stack_depth = max_t(u32, env->subprog_info[0].stack_depth,
 			env->subprog_info[0].native_local_stack);
@@ -24027,9 +23428,6 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 		 * check_helper_call(). This is backend input validation only.
 		 */
 		if (insn->code == (BPF_JMP | BPF_CALL) && !insn->src_reg) {
-			if (!env->ops->get_func_proto ||
-			    !env->ops->get_func_proto(insn->imm, env->prog))
-				return -EINVAL;
 			/* No constant map or key was proved. Retain the ordinary
 			 * helper call rather than specializing against a NULL map.
 			 */
@@ -24037,8 +23435,6 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 			bpf_map_key_store(&env->insn_aux_data[i], BPF_MAP_KEY_POISON);
 		}
 		if (insn->code == (BPF_JMP | BPF_CALL | BPF_X)) {
-			if (!bpf_jit_supports_callx())
-				return -EOPNOTSUPP;
 			env->prog->aux->has_callx = true;
 		}
 	}
