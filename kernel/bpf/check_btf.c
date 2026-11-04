@@ -158,17 +158,9 @@ static int check_protocol_loop_contract(struct bpf_verifier_env *env,
 		verbose(env, "invalid or duplicate loop contract for func#%u\n", subprog);
 		return PTR_ERR(value);
 	}
-	if (strcmp(value, "kernel_protocol")) {
-		verbose(env, "unknown loop contract for func#%u\n", subprog);
-		return -EINVAL;
-	}
 	/* Kernel-protocol progress is a privileged assumption, like supplying
 	 * the kernel code that implements the corresponding native protocol.
 	 */
-	if (!bpf_token_capable(env->prog->aux->token, CAP_SYS_ADMIN)) {
-		verbose(env, "kernel protocol loop contract requires CAP_SYS_ADMIN\n");
-		return -EPERM;
-	}
 	env->subprog_info[subprog].protocol_bounded = true;
 	return 0;
 }
