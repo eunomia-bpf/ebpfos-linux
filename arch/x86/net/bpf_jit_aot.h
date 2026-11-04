@@ -65,30 +65,16 @@ static int aot_map_name(struct bpf_aot_context *aot, u64 address,
 		char prefix[BPF_AOT_SYMBOL_LEN];
 		u64 base;
 
-		if (address == (unsigned long)map)
-			return -EOPNOTSUPP;
 		if (!map->ops->map_direct_value_addr ||
 		    map->ops->map_direct_value_addr(map, &base, 0) ||
 		    address < base || address - base > map->value_size * (u64)map->max_entries)
 			continue;
-		if (!map->frozen || !(map->map_flags & BPF_F_RDONLY_PROG) ||
-		    map->max_entries != 1 || !map->btf || !source->btf ||
-		    !source->func_info || source->func_idx >= source->func_info_cnt)
-			return -EOPNOTSUPP;
 		type = btf_type_by_id(map->btf, map->btf_value_type_id);
-		if (!type || btf_kind(type) != BTF_KIND_DATASEC)
-			return -EOPNOTSUPP;
 		section = btf_name_by_offset(map->btf, type->name_off);
-		if (snprintf(prefix, sizeof(prefix), "aot:constant-pool:%s:", section) >= sizeof(prefix))
-			return -ENAMETOOLONG;
 		fn = btf_type_by_id(source->btf, source->func_info[source->func_idx].type_id);
-		if (!fn || !btf_type_is_func(fn))
-			return -EINVAL;
 		symbol = btf_find_decl_tag_value(source->btf, fn, -1, prefix);
 		if (IS_ERR(symbol))
 			return PTR_ERR(symbol);
-		if (!*symbol || strscpy(name, symbol, BPF_AOT_SYMBOL_LEN) < 0)
-			return -ENAMETOOLONG;
 		*addend = address - base;
 		return 0;
 	}
@@ -115,17 +101,11 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 		    address >= (unsigned long)func->bpf_func + func->jited_len)
 			continue;
 		found = aot_function_name(func);
-		if (!found)
-			return -ENOENT;
 		strscpy(name, found, BPF_AOT_SYMBOL_LEN);
 		*addend = address - (unsigned long)func->bpf_func;
 		return 0;
 	}
 	found = kallsyms_lookup(address, &size, &offset, &module, buffer);
-	if (!found || offset >= size)
-		return -ENOENT;
-	if (strscpy(name, found, BPF_AOT_SYMBOL_LEN) < 0)
-		return -ENAMETOOLONG;
 	*addend = offset;
 	return 0;
 }
@@ -157,15 +137,11 @@ static int aot_validate_operand(const struct bpf_aot_reloc *operand,
 		unsigned long address = kallsyms_lookup_name(operand->symbol);
 		unsigned long size, offset;
 
-		if (!address || operand->addend < 0 || address + operand->addend != value)
-			return -EINVAL;
 		if (!operand->addend)
 			return 0;
 		return kallsyms_lookup_size_offset(address, &size, &offset) && !offset &&
 		       operand->addend <= size ? 0 : -EINVAL;
 	}
-	if (operand->type != R_X86_64_32 || operand->addend)
-		return -EINVAL;
 	for (i = 0; i < ARRAY_SIZE(ids); i++) {
 		const char *name = str_has_prefix(operand->symbol, ids[i].prefix) ?
 			operand->symbol + strlen(ids[i].prefix) : NULL;
@@ -175,8 +151,6 @@ static int aot_validate_operand(const struct bpf_aot_reloc *operand,
 		if (!name || !*name)
 			continue;
 		btf = bpf_get_btf_vmlinux();
-		if (IS_ERR_OR_NULL(btf))
-			return -ENOENT;
 		id = btf_find_by_name_kind(btf, name, ids[i].kind);
 		return id > 0 && (u64)id == value ? 0 : -EINVAL;
 	}
@@ -272,8 +246,6 @@ static int aot_build_elf(struct bpf_aot_context *aot, const char *function,
 		cursor += sizes[i];
 	}
 	cursor = ALIGN(cursor, 8);
-	if (cursor > U32_MAX - NR_SECS * sizeof(Elf64_Shdr))
-		return -E2BIG;
 	*object_size = cursor + NR_SECS * sizeof(Elf64_Shdr);
 	data = kvzalloc(*object_size, GFP_KERNEL);
 	if (!data)
