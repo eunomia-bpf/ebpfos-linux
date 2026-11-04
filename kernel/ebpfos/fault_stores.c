@@ -50,12 +50,12 @@ static u32 family##width##_service(u64 payload) \
 static int family##width##_proof(u64 payload, struct bpf_insn *insns) \
 { \
  u32 service = family##width##_service(payload); \
- if (!insns || !service) return -EINVAL; \
+ \
  insns[0] = BPF_CALL_KFUNC(0, service); return 1; \
 } \
 static int family##width##_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry) \
 { \
- if (!entry || index || !family##width##_valid(payload)) return -EINVAL; \
+ \
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_FAULT_##stem##width##_INSN, \
   .fixup_offset = EBPFOS_FAULT_##stem##width##_FIXUP, .data = payload & 255 }; return 0; \
 } \
@@ -63,13 +63,13 @@ static int family##width##_requirements(u64 payload, u64 *capability, u64 *effec
 { \
  static const u8 ordinary[] = EBPFOS_FAULT_##stem##width##_SHA256_1; \
  static const u8 uaccess[] = EBPFOS_FAULT_##stem##width##_SHA256_3; \
- if (!capability || !effect || !sha || !family##width##_valid(payload)) return -EINVAL; \
+ \
  *capability = 0; *effect = 0; memcpy(sha, (payload & 255) == 1 ? ordinary : uaccess, 32); return 0; \
 } \
 static int family##width##_emit(u8 *image, u32 *offset, bool emit, u64 payload, \
                               const struct bpf_prog *prog, const u8 *final_ip) \
 { \
- if (!offset || (emit && !image) || !family##width##_valid(payload)) return -EINVAL; \
+ \
  if (emit) memcpy(image + *offset, family##width##_native, sizeof(family##width##_native)); \
  *offset += sizeof(family##width##_native); return sizeof(family##width##_native); \
 } \
