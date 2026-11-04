@@ -98,8 +98,6 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node)
   if (plt_binding(scope, entry->slot.target[1])) ++count;
  if (!count) return NULL;
- if (check_mul_overflow(count, 13U, &capacity) || check_add_overflow(capacity, IS_ENABLED(CONFIG_PREEMPT_RT) ? 81U : 64U, &capacity))
-  return ERR_PTR(-E2BIG);
  image = kzalloc(sizeof(*image), GFP_KERNEL);
  buffer = kmalloc(capacity, GFP_KERNEL);
  programs = kvmalloc_array(count, sizeof(*programs), GFP_KERNEL);
