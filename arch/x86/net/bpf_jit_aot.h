@@ -71,10 +71,12 @@ static int aot_map_name(struct bpf_aot_context *aot, u64 address,
 			continue;
 		type = btf_type_by_id(map->btf, map->btf_value_type_id);
 		section = btf_name_by_offset(map->btf, type->name_off);
+		snprintf(prefix, sizeof(prefix), "aot:constant-pool:%s:", section);
 		fn = btf_type_by_id(source->btf, source->func_info[source->func_idx].type_id);
 		symbol = btf_find_decl_tag_value(source->btf, fn, -1, prefix);
 		if (IS_ERR(symbol))
 			return PTR_ERR(symbol);
+		strscpy(name, symbol, BPF_AOT_SYMBOL_LEN);
 		*addend = address - base;
 		return 0;
 	}
@@ -106,6 +108,7 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 		return 0;
 	}
 	found = kallsyms_lookup(address, &size, &offset, &module, buffer);
+	strscpy(name, found, BPF_AOT_SYMBOL_LEN);
 	*addend = offset;
 	return 0;
 }

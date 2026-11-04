@@ -9706,6 +9706,9 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 			}
 		}
 
+		if (add_filter && hook_filter->nr_filters == BTF_KFUNC_FILTER_MAX_CNT) {
+			return -E2BIG;
+		}
 	}
 
 	if (!tab) {

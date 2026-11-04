@@ -196,6 +196,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
     
     
     
+  entry_native_jump(ip, sources[i].address, entry->bytes);
     entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
    }
    /* An entry without its own instruction stays private to its holders.

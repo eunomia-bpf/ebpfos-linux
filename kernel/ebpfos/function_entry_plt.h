@@ -174,8 +174,10 @@ static int plt_publish(void)
   if (IS_ERR(entry->next)) {error = PTR_ERR(entry->next);entry->next = NULL;goto fail;}
   pairs[i].addr = (void *)slot.ip;
   slot.target[0] = (unsigned long)(entry->image ? entry->image->text : NULL);
+  entry_native_instruction(&slot, entry->image ? 1 : 0, pairs[i].before);
   
   slot.target[0] = (unsigned long)(entry->next ? entry->next->text : NULL);
+  entry_native_instruction(&slot, entry->next ? 1 : 0, pairs[i].after);
   
   ++i;
  }
@@ -230,6 +232,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
   /* target[1] is cold lookup identity, never an emitted second branch. */
   entry->slot.target[1] = bindings[i].native_address;
   
+  copy_from_kernel_nofault(before, (void *)ip, 5);
   if (before[0] == 0xe9) {s32 displacement;memcpy(&displacement, before + 1, 4);entry->slot.original = ip + 5 + displacement;}
   
   if (ftrace) {

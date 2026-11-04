@@ -1196,6 +1196,7 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 				if (!IS_ERR(target))
 					symbol = target;
 
+					strscpy(name, symbol, sizeof(name));
 				err = 0;
 			} else {
 				err = aot_address_name(aot, value, name, &addend);
