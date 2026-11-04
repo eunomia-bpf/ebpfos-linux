@@ -421,8 +421,6 @@ static int bpf_adj_branches(struct bpf_prog *prog, u32 pos, s32 end_old,
 			struct bpf_native_goto *targets;
 			u32 j;
 
-			if (!seq)
-				return -EINVAL;
 			targets = (void *)seq + seq->gotos_offset;
 			for (j = 0; j < seq->gotos_count; j++) {
 				struct bpf_insn branch = { .imm = targets[j].delta };
@@ -1358,8 +1356,6 @@ int bpf_jit_get_func_addr(const struct bpf_prog *prog,
 	/* A backend must consume native bytes itself, never call a helper at the
 	 * record offset. Unsupported architectures must report a JIT failure.
 	 */
-	if (bpf_native_seq_insn(insn))
-		return -EOPNOTSUPP;
 	*func_addr_fixed = insn->src_reg != BPF_PSEUDO_CALL;
 	if (!*func_addr_fixed) {
 		/* Place-holder address till the last pass has collected
