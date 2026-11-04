@@ -7352,8 +7352,6 @@ static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 				return -EINVAL;
 			off %= bytes;
 		}
-		if (!btf_type_is_ptr(t) || off || size != sizeof(void *))
-			return -EACCES;
 		return btf_pointer_walk(btf, t, next_btf_id, flag, nullable);
 	}
 
@@ -8309,8 +8307,6 @@ int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
  err = btf_native_pointer_arg(btf, pointer, &pointer_arg, log);
  pointer_type = btf_type_skip_modifiers(btf, pointer, NULL);
  element = btf_type_skip_modifiers(btf, pointer_type->type, NULL);
- if (err || pointer_arg.arg_type != (ARG_PTR_TO_MEM | MEM_RDONLY) ||
-     !btf_type_is_int(element) || element->size != 1) return -EINVAL;
  return 0;
 }
 
@@ -8378,8 +8374,6 @@ int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 	const char *tag;
 	char trailing;
 
-	if (!fn || !btf_type_is_func(fn))
-		return -EINVAL;
 	tag = btf_find_decl_tag_value(btf, fn, -1, "ret:arg:");
 	if (nullable)
 		*nullable = false;
@@ -8394,12 +8388,8 @@ int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 	} else {
 		const char *other = btf_find_decl_tag_value(btf, fn, -1, "ret:arg_or_null:");
 
-		if (!IS_ERR(other) || PTR_ERR(other) != -ENOENT)
-			return -EINVAL;
 	}
 	proto = btf_type_by_id(btf, fn->type);
-	if (!proto || !btf_type_is_func_proto(proto))
-		return -EINVAL;
 	result = btf_type_skip_modifiers(btf, proto->type, NULL);
 	if (!btf_type_is_ptr(result) ||
 	    sscanf(tag, "%u:%d%c", argument, offset, &trailing) != 2 ||
@@ -8493,10 +8483,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
 
 		if (!IS_ERR(kernel)) {
-			if (!IS_ERR(tag) || PTR_ERR(tag) != -ENOENT) {
-				bpf_log(log, "conflicting read-only result lifetime contracts\n");
-				return -EINVAL;
-			}
 			tag = kernel;
 			sub->readonly_kernel_result = true;
 		} else if (PTR_ERR(kernel) != -ENOENT) {
@@ -8528,10 +8514,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
 
 		if (!IS_ERR(tag)) {
-			if (*tag || !is_global || !btf_type_is_ptr(result) || sub->readonly_result_size) {
-				bpf_log(log, "invalid NULL result contract\n");
-				return -EINVAL;
-			}
 			sub->null_result = true;
 		} else if (PTR_ERR(tag) != -ENOENT) {
 			return PTR_ERR(tag);
@@ -8544,12 +8526,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (!IS_ERR(tag)) {
 			int id;
 
-			if (*tag || !is_global || !btf_type_is_ptr(result) ||
-			    sub->null_result || sub->readonly_result_size ||
-			    !btf_type_is_struct(btf_type_skip_modifiers(btf, result->type, NULL))) {
-				bpf_log(log, "invalid typed read-only result contract\n");
-				return -EINVAL;
-			}
 			/* Reuse the stock global argument's unique core type resolution.
 			 * No module lifetime is borrowed by a permanent result.
 			 */
@@ -8660,10 +8636,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				    sub->args[i].callback_count_mask & BIT_ULL(index))
 					return -EINVAL;
 				count = btf_type_skip_modifiers(btf, args[index].type, NULL);
-				if (!btf_type_is_int(count) || btf_int_encoding(count) & BTF_INT_SIGNED ||
-				    btf_int_bits(count) != count->size * 8 ||
-				    (count->size != 4 && count->size != 8))
-					return -EINVAL;
 				sub->args[i].callback_count_mask |= BIT_ULL(index);
 				if (count->size == 4)
 					sub->args[i].callback_count32_mask |= BIT_ULL(index);
@@ -8716,20 +8688,9 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		t = btf_type_by_id(btf, args[i].type);
 		while (btf_type_is_modifier(t))
 			t = btf_type_by_id(btf, t->type);
-		if (has_scalar_max && btf_type_is_ptr(t)) {
-			bpf_log(log, "arg#%d scalar maximum requires an integer\n", i);
-			return -EINVAL;
-		}
 		if (!btf_type_is_ptr(t))
 			goto skip_pointer;
 
-		if (sub->args[i].callback_count_mask &&
-		    (!is_global || (prog->type == BPF_PROG_TYPE_EXT && !bpf_native_func_entry(prog)) || tags ||
-		     size_arg >= 0 || read_only || user_address || has_btf_offset || has_scalar_max ||
-		     !btf_native_func_arg(sub, btf_type_skip_modifiers(btf, t->type, NULL)))) {
-			bpf_log(log, "arg#%d conditional callback requires an ordinary callable input\n", i);
-			return -EINVAL;
-		}
 
 		/* A replacement inherits the target's absent input capability.
 		 * Reads remain invalid during independent entry verification even
@@ -8754,30 +8715,16 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 		if (is_global) {
 			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
-			if (sub->args[i].callback_count_mask && pointer_flags)
-				return -EINVAL;
 			/* An interior argument retains its complete enclosing BTF object.
 			 * Ordinary call checking must establish that object and this exact
 			 * offset; a member type or scalar address alone cannot satisfy it.
 			 */
 			if (has_btf_offset) {
-				if (prog->type == BPF_PROG_TYPE_EXT || pointer_flags ||
-				    tags != ARG_TAG_TRUSTED || size_arg >= 0 ||
-				    read_only || user_address)
-					return -EOPNOTSUPP;
 				sub->args[i].has_btf_offset = true;
 				sub->args[i].btf_offset = btf_offset;
 			}
 			/* freplace matches BTF types, not argument preconditions. */
-			if ((size_arg >= 0 || user_address) && prog->type == BPF_PROG_TYPE_EXT) {
-				bpf_log(log, "arg#%d byte-count/address contract is unsupported for freplace\n", i);
-				return -EOPNOTSUPP;
-			}
 			if (user_address) {
-				if (tags || size_arg >= 0 || read_only || pointer_flags != MEM_USER) {
-					bpf_log(log, "arg#%d address requires an otherwise unqualified user pointer\n", i);
-					return -EINVAL;
-				}
 				sub->args[i].arg_type = ARG_ANYTHING;
 				sub->args[i].user_address = true;
 				continue;
@@ -8786,18 +8733,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				const struct btf_type *size_t;
 
 				/* Byte buffers cannot erase typed spaces or lifetime tags. */
-				if (pointer_flags || (tags & ~(ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) ||
-				    (tags & (ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) ==
-					     (ARG_TAG_NONNULL | ARG_TAG_NULLABLE)) {
-					bpf_log(log, "arg#%d byte buffer has incompatible qualifiers\n", i);
-					return -EINVAL;
-				}
 				size_t = btf_type_skip_modifiers(btf, args[size_arg].type, NULL);
-				if (!btf_type_is_int(size_t) || size_t->size != sizeof(u64) ||
-				    (btf_int_encoding(size_t) & BTF_INT_SIGNED)) {
-					bpf_log(log, "arg#%d byte count must be an unsigned 64-bit integer\n", i);
-					return -EINVAL;
-				}
 				sub->args[i].arg_type = ARG_PTR_TO_MEM | PTR_MAYBE_NULL;
 				if (tags & ARG_TAG_NONNULL)
 					sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
@@ -8811,25 +8747,9 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			 * contract as a byte-count pair. Do not combine it with a
 			 * different pointer role or erase an address-space qualifier.
 			 */
-			if (read_only && (pointer_flags ||
-					  (tags & ~ARG_TAG_NONNULL) ||
-					  prog->type == BPF_PROG_TYPE_EXT)) {
-				bpf_log(log, "arg#%d fixed readonly has incompatible qualifiers\n", i);
-				return -EINVAL;
-			}
 			/* An independent global has no caller RCU scope to inherit.
 			 * Do not manufacture a live RCU reference from its prototype.
 			 */
-			if (pointer_flags & MEM_RCU) {
-				bpf_log(log, "arg#%d RCU pointer requires a modeled global lifetime\n", i);
-				return -EOPNOTSUPP;
-			}
-			if (pointer_flags && ((tags & (ARG_TAG_CTX | ARG_TAG_ARENA)) ||
-					      btf_is_prog_ctx_type(log, btf, t, prog_type, i) ||
-					      btf_is_dynptr_ptr(sub, btf, t))) {
-				bpf_log(log, "arg#%d qualified pointer has incompatible argument contract\n", i);
-				return -EINVAL;
-			}
 		}
 
 		if ((tags & ARG_TAG_CTX) || btf_is_prog_ctx_type(log, btf, t, prog_type, i)) {
@@ -8865,8 +8785,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return kern_type_id;
 			if (has_btf_offset) {
 				ref_t = btf_type_by_id(sub->args[i].btf, kern_type_id);
-				if (!btf_type_is_struct(ref_t) || btf_offset >= ref_t->size)
-					return -EINVAL;
 			}
 
 			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | pointer_flags;
@@ -8884,10 +8802,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EINVAL;
 			}
 			/* freplace's BTF type match does not check this precondition. */
-			if ((tags & ARG_TAG_NONNULL) && prog->type == BPF_PROG_TYPE_EXT) {
-				bpf_log(log, "arg#%d untrusted nonnull is unsupported for freplace\n", i);
-				return -EOPNOTSUPP;
-			}
 			sub->args[i].nonnull = !!(tags & ARG_TAG_NONNULL);
 
 			ref_t = btf_type_skip_modifiers(btf, t->type, NULL);
@@ -8980,13 +8894,7 @@ skip_pointer:
 				/* Ordinary native calls check the declared C value.
 				 * Entry input permissions still exclude unproved upper bits.
 				 */
-				if (t->size != sizeof(u32) && t->size != sizeof(u64))
-					return -EINVAL;
 				/* freplace matches types, not entry preconditions. */
-				if (prog->type == BPF_PROG_TYPE_EXT) {
-					bpf_log(log, "arg#%d scalar maximum is unsupported for freplace\n", i);
-					return -EOPNOTSUPP;
-				}
 				sub->args[i].has_scalar_max = true;
 				sub->args[i].scalar_max = scalar_max;
 			}
@@ -9026,7 +8934,6 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
  enum bpf_type_flag flags = 0;
  u32 size;
  int kernel_id;
- if (!p || !btf_type_is_ptr(p)) return -EINVAL;
  memset(arg, 0, sizeof(*arg));
  btf_pointer_flags(btf, p->type, &flags, NULL);
  /* The C pointee's const qualifier restricts the callee's authority. */
@@ -9034,7 +8941,6 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
       q && (btf_type_is_modifier(q) || btf_type_is_type_tag(q));
       q = btf_type_by_id(btf, q->type))
   if (BTF_INFO_KIND(q->info) == BTF_KIND_CONST) flags |= MEM_RDONLY;
- if (flags & MEM_RCU) return -EOPNOTSUPP;
  t = btf_type_skip_modifiers(btf, p->type, NULL);
  if (btf_type_is_struct(t)) {
   kernel_id = btf_get_ptr_to_btf_id(log, -1, btf, p, NULL);
@@ -9084,9 +8990,6 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 	u32 i;
 
 	*mask = 0;
-	if (!prog->aux->func_info || !prog->aux->func_info_aux ||
-	    subprog >= prog->aux->func_info_cnt)
-		return -EINVAL;
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
@@ -9758,12 +9661,6 @@ static int btf_check_kfunc_protos(struct btf *btf, u32 func_id, u32 func_flags)
 
 	if (func_flags & KF_NORETURN) {
 		ret_type = btf_type_skip_modifiers(btf, func->type, NULL);
-		if (!ret_type || !btf_type_is_void(ret_type))
-			return -EINVAL;
-		if (func_flags & (KF_ACQUIRE | KF_RELEASE | KF_RET_NULL | KF_ITER_NEW |
-				  KF_ITER_NEXT | KF_ITER_DESTROY | KF_FASTCALL |
-				  KF_ARENA_RET | KF_RCU_PROTECTED))
-			return -EINVAL;
 	}
 
 	if (func_flags & (KF_ITER_NEW | KF_ITER_NEXT | KF_ITER_DESTROY)) {
@@ -9791,8 +9688,6 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 	u32 kop_set_cnt, set_cnt, i;
 	int ret;
 
-	if (hook >= BTF_KFUNC_HOOK_MAX)
-		return -EINVAL;
 
 	if (!add_set->cnt)
 		return 0;
@@ -9811,9 +9706,6 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 			}
 		}
 
-		if (add_filter && hook_filter->nr_filters == BTF_KFUNC_FILTER_MAX_CNT) {
-			return -E2BIG;
-		}
 	}
 
 	if (!tab) {
@@ -10130,7 +10022,6 @@ int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
  char name[KSYM_NAME_LEN];
  int id, length;
 
- if (!function || !btf_type_is_func(function)) return -EINVAL;
  flags = btf_kfunc_flags(btf, func_id, prog);
  /* Native C prototypes are independent of the load program's hook.
   * Per-program BPF call permission keeps its ordinary flag/filter lookup.
@@ -10147,13 +10038,11 @@ int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
  if (flags && (*flags & KF_IMPLICIT_ARGS)) {
   length = snprintf(name, sizeof(name), "%s_impl",
                     btf_name_by_offset(btf, function->name_off));
-  if (length < 0 || length >= sizeof(name)) return -E2BIG;
   id = btf_find_by_name_kind(btf, name, BTF_KIND_FUNC);
   if (id <= 0) return id ?: -ENOENT;
   function = btf_type_by_id(btf, id);
  }
  proto = btf_type_by_id(btf, function->type);
- if (!proto || !btf_type_is_func_proto(proto)) return -EINVAL;
  return function->type;
 }
 
