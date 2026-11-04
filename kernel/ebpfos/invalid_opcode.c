@@ -28,8 +28,6 @@ static bool ud2_valid(u64 payload)
 }
 static int ud2_proof(u64 payload, struct bpf_insn *insns)
 {
-	if (!insns || !ud2_valid(payload))
-		return -EINVAL;
 	/* The existing KF_NORETURN protocol marks this final scalar instruction
 	 * terminal. No source output or local continuation survives the #UD.
 	 * Its Linux entry/handler remain separate compiled-code dependencies.
@@ -42,8 +40,6 @@ static int ud2_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	static const u8 native[] = EBPFOS_UD2_TERMINAL_NATIVE;
 
-	if (!offset || (emit && !image) || !ud2_valid(payload))
-		return -EINVAL;
 	if (emit)
 		memcpy(image + *offset, native, sizeof(native));
 	*offset += sizeof(native);
