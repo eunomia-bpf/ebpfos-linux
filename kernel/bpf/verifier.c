@@ -39,6 +39,7 @@
 
 #include "disasm.h"
 #include "../ebpfos/function_native.h"
+#include "../ebpfos/function_layout.h"
 
 
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
