@@ -23,8 +23,6 @@ BTF_KFUNCS_END(irq_restore_if_ids)
 static const u8 irq_restore_if_native[] = EBPFOS_IRQ_RESTORE_IF_NATIVE;
 static int irq_restore_if_proof(u64 payload, struct bpf_insn *insns)
 {
-	if (!insns || payload != irq_restore_if_ids.pairs[0].id)
-		return -EINVAL;
 	insns[0] = BPF_CALL_KFUNC(0, irq_restore_if_services.pairs[0].id);
 	return 1;
 }
@@ -32,8 +30,6 @@ static int irq_restore_if_requirements(u64 payload, u64 *capability,
 				       u64 *effect, u8 sha[32])
 {
 	static const u8 semantics[] = EBPFOS_IRQ_RESTORE_IF_SHA256;
-	if (!capability || !effect || !sha || payload != irq_restore_if_ids.pairs[0].id)
-		return -EINVAL;
 	*capability = 0;
 	*effect = 0;
 	memcpy(sha, semantics, sizeof(semantics));
@@ -42,8 +38,6 @@ static int irq_restore_if_requirements(u64 payload, u64 *capability,
 static int irq_restore_if_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 			      const struct bpf_prog *prog, const u8 *final_ip)
 {
-	if (!offset || (emit && !image) || payload != irq_restore_if_ids.pairs[0].id)
-		return -EINVAL;
 	if (emit)
 		memcpy(image + *offset, irq_restore_if_native, sizeof(irq_restore_if_native));
 	*offset += sizeof(irq_restore_if_native);
