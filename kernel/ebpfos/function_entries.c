@@ -88,7 +88,7 @@ static bool entry_export(struct btf *native, u32 prototype,
   const struct btf_type *candidate = btf_type_by_id(aux->btf, id);
   if (!candidate || !btf_type_is_func(candidate) ||
       !cell_export_name(name, aux->btf, id, !source_name)) continue;
-  if (found || !cell_callable_proto(native, prototype, function, name, program, id, address)) return false;
+  if (!cell_callable_proto(native, prototype, function, name, program, id, address)) return false;
   found = true;
  }
  return found;

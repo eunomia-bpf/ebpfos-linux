@@ -38,8 +38,6 @@
 #include <asm/sections.h>
 
 #include "disasm.h"
-#include "../ebpfos/function_scalar_record_abi.h"
-#include "../ebpfos/function_arguments.h"
 #include "../ebpfos/function_native.h"
 
 
@@ -6737,8 +6735,6 @@ static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
  * the scalar ABI. Check modeled resources without inventing a lifetime model
  * for borrowed Linux objects; their lifetime follows source synchronization.
  */
-static bool native_callback_types_match(struct btf *source, u32 source_id,
-					struct btf *target, u32 target_id);
 
 static int check_btf_pointer_store(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *dst,
@@ -10720,34 +10716,7 @@ static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
  * can carry equivalent prototypes in different namespaces. Reuse the cold
  * callable-layout and argument-protocol checks; shape grants no target effects.
  */
-static bool native_callback_types_match(struct btf *source, u32 source_id,
-					struct btf *target, u32 target_id)
-{
-	const struct btf_type *declaration, *actual, *expected;
-	const struct btf_param *ap, *ep;
-	u32 actual_id, i;
 
-	actual = native_callable_proto(source, source_id, &declaration);
-	expected = btf_type_by_id(target, target_id);
-	if (!actual || !expected || !btf_type_is_func_proto(expected))
-		return false;
-	actual_id = declaration ? declaration->type : source_id;
-	if (!btf_types_are_same(source, actual_id, target, target_id) &&
-	    !cell_layout(source, actual_id, target, target_id, 0, false))
-		return false;
-	ap = btf_params(actual);
-	ep = btf_params(expected);
-	for (i = 0; i < btf_type_vlen(expected); i++)
-		if (btf_type_is_ptr(btf_type_skip_modifiers(target, ep[i].type, NULL)) &&
-		    cell_argument_nullable(target, NULL, ep, i) &&
-		    !cell_argument_nullable(source, declaration, ap, i))
-			return false;
-	/* A resolved target must accept the interface's inputs. Preserve stronger
-	 * bounds, trust and other argument requirements instead of erasing them.
-	 */
-	return !declaration ||
-		cell_argument_requirements(target, NULL, expected, source, source_id);
-}
 
 /* Share the typed callback contract across Native calls and globals. NULL
  * satisfies only a nullable interface; no byte span or provider effect is
@@ -14822,24 +14791,7 @@ static int check_native_function_call(struct bpf_verifier_env *env, struct btf *
  * preconditions for another function. With no inputs and no pointer result,
  * the ABI itself supplies the complete memory interface.
  */
-static bool native_memory_contract(const struct bpf_kfunc_meta *kfunc)
-{
-	const struct btf_type *function = btf_type_by_id(kfunc->btf, kfunc->id);
-	const struct btf_type *result;
-	const char *tag;
 
-	
-
-	result = btf_type_skip_modifiers(kfunc->btf, kfunc->proto->type, NULL);
-	if (!btf_type_vlen(kfunc->proto) &&
-	    (btf_type_is_void(result) ||
-	     (btf_type_is_scalar(result) && result->size <= sizeof(u64)) ||
-	     btf_scalar_record_return(kfunc->btf, kfunc->proto->type)))
-		return true;
-	tag = btf_find_decl_tag_value(kfunc->btf, function, -1,
-				     "native:memory_contract");
-	return !IS_ERR(tag) && !*tag;
-}
 
 /* A field supplies only its prototype. A resolved Native symbol additionally
  * retains its provider declaration; neither route invents a target set.

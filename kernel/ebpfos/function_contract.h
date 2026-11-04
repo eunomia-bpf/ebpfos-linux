@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
-#include "function_arguments.h"
-#include "function_untrusted_address.h"
-#include "function_context_requirements.h"
 #include "function_scalar_span.h"
-#include "function_scalar_record_abi.h"
 #include "native_result_abi.h"
 #include "../bpf/btf_record_return.h"
-#include "function_register_prefix.h"
 #include <linux/module.h>
 #include <linux/bpf_native_abi.h>
 /* Cold native-call contract shared by direct entries and owned ops tables.

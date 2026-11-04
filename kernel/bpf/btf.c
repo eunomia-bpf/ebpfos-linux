@@ -9684,7 +9684,7 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 	/* Warn when register_btf_kfunc_id_set is called twice for the same hook
 	 * for module sets.
 	 */
-	if (WARN_ON_ONCE((old_set || old_kop_set) && !vmlinux_set)) {
+	if (WARN_ON_ONCE(old_set && !vmlinux_set)) {
 		ret = -EINVAL;
 		goto err_free;
 	}
