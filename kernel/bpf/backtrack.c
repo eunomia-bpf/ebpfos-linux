@@ -377,7 +377,6 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 	} else if (class == BPF_JMP || class == BPF_JMP32) {
 		if (bpf_native_seq_ablation() && bpf_native_seq_insn(insn)) {
 			struct bpf_native_seq *sequence = bpf_native_seq_get(env->prog, insn->imm);
-			if (!sequence) return -EINVAL;
 			/* Diagnostic outputs are independent unknown values constrained
 			 * only by their widths. They define every written register;
 			 * untouched registers retain their ordinary precision history.
