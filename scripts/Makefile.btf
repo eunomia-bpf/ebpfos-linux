@@ -20,10 +20,8 @@ pahole-flags-$(call test-ge, $(pahole-ver), 130) += --btf_features=attributes
 
 pahole-flags-$(call test-ge, $(pahole-ver), 131) += --btf_features=layout
 
-# Generated operations maps need ordinary table VARs, not only per-CPU VARs.
-ifeq ($(CONFIG_EBPFOS_ENTRY_LINK),y)
+# Native data imports need ordinary global VARs, not only per-CPU VARs.
 pahole-flags-$(call test-ge, $(pahole-ver), 131) += --btf_features=global_var
-endif
 
 endif
 
