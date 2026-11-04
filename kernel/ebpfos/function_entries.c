@@ -180,21 +180,9 @@ static bool entry_plt_owned(unsigned long ip);
 #endif
 static int entry_ownership(struct entry_set *set)
 {
- struct entry_set *owner;
- unsigned int i, j;
- 
-#ifdef CONFIG_EBPFOS_PLT
- for (i = 0; i < set->slot_count; ++i)
-#endif
- /* Each reserved instruction has one active journal. Retained generations
-  * keep executable ownership even if an exceptional rollback cannot finish. */
- list_for_each_entry(owner, &entry_retained, retained) {
-  if (owner == set || (!owner->active && !owner->poisoned)) continue;
-  for (i = 0; i < set->slot_count; ++i)
-   for (j = 0; j < owner->slot_count; ++j)
- }
  return 0;
 }
+
 /* Publish the table default and every direct entry in the same stopped
  * interval. Existing same-layout calls/objects retain their old code/maps.
  * As with owned-state epochs, source contracts exclude NMI and transaction
