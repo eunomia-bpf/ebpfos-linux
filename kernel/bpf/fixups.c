@@ -131,16 +131,27 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
  s64 target;
  bool store;
 
+ /* An absent annotation is ordinary bytecode, not a failed program.
+  * Classify the encoding before reading its neighbouring instruction. */
+ if (index < 1 || index >= prog->len)
+  return -ENOENT;
  if (bpf_pseudo_kop_call(call)) {
   const struct bpf_kop *kop;
   struct bpf_kop_exception entry;
   u64 payload;
   int error;
 
+  if (index + 1 >= prog->len)
+   return -ENOENT;
   branch = call + 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO || branch->dst_reg != 1)
+   return -ENOENT;
   error = bpf_jit_get_kop_payload(prog, call, &kop, &payload);
   if (error)
    return error;
+  if (!kop->exception_entry || !kop->num_exentries)
+   return -ENOENT;
   error = kop->exception_entry(payload, 0, &entry);
   if (error || entry.insn_offset || entry.fixup_offset != kop->max_emit_bytes ||
       entry.data != branch->imm)
@@ -149,7 +160,13 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
  } else {
   store = (BPF_CLASS(call->code) == BPF_ST ||
            BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
+  if (!bpf_pseudo_call(call) && !store)
+   return -ENOENT;
   branch = call - 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO || branch->dst_reg ||
+      (branch->imm != 3 && (!store || branch->imm != 1)))
+   return -ENOENT;
   target = index + branch->off;
  }
  if (recovery)
