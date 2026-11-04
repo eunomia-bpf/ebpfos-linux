@@ -13819,6 +13819,17 @@ static int process_kf_arg_ptr_to_btf_id(struct bpf_verifier_env *env,
 	reg_ref_tname = btf_name_by_offset(reg_btf, reg_ref_t->name_off);
 	struct_same = btf_struct_ids_match(&env->log, reg_btf, reg_ref_id, reg->var_off.value,
 					   meta->btf, ref_id, strict_type_match);
+	/* A bare callback's source prototype can live in program BTF while
+	 * its already-typed data input lives in kernel BTF. Compare the
+	 * complete passed object, never names alone or an interior address.
+	 * This grants no capability or target effect; the ordinary trust,
+	 * lifetime, offset and publication checks still apply.
+	 */
+	if (!struct_same && meta->func_id == U32_MAX && !meta->native_call &&
+	    !meta->func_decl && !strict_type_match &&
+	    tnum_is_const(reg->var_off) && !reg->var_off.value &&
+	    cell_layout(reg_btf, reg_ref_id, meta->btf, ref_id, 0, false))
+		struct_same = true;
 	/* If kfunc is accepting a projection type (ie. __sk_buff), it cannot
 	 * actually use it -- it must cast to the underlying type. So we allow
 	 * caller to pass in the underlying type.
