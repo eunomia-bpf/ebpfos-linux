@@ -3346,8 +3346,6 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 		u32 start = env->subprog_info[j].start;
 		u32 next = env->subprog_info[j + 1].start;
 
-		if (start > first && start <= last)
-			return -EINVAL;
 		if (start <= first && last < next) {
 			owner_start = start;
 			end = next;
@@ -11145,9 +11143,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
 			if (ret < 0)
 				return ret;
-			if (check_mem_reg(env, reg, regno, arg->mem_size,
-					  arg->arg_type & MEM_RDONLY))
-				return -EINVAL;
 			if (!(arg->arg_type & PTR_MAYBE_NULL) &&
 			    (bpf_register_is_null(reg) || (reg->type & PTR_MAYBE_NULL))) {
 				bpf_log(log, "arg#%d is expected to be non-NULL\n", i);
