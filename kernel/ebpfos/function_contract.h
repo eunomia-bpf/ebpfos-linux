@@ -284,9 +284,6 @@ static inline int ebpfos_function_binding_open_pure(
 {
  struct bpf_prog *program;
  unsigned long address;
- if (!IS_ENABLED(CONFIG_X86_64) || IS_ENABLED(CONFIG_CFI)) return -EOPNOTSUPP;
- if (out->program || out->module || out->address || !native || !function || !btf_type_is_func(function))
-  return -EINVAL;
  program = bpf_prog_get_type_dev(fd, type, false);
  if (IS_ERR(program)) return PTR_ERR(program);
  if (program->sleepable || !program->aux->func || !program->aux->func_cnt) goto invalid;
