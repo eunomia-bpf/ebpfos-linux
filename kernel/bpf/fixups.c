@@ -133,7 +133,7 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 
  /* An absent annotation is ordinary bytecode, not a failed program.
   * Classify the encoding before reading its neighbouring instruction. */
- if (index < 1 || index >= prog->len)
+ if (index < 0 || index >= prog->len)
   return -ENOENT;
  if (bpf_pseudo_kop_call(call)) {
   const struct bpf_kop *kop;
@@ -157,6 +157,8 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
    return error;
   target = index + 2 + branch->off;
  } else {
+  if (!index)
+   return -ENOENT;
   store = (BPF_CLASS(call->code) == BPF_ST ||
            BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
   if (!bpf_pseudo_call(call) && !store)
