@@ -44,27 +44,27 @@ static u32 name##_service(u64 payload) \
 { return name##_valid(payload) ? name##_services.pairs[0].id : 0; } \
 static int name##_proof(u64 payload, struct bpf_insn *insns) \
 { \
- if (!insns || !name##_valid(payload)) return -EINVAL; \
+ \
  insns[0] = BPF_MOV64_REG(BPF_REG_1, BPF_REG_2); \
  insns[1] = BPF_MOV64_REG(BPF_REG_2, BPF_REG_3); \
  insns[2] = BPF_CALL_KFUNC(0, name##_services.pairs[0].id); return 3; \
 } \
 static int name##_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry) \
 { \
- if (!entry || index || !name##_valid(payload)) return -EINVAL; \
+ \
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_FAULT_##stem##_INSN, \
   .fixup_offset = EBPFOS_FAULT_##stem##_FIXUP, .data = EX_TYPE_UACCESS }; return 0; \
 } \
 static int name##_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32]) \
 { \
  static const u8 digest[] = EBPFOS_FAULT_##stem##_SHA256; \
- if (!capability || !effect || !sha || !name##_valid(payload)) return -EINVAL; \
+ \
  *capability = 0; *effect = 0; memcpy(sha, digest, 32); return 0; \
 } \
 static int name##_emit(u8 *image, u32 *offset, bool emit, u64 payload, \
                      const struct bpf_prog *prog, const u8 *final_ip) \
 { \
- if (!offset || (emit && !image) || !name##_valid(payload)) return -EINVAL; \
+ \
  if (emit) memcpy(image + *offset, name##_native, sizeof(name##_native)); \
  *offset += sizeof(name##_native); return sizeof(name##_native); \
 } \
