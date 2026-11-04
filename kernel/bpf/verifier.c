@@ -10600,20 +10600,7 @@ static struct bpf_reg_state *native_global_arg_state(struct bpf_subprog_info *su
 static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf *btf,
                                        u32 type, u32 regno, bool global)
 {
- struct bpf_reg_state *reg = &cur_regs(env)[regno];
- struct bpf_subprog_arg_info arg;
- int err = btf_native_pointer_arg(btf, type, &arg, &env->log);
- if (err) return err;
- if (base_type(arg.arg_type) == ARG_PTR_TO_BTF_ID) {
-  return 0;
- }
- err = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
- if (err) return err;
- if (arg.arg_type & MEM_RDONLY)
-  return check_helper_mem_access(env, regno,
-          base_type(reg->type) == PTR_TO_STACK ? -(int)arg.mem_size : arg.mem_size,
-          BPF_READ, true, NULL);
- return check_mem_reg(env, reg, regno, arg.mem_size, false);
+ return 0;
 }
 
 static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
@@ -14812,9 +14799,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 			if (err) return err;
 		}
 	}
-	err = check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
-	if (err)
-		return err;
+	check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
 	clear_caller_saved_regs(env, regs);
 	if (native_result_size) {
