@@ -98,6 +98,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node)
   if (plt_binding(scope, entry->slot.target[1])) ++count;
  if (!count) return NULL;
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 81U : 64U) + 13U * count;
  image = kzalloc(sizeof(*image), GFP_KERNEL);
  buffer = kmalloc(capacity, GFP_KERNEL);
  programs = kvmalloc_array(count, sizeof(*programs), GFP_KERNEL);
@@ -200,7 +201,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
 {
  struct bpf_entry_scope *scope;
  struct plt_entry *entry, *next;
- u32 i, j;
+ u32 i;
  int error = 0;
  if (!count) return NULL;
  mutex_lock(&entry_lock);
@@ -219,8 +220,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
  for (i = 0; i < count; ++i) {
   bool ftrace, canonical_nop;
   unsigned long ip = bpf_entry_text_location(bindings[i].source_module, bindings[i].native_address, &ftrace, &canonical_nop);
-  struct entry_set *owner;
-  u8 before[5], expected[5];
+  u8 before[5];
   
   
   if (entry_plt_owned(ip)) continue;
