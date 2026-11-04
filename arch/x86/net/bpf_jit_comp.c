@@ -661,14 +661,6 @@ static int emit_kop_desc_call(u8 **pprog,
 		return ret;
 	if (ret != off || ret > kop->max_emit_bytes)
 		return -EFAULT;
-	if (kop->call_exception_annotation) {
-		/* Metadata only. The ordinary adjacent CALL owns its opcode and
-		 * exception entry, whose recovery is an ordinary BPF branch target.
-		 */
-		if (off || kop->num_exentries != 1)
-			return -EINVAL;
-		return 0;
-	}
 	if (kop->num_exentries && !kop->exception_entry)
 		return -EINVAL;
 	if (image && bpf_prog->aux->extable) {

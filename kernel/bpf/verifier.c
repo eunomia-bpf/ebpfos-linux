@@ -3362,15 +3362,15 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 		verbose(env, "direct-CALL exception annotations require native JIT emission\n");
 		return -EOPNOTSUPP;
 	}
-	if (index + 2 >= env->prog->len)
+	if (index + 1 >= env->prog->len)
 		return -EINVAL;
-	branch = &insns[index + 1];
+	branch = &insns[index];
 	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
 	 * analysis. No register refinement or call-state analysis is added.
 	 */
-	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg || branch->imm)
+	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg || branch->imm != 3)
 		return -EINVAL;
-	err = bpf_jit_get_call_exception(env->prog, &insns[index + 2],
+	err = bpf_jit_get_call_exception(env->prog, &insns[index + 1],
 					 &recovery, NULL);
 	if (err)
 		return err;
@@ -3378,9 +3378,9 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 		u32 start = env->subprog_info[j].start;
 		u32 next = env->subprog_info[j + 1].start;
 
-		if (start >= index && start <= index + 2)
+		if (start > index && start <= index + 1)
 			return -EINVAL;
-		if (start <= index - 1 && index + 2 < next)
+		if (start <= index && index + 1 < next)
 			end = next;
 	}
 	if (!end || recovery >= end)
@@ -3404,13 +3404,13 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 				(insn->code == (BPF_JMP32 | BPF_JA) ?
 				 insn->imm : insn->off);
 		}
-		if (target >= index && target <= index + 2) {
+		if (target == index + 1) {
 			verbose(env, "branch bypasses direct-CALL exception annotation at insn %u\n",
-				index - 1);
+				index);
 			return -EINVAL;
 		}
 	}
-	env->insn_aux_data[index + 1].kop_call_fault_branch = true;
+	env->insn_aux_data[index].kop_call_fault_branch = true;
 	return 0;
 }
 
@@ -3423,6 +3423,16 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 	u32 cap = env->kop_call_cnt;
 	int i, err;
 
+	/* Exception metadata belongs to ordinary CALL/CFG, not a KOperation. */
+	for (i = 0; i < env->prog->len; i++) {
+		struct bpf_insn *insn = &env->prog->insnsi[i];
+
+		if (!bpf_is_may_goto_insn(insn) || !insn->imm)
+			continue;
+		err = validate_call_exception_annotation(env, i);
+		if (err)
+			return err;
+	}
 	if (cap) {
 		struct bpf_prog_aux *aux = env->prog->aux;
 
@@ -3496,11 +3506,6 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		desc = find_kfunc_desc(env->prog, call->imm, call->off);
 		if (!desc || !desc->kop)
 			return -ENOENT;
-		if (desc->kop->call_exception_annotation) {
-			err = validate_call_exception_annotation(env, i);
-			if (err)
-				return err;
-		}
 		native_backedge = desc->kop->noreturn_native_backedge;
 		if (native_backedge) {
 			const struct bpf_insn *backedge;
@@ -21851,7 +21856,7 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 		return 0;
 	case BPF_JCOND:
 		if (insn->code != (BPF_JMP | BPF_JCOND) || insn->src_reg != BPF_MAY_GOTO ||
-		    insn->dst_reg || insn->imm) {
+		    insn->dst_reg || (insn->imm && insn->imm != 3)) {
 			verbose(env, "invalid may_goto imm %d\n", insn->imm);
 			return -EINVAL;
 		}

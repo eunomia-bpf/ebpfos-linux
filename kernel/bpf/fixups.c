@@ -200,25 +200,19 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 			       u32 *recovery, u32 *data)
 {
 	ptrdiff_t index = call - prog->insnsi;
-	const struct bpf_kop *kop;
 	const struct bpf_insn *branch;
-	u64 payload;
 	s64 target;
-	int err;
 
-	if (index < 3 || index >= prog->len || !bpf_pseudo_call(call) ||
-	    !bpf_pseudo_kop_call(call - 2))
-		return -ENOENT;
-	err = bpf_jit_get_kop_payload(prog, call - 2, &kop, &payload);
-	if (err)
-		return err;
-	if (!kop->call_exception_annotation)
+	if (index < 1 || index >= prog->len || !bpf_pseudo_call(call))
 		return -ENOENT;
 	branch = call - 1;
+	/* EX_TYPE_UACCESS is metadata on the ordinary, verifier-visible branch.
+	 * The adjacent real CALL retains stock callee and argument checking.
+	 */
 	if (branch->code != (BPF_JMP | BPF_JCOND) ||
-	    branch->dst_reg || branch->src_reg != BPF_MAY_GOTO ||
-	    branch->imm || branch->off <= 0 ||
-	    kop->num_exentries != 1 || (payload & 0xff) != 3)
+	    branch->src_reg != BPF_MAY_GOTO || branch->imm != 3)
+		return -ENOENT;
+	if (branch->dst_reg || branch->off <= 0)
 		return -EINVAL;
 	target = index + branch->off;
 	if (target <= index || target >= prog->len)
@@ -226,7 +220,7 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 	if (recovery)
 		*recovery = target;
 	if (data)
-		*data = payload & 0xff;
+		*data = branch->imm;
 	return 0;
 }
 
@@ -1374,6 +1368,14 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 					goto out_free;
 				num_exentries += kop->num_exentries;
 			}
+			if (bpf_pseudo_call(insn)) {
+				err = bpf_jit_get_call_exception(func[i], insn, NULL, NULL);
+				if (err != -ENOENT) {
+					if (err)
+						goto out_free;
+					num_exentries++;
+				}
+			}
 		}
 		func[i]->aux->num_exentries = num_exentries;
 		func[i]->aux->tail_call_reachable = env->subprog_info[i].tail_call_reachable;
@@ -1648,6 +1650,10 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 		return -EINVAL;
 	}
 	for (i = 0; i < prog->len; i++, insn++) {
+		if (env->insn_aux_data[i].kop_call_fault_branch) {
+			verbose(env, "direct-CALL exception annotations require native JIT emission\n");
+			return -EOPNOTSUPP;
+		}
 		if (bpf_pseudo_func(insn)) {
 			/* When JIT fails the progs with callback calls
 			 * have to be rejected, since interpreter doesn't support them yet.
@@ -1751,6 +1757,7 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 						  NULL, NULL);
 			if (ret)
 				return ret;
+			env->prog->aux->num_exentries++;
 			goto next_insn;
 		}
 		if (bpf_kop_is_sidecar_insn(insn)) {

@@ -1083,8 +1083,8 @@ struct bpf_kop_reloc {
 
 struct bpf_kop {
 	struct module *owner; /* NULL for built-in/vmlinux descriptors */
-	/* Decorate an adjacent verifier-visible MAY_GOTO / direct BPF CALL.
-	 * Native emission binds the CALL's exception to that branch's target.
+	/* Retained in the native data layout. CALL exception metadata is
+	 * carried by the ordinary MAY_GOTO/CALL pair.
 	 */
 	bool call_exception_annotation;
 	u16 max_insn_cnt;

@@ -19,7 +19,6 @@ obj-$(CONFIG_EBPFOS_KOPERATION) += locked_bits.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += locked_xchg.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += user_access_window.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += irq_restore_if.o
-obj-$(CONFIG_EBPFOS_KOPERATION) += fault_call.o
 obj-$(CONFIG_EBPFOS_KOPERATION) += invalid_opcode.o
 
 obj-$(CONFIG_EBPFOS_PTVIEW) += ptview.o
