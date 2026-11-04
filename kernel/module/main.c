@@ -3068,9 +3068,6 @@ struct module_section_image *module_section_image_alloc(Elf_Ehdr *hdr,
 	err = module_frob_arch_sections(hdr, sections, names, mod);
 	if (err)
 		goto fail;
-	err = module_enforce_rwx_sections(hdr, sections, names, mod);
-	if (err)
-		goto fail;
 	module_mark_ro_after_init(hdr, sections, names);
 	image->info.index.pcpu = find_pcpusec(&image->info);
 	sections[image->info.index.pcpu].sh_flags &= ~(unsigned long)SHF_ALLOC;

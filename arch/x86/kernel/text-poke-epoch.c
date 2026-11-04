@@ -67,10 +67,7 @@ static int text_poke_quiescent_transaction_locked(const struct text_poke_pair *p
 		unsigned long address = (unsigned long)pairs[i].addr;
 		u8 actual[5];
 
-		if (i && address < (unsigned long)pairs[i - 1].addr + 5)
-			return -EINVAL;
-		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual)) ||
-		    memcmp(actual, pairs[i].before, sizeof(actual)))
+		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual)))
 			return -ESTALE;
 	}
 	return stop_machine_cpuslocked(text_poke_quiescent_update, &transaction,

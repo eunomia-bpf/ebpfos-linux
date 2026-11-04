@@ -3282,8 +3282,6 @@ int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int c
 	lockdep_assert_held(&text_mutex);
 	if (!count)
 		return 0;
-	if (text_poke_array.nr_entries)
-		return -EBUSY;
 	if (count > INT_MAX)
 		return -E2BIG;
 	vector = kvmalloc_array(count, sizeof(*vector), GFP_KERNEL);
@@ -3296,13 +3294,11 @@ int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int c
 		long offset = address - (unsigned long)_stext;
 		u8 actual[5];
 
-		if ((i && address < (unsigned long)pairs[i - 1].addr + 5) ||
-		    offset != (s32)offset ||
+		if (offset != (s32)offset ||
 		    !text_poke_branch(pairs[i].before, &slot->previous_opcode, &slot->previous_disp) ||
 		    !text_poke_branch(pairs[i].after, &slot->opcode, &slot->disp))
 			goto out;
-		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual)) ||
-		    memcmp(actual, pairs[i].before, sizeof(actual))) {
+		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual))) {
 			error = -ESTALE;
 			goto out;
 		}

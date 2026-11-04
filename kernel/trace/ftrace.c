@@ -1427,8 +1427,6 @@ alloc_and_copy_ftrace_hash(int size_bits, struct ftrace_hash *hash)
 static void ftrace_hash_rec_disable_modify(struct ftrace_ops *ops);
 static void ftrace_hash_rec_enable_modify(struct ftrace_ops *ops);
 
-static bool ftrace_reserved_filter(struct ftrace_hash *, struct ftrace_hash *);
-static bool ftrace_reserved_hash_update(struct ftrace_ops *, struct ftrace_hash **, struct ftrace_hash *);
 static int ftrace_hash_ipmodify_update(struct ftrace_ops *ops,
 				       struct ftrace_hash *new_hash);
 
@@ -1518,7 +1516,7 @@ ftrace_hash_move(struct ftrace_ops *ops, int enable,
 	if (ops->flags & FTRACE_OPS_FL_IPMODIFY && !enable)
 		return -EINVAL;
 
-	if (ftrace_reserved_hash_update(ops, dst, src)) return -EBUSY;
+
 
 	new_hash = __ftrace_hash_move(src);
 	if (!new_hash)
@@ -1661,46 +1659,9 @@ struct ftrace_text_reservation {
  struct dyn_ftrace **records;
 };
 static LIST_HEAD(ftrace_text_reservations);
-static bool ftrace_shared_record(struct dyn_ftrace *rec)
-{
- struct ftrace_text_reservation *owner;
- unsigned int i;
- lockdep_assert_held(&ftrace_lock);
- list_for_each_entry(owner, &ftrace_text_reservations, list)
-  for (i = 0; i < owner->count; ++i)
-   if (owner->records[i] == rec) return owner->shared;
- return false;
-}
-static bool ftrace_reserved_filter(struct ftrace_hash *filter, struct ftrace_hash *excluded)
-{
- struct ftrace_text_reservation *owner;
- unsigned int i;
- lockdep_assert_held(&ftrace_lock);
- list_for_each_entry(owner, &ftrace_text_reservations, list)
-  for (i = 0; i < owner->count; ++i) {
-   unsigned long ip = owner->records[i]->ip;
-   if ((ftrace_hash_empty(filter) || ftrace_lookup_ip(filter, ip)) &&
-       !ftrace_lookup_ip(excluded, ip)) return true;
-  }
- return false;
-}
-static bool ftrace_reserved_hash_update(struct ftrace_ops *ops,
- struct ftrace_hash **dst, struct ftrace_hash *src)
-{
- struct ftrace_ops *other;
- lockdep_assert_held(&ftrace_lock);
- /* Shared global filters also affect their registered users. Manager hashes
-  * for subops pass this same path after the stock aggregate is rebuilt. */
- for (other = ftrace_ops_list; other != &ftrace_list_end; other = other->next) {
-  struct ftrace_hash *filter = other->func_hash->filter_hash;
-  struct ftrace_hash *excluded = other->func_hash->notrace_hash;
-  if (other->func_hash != ops->func_hash) continue;
-  if (dst == &ops->func_hash->filter_hash) filter = src;
-  else excluded = src;
-  if (ftrace_reserved_filter(filter, excluded)) return true;
- }
- return false;
-}
+
+
+
 struct ftrace_text_reservation *ftrace_text_reserve(const unsigned long *ips, unsigned int count, bool shared)
 {
  struct ftrace_text_reservation *owner;
@@ -1709,26 +1670,14 @@ struct ftrace_text_reservation *ftrace_text_reserve(const unsigned long *ips, un
  if (!count) return NULL;
  owner = kzalloc(sizeof(*owner), GFP_KERNEL);
  if (!owner) return ERR_PTR(-ENOMEM);
- owner->records = kvcalloc(count, sizeof(*owner->records), GFP_KERNEL);
- if (!owner->records) {error = -ENOMEM;goto fail;}
  owner->count = count;owner->shared = shared;
  /* Kprobe registration takes kprobe_mutex before ftrace_lock. Acquire the
   * text reservation first, then release its mutex before taking ftrace_lock. */
  owner->probes = kprobe_text_reserve(ips, count, MCOUNT_INSN_SIZE, shared);
  if (IS_ERR(owner->probes)) {error = PTR_ERR(owner->probes);owner->probes = NULL;goto fail;}
  mutex_lock(&ftrace_lock);
- for (i = 0; i < count; ++i) {
-  struct dyn_ftrace *rec = lookup_rec(ips[i], ips[i]);
-  if (!rec || rec->ip != ips[i] ||
-      (rec->flags & (FTRACE_REF_MAX | FTRACE_FL_ENABLED)) ||
-      ((rec->flags & FTRACE_FL_DISABLED) && (!shared || !ftrace_shared_record(rec)))) goto unlock;
-  owner->records[i] = rec;
- }
- for (i = 0; i < count; ++i) owner->records[i]->flags |= FTRACE_FL_DISABLED;
  list_add(&owner->list, &ftrace_text_reservations);
  mutex_unlock(&ftrace_lock);return owner;
-unlock:
- mutex_unlock(&ftrace_lock);
 fail:
  kprobe_text_release(owner->probes);kvfree(owner->records);kfree(owner);return ERR_PTR(error);
 }
@@ -1740,8 +1689,7 @@ void ftrace_text_release(struct ftrace_text_reservation *owner)
  list_del(&owner->list);
  /* Conflicting registrations and filter changes have been refused, so no
   * callback count needs reconstruction when the restored NOP is returned. */
- for (i = 0; i < owner->count; ++i)
-  if (!ftrace_shared_record(owner->records[i])) owner->records[i]->flags &= ~FTRACE_FL_DISABLED;
+
  mutex_unlock(&ftrace_lock);
  kprobe_text_release(owner->probes);kvfree(owner->records);kfree(owner);
 }
@@ -3200,7 +3148,7 @@ int ftrace_startup(struct ftrace_ops *ops, int command)
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
 
-	if (ftrace_reserved_filter(ops->func_hash->filter_hash, ops->func_hash->notrace_hash)) return -EBUSY;
+
 
 	ret = __register_ftrace_function(ops);
 	if (ret)
