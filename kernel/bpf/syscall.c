@@ -2976,6 +2976,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	struct bpf_token *token = NULL;
 	bool bpf_cap;
 	size_t field_access_bytes;
+		check_mul_overflow((size_t)attr->ebpfos_field_access_cnt,
+			       sizeof(struct bpf_ebpfos_field_access),
+			       &field_access_bytes);
 	int err;
 	char license[128];
 

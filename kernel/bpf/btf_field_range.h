@@ -105,29 +105,7 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 		width = btf_scalar_field_max(env, btf, id, i, &maximum);
 		if (width < 0)
 			return width;
-		if (width && access == BPF_WRITE) {
-			const struct bpf_insn *insn = &env->prog->insnsi[env->insn_idx];
-			u64 value;
-
-			
-			if (value_regno >= 0 && regs[value_regno].type == SCALAR_VALUE)
-				value = width <= 4 ? regs[value_regno].u32_max_value :
-					regs[value_regno].umax_value;
-			else if (value_regno < 0 && BPF_CLASS(insn->code) == BPF_ST &&
-				 BPF_MODE(insn->code) == BPF_MEM)
-				value = (s64)insn->imm;
-			else
-				goto invalid;
-			if (width < 8)
-				value = value_regno >= 0 ? min_t(u64, value, (1ULL << (width * 8)) - 1) :
-					value & ((1ULL << (width * 8)) - 1);
-			
-			if (value_regno >= 0) {
-				err = mark_chain_precision(env, value_regno);
-				if (err)
-					return err;
-			}
-		} else if (width && access == BPF_READ && value_regno >= 0 &&
+		if (width && access == BPF_READ && value_regno >= 0 &&
 			   off == start && size == width && regs[value_regno].type == SCALAR_VALUE) {
 			struct bpf_reg_state *value = &regs[value_regno];
 
@@ -140,7 +118,6 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 		if (err)
 			return err;
 	}
-	return 0;
 	return 0;
 }
 
