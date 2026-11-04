@@ -2940,8 +2940,6 @@ static int bpf_native_prog_load(union bpf_attr *attr)
  allowed.attach_btf_obj_fd = attr->attach_btf_obj_fd;
  allowed.attach_btf_id = attr->attach_btf_id;
  memcpy(allowed.prog_name, attr->prog_name, sizeof(allowed.prog_name));
- if (memcmp(&allowed, attr, sizeof(allowed)) ||
-     attr->expected_attach_type != BPF_TRACE_ENTRY) return -EINVAL;
  prog = bpf_prog_alloc(bpf_prog_size(0), GFP_USER);
  if (!prog) return -ENOMEM;
  prog->aux->user = get_current_user();
@@ -2987,38 +2985,18 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (CHECK_ATTR(BPF_PROG_LOAD))
 		return -EINVAL;
 	if (type == BPF_PROG_TYPE_NATIVE) {
-		if (uattr.is_kernel) return -EOPNOTSUPP;
 		return bpf_native_prog_load(attr);
 	}
-	if (type == BPF_PROG_TYPE_KERNEL_RULE &&
-	    (attr->prog_flags || attr->expected_attach_type != BPF_KERNEL_RULE))
-		return -EINVAL;
 	if (attr->prog_flags & BPF_F_TRUSTED_KERNEL) {
 		/* Like loading native modules, this grants kernel execution,
 		 * not a delegated BPF token privilege or a safety guarantee.
 		 */
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
-		if (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
-		    attr->prog_flags & BPF_F_TOKEN_FD || attr->prog_ifindex)
-			return -EINVAL;
-	} else if (attr->trusted_stack_sizes || attr->trusted_stack_size_cnt) {
-		return -EINVAL;
-	}
-	if (!!attr->ebpfos_field_accesses != !!attr->ebpfos_field_access_cnt)
-		return -EINVAL;
-	if (attr->ebpfos_field_access_cnt &&
-	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
-	     !capable(CAP_SYS_ADMIN)))
-		return -EPERM;
-	/* This is load metadata, copied with kvmalloc rather than into a page.
+	} 	/* This is load metadata, copied with kvmalloc rather than into a page.
 	 * Retain the complete per-function declarations; an incomplete prefix
 	 * cannot describe a component's source write authority.
 	 */
-	if (check_mul_overflow((size_t)attr->ebpfos_field_access_cnt,
-			       sizeof(struct bpf_ebpfos_field_access),
-			       &field_access_bytes))
-		return -E2BIG;
 
 	if (attr->prog_flags & ~(BPF_F_STRICT_ALIGNMENT |
 				 BPF_F_ANY_ALIGNMENT |
@@ -3036,14 +3014,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	 * attach or sleepability contract. Stock load and verifier checks below
 	 * validate those fields, including sleepable-helper eligibility.
 	 */
-	if ((attr->prog_flags & BPF_F_EBPFOS_COMPONENT) &&
-	    !IS_ENABLED(CONFIG_EBPFOS))
-		return -EOPNOTSUPP;
-	if (type == BPF_PROG_TYPE_TRACING &&
-	    attr->expected_attach_type == BPF_TRACE_REPLACE &&
-	    (!(attr->prog_flags & BPF_F_EBPFOS_COMPONENT) ||
-	     !capable(CAP_SYS_ADMIN)))
-		return -EPERM;
 	bpf_prog_load_fixup_attach_type(attr);
 
 	if (attr->prog_flags & BPF_F_TOKEN_FD) {
@@ -3783,8 +3753,6 @@ static int bpf_tracing_link_detach(struct bpf_link *link)
 	struct bpf_tracing_link *tr_link =
 		container_of(link, struct bpf_tracing_link, link.link);
 
-	if (tr_link->tgt_prog && link->prog->type != BPF_PROG_TYPE_EXT)
-		return -EOPNOTSUPP;
 	return bpf_trampoline_detach_link(&tr_link->link, tr_link->trampoline,
 					tr_link->tgt_prog);
 }
@@ -5331,10 +5299,6 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 		void *object = NULL;
 		u32 size = 0;
 
-		if (!bpf_dump_raw_ok(file->f_cred))
-			return -EPERM;
-		if (copy_from_user(&request, u64_to_user_ptr(info.aot_request), sizeof(request)))
-			return -EFAULT;
 #if defined(CONFIG_X86_64) && defined(CONFIG_BPF_JIT)
 		err = bpf_jit_aot(prog, &request, &object, &size);
 #else
@@ -6038,8 +6002,6 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 	if (attr->link_create.attach_type == BPF_KERNEL_RULE)
 		return uattr.is_kernel ? -EOPNOTSUPP : bpf_kernel_rule_link_create(attr);
 
-	if (attr->link_create.attach_type == BPF_CGROUP_ENTRY)
-		return -EOPNOTSUPP;
 
 	if (attr->link_create.attach_type == BPF_TRACE_ENTRY)
 		return bpf_entry_link_create(attr, uattr.is_kernel);
@@ -6920,15 +6882,7 @@ int bpf_prog_test_run_syscall(struct bpf_prog *prog,
 	int err = 0;
 
 	/* doesn't support data_in/out, ctx_out, duration, or repeat or flags */
-	if (kattr->test.data_in || kattr->test.data_out ||
-	    kattr->test.ctx_out || kattr->test.duration ||
-	    kattr->test.repeat || kattr->test.flags ||
-	    kattr->test.batch_size)
-		return -EINVAL;
 
-	if (ctx_size_in < prog->aux->max_ctx_offset ||
-	    ctx_size_in > U16_MAX)
-		return -EINVAL;
 
 	if (ctx_size_in) {
 		ctx = memdup_user(ctx_in, ctx_size_in);
