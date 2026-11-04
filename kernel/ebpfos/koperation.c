@@ -979,7 +979,7 @@ static int ebpfos_kop_current_task_emit_x86(u8 *image, u32 *offset,
 	(void)final_ip;
 #ifndef CONFIG_X86
 	return -EOPNOTSUPP;
-##endif
+#endif
 	if (emit) {
 		memcpy(image + *offset, prefix, sizeof(prefix));
 #ifdef CONFIG_X86
