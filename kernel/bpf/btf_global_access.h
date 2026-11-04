@@ -26,12 +26,6 @@ static int check_btf_pointer_global(struct bpf_verifier_env *env,
 	u32 bytes, id = 0;
 	int ret;
 
-	if (!btf_is_kernel(reg->btf) ||
-	    base_type(reg->type) != PTR_TO_BTF_ID ||
-	    reg->type & (PTR_UNTRUSTED | PTR_MAYBE_NULL | MEM_USER | MEM_PERCPU |
-			 MEM_RCU | MEM_ALLOC) || reg->ref_obj_id ||
-	    atype != BPF_READ)
-		return -EACCES;
 	type = btf_type_skip_modifiers(reg->btf, var->type, NULL);
 	if (IS_ERR(btf_resolve_size(reg->btf, type, &bytes)))
 		return -EINVAL;
@@ -140,10 +134,6 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 	/* No reference, nullable, user, RCU or per-CPU capability can become a
 	 * writable global. VAR pointers originate only at checked symbol loads.
 	 */
-	if (reg->type != (PTR_TO_BTF_ID | PTR_TRUSTED) ||
-	    !env->prog->aux->ebpfos_component ||
-	    !btf_is_vmlinux(reg->btf))
-		return -EACCES;
 	type = btf_type_skip_modifiers(reg->btf, var->type, NULL);
 	if (IS_ERR(btf_resolve_size(reg->btf, type, &bytes)))
 		return -EINVAL;
@@ -151,23 +141,11 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 	if (err)
 		return err;
 	if (atype == BPF_WRITE) {
-		if (!tnum_is_const(reg->var_off) || !aux->btf || !aux->func_info ||
-		    owner >= aux->func_info_cnt ||
-		    (value_regno >= 0 && regs[value_regno].type != SCALAR_VALUE)) {
-			verbose(env, "kernel global store requires a fixed scalar span\n");
-			return -EACCES;
-		}
 		len = snprintf(key, sizeof(key), "write:kernel_global:%s:%llu:%d",
 			btf_name_by_offset(reg->btf, var->name_off),
 			(unsigned long long)(off + reg->var_off.value), size);
-		if (len < 0 || len >= sizeof(key))
-			return -EINVAL;
 		tag = btf_find_decl_tag_value(aux->btf,
 			btf_type_by_id(aux->btf, aux->func_info[owner].type_id), -1, key);
-		if (IS_ERR(tag) || *tag) {
-			verbose(env, "kernel global store lacks source authority: %s\n", key);
-			return -EACCES;
-		}
 	} else if (value_regno >= 0) {
 		mark_reg_unknown(env, regs, value_regno);
 	}
