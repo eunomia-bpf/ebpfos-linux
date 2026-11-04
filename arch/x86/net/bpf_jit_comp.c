@@ -638,7 +638,8 @@ static int emit_kop_desc_call(u8 **pprog,
 			      const struct bpf_prog *bpf_prog,
 			      const struct bpf_insn *insn, bool emit,
 			      const u8 *final_ip, u8 *image, u8 *rw_image,
-			      unsigned int *excnt, struct jit_context *ctx)
+			      unsigned int *excnt, struct jit_context *ctx,
+			      const u8 *recovery_ip)
 {
 	const struct bpf_kop *kop;
 	u8 scratch[BPF_MAX_INSN_SIZE];
@@ -678,7 +679,8 @@ static int emit_kop_desc_call(u8 **pprog,
 				return ret ?: -EINVAL;
 			ex = &bpf_prog->aux->extable[(*excnt)++];
 			insn_delta = final_ip + entry.insn_offset - (u8 *)&ex->insn;
-			fixup_delta = final_ip + entry.fixup_offset - (u8 *)&ex->fixup;
+			fixup_delta = (recovery_ip ?: final_ip + entry.fixup_offset) -
+				      (u8 *)&ex->fixup;
 			if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
 				return -ERANGE;
 			rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
@@ -2933,10 +2935,19 @@ populate_extable:
 			}
 			func = (u8 *) __bpf_call_base + imm32;
 			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				const u8 *recovery_ip = NULL;
+
+				err = bpf_jit_get_call_exception(bpf_prog, insn, &recovery, NULL);
+				if (err != -ENOENT) {
+					if (err)
+						return err;
+					if (image)
+						recovery_ip = image + addrs[recovery];
+				}
 				err = emit_kop_desc_call(&prog, bpf_prog,
 							 insn, !!rw_image,
 							 image ? ip : NULL,
-							 image, rw_image, &excnt, ctx);
+							 image, rw_image, &excnt, ctx, recovery_ip);
 				if (err)
 					return err;
 				break;
@@ -2984,11 +2995,11 @@ populate_extable:
 			/* A validated exception branch describes a possible native
 			 * CALL fault; it emits neither a condition nor a loop counter.
 			 */
-			err = bpf_jit_get_call_exception(bpf_prog, insn + 1,
-						 NULL, NULL);
+			err = bpf_jit_get_call_exception(bpf_prog,
+				insn->dst_reg ? insn - 1 : insn + 1, NULL, NULL);
 			if (err)
 				return err;
-			if (insn[1].code == (BPF_JMP | BPF_CALL) &&
+			if (!insn->dst_reg && insn[1].code == (BPF_JMP | BPF_CALL) &&
 			    (priv_frame_ptr || tail_call_reachable ||
 			     IS_ENABLED(CONFIG_CALL_THUNKS)))
 				return -EOPNOTSUPP;
@@ -3307,7 +3318,9 @@ emit_jmp:
 		/* Ordinary CALL and store opcodes share their original exception
 		 * continuation. This metadata emits no machine instruction.
 		 */
-		if (image && bpf_prog->aux->extable) {
+		if (image && bpf_prog->aux->extable &&
+		    !(insn->code == (BPF_JMP | BPF_CALL) &&
+		      insn->src_reg == BPF_PSEUDO_KOP_CALL)) {
 			u32 recovery, exception_data;
 
 			err = bpf_jit_get_call_exception(bpf_prog, insn,

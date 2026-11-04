@@ -3355,23 +3355,28 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 {
 	struct bpf_insn *insns = env->prog->insnsi;
 	struct bpf_insn *branch;
-	u32 recovery, j, owner_start = 0, end = 0;
+	u32 recovery, j, owner_start = 0, end = 0, operation, first, last;
 	int err;
 
 	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux)) {
 		verbose(env, "instruction exception annotations require native JIT emission\n");
 		return -EOPNOTSUPP;
 	}
-	if (index + 1 >= env->prog->len)
-		return -EINVAL;
 	branch = &insns[index];
 	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
 	 * analysis. No register refinement or call-state analysis is added.
 	 */
-	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg ||
-	    (branch->imm != 1 && branch->imm != 3))
+	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg > 1 ||
+	    (branch->dst_reg ? (branch->imm != 3 && branch->imm != 14) :
+	     (branch->imm != 1 && branch->imm != 3)))
 		return -EINVAL;
-	err = bpf_jit_get_call_exception(env->prog, &insns[index + 1],
+	if ((branch->dst_reg && index < 2) ||
+	    (!branch->dst_reg && index + 1 >= env->prog->len))
+		return -EINVAL;
+	operation = branch->dst_reg ? index - 1 : index + 1;
+	first = branch->dst_reg ? index - 2 : index;
+	last = branch->dst_reg ? index : index + 1;
+	err = bpf_jit_get_call_exception(env->prog, &insns[operation],
 					 &recovery, NULL);
 	if (err)
 		return err;
@@ -3379,9 +3384,9 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 		u32 start = env->subprog_info[j].start;
 		u32 next = env->subprog_info[j + 1].start;
 
-		if (start > index && start <= index + 1)
+		if (start > first && start <= last)
 			return -EINVAL;
-		if (start <= index && index + 1 < next) {
+		if (start <= first && last < next) {
 			owner_start = start;
 			end = next;
 		}
@@ -3407,8 +3412,9 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 				(insn->code == (BPF_JMP32 | BPF_JA) ?
 				 insn->imm : insn->off);
 		}
-		if (target == index + 1) {
-			verbose(env, "branch bypasses direct-CALL exception annotation at insn %u\n",
+		if (branch->dst_reg ? (target == index || target == operation) :
+		    target == operation) {
+			verbose(env, "branch bypasses instruction exception annotation at insn %u\n",
 				index);
 			return -EINVAL;
 		}
@@ -21892,7 +21898,9 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 		return 0;
 	case BPF_JCOND:
 		if (insn->code != (BPF_JMP | BPF_JCOND) || insn->src_reg != BPF_MAY_GOTO ||
-		    insn->dst_reg || (insn->imm && insn->imm != 1 && insn->imm != 3)) {
+		    insn->dst_reg > 1 || (insn->dst_reg ?
+		     (insn->imm != 3 && insn->imm != 14) :
+		     (insn->imm && insn->imm != 1 && insn->imm != 3))) {
 			verbose(env, "invalid may_goto imm %d\n", insn->imm);
 			return -EINVAL;
 		}

@@ -196,38 +196,59 @@ int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
  * descriptor proof and retains stock target discovery and argument checking.
  */
 int bpf_jit_get_call_exception(const struct bpf_prog *prog,
-			       const struct bpf_insn *call,
-			       u32 *recovery, u32 *data)
+                               const struct bpf_insn *call,
+                               u32 *recovery, u32 *data)
 {
-	ptrdiff_t index = call - prog->insnsi;
-	const struct bpf_insn *branch;
-	s64 target;
-	bool store;
+ ptrdiff_t index = call - prog->insnsi;
+ const struct bpf_insn *branch;
+ s64 target;
+ bool store;
 
-	if (index < 1 || index >= prog->len)
-		return -ENOENT;
-	store = (BPF_CLASS(call->code) == BPF_ST ||
-		 BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
-	if (!bpf_pseudo_call(call) && !store)
-		return -ENOENT;
-	branch = call - 1;
-	/* EX_TYPE_UACCESS is metadata on the ordinary, verifier-visible branch.
-	 * The adjacent real CALL retains stock callee and argument checking.
-	 */
-	if (branch->code != (BPF_JMP | BPF_JCOND) ||
-	    branch->src_reg != BPF_MAY_GOTO ||
-	    (branch->imm != 3 && (!store || branch->imm != 1)))
-		return -ENOENT;
-	if (branch->dst_reg)
-		return -EINVAL;
-	target = index + branch->off;
-	if (target < 0 || target >= prog->len)
-		return -EINVAL;
-	if (recovery)
-		*recovery = target;
-	if (data)
-		*data = branch->imm;
-	return 0;
+ if (index < 1 || index >= prog->len)
+  return -ENOENT;
+ if (bpf_pseudo_kop_call(call)) {
+  const struct bpf_kop *kop;
+  struct bpf_kop_exception entry;
+  u64 payload;
+  int error;
+
+  if (index + 1 >= prog->len)
+   return -ENOENT;
+  branch = call + 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO || branch->dst_reg != 1)
+   return -ENOENT;
+  error = bpf_jit_get_kop_payload(prog, call, &kop, &payload);
+  if (error)
+   return error;
+  if (kop->num_exentries != 1 || !kop->exception_entry)
+   return -EINVAL;
+  error = kop->exception_entry(payload, 0, &entry);
+  if (error || entry.insn_offset || entry.fixup_offset != kop->max_emit_bytes ||
+      entry.data != branch->imm)
+   return error ?: -EINVAL;
+  target = index + 2 + branch->off;
+ } else {
+  store = (BPF_CLASS(call->code) == BPF_ST ||
+           BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
+  if (!bpf_pseudo_call(call) && !store)
+   return -ENOENT;
+  branch = call - 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO ||
+      (branch->imm != 3 && (!store || branch->imm != 1)))
+   return -ENOENT;
+  if (branch->dst_reg)
+   return -EINVAL;
+  target = index + branch->off;
+ }
+ if (target < 0 || target >= prog->len)
+  return -EINVAL;
+ if (recovery)
+  *recovery = target;
+ if (data)
+  *data = branch->imm;
+ return 0;
 }
 
 int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
@@ -1759,13 +1780,16 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 		 * it must not acquire timed-loop counter code or stack slots.
 		 */
 		if (env->insn_aux_data[i + delta].kop_call_fault_branch) {
-			if (i + 1 >= insn_cnt)
+			if ((!insn->dst_reg && i + 1 >= insn_cnt) ||
+			    (insn->dst_reg && !i))
 				return -EINVAL;
-			ret = bpf_jit_get_call_exception(env->prog, insn + 1,
-						  NULL, NULL);
+			ret = bpf_jit_get_call_exception(env->prog,
+					insn->dst_reg ? insn - 1 : insn + 1, NULL, NULL);
 			if (ret)
 				return ret;
-			env->prog->aux->num_exentries++;
+			/* A post-effect edge uses the operation's existing entry. */
+			if (!insn->dst_reg)
+				env->prog->aux->num_exentries++;
 			goto next_insn;
 		}
 		if (bpf_kop_is_sidecar_insn(insn)) {
