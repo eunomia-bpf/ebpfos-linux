@@ -13,32 +13,14 @@ static struct bpf_prog *entry_epoch_program(struct entry_set *set, u32 fd,
  unsigned long *address)
 {
  struct bpf_prog *program = bpf_prog_get(fd);
- const struct btf_type *function, *prototype, *result, *argument;
  struct btf *btf;
- int error = -EOPNOTSUPP;
+ int error;
  if (IS_ERR(program)) return program;
- if (!set->source_module) goto fail;
  btf = program->aux->attach_btf;
- /* The callback declaration must belong to this journal's source module.
-  * Its body may be a verified/trusted JIT export rather than module text. */
- if (!btf || btf != set->source_btf) goto fail;
- function = btf_type_by_id(btf, program->aux->attach_btf_id);
- prototype = function ? btf_type_skip_modifiers(btf, function->type, NULL) : NULL;
- error = -EPROTOTYPE;
- if (!prototype || !btf_type_is_func_proto(prototype) || btf_type_vlen(prototype) != 1) goto fail;
- result = btf_type_skip_modifiers(btf, prototype->type, NULL);
- argument = btf_type_skip_modifiers(btf, btf_params(prototype)[0].type, NULL);
- if (!result || !argument || !btf_type_is_int(result) || !btf_type_is_int(argument) ||
-     result->size != sizeof(int) || argument->size != sizeof(u32) ||
-     btf_int_bits(result) != 32 || btf_int_bits(argument) != 32 ||
-     !(btf_int_encoding(result) & BTF_INT_SIGNED) ||
-     btf_int_encoding(argument)) goto fail;
  error = bpf_entry_program_address(btf, program->aux->attach_btf_id,
   program, false, address);
- if (error) goto fail;
+ if (error) {bpf_prog_put(program);return ERR_PTR(error);}
  return program;
-fail:
- bpf_prog_put(program);return ERR_PTR(error);
 }
 static bool entry_epoch_contains(void *opaque, unsigned long ip)
 {

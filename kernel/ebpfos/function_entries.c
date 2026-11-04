@@ -67,7 +67,6 @@ static LIST_HEAD(entry_sharing_sets);
 /* Bare native ABI calls have no bpf_run_ctx. These standard helpers depend
  * only on explicit operands or the native CPU/task, not on such a frame.
  * Keep this cold eligibility check outside the call path. */
-#include "function_native_context.h"
 
 #include "function_contract.h"
 

@@ -76,7 +76,6 @@ static bool cell_callable(struct btf *native, const struct btf_type *function,
  * backedge operation uses the current function's initialized stack slots.
  */
 #include "function_binding.h"
-#include "function_native_context.h"
 static inline int ebpfos_function_binding_open_pure(
  struct ebpfos_function_binding *out, u32 fd, enum bpf_prog_type type,
  struct btf *native, const struct btf_type *function, u32 compiled_id)
