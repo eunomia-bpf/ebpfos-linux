@@ -8652,7 +8652,22 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EOPNOTSUPP;
 			}
 
-			if (strncmp(tag, "max:", 4) == 0) {
+			if (strncmp(tag, "nonnull-if-count:", 17) == 0) {
+				const struct btf_type *count;
+				u32 index;
+
+				if (kstrtou32(tag + 17, 10, &index) || index >= nargs || index == i ||
+				    sub->args[i].callback_count_mask & BIT_ULL(index))
+					return -EINVAL;
+				count = btf_type_skip_modifiers(btf, args[index].type, NULL);
+				if (!btf_type_is_int(count) || btf_int_encoding(count) & BTF_INT_SIGNED ||
+				    btf_int_bits(count) != count->size * 8 ||
+				    (count->size != 4 && count->size != 8))
+					return -EINVAL;
+				sub->args[i].callback_count_mask |= BIT_ULL(index);
+				if (count->size == 4)
+					sub->args[i].callback_count32_mask |= BIT_ULL(index);
+			} else if (strncmp(tag, "max:", 4) == 0) {
 				if (has_scalar_max || kstrtou32(tag + 4, 10, &scalar_max)) {
 					bpf_log(log, "arg#%d has invalid scalar maximum\n", i);
 					return -EINVAL;
@@ -8708,6 +8723,14 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		if (!btf_type_is_ptr(t))
 			goto skip_pointer;
 
+		if (sub->args[i].callback_count_mask &&
+		    (!is_global || (prog->type == BPF_PROG_TYPE_EXT && !bpf_native_func_entry(prog)) || tags ||
+		     size_arg >= 0 || read_only || user_address || has_btf_offset || has_scalar_max ||
+		     !btf_native_func_arg(sub, btf_type_skip_modifiers(btf, t->type, NULL)))) {
+			bpf_log(log, "arg#%d conditional callback requires an ordinary callable input\n", i);
+			return -EINVAL;
+		}
+
 		/* A replacement inherits the target's absent input capability.
 		 * Reads remain invalid during independent entry verification even
 		 * when the replacement spells a stronger argument annotation.
@@ -8718,7 +8741,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			continue;
 		}
 
-		if (is_global && !tags && size_arg < 0 && !read_only &&
+		if (is_global && !tags && !sub->args[i].callback_count_mask && size_arg < 0 && !read_only &&
 		    !user_address && !has_btf_offset && !has_scalar_max &&
 		    !btf_is_prog_ctx_type(log, btf, t, prog_type, i) &&
 		    !btf_is_dynptr_ptr(sub, btf, t) &&
@@ -8731,6 +8754,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 		if (is_global) {
 			btf_pointer_flags(btf, t->type, &pointer_flags, NULL);
+			if (sub->args[i].callback_count_mask && pointer_flags)
+				return -EINVAL;
 			/* An interior argument retains its complete enclosing BTF object.
 			 * Ordinary call checking must establish that object and this exact
 			 * offset; a member type or scalar address alone cannot satisfy it.
@@ -8945,7 +8970,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		}
 
 skip_pointer:
-		if (tags || size_arg >= 0 || read_only || user_address || has_btf_offset) {
+		if (tags || sub->args[i].callback_count_mask ||
+		    size_arg >= 0 || read_only || user_address || has_btf_offset) {
 			bpf_log(log, "arg#%d has pointer tag, but is not a pointer type\n", i);
 			return -EINVAL;
 		}

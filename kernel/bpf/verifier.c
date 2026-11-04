@@ -11258,6 +11258,34 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
  native_argument:
 		reg = &regs[regno];
+		if (arg->callback_count_mask &&
+		    (bpf_register_is_null(reg) || type_may_be_null(reg->type))) {
+			for (u32 count_index = 0; count_index < sub->arg_cnt; count_index++) {
+				struct native_arg_scope count_scope __free(native_arg) = {};
+				struct bpf_reg_state *count;
+				int count_regno;
+				bool narrow;
+
+				if (!(arg->callback_count_mask & BIT_ULL(count_index)))
+					continue;
+				count_regno = sub->native_frame ?
+					native_call_arg_reg(env, btf, &sub->native_abi,
+							    count_index, &count_scope) :
+					bpf_arg_regno(count_index);
+				if (count_regno < 0) return count_regno;
+				count = &regs[count_regno];
+				narrow = arg->callback_count32_mask & BIT_ULL(count_index);
+				if (count->type != SCALAR_VALUE ||
+				    (narrow ? count->u32_max_value : count->umax_value)) {
+					bpf_log(log, "arg#%d callback requires non-NULL when count arg#%u may be nonzero\n",
+						i, count_index);
+					return -EACCES;
+				}
+				ret = mark_chain_precision(env, count_regno);
+				if (ret) return ret;
+			}
+		}
+
 		/* The declared scalar width is shared by the caller and independent
 		 * entry, including arguments with explicit value bounds.
 		 */
@@ -22287,6 +22315,85 @@ static void free_states(struct bpf_verifier_env *env)
 	}
 }
 
+/* Partition an ordinary entry's checked callback/count relation. These are
+ * verifier states, not generated branches or runtime checks. All combinations
+ * are retained, through the existing verifier state/jump budgets.
+ */
+static int partition_callback_counts(struct bpf_verifier_env *env,
+				     struct bpf_subprog_info *sub, u32 callback)
+{
+	struct bpf_subprog_arg_info *arg = &sub->args[callback];
+	struct bpf_reg_state *target, *count;
+	struct bpf_verifier_state *zero;
+
+	target = native_global_arg_state(sub, env->cur_state->frame[0], callback);
+	if (base_type(target->type) != PTR_TO_BTF_FUNC)
+		return -EINVAL;
+	if (!(target->type & PTR_MAYBE_NULL))
+		return 0;
+	for (u32 index = 0; index < sub->arg_cnt; index++) {
+		if (!(arg->callback_count_mask & BIT_ULL(index))) continue;
+		count = native_global_arg_state(sub, env->cur_state->frame[0], index);
+		if (count->type != SCALAR_VALUE) return -EINVAL;
+		if (arg->callback_count32_mask & BIT_ULL(index) ?
+		    count->u32_min_value : count->umin_value) {
+			target->type &= ~PTR_MAYBE_NULL;
+			return 0;
+		}
+	}
+	/* Equivalent disjunction: non-NULL callback with any counts, or a
+	 * nullable callback with every selected count zero. No nonzero
+	 * scalar bound is needed on the first alternative.
+	 */
+	zero = push_stack(env, sub->start, sub->start, false);
+	if (IS_ERR(zero)) return PTR_ERR(zero);
+	for (u32 index = 0; index < sub->arg_cnt; index++) {
+		bool narrow;
+		if (!(arg->callback_count_mask & BIT_ULL(index))) continue;
+		narrow = arg->callback_count32_mask & BIT_ULL(index);
+		count = native_global_arg_state(sub, zero->frame[0], index);
+		if (narrow) __mark_reg32_known(count, 0);
+		else ___mark_reg_known(count, 0);
+		count->precise = true;
+		reg_bounds_sync(count);
+		if (sub->native_frame &&
+		    sub->native_abi.args[index + sub->native_abi.result_buffer].reg < 0) {
+			struct bpf_stack_state *slot =
+				container_of(count, struct bpf_stack_state, spilled_ptr);
+			/* Preserve narrow-word padding. These bytes are zero by
+			 * the checked entry alternative, not by an invented
+			 * store instruction or an unchecked physical high word.
+			 */
+			for (u32 byte = 0; byte < (narrow ? 4 : 8); byte++)
+				slot->slot_type[7 - byte] = STACK_ZERO;
+		}
+	}
+	target->type &= ~PTR_MAYBE_NULL;
+	return 0;
+}
+
+static int initialize_callback_counts(struct bpf_verifier_env *env,
+				      struct bpf_subprog_info *sub)
+{
+	struct bpf_verifier_stack_elem *stop = env->head, *queued;
+	struct bpf_verifier_state *initial = env->cur_state;
+	int err;
+
+	for (u32 callback = 0; callback < sub->arg_cnt; callback++) {
+		if (!sub->args[callback].callback_count_mask) continue;
+		queued = env->head;
+		err = partition_callback_counts(env, sub, callback);
+		if (err) return err;
+		for (; queued != stop; queued = queued->next) {
+			env->cur_state = &queued->st;
+			err = partition_callback_counts(env, sub, callback);
+			env->cur_state = initial;
+			if (err) return err;
+		}
+	}
+	return 0;
+}
+
 static int do_check_common(struct bpf_verifier_env *env, int subprog)
 {
 	bool pop_log = !(env->log.level & BPF_LOG_LEVEL2);
@@ -22352,6 +22459,11 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 				goto out;
 			}
 			for (i = 0; i < sub->arg_cnt; i++) {
+				if (sub->args[i].callback_count_mask) {
+					verbose(env, "conditional input contracts are unsupported for helper callbacks\n");
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
 				if (sub->args[i].has_scalar_max) {
 					verbose(env, "scalar maximum contracts are unsupported for callbacks\n");
 					ret = -EOPNOTSUPP;
@@ -22629,7 +22741,9 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 							  acquire_reference(env, 0) : 0;
 	}
 
-	ret = do_check(env);
+	ret = initialize_callback_counts(env, sub);
+	if (!ret)
+		ret = do_check(env);
 out:
 	if (!ret && pop_log)
 		bpf_vlog_reset(&env->log, 0);

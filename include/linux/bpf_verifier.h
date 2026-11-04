@@ -781,6 +781,9 @@ struct bpf_subprog_arg_info {
 	bool user_address;
 	/* Explicit non-NULL obligation on an otherwise probe-safe argument. */
 	bool nonnull;
+	/* A callback is non-NULL whenever any selected unsigned count is nonzero. */
+	u64 callback_count_mask;
+	u64 callback_count32_mask;
 	/* Fixed interior address within the independently checked BTF object. */
 	bool has_btf_offset : 1;
 	bool has_scalar_max : 1;
