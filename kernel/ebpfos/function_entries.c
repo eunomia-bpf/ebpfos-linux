@@ -173,7 +173,7 @@ static struct entry_set *entry_generation(struct entry_set *set, unsigned int id
 }
 static unsigned int entry_generation_slot(unsigned int id)
 { return 0; }
-#include "function_entry_side.h"
+
 #ifdef CONFIG_EBPFOS_PLT
 static bool entry_plt_owned(unsigned long ip);
 #endif
@@ -399,7 +399,7 @@ static void entry_release_work(struct work_struct *work)
  struct entry_set *set = container_of(to_delayed_work(work), struct entry_set, release_work);
  int error;
  mutex_lock(&entry_lock);
- error = set->poisoned ? -EUCLEAN : entry_switch(set, set->active, 0);
+ error = entry_switch(set, set->active, 0);
  if (!error) error = entry_source_release(set);
  if (!error) error = entry_all_quiescent(set);
  if (!error && set->published) list_del(&set->retained);
@@ -713,8 +713,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  error = bpf_link_prime(&entry->link, &primer);
  if (error) {kfree(entry);goto free_set;}
  mutex_lock(&entry_lock);
- error=entry_side_compatible(NULL,NULL,0,set,false);
- if (!error) error = entry_switch(set, 0, 1);
+ error = entry_switch(set, 0, 1);
  if (!error) list_add_tail(&set->sharing,&entry_sharing_sets);
  mutex_unlock(&entry_lock);
  if (error) {

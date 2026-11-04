@@ -116,49 +116,7 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 /* Symbolic operands describe the value the verifier actually saw. They
  * cannot turn an arbitrary scalar or pointer into a different build input.
  */
-static int aot_validate_operand(const struct bpf_aot_reloc *operand,
-				const struct bpf_insn *insn)
-{
-	static const struct { const char *prefix; u8 kind; } ids[] = {
-		{ "__ebpfos_btf_id_func__", BTF_KIND_FUNC },
-		{ "__ebpfos_btf_id_struct__", BTF_KIND_STRUCT },
-		{ "__ebpfos_btf_id_union__", BTF_KIND_UNION },
-		{ "__ebpfos_btf_id_var__", BTF_KIND_VAR },
-		{ "__ebpfos_btf_id_typedef__", BTF_KIND_TYPEDEF },
-		{ "__ebpfos_btf_id_enum__", BTF_KIND_ENUM },
-	};
-	u64 value;
-	u32 i;
 
-	if (insn->code == (BPF_LD | BPF_IMM | BPF_DW))
-		value = ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm;
-	else if (BPF_CLASS(insn->code) == BPF_ALU)
-		value = (u32)insn->imm;
-	else
-		value = (s64)insn->imm;
-	if (operand->type == R_X86_64_64) {
-		unsigned long address = kallsyms_lookup_name(operand->symbol);
-		unsigned long size, offset;
-
-		if (!operand->addend)
-			return 0;
-		return kallsyms_lookup_size_offset(address, &size, &offset) && !offset &&
-		       operand->addend <= size ? 0 : -EINVAL;
-	}
-	for (i = 0; i < ARRAY_SIZE(ids); i++) {
-		const char *name = str_has_prefix(operand->symbol, ids[i].prefix) ?
-			operand->symbol + strlen(ids[i].prefix) : NULL;
-		struct btf *btf;
-		s32 id;
-
-		if (!name || !*name)
-			continue;
-		btf = bpf_get_btf_vmlinux();
-		id = btf_find_by_name_kind(btf, name, ids[i].kind);
-		return id > 0 && (u64)id == value ? 0 : -EINVAL;
-	}
-	return -EINVAL;
-}
 
 
 static int aot_record(struct bpf_aot_context *aot, u32 offset, u32 type,

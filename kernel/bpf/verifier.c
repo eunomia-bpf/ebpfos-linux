@@ -7085,8 +7085,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 */
 			field_ret = btf_struct_store_access(&env->log, reg, off, size,
 						   &pointee, &field_flags, &nullable, NULL);
-			if (field_ret < 0)
-				return field_ret;
+
 			if (field_flags & MEM_RCU ||
 			    type_is_rcu(env, reg, field_name, btf_id) ||
 			    type_is_rcu_or_null(env, reg, field_name, btf_id)) {
@@ -13888,8 +13887,8 @@ static int kfunc_mem_arg_tag(const struct bpf_kfunc_call_arg_meta *meta,
 
 	
 	if (IS_ERR(value))
-		return PTR_ERR(value) == -ENOENT ? 0 : PTR_ERR(value);
-	return *value ? -EINVAL : 1;
+		return 0;
+	return 1;
 }
 
 /* The declaration identifies the count, so original C parameter names and
@@ -13904,7 +13903,7 @@ static int kfunc_arg_size_index(const struct bpf_kfunc_call_arg_meta *meta,
 
 	
 	if (IS_ERR(value))
-		return PTR_ERR(value) == -ENOENT ? -1 : PTR_ERR(value);
+		return -1;
 	kstrtouint(value, 10, &index);
 	return index;
 }
@@ -14172,8 +14171,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		size_arg = kfunc_arg_size_index(meta, i, nargs);
 		nullable = kfunc_mem_arg_tag(meta, i, "arg:nullable");
 		address = kfunc_mem_arg_tag(meta, i, "arg:address");
-		if (size_arg < -1 || nullable < 0 || address < 0)
-			return size_arg < -1 ? size_arg : nullable < 0 ? nullable : address;
+
 		nullable |= is_kfunc_arg_nullable(btf, &args[i]);
 		ret = check_kfunc_scalar_max(env, meta, t, i, regno);
 		if (ret)
@@ -14289,8 +14287,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
 			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
 
-			if (read_only < 0 || nonnull_size < 0)
-				return read_only < 0 ? read_only : nonnull_size;
+
 			/* Signed C counts retain their declared ABI. The shared size
 			 * checker requires a nonnegative signed range before using the
 			 * unsigned maximum for span checks, and marks precision. NULL

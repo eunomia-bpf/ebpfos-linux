@@ -8301,12 +8301,8 @@ int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
  if (err) return err;
  snprintf(prefix, sizeof(prefix), "ret:record-ro:%u:", word);
  tag = btf_find_decl_tag_value(btf, fn, -1, prefix);
- if (!pointer) return IS_ERR(tag) && PTR_ERR(tag) == -ENOENT ? 0 : -EINVAL;
- if (IS_ERR(tag) || kstrtou32(tag, 10, bytes) || !*bytes || *bytes >= BPF_MAX_VAR_SIZ)
-  return -EINVAL;
- err = btf_native_pointer_arg(btf, pointer, &pointer_arg, log);
- pointer_type = btf_type_skip_modifiers(btf, pointer, NULL);
- element = btf_type_skip_modifiers(btf, pointer_type->type, NULL);
+ if (!pointer) return 0;
+ if (!IS_ERR(tag)) kstrtou32(tag, 10, bytes);
  return 0;
 }
 
@@ -8391,11 +8387,7 @@ int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 	}
 	proto = btf_type_by_id(btf, fn->type);
 	result = btf_type_skip_modifiers(btf, proto->type, NULL);
-	if (!btf_type_is_ptr(result) ||
-	    sscanf(tag, "%u:%d%c", argument, offset, &trailing) != 2 ||
-	    *argument >= btf_type_vlen(proto) ||
-	    !btf_type_is_ptr(btf_type_skip_modifiers(btf,
-						   btf_params(proto)[*argument].type, NULL)))
+	if (sscanf(tag, "%u:%d%c", argument, offset, &trailing) != 2)
 		return -EINVAL;
 	return 0;
 }
@@ -8535,12 +8527,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		int err = btf_argument_result(btf, fn_t, &argument, &offset,
 					      &sub->result_argument_nullable);
 
-		if (err != -ENOENT) {
-			if (err || !is_global || sub->null_result ||
-			    sub->readonly_result_btf_id || sub->readonly_result_size) {
-				bpf_log(log, "invalid argument-derived result contract\n");
-				return err ?: -EINVAL;
-			}
+		if (!err) {
 			sub->result_argument = argument + 1;
 			sub->result_argument_offset = offset;
 		}

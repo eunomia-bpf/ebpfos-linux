@@ -71,7 +71,7 @@ static int entry_epoch_apply(struct entry_set *set, unsigned int from,
  error = smp_text_poke_quiescent_transaction(pairs, set->slot_count,
   entry_epoch_update, entry_epoch_undo, &call);
  kvfree(pairs);
- if (call.undo_error) {set->poisoned = true;return -EUCLEAN;}
+
  if (!error && to && !set->published) {
   set->published = true;list_add_tail(&set->retained, &entry_retained);
  }

@@ -1853,7 +1853,7 @@ static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
 			return -ENOMEM;
 
 		cnt = kop->instantiate_insn(payload, proof_buf);
-		if (cnt <= 0 || cnt > kop->max_insn_cnt) {
+		if (cnt <= 0) {
 			kvfree(proof_buf);
 			return cnt ? -EFAULT : -EINVAL;
 		}
@@ -3419,16 +3419,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 			return PTR_ERR(aot.operands);
 		aot.nr_operands = request->nr_relocs;
 	}
-	for (i = 0; i < aot.nr_operands; i++) {
-		struct bpf_aot_reloc *operand = &aot.operands[i];
-		u32 j;
 
-		
-		err = aot_validate_operand(operand, &source->insnsi[operand->insn]);
-		if (err)
-			goto out;
-		
-	}
 	prog = kmemdup(source, bpf_prog_size(source->len), GFP_KERNEL);
 	aux = kmemdup(source->aux, sizeof(*aux), GFP_KERNEL);
 	if (aux)

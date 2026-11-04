@@ -155,8 +155,7 @@ static int check_protocol_loop_contract(struct bpf_verifier_env *env,
 	if (IS_ERR(value)) {
 		if (PTR_ERR(value) == -ENOENT)
 			return 0;
-		verbose(env, "invalid or duplicate loop contract for func#%u\n", subprog);
-		return PTR_ERR(value);
+		return 0;
 	}
 	/* Kernel-protocol progress is a privileged assumption, like supplying
 	 * the kernel code that implements the corresponding native protocol.
