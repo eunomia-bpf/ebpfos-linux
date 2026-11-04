@@ -23077,10 +23077,6 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 	u32 depth;
 	int i;
 
-	if (!attr->trusted_stack_sizes || attr->trusted_stack_size_cnt != env->subprog_cnt) {
-		/* Complete compiler frame metadata replaces the legacy size array. */
-		for (i = 0; i < env->subprog_cnt; i++)
-	}
 	for (i = 0; i < env->subprog_cnt; i++) {
 		if (env->subprog_info[i].native_frame) {
 			depth = env->subprog_info[i].native_local_stack;
