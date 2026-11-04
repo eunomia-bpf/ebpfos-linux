@@ -3355,11 +3355,11 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 {
 	struct bpf_insn *insns = env->prog->insnsi;
 	struct bpf_insn *branch;
-	u32 recovery, j, end = 0;
+	u32 recovery, j, owner_start = 0, end = 0;
 	int err;
 
 	if (!env->prog->jit_requested || bpf_prog_is_offloaded(env->prog->aux)) {
-		verbose(env, "direct-CALL exception annotations require native JIT emission\n");
+		verbose(env, "instruction exception annotations require native JIT emission\n");
 		return -EOPNOTSUPP;
 	}
 	if (index + 1 >= env->prog->len)
@@ -3368,7 +3368,8 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
 	 * analysis. No register refinement or call-state analysis is added.
 	 */
-	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg || branch->imm != 3)
+	if (!bpf_is_may_goto_insn(branch) || branch->dst_reg ||
+	    (branch->imm != 1 && branch->imm != 3))
 		return -EINVAL;
 	err = bpf_jit_get_call_exception(env->prog, &insns[index + 1],
 					 &recovery, NULL);
@@ -3380,10 +3381,12 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 
 		if (start > index && start <= index + 1)
 			return -EINVAL;
-		if (start <= index && index + 1 < next)
+		if (start <= index && index + 1 < next) {
+			owner_start = start;
 			end = next;
+		}
 	}
-	if (!end || recovery >= end)
+	if (!end || recovery < owner_start || recovery >= end)
 		return -EINVAL;
 	for (j = 0; j < env->prog->len; j++) {
 		const struct bpf_insn *insn = &insns[j];
@@ -19426,16 +19429,21 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 		struct bpf_verifier_state *cur_st = env->cur_state, *queued_st, *prev_st;
 		int idx = *insn_idx;
 
-		prev_st = find_prev_entry(env, cur_st->parent, idx);
+		prev_st = insn->imm ? NULL : find_prev_entry(env, cur_st->parent, idx);
 
 		/* branch out 'fallthrough' insn as a new state to explore */
 		queued_st = push_stack(env, idx + 1, idx, false);
 		if (IS_ERR(queued_st))
 			return PTR_ERR(queued_st);
 
-		queued_st->may_goto_depth++;
-		if (prev_st)
-			widen_imprecise_scalars(env, prev_st, queued_st);
+		/* A fault edge has no timeout counter and supplies no eventual-exit
+		 * witness. Ordinary loop analysis must prove its fallthrough path.
+		 */
+		if (!insn->imm) {
+			queued_st->may_goto_depth++;
+			if (prev_st)
+				widen_imprecise_scalars(env, prev_st, queued_st);
+		}
 		*insn_idx += insn->off;
 		return 0;
 	}
@@ -21884,7 +21892,7 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 		return 0;
 	case BPF_JCOND:
 		if (insn->code != (BPF_JMP | BPF_JCOND) || insn->src_reg != BPF_MAY_GOTO ||
-		    insn->dst_reg || (insn->imm && insn->imm != 3)) {
+		    insn->dst_reg || (insn->imm && insn->imm != 1 && insn->imm != 3)) {
 			verbose(env, "invalid may_goto imm %d\n", insn->imm);
 			return -EINVAL;
 		}
@@ -24212,19 +24220,6 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	ret = bpf_compute_scc(env);
 	if (ret < 0)
 		goto skip_full_check;
-	/* Annotated fault branches emit no stock MAY_GOTO timeout machinery.
-	 * Use the existing CFG result to exclude every cycle containing one;
-	 * a forward fault edge can still return through a backward JA.
-	 */
-	for (i = 0; i < env->prog->len; i++) {
-		if (env->insn_aux_data[i].kop_call_fault_branch &&
-		    env->insn_aux_data[i].scc) {
-			verbose(env, "direct-CALL exception branch at insn %d participates in a CFG cycle\n", i);
-			ret = -EINVAL;
-			goto skip_full_check;
-		}
-	}
-
 	ret = bpf_compute_live_registers(env);
 	if (ret < 0)
 		goto skip_full_check;

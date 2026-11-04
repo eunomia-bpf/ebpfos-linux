@@ -10,8 +10,6 @@
 #include "koperation_fault_store.generated.h"
 
 #define STORE_ROWS(X) \
- X(store, STORE, 8, "movb", "b") X(store, STORE, 16, "movw", "w") \
- X(store, STORE, 32, "movl", "k") X(store, STORE, 64, "movq", "q") \
  X(ntstore, NTSTORE, 32, "movnti", "k") X(ntstore, NTSTORE, 64, "movnti", "q")
 __bpf_kfunc_start_defs();
 #define STORE_SERVICE(family, stem, width, opcode, part, kind) \

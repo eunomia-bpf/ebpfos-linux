@@ -202,20 +202,26 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 	ptrdiff_t index = call - prog->insnsi;
 	const struct bpf_insn *branch;
 	s64 target;
+	bool store;
 
-	if (index < 1 || index >= prog->len || !bpf_pseudo_call(call))
+	if (index < 1 || index >= prog->len)
+		return -ENOENT;
+	store = (BPF_CLASS(call->code) == BPF_ST ||
+		 BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
+	if (!bpf_pseudo_call(call) && !store)
 		return -ENOENT;
 	branch = call - 1;
 	/* EX_TYPE_UACCESS is metadata on the ordinary, verifier-visible branch.
 	 * The adjacent real CALL retains stock callee and argument checking.
 	 */
 	if (branch->code != (BPF_JMP | BPF_JCOND) ||
-	    branch->src_reg != BPF_MAY_GOTO || branch->imm != 3)
+	    branch->src_reg != BPF_MAY_GOTO ||
+	    (branch->imm != 3 && (!store || branch->imm != 1)))
 		return -ENOENT;
-	if (branch->dst_reg || branch->off <= 0)
+	if (branch->dst_reg)
 		return -EINVAL;
 	target = index + branch->off;
-	if (target <= index || target >= prog->len)
+	if (target < 0 || target >= prog->len)
 		return -EINVAL;
 	if (recovery)
 		*recovery = target;
@@ -1368,7 +1374,9 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 					goto out_free;
 				num_exentries += kop->num_exentries;
 			}
-			if (bpf_pseudo_call(insn)) {
+			if (bpf_pseudo_call(insn) ||
+			    ((BPF_CLASS(insn->code) == BPF_ST || BPF_CLASS(insn->code) == BPF_STX) &&
+			     BPF_MODE(insn->code) == BPF_MEM)) {
 				err = bpf_jit_get_call_exception(func[i], insn, NULL, NULL);
 				if (err != -ENOENT) {
 					if (err)
@@ -1651,7 +1659,7 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 	}
 	for (i = 0; i < prog->len; i++, insn++) {
 		if (env->insn_aux_data[i].kop_call_fault_branch) {
-			verbose(env, "direct-CALL exception annotations require native JIT emission\n");
+			verbose(env, "instruction exception annotations require native JIT emission\n");
 			return -EOPNOTSUPP;
 		}
 		if (bpf_pseudo_func(insn)) {

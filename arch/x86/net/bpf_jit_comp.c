@@ -2146,6 +2146,7 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 		u32 src_reg = insn->src_reg;
 		u8 b2 = 0, b3 = 0;
 		u8 *start_of_ldx;
+		const u8 *exception_ip = image ? image + proglen : NULL;
 		s64 jmp_offset;
 		s16 insn_off;
 		u8 jmp_cond;
@@ -2971,22 +2972,9 @@ populate_extable:
 				ip += x86_call_depth_emit_accounting(&prog, func, ip);
 			if (emit_aot_branch(&prog, func, ip, 0xe8, ctx))
 				return -EINVAL;
-			if (fault_call && image && bpf_prog->aux->extable) {
-				struct exception_table_entry *ex, *rw_ex;
-				s64 insn_delta, fixup_delta;
+			if (fault_call)
+				exception_ip = ip;
 
-				if (excnt >= bpf_prog->aux->num_exentries)
-					return -EFAULT;
-				ex = &bpf_prog->aux->extable[excnt++];
-				insn_delta = ip - (u8 *)&ex->insn;
-				fixup_delta = image + addrs[recovery] - (u8 *)&ex->fixup;
-				if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
-					return -ERANGE;
-				rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
-				rw_ex->insn = insn_delta;
-				rw_ex->fixup = fixup_delta;
-				rw_ex->data = exception_data;
-			}
 			if (priv_frame_ptr)
 				pop_r9(&prog);
 			break;
@@ -3000,8 +2988,9 @@ populate_extable:
 						 NULL, NULL);
 			if (err)
 				return err;
-			if (priv_frame_ptr || tail_call_reachable ||
-			    IS_ENABLED(CONFIG_CALL_THUNKS))
+			if (insn[1].code == (BPF_JMP | BPF_CALL) &&
+			    (priv_frame_ptr || tail_call_reachable ||
+			     IS_ENABLED(CONFIG_CALL_THUNKS)))
 				return -EOPNOTSUPP;
 			break;
 
@@ -3313,6 +3302,34 @@ emit_jmp:
 			 */
 			pr_err("bpf_jit: unknown opcode %02x\n", insn->code);
 			return -EINVAL;
+		}
+
+		/* Ordinary CALL and store opcodes share their original exception
+		 * continuation. This metadata emits no machine instruction.
+		 */
+		if (image && bpf_prog->aux->extable) {
+			u32 recovery, exception_data;
+
+			err = bpf_jit_get_call_exception(bpf_prog, insn,
+						 &recovery, &exception_data);
+			if (err != -ENOENT) {
+				struct exception_table_entry *ex, *rw_ex;
+				s64 insn_delta, fixup_delta;
+
+				if (err)
+					return err;
+				if (excnt >= bpf_prog->aux->num_exentries)
+					return -EFAULT;
+				ex = &bpf_prog->aux->extable[excnt++];
+				insn_delta = exception_ip - (u8 *)&ex->insn;
+				fixup_delta = image + addrs[recovery] - (u8 *)&ex->fixup;
+				if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
+					return -ERANGE;
+				rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
+				rw_ex->insn = insn_delta;
+				rw_ex->fixup = fixup_delta;
+				rw_ex->data = exception_data;
+			}
 		}
 
 		if (ctx->aot && ctx->aot->error)
