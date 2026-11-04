@@ -105,8 +105,6 @@ static inline int ebpfos_code_quiescent(bool (*contains)(void *, unsigned long),
  struct ebpfos_stack_check check = { .contains = contains, .owner = owner };
  struct task_struct *group, *task;
  int error = 0, cpu;
- if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) ||
-     !IS_ENABLED(CONFIG_TASKS_RCU)) return -EOPNOTSUPP;
  /* Drain non-task interrupt readers as well, including interrupts from idle. */
  synchronize_rcu();
  synchronize_rcu_tasks();
@@ -140,7 +138,6 @@ static inline int ebpfos_code_stopped(bool (*contains)(void *, unsigned long), v
  struct ebpfos_stack_check check = { .contains = contains, .owner = owner };
  struct task_struct *group, *task;
  int error = 0, cpu;
- if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE)) return -EOPNOTSUPP;
  rcu_read_lock();
  for_each_process_thread(group, task) {
   int verdict;
