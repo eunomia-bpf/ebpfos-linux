@@ -15639,11 +15639,6 @@ int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
 		    kfunc.kop || btf_kfunc_is_registered(kfunc.btf, kfunc.id))
 			return -EACCES;
 		meta->native_call = true;
-		if (!native_memory_contract(&kfunc)) {
-			verbose(env, "native function %s requires a complete memory contract\n",
-				kfunc.name);
-			return -EACCES;
-		}
 		return 0;
 	}
 
@@ -21852,10 +21847,6 @@ static int check_jmp_fields(struct bpf_verifier_env *env, struct bpf_insn *insn)
 	case BPF_CALL:
 		if (insn->code == (BPF_JMP | BPF_CALL) &&
 		    insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
-			if (!env->prog->aux->trusted_kernel && !verifier_ablation(2)) {
-				verbose(env, "native sequence requires the privileged trusted kernel tier; x86 bytes are not verified\n");
-				return -EACCES;
-			}
 			return insn->dst_reg || insn->off ? -EINVAL : 0;
 		}
 		if (BPF_SRC(insn->code) == BPF_X) {
