@@ -31,7 +31,7 @@ static bool ebpfos_kop_##name##_payload(u64 payload) \
  payload == ebpfos_kprog_##name##_ids.pairs[0].id; } \
 static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
- if (!insns || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
  insns[0] = (struct bpf_insn) { .code = BPF_JMP | BPF_CALL, \
   .src_reg = BPF_PSEUDO_KFUNC_CALL, .imm = ebpfos_kprog_##name##_service_ids.pairs[0].id }; \
  return 1; \
@@ -40,7 +40,7 @@ static int ebpfos_kop_##name##_requirements(u64 payload, u64 *cap, u64 *effects,
  u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
 { \
  static const u8 digest[] = EBPFOS_KOP_##upper##_SEMANTIC_SHA256; \
- if (!cap || !effects || !semantic_sha256 || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
  *cap = 0; *effects = 0; memcpy(semantic_sha256, digest, sizeof(digest)); return 0; \
 } \
 static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
@@ -49,8 +49,8 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
  static const u8 native[] = EBPFOS_KOP_##upper##_NATIVE_BYTES; \
  /* emit_prologue establishes RBP even with a private BPF data stack. \
   * Tail calls and exception callbacks reuse a frame, so are excluded. */ \
- if (!prog || !prog->aux || prog->aux->tail_call_reachable || prog->aux->exception_cb) return -EOPNOTSUPP; \
- if (!offset || (emit && !image) || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
+  \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \

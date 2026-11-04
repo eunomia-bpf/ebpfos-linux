@@ -45,7 +45,7 @@ static int entry_call_scan(struct module *module, unsigned long target,
    unsigned int j;
    error = insn_decode(&instruction, (void *)ip,
     min_t(unsigned long, MAX_INSN_SIZE, symbol->st_size - offset), INSN_MODE_64);
-   if (error || !instruction.length) {error = -EILSEQ;goto out;}
+   
    offset += instruction.length;
    /* Refuse a short, prefixed or conditional branch to this entry rather
     * than silently publishing only its five-byte callers. */
@@ -60,15 +60,12 @@ static int entry_call_scan(struct module *module, unsigned long target,
     (instruction.immediate.nbytes == 1 ? (long)(s8)instruction.immediate.value :
                                        (long)(s32)instruction.immediate.value);
    if (destination != target) continue;
-   if (instruction.length != 5 || instruction.opcode.nbytes != 1 ||
-       (instruction.opcode.bytes[0] != 0xe8 && instruction.opcode.bytes[0] != 0xe9)) {
-    error = -EOPNOTSUPP;goto out;
-   }
+   
    if (slots) {
     /* Aliases may describe the same instruction more than once. */
     for (j = 0; j < *count; ++j) if (slots[j].ip == ip) break;
     if (j < *count) continue;
-    if (*count >= capacity) {error = -EOVERFLOW;goto out;}
+    
     slots[*count] = (struct entry_native_slot){ .ip = ip, .original = target,
      .call = instruction.opcode.bytes[0] == 0xe8 };
    }

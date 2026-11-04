@@ -51,15 +51,13 @@ BTF_KFUNCS_END(window_close_ids)
 
 static int window_open_proof(u64 payload, struct bpf_insn *insns)
 {
-	if (!insns || payload != window_open_ids.pairs[0].id)
-		return -EINVAL;
+	
 	insns[0] = BPF_CALL_KFUNC(0, window_open_services.pairs[0].id);
 	return 1;
 }
 static int window_close_proof(u64 payload, struct bpf_insn *insns)
 {
-	if (!insns || payload != window_close_ids.pairs[0].id)
-		return -EINVAL;
+	
 	insns[0] = BPF_CALL_KFUNC(0, window_close_services.pairs[0].id);
 	return 1;
 }
@@ -71,8 +69,7 @@ static int window_open_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 		0, 0, 0, 0, 0, 0, 0, 0 };
 	u64 cookie = (unsigned long)&window_cookie;
 	static const u8 instruction[] = EBPFOS_USER_STAC_INSN;
-	if (!offset || (emit && !image) || payload != window_open_ids.pairs[0].id)
-		return -EINVAL;
+	
 	memcpy(native + 5, &cookie, sizeof(cookie));
 	memcpy(native, instruction, sizeof(instruction));
 	if (emit)
@@ -86,8 +83,7 @@ static int window_close_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	/* CLAC, then MOV (not XOR) to preserve the source arithmetic flags. */
 	u8 native[] = { 0x0f, 0x01, 0xca, 0xb8, 0, 0, 0, 0 };
 	static const u8 instruction[] = EBPFOS_USER_CLAC_INSN;
-	if (!offset || (emit && !image) || payload != window_close_ids.pairs[0].id)
-		return -EINVAL;
+	
 	memcpy(native, instruction, sizeof(instruction));
 	if (emit)
 		memcpy(image + *offset, native, sizeof(native));

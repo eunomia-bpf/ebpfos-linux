@@ -38,7 +38,7 @@ static bool ebpfos_result2_payload(u64 payload)
 }
 static int ebpfos_result2_instantiate(u64 payload, struct bpf_insn *insns)
 {
- if (!insns || !ebpfos_result2_payload(payload)) return -EINVAL;
+ 
  insns[0] = (struct bpf_insn) { .code = BPF_JMP | BPF_CALL,
   .src_reg = BPF_PSEUDO_KFUNC_CALL, .imm = ebpfos_kprog_native_result2_service_ids.pairs[0].id };
  return 1;
@@ -47,18 +47,15 @@ static int ebpfos_result2_requirements(u64 payload, u64 *cap, u64 *effects,
  u8 semantic_sha256[SHA256_DIGEST_SIZE])
 {
  static const u8 digest[] = EBPFOS_KOP_NATIVE_RESULT2_SEMANTIC_SHA256;
- if (!cap || !effects || !semantic_sha256 || !ebpfos_result2_payload(payload)) return -EINVAL;
+ 
  *cap = 0; *effects = 0; memcpy(semantic_sha256, digest, sizeof(digest)); return 0;
 }
 static int ebpfos_result2_emit_x86(u8 *image, u32 *offset, bool emit,
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip)
 {
  static const u8 native[] = EBPFOS_KOP_NATIVE_RESULT2_NATIVE_BYTES;
- if (!prog || !prog->aux || prog->aux->tail_call_reachable ||
-     prog->aux->exception_cb || prog->aux->exception_boundary ||
-     prog->aux->jits_use_priv_stack || prog->aux->priv_stack_ptr ||
-     !ebpfos_result2_returns(prog)) return -EOPNOTSUPP;
- if (!offset || (emit && !image) || !ebpfos_result2_payload(payload)) return -EINVAL;
+ 
+ 
  if (emit) memcpy(image + *offset, native, sizeof(native));
  *offset += sizeof(native); return sizeof(native);
 }

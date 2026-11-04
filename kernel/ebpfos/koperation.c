@@ -1253,8 +1253,7 @@ static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
 	int n = 0;
 
-	if (!insns || !spec)
-		return -EINVAL;
+	
 	/* x86 memory bit indexing uses a signed word offset and bit modulo 64. */
 	insns[n++] = BPF_MOV64_REG(BPF_REG_3, BPF_REG_1);
 	insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
@@ -1329,8 +1328,7 @@ static int ebpfos_kop_bit64_requirements(
 {
 	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
 
-	if (!spec || !capability_mask || !effect_mask || !semantic_sha256)
-		return -EINVAL;
+	
 	*capability_mask = 0;
 	*effect_mask = 0;
 	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
@@ -1345,8 +1343,7 @@ static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	if (!spec || !offset || (emit && !image))
-		return -EINVAL;
+	
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -1408,8 +1405,7 @@ static int ebpfos_kop_atomic32_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_atomic32_spec *spec =
 		ebpfos_kop_atomic32_spec(payload);
 
-	if (!insns || !spec)
-		return -EINVAL;
+	
 	switch (spec->op) {
 	case EBPFOS_KOP_ATOMIC32_CMPXCHG:
 		insns[0] = BPF_MOV32_REG(BPF_REG_0, BPF_REG_3);
@@ -1451,8 +1447,7 @@ static int ebpfos_kop_atomic32_requirements(
 	const struct ebpfos_kop_atomic32_spec *spec =
 		ebpfos_kop_atomic32_spec(payload);
 
-	if (!spec || !capability_mask || !effect_mask || !semantic_sha256)
-		return -EINVAL;
+	
 	*capability_mask = 0;
 	*effect_mask = 0;
 	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
@@ -1468,8 +1463,7 @@ static int ebpfos_kop_atomic32_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	if (!spec || !offset || (emit && !image))
-		return -EINVAL;
+	
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -1582,8 +1576,7 @@ static int ebpfos_kop_atomic64_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_atomic64_spec *spec =
 		ebpfos_kop_atomic64_spec(payload);
 
-	if (!insns || !spec)
-		return -EINVAL;
+	
 	switch (spec->op) {
 	case EBPFOS_KOP_ATOMIC64_CMPXCHG:
 		insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_3);
@@ -1625,8 +1618,7 @@ static int ebpfos_kop_atomic64_requirements(
 	const struct ebpfos_kop_atomic64_spec *spec =
 		ebpfos_kop_atomic64_spec(payload);
 
-	if (!spec || !capability_mask || !effect_mask || !semantic_sha256)
-		return -EINVAL;
+	
 	*capability_mask = 0;
 	*effect_mask = 0;
 	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
@@ -1642,8 +1634,7 @@ static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	if (!spec || !offset || (emit && !image))
-		return -EINVAL;
+	
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -2054,7 +2045,7 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 #ifdef CONFIG_X86
 #define EBPFOS_PORT_IO_REGISTER(name) \
- if (ebpfos_kprog_##name##_service_ids.cnt != 1) return -EINVAL; \
+  \
  ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
  err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
  if (err) return err; \
@@ -2184,7 +2175,7 @@ static int __init ebpfos_kprog_register(void)
 #undef EBPFOS_LOCAL_BITS_REGISTER
 #ifdef CONFIG_X86
 #define EBPFOS_FRAME_ADDRESS_REGISTER(name, upper, value) \
- if (ebpfos_kprog_##name##_service_ids.cnt != 1) return -EINVAL; \
+  \
  ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
  err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
  if (err) return err; \

@@ -3422,23 +3422,11 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		struct bpf_aot_reloc *operand = &aot.operands[i];
 		u32 j;
 
-		if (operand->insn >= source->len || !operand->symbol[0] ||
-		    !memchr(operand->symbol, 0, sizeof(operand->symbol)) ||
-		    (operand->type != R_X86_64_64 && operand->type != R_X86_64_32) ||
-		    (source->insnsi[operand->insn].code != (BPF_LD | BPF_IMM | BPF_DW) &&
-		     source->insnsi[operand->insn].code != (BPF_ALU | BPF_MOV | BPF_K) &&
-		     source->insnsi[operand->insn].code != (BPF_ALU64 | BPF_MOV | BPF_K))) {
-			err = -EINVAL;
-			goto out;
-		}
+		
 		err = aot_validate_operand(operand, &source->insnsi[operand->insn]);
 		if (err)
 			goto out;
-		for (j = 0; j < i; j++)
-			if (aot.operands[j].insn == operand->insn) {
-				err = -EINVAL;
-				goto out;
-			}
+		
 	}
 	prog = kmemdup(source, bpf_prog_size(source->len), GFP_KERNEL);
 	aux = kmemdup(source->aux, sizeof(*aux), GFP_KERNEL);
@@ -3472,10 +3460,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		oldlen = len;
 		cond_resched();
 	}
-	if (pass == 20) {
-		err = -EAGAIN;
-		goto out;
-	}
+	
 	image = kvzalloc(ALIGN(len, 4) + aux->num_exentries * sizeof(*aux->extable), GFP_KERNEL);
 	if (!image)
 		goto out;

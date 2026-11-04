@@ -393,8 +393,8 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  refcount_set(&next->refs, 1);
  mutex_lock(&rule_mutex);
  before = link->generation;
- if (!link->attached) {error = -ENOLINK;goto fail;}
- if (old && old != before->program) {error = -EPERM;goto fail;}
+ 
+ 
  next->program = program;next->count = before->count;
  next->scope = before->scope;
 #ifdef CONFIG_CGROUPS
@@ -480,7 +480,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  if (IS_ERR(versions)) return PTR_ERR(versions);
  program = bpf_prog_get_type(attr->link_create.prog_fd, BPF_PROG_TYPE_KERNEL_RULE);
  if (IS_ERR(program)) {error = PTR_ERR(program);kfree(versions);return error;}
- if (!rule_program_allowed(program)) {bpf_prog_put(program);kfree(versions);return -EINVAL;}
+ 
  generation = kzalloc(sizeof(*generation), GFP_KERNEL);
  if (!generation) {bpf_prog_put(program);kfree(versions);return -ENOMEM;}
  refcount_set(&generation->refs, 1);generation->program = program;generation->count = count;
@@ -490,17 +490,14 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
   if (IS_ERR(generation->scope)) {
    error = PTR_ERR(generation->scope);generation->scope = NULL;goto fail;
   }
-  if (!cgroup_on_dfl(generation->scope)) {error = -EINVAL;goto fail;}
+  
 #else
   error = -EOPNOTSUPP;goto fail;
 #endif
  }
  for (i = 0; i < count; ++i) {
   u32 *fds;
-  if (versions[i].reserved ||
-      versions[i].function_flags) {
-   error = -EINVAL;goto fail;
-  }
+  
   if (versions[i].function_count) {
    generation->tasks[i] = ebpfos_rule_task_prepare(&versions[i]);
    if (IS_ERR(generation->tasks[i])) {

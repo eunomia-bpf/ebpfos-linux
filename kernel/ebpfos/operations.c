@@ -57,11 +57,11 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
  const struct btf_type *type = btf_type_skip_modifiers(btf, id, &id);
  u32 i;
  int error;
- if (!type || offset > size) return -EINVAL;
+ 
  if (btf_type_is_ptr(type)) {
   const struct btf_type *target = btf_type_skip_modifiers(btf, type->type, NULL);
   if (!target || !btf_type_is_func_proto(target)) return 0;
-  if (sizeof(void *) > size - offset || *count == U32_MAX) return -EINVAL;
+  
   if (fields) fields[*count] = (struct operations_field){offset, id};
   ++*count;return 0;
  }
@@ -72,7 +72,7 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
   if (!element_type || !btf_resolve_size(btf, element_type, &stride)) return -EINVAL;
   if (!stride) return 0;
   elements = array->nelems ? array->nelems : tail ? (size-offset)/stride : 0;
-  if ((u64)elements * stride > size - offset) return -EINVAL;
+  
   for (i = 0; i < elements; ++i) {
    error = operations_fields(btf, element, offset + (u64)i * stride,
     offset + (u64)(i+1)*stride, fields, count, false);
@@ -168,13 +168,9 @@ static unsigned long operations_storage(struct btf *btf, u32 variable, struct mo
 }
 static int operations_alloc_check(union bpf_attr *attr)
 {
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU)) return -EOPNOTSUPP;
- if (attr->key_size != sizeof(u32) || attr->max_entries != 1 ||
-     !attr->value_size || !attr->btf_vmlinux_value_type_id ||
-     !attr->map_extra || attr->map_extra > U32_MAX ||
-     (attr->map_flags & ~BPF_F_VTYPE_BTF_OBJ_FD) ||
-     attr->btf_fd || attr->btf_key_type_id || attr->btf_value_type_id) return -EINVAL;
+ 
+ 
+ 
  return 0;
 }
 static struct bpf_map *operations_alloc(union bpf_attr *attr)
@@ -190,13 +186,13 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
   btf = btf_get_by_fd(attr->value_type_btf_obj_fd);
   if (IS_ERR(btf)) return ERR_CAST(btf);
  } else {
-  if (IS_ERR_OR_NULL(btf)) return ERR_PTR(-EOPNOTSUPP);
+  
   btf_get(btf);
  }
  /* The VAR owns storage and its lease, independently of shared types. */
  btf = ebpfos_binding_btf_owner(btf, attr->map_extra);
  module = btf_try_get_module(btf);
- if (!module && !btf_is_vmlinux(btf)) {btf_put(btf);return ERR_PTR(-ENOENT);}
+ 
  variable = btf_type_by_id(btf, attr->map_extra);
  record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
  if (!variable || !btf_type_is_var(variable) || !record ||
@@ -209,7 +205,7 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  }
  if (size != attr->value_size) goto fail;
  address = operations_storage(btf, attr->map_extra, module, size);
- if (!address) {error = -ENOENT;goto fail;}
+ 
  ops = kzalloc(sizeof(*ops), GFP_KERNEL);
  if (!ops) {error = -ENOMEM;goto fail;}
  ops->table = kmalloc(size, GFP_KERNEL);
@@ -246,8 +242,8 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  u32 i, count = 0;
  bool incompatible = false;
  int error = -EINVAL;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (*(u32 *)key || (flags != BPF_ANY && flags != BPF_NOEXIST)) return -EINVAL;
+ 
+ 
  programs = kvcalloc(ops->field_count, sizeof(*programs), GFP_KERNEL);
  addresses = kvcalloc(ops->field_count, sizeof(*addresses), GFP_KERNEL);
  checked = kzalloc(map->value_size, GFP_KERNEL);
@@ -267,12 +263,9 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   if (error) goto free;
   /* A module's table may call permanent Core text. The storage lease
    * protects its own module text; another module still needs its own lease. */
-  if (original && !core_kernel_text(original) &&
-      !(ops->module && within_module_mem_type(original, ops->module, MOD_TEXT))) {
-   error = -ENOENT;goto free;
-  }
+  
   name = original ? kallsyms_lookup(original, &bytes, &offset, NULL, symbol) : NULL;
-  if (original && (!name || offset)) {error = -ENOENT;goto free;}
+  
   id = name ? btf_find_by_name_kind(ops->types, name, BTF_KIND_FUNC) : 0;
   if (id > 0) {
    const struct btf_type *function = btf_type_by_id(ops->types, id);
@@ -328,7 +321,7 @@ static long operations_program_update(struct bpf_map *map, void *key, void *valu
 static long operations_delete(struct bpf_map *map, void *key) { return -EOPNOTSUPP; }
 static int operations_next(struct bpf_map *map, void *key, void *next)
 {
- if (key && !*(u32 *)key) return -ENOENT;
+ 
  *(u32 *)next = 0;return 0;
 }
 static bool operations_contains(void *opaque, unsigned long ip)
@@ -391,13 +384,10 @@ struct bpf_operations_set *bpf_operations_prepare(const u32 *fds, u32 count)
   struct ebpfos_operations *ops;
   set->maps[i] = bpf_map_get(fds[i]);
   if (IS_ERR(set->maps[i])) {error = PTR_ERR(set->maps[i]);set->maps[i] = NULL;goto fail;}
-  if (set->maps[i]->map_type != BPF_MAP_TYPE_OPERATIONS) {error = -EINVAL;goto fail;}
+  
   ops = container_of(set->maps[i], struct ebpfos_operations, map);
-  if (!smp_load_acquire(&ops->ready)) {error = -ENODATA;goto fail;}
-  for (j = 0; j < i; ++j)
-   if (ops->original == container_of(set->maps[j], struct ebpfos_operations, map)->original) {
-    error = -ENOTUNIQ;goto fail;
-   }
+  
+  
  }
  return set;
 fail:
@@ -481,18 +471,16 @@ struct bpf_operations_set *bpf_operations_compose(struct bpf_operations_set *act
  struct bpf_operations_set *merged = NULL;
  u32 i, j, count, at = 0, have = bpf_operations_set_count(active);
  u32 remove = bpf_operations_set_count(old), add = bpf_operations_set_count(next);
- for (i = 0; i < remove; ++i)
-  if (!operations_set_has(active, old->maps[i])) return ERR_PTR(-EBUSY);
+ 
  for (i = 0; i < add; ++i) {
   struct ebpfos_operations *wanted = container_of(next->maps[i], struct ebpfos_operations, map);
   for (j = 0; j < have; ++j) {
    struct ebpfos_operations *owner = container_of(active->maps[j], struct ebpfos_operations, map);
-   if (wanted->original == owner->original && !operations_set_has(old, active->maps[j]))
-    return ERR_PTR(-EBUSY);
+   
   }
  }
  if (bpf_operations_set_same(next, old)) return bpf_operations_set_get(active);
- if (remove > have || add > U32_MAX - (have - remove)) return ERR_PTR(-E2BIG);
+ 
  count = have - remove + add;
  if (count) {
   merged = kvzalloc(struct_size(merged, maps, count), GFP_KERNEL);

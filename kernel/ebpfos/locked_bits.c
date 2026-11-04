@@ -35,7 +35,7 @@ static bool locked_##op##width##_payload(u64 p) \
 { return locked_##op##width##_ids.cnt == 1 && p == locked_##op##width##_ids.pairs[0].id; } \
 static int locked_##op##width##_proof(u64 p, struct bpf_insn *insns) \
 { \
- if (!insns || !locked_##op##width##_payload(p)) return -EINVAL; \
+  \
  insns[0] = BPF_LDX_MEM(size, BPF_REG_3, BPF_REG_1, 0); \
  insns[1] = BPF_ALU32_REG(BPF_##upper, BPF_REG_3, BPF_REG_2); \
  insns[2] = BPF_STX_MEM(size, BPF_REG_1, BPF_REG_3, 0); \
@@ -53,14 +53,14 @@ static int locked_##op##width##_proof(u64 p, struct bpf_insn *insns) \
 static int locked_##op##width##_requirements(u64 p, u64 *cap, u64 *effects, u8 d[SHA256_DIGEST_SIZE]) \
 { \
  static const u8 digest[] = EBPFOS_KOP_LOCKED_##upper##width##_SEMANTIC_SHA256; \
- if (!cap || !effects || !d || !locked_##op##width##_payload(p)) return -EINVAL; \
+  \
  *cap = 0; *effects = 0; memcpy(d, digest, sizeof(digest)); return 0; \
 } \
 static int locked_##op##width##_emit(u8 *image, u32 *offset, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_LOCKED_##upper##width##_NATIVE_BYTES; \
- if (!offset || (emit && !image) || !locked_##op##width##_payload(p)) return -EINVAL; \
+  \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \

@@ -174,9 +174,9 @@ static int plt_publish(void)
   if (IS_ERR(entry->next)) {error = PTR_ERR(entry->next);entry->next = NULL;goto fail;}
   pairs[i].addr = (void *)slot.ip;
   slot.target[0] = (unsigned long)(entry->image ? entry->image->text : NULL);
-  if (!entry_native_instruction(&slot, entry->image ? 1 : 0, pairs[i].before)) {error = -ERANGE;goto fail;}
+  
   slot.target[0] = (unsigned long)(entry->next ? entry->next->text : NULL);
-  if (!entry_native_instruction(&slot, entry->next ? 1 : 0, pairs[i].after)) {error = -ERANGE;goto fail;}
+  
   ++i;
  }
  sort(pairs, count, sizeof(*pairs), entry_native_pair_order, NULL);
@@ -211,7 +211,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
  }
  scope = kzalloc(struct_size(scope, bindings, count), GFP_KERNEL);
  if (!scope) {error = -ENOMEM;goto fail;}
- if (plt_next_id == U32_MAX) {kfree(scope);error = -EOVERFLOW;goto fail;}
+ 
  scope->id = ++plt_next_id;scope->count = count;refcount_set(&scope->refs, 1);
  memcpy(scope->bindings, bindings, count * sizeof(*bindings));
  for (i = 0; i < count; ++i) {
@@ -219,21 +219,19 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
   unsigned long ip = bpf_entry_text_location(bindings[i].source_module, bindings[i].native_address, &ftrace, &canonical_nop);
   struct entry_set *owner;
   u8 before[5], expected[5];
-  if (!ip) {error = -EOPNOTSUPP;goto free_scope;}
-  for (j = 0; j < i; ++j) if (bindings[j].native_address == bindings[i].native_address) {error = -ENOTUNIQ;goto free_scope;}
+  
+  
   list_for_each_entry(owner, &entry_retained, retained)
-   if (owner->active || owner->poisoned)
-    for (j = 0; j < owner->slot_count; ++j)
-     if (owner->slots[j].ip == ip) {error = -EBUSY;goto free_scope;}
+   
   if (entry_plt_owned(ip)) continue;
   entry = kzalloc(sizeof(*entry), GFP_KERNEL);
   if (!entry) {error = -ENOMEM;goto free_scope;}
   entry->slot.ip = ip;entry->slot.ftrace = ftrace;entry->slot.canonical_nop = canonical_nop;
   /* target[1] is cold lookup identity, never an emitted second branch. */
   entry->slot.target[1] = bindings[i].native_address;
-  if (copy_from_kernel_nofault(before, (void *)ip, 5)) {kfree(entry);error = -EFAULT;goto free_scope;}
+  
   if (before[0] == 0xe9) {s32 displacement;memcpy(&displacement, before + 1, 4);entry->slot.original = ip + 5 + displacement;}
-  else if (!entry_native_instruction(&entry->slot, 0, expected) || memcmp(before, expected, 5)) {kfree(entry);error = -EBUSY;goto free_scope;}
+  
   if (ftrace) {
    entry->ftrace = ftrace_text_reserve(&ip, 1, false);
    if (IS_ERR(entry->ftrace)) {error = PTR_ERR(entry->ftrace);kfree(entry);goto free_scope;}

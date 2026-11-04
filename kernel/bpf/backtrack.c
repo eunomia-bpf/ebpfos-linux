@@ -375,18 +375,7 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 		if (class == BPF_STX)
 			bt_set_reg(bt, sreg);
 	} else if (class == BPF_JMP || class == BPF_JMP32) {
-		if (bpf_native_seq_ablation() && bpf_native_seq_insn(insn)) {
-			struct bpf_native_seq *sequence = bpf_native_seq_get(env->prog, insn->imm);
-			/* Diagnostic outputs are independent unknown values constrained
-			 * only by their widths. They define every written register;
-			 * untouched registers retain their ordinary precision history.
-			 */
-			for (i = 0; i < MAX_BPF_REG; i++)
-				if ((sequence->write_mask & BIT(i)) && i != BPF_REG_FP && i != 13)
-					bt_clear_reg(bt, i);
-			bpf_bt_sync_linked_regs(bt, hist);
-			return 0;
-		} else if (bpf_pseudo_call(insn)) {
+		if (bpf_pseudo_call(insn)) {
 			int subprog_insn_idx, subprog;
 
 			subprog_insn_idx = idx + insn->imm + 1;

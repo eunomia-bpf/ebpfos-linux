@@ -33,8 +33,7 @@ static int xadd_requirements(u64 payload, u64 *cap, u64 *effects,
 	const char *semantics = area ?
 		"percpu-area-xadd-v1:offset24;stock-selection;checked-load-add-store;old-value;single-unlocked-GS-XADD;r6-wide-sum;r3-zero" :
 		"percpu-xadd-v1:offset15;stock-selection;checked-load-add-store;old-value;single-unlocked-GS-XADD;r6-wide-sum;r3-zero";
-	if (!cap || !effects || !digest || !xadd_payload(payload, area))
-		return -EINVAL;
+	
 	*cap = 0;
 	*effects = 0;
 	sha256(semantics, strlen(semantics), digest);
@@ -44,8 +43,7 @@ static int xadd_requirements(u64 payload, u64 *cap, u64 *effects,
 static int xadd_proof(u64 payload, struct bpf_insn *insns, unsigned size, bool area)
 {
 	unsigned n = 0;
-	if (!insns || !xadd_payload(payload, area))
-		return -EINVAL;
+	
 	insns[n++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2);
 	insns[n++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr);
 	if (area) insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, payload);
@@ -62,8 +60,7 @@ static int xadd_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	u8 native[24];
 	unsigned n = 0;
-	if (!offset || (emit && !image) || !xadd_payload(payload, area))
-		return -EINVAL;
+	
 	if (width <= 16) {
 		if (width == 8) native[n++] = 0x40; /* SIL needs REX. */
 		native[n++] = 0x0f;

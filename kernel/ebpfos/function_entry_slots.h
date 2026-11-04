@@ -116,7 +116,7 @@ static struct text_poke_pair *entry_native_pairs(struct entry_native_slot *old,
  if (!pairs) return ERR_PTR(-ENOMEM);
  for (i = 0; i < count; ++i) {
   pairs[i].addr = (void *)old[i].ip;
-  if (old[i].ip != next[i].ip) {error = -EINVAL;goto fail;}
+  
   if (!entry_native_instruction(&old[i], from, pairs[i].before) ||
       !entry_native_instruction(&next[i], to, pairs[i].after)) goto fail;
  }

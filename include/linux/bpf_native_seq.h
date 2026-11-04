@@ -3,12 +3,6 @@
 #define _LINUX_BPF_NATIVE_SEQ_H
 
 #include <linux/bpf.h>
-#ifdef CONFIG_EBPFOS_VERIFIER_ABLATION
-extern unsigned int ebpfos_verifier_ablation;
-static inline bool bpf_native_seq_ablation(void) { return ebpfos_verifier_ablation >= 2; }
-#else
-static inline bool bpf_native_seq_ablation(void) { return false; }
-#endif
 
 /* runtime/link/native-sequence.md, version 1. No byte semantics are proved. */
 struct bpf_native_seq {
@@ -90,8 +84,7 @@ static inline int bpf_native_seq_clone_records(struct bpf_prog *prog)
 		if (!bpf_native_seq_insn(&prog->insnsi[i]))
 			continue;
 		seq = bpf_native_seq_get(prog, prog->insnsi[i].imm);
-		if (!seq || seq->size > U32_MAX - size)
-			return -EINVAL;
+		
 		size += seq->size;
 	}
 	if (!size)

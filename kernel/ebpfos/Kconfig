@@ -63,11 +63,3 @@ config EBPFOS_AUTOBIND
    The owner-boundary handoff remains an optional alternative
    when this option is disabled. Paging restrictions are those of PTVIEW.
 
-config EBPFOS_VERIFIER_ABLATION
- bool "Diagnostic verifier barrier ablation (no safety claim)"
- depends on EBPFOS && DEBUG_KERNEL
- default n
- help
-   Enable E10 load-only diagnostics selected by ebpfos_verifier_ablation.
-   Diagnostic passes are not verified artifacts and must not enter coverage
-   or production images. This option changes no default production rule.

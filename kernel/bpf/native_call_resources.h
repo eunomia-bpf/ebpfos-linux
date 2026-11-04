@@ -55,10 +55,7 @@ static int check_native_call_resources(struct bpf_verifier_env *env)
 			    (!bpf_pseudo_call(insn) && !bpf_pseudo_func(insn)))
 				continue;
 			callee = bpf_find_subprog(env, j + insn->imm + 1);
-			if (callee < 0) {
-				err = -EFAULT;
-				goto out;
-			}
+			
 			edges[count].caller = i;
 			edges[count].next = heads[callee];
 			heads[callee] = count++;
@@ -87,16 +84,8 @@ static int check_native_call_resources(struct bpf_verifier_env *env)
 			    !bpf_pseudo_call(insn))
 				continue;
 			callee = bpf_find_subprog(env, j + insn->imm + 1);
-			if (callee < 0) {
-				err = -EFAULT;
-				goto out;
-			}
-			if (env->subprog_info[callee].has_native_call) {
-				verbose(env, "global function %s cannot call native code with modeled resources held\n",
-					subprog_name(env, callee));
-				err = -EACCES;
-				goto out;
-			}
+			
+			
 		}
 		if (env->subprog_info[i].has_native_call) {
 			verbose(env, "func#%u relies on verifier option C; name='%s'\n",

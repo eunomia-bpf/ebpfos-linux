@@ -61,13 +61,13 @@ static u32 rdmsr_service(u64 payload)
 { return rdmsr_valid(payload) ? rdmsr_services.pairs[0].id : 0; }
 static int rdmsr_proof(u64 payload, struct bpf_insn *insns)
 {
- if (!insns || !rdmsr_valid(payload)) return -EINVAL;
+ 
  insns[0] = BPF_CALL_KFUNC(0, rdmsr_services.pairs[0].id);
  return 1;
 }
 static int rdmsr_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- if (!entry || index || !rdmsr_valid(payload)) return -EINVAL;
+ 
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_RDMSR_INSN,
   .fixup_offset = EBPFOS_RDMSR_FIXUP, .data = EX_TYPE_RDMSR_SAFE | (8 << 8) };
  return 0;
@@ -75,14 +75,14 @@ static int rdmsr_exception(u64 payload, unsigned int index, struct bpf_kop_excep
 static int rdmsr_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
 {
  static const u8 digest[] = EBPFOS_RDMSR_SHA256;
- if (!capability || !effect || !sha || !rdmsr_valid(payload)) return -EINVAL;
+ 
  *capability = 0; *effect = 0; memcpy(sha, digest, 32);
  return 0;
 }
 static int rdmsr_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                      const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !rdmsr_valid(payload)) return -EINVAL;
+ 
  if (emit) memcpy(image + *offset, rdmsr_native, sizeof(rdmsr_native));
  *offset += sizeof(rdmsr_native); return sizeof(rdmsr_native);
 }
@@ -102,14 +102,14 @@ static u32 rdmsr_unchecked_service(u64 payload)
 { return rdmsr_unchecked_valid(payload) ? rdmsr_unchecked_services.pairs[0].id : 0; }
 static int rdmsr_unchecked_proof(u64 payload, struct bpf_insn *insns)
 {
- if (!insns || !rdmsr_unchecked_valid(payload)) return -EINVAL;
+ 
  insns[0] = BPF_CALL_KFUNC(0, rdmsr_unchecked_services.pairs[0].id);
  return 1;
 }
 static int rdmsr_unchecked_exception(u64 payload, unsigned int index,
                                    struct bpf_kop_exception *entry)
 {
- if (!entry || index || !rdmsr_unchecked_valid(payload)) return -EINVAL;
+ 
  *entry = (struct bpf_kop_exception) {
   .insn_offset = EBPFOS_RDMSR_UNCHECKED_INSN,
   .fixup_offset = EBPFOS_RDMSR_UNCHECKED_FIXUP, .data = EX_TYPE_RDMSR };
@@ -119,14 +119,14 @@ static int rdmsr_unchecked_requirements(u64 payload, u64 *capability,
                                        u64 *effect, u8 sha[32])
 {
  static const u8 digest[] = EBPFOS_RDMSR_UNCHECKED_SHA256;
- if (!capability || !effect || !sha || !rdmsr_unchecked_valid(payload)) return -EINVAL;
+ 
  *capability = 0; *effect = 0; memcpy(sha, digest, 32);
  return 0;
 }
 static int rdmsr_unchecked_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                                const struct bpf_prog *prog, const u8 *final_ip)
 {
- if (!offset || (emit && !image) || !rdmsr_unchecked_valid(payload)) return -EINVAL;
+ 
  if (emit) memcpy(image + *offset, rdmsr_unchecked_native, sizeof(rdmsr_unchecked_native));
  *offset += sizeof(rdmsr_unchecked_native); return sizeof(rdmsr_unchecked_native);
 }

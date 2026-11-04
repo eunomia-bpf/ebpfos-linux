@@ -34,7 +34,7 @@ static bool xchg##width##_payload(u64 p) \
 { return xchg##width##_ids.cnt == 1 && p == xchg##width##_ids.pairs[0].id; } \
 static int xchg##width##_proof(u64 p, struct bpf_insn *insns) \
 { \
- if (!insns || !xchg##width##_payload(p)) return -EINVAL; \
+  \
  insns[0] = BPF_LDX_MEM(size, BPF_REG_0, BPF_REG_1, 0); \
  insns[1] = BPF_STX_MEM(size, BPF_REG_1, BPF_REG_2, 0); \
  return 2; \
@@ -42,14 +42,14 @@ static int xchg##width##_proof(u64 p, struct bpf_insn *insns) \
 static int xchg##width##_requirements(u64 p, u64 *cap, u64 *effects, u8 d[SHA256_DIGEST_SIZE]) \
 { \
  static const u8 digest[] = EBPFOS_KOP_LOCKED_XCHG##width##_SEMANTIC_SHA256; \
- if (!cap || !effects || !d || !xchg##width##_payload(p)) return -EINVAL; \
+  \
  *cap = 0; *effects = 0; memcpy(d, digest, sizeof(digest)); return 0; \
 } \
 static int xchg##width##_emit(u8 *image, u32 *offset, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_LOCKED_XCHG##width##_NATIVE_BYTES; \
- if (!offset || (emit && !image) || !xchg##width##_payload(p)) return -EINVAL; \
+  \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \

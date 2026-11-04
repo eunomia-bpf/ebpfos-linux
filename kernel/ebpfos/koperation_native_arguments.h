@@ -29,7 +29,7 @@ static bool ebpfos_kop_##name##_payload(u64 payload) \
  payload == ebpfos_kprog_##name##_ids.pairs[0].id; } \
 static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
- if (!insns || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
  insns[0] = (struct bpf_insn) { .code = BPF_JMP | BPF_CALL, \
   .src_reg = BPF_PSEUDO_KFUNC_CALL, .imm = ebpfos_kprog_##name##_service_ids.pairs[0].id }; \
  return 1; \
@@ -38,7 +38,7 @@ static int ebpfos_kop_##name##_requirements(u64 payload, u64 *cap, u64 *effects,
  u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
 { \
  static const u8 digest[] = EBPFOS_KOP_##upper##_SEMANTIC_SHA256; \
- if (!cap || !effects || !semantic_sha256 || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
  *cap = 0; *effects = 0; memcpy(semantic_sha256, digest, sizeof(digest)); return 0; \
 } \
 static struct bpf_kop ebpfos_kop_##name; \
@@ -48,10 +48,8 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
  static const u8 native[] = EBPFOS_KOP_##upper##_NATIVE_BYTES; \
  /* Private stacks overwrite R9 before the first BPF instruction. \
   * FineIBT's optional BHI call also has no six-argument contract. */ \
- if (!prog || !prog->aux || prog->aux->tail_call_reachable || \
-     prog->aux->exception_cb || prog->aux->jits_use_priv_stack || prog->aux->priv_stack_ptr || \
-     IS_ENABLED(CONFIG_FINEIBT)) return -EOPNOTSUPP; \
- if (!offset || (emit && !image) || !ebpfos_kop_##name##_payload(payload)) return -EINVAL; \
+  \
+  \
  /* Calls can overwrite R9; require one capture before other calls. \
   * Branches after it may loop, but cannot re-enter the capture. */ \
  { \
@@ -65,18 +63,18 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
        !bpf_jit_get_kop_payload(prog, insn, &found, &found_payload) && \
        found == &ebpfos_kop_##name && found_payload == payload; \
    if (snapshot) { \
-    if (capture != U32_MAX) return -EOPNOTSUPP; \
+     \
     capture = i; \
-   } else if (capture == U32_MAX) return -EOPNOTSUPP; \
+   }  \
   } \
-  if (capture == U32_MAX) return -EOPNOTSUPP; \
+   \
   for (u32 i = 0; i < prog->len; ++i) { \
    const struct bpf_insn *insn = &prog->insnsi[i]; \
    u8 cls = BPF_CLASS(insn->code), op = BPF_OP(insn->code); \
    s64 displacement; \
    if ((cls != BPF_JMP && cls != BPF_JMP32) || op == BPF_CALL || op == BPF_EXIT) continue; \
    displacement = cls == BPF_JMP32 && op == BPF_JA ? insn->imm : insn->off; \
-   if (i > capture && (s64)i + 1 + displacement <= capture) return -EOPNOTSUPP; \
+    \
   } \
  } \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \

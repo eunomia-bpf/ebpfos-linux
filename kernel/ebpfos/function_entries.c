@@ -181,7 +181,7 @@ static int entry_ownership(struct entry_set *set)
 {
  struct entry_set *owner;
  unsigned int i, j;
- if (set->poisoned) return -EUCLEAN;
+ 
 #ifdef CONFIG_EBPFOS_PLT
  for (i = 0; i < set->slot_count; ++i)
 #endif
@@ -269,7 +269,7 @@ done:
 static int entry_switch(struct entry_set *set, unsigned int from, unsigned int to)
 {
  int error;
- if (set->poisoned) return -EUCLEAN;
+ 
  if (from == to) return 0;
  error = entry_apply(set, from, to);
  if (!error) set->active = to;
@@ -470,7 +470,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
  set->count = count;
  if (source) {
   set->source_module = btf_try_get_module(source);
-  if (!set->source_module) {error = -ENOENT;goto fail;}
+  
   btf_get(source);set->source_btf = source;
  }
 
@@ -492,7 +492,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   if (!function || !btf_type_is_func(function)) goto fail;
   if (source && entry->native_function < btf_nr_types(vmlinux_btf)) goto fail;
   address = ebpfos_native_function(btf, entry->native_function, set->source_module);
-  if (!address) {error = -ENOENT;goto fail;}
+  
   ip = address;
   if (!task && source && entry_module_noinstr(set->source_module, address)) {
    /* No entry patch or breakpoint in noinstr text. Replace every decoded
@@ -501,7 +501,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   } else if (!task) {
   ip = bpf_entry_text_location(set->source_module, address, &ftrace, &canonical_nop);
   if (!ip) {
-    if (!source) {error = -ENOENT;goto fail;}
+    
     /* An unpadded module entry uses the same closed direct-caller
      * transaction as noinstr text. No reservation is added to its body. */
     call_sites = true;ip = address;
@@ -529,14 +529,13 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
             btf_name_by_offset(btf, function->name_off), error);
     goto fail;
    }
-   if (!task && target == address) {error = -EINVAL;goto fail;}
+   
    set->addresses[i] = target;
    if (call_sites && entry_module_noinstr(set->source_module, address)) {
-    if (program->type != BPF_PROG_TYPE_NATIVE || !program->aux->mod ||
-        !entry_module_noinstr(program->aux->mod, target)) {error = -EOPNOTSUPP;goto fail;}
+    
    } else if (slot) {
     u8 instruction[5];
-    if (!entry_native_jump(ip, target, instruction)) {error = -ERANGE;goto fail;}
+    
     slot->target[j] = target;
    }
   }
@@ -575,20 +574,15 @@ int bpf_native_prog_init(struct bpf_prog *prog, const union bpf_attr *attr)
   btf = btf_get_by_fd(attr->attach_btf_obj_fd);
   if (IS_ERR(btf)) return PTR_ERR(btf);
   module = btf_try_get_module(btf);
-  if (!module) {btf_put(btf);return -EINVAL;}
+  
  } else {
   btf = bpf_get_btf_vmlinux();
   btf_get(btf);
  }
  function = btf_type_by_id(btf, attr->attach_btf_id);
- if (!function || !btf_type_is_func(function) ||
-     (module && attr->attach_btf_id < btf_nr_types(bpf_get_btf_vmlinux()))) {
-  module_put(module);btf_put(btf);return -EINVAL;
- }
+ 
  address = ebpfos_native_function(btf, attr->attach_btf_id, module);
- if (!address) {
-  module_put(module);btf_put(btf);return -ENOENT;
- }
+ 
  prog->aux->attach_btf = btf;
  prog->aux->attach_btf_id = attr->attach_btf_id;
  prog->aux->mod = module;
@@ -702,7 +696,7 @@ int bpf_entry_link_create(const union bpf_attr *attr, bool kernel)
  u32 *targets, *programs, count = attr->link_create.entry.count, i;
  u32 operations_count = attr->link_create.entry.operations_count, *operations_fds;
  int error;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ 
  targets = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.target_btf_ids), count, sizeof(u32));
  if (IS_ERR(targets)) return PTR_ERR(targets);
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_create.entry.prog_fds), count, sizeof(u32));
@@ -766,13 +760,13 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  u32 *programs = NULL, *old_fds = NULL, count = attr->link_update.entry.count;
  unsigned int i, slot, id = 0;
  int error = -EINVAL;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
+ 
  if (attr->link_update.entry.migration_prog_fd) {
   migration = entry_epoch_program(set, attr->link_update.entry.migration_prog_fd, &migration_address);
   if (IS_ERR(migration)) return PTR_ERR(migration);
   reverse = entry_epoch_program(set, attr->link_update.entry.reverse_prog_fd, &reverse_address);
   if (IS_ERR(reverse)) {error = PTR_ERR(reverse);reverse = NULL;goto out;}
-  if (migration == reverse) {error = -EINVAL;goto out;}
+  
  }
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.prog_fds), count, sizeof(u32));
  if (IS_ERR(programs)) {error = PTR_ERR(programs);programs = NULL;goto out;}

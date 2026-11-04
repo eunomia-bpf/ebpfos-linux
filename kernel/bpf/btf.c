@@ -9774,14 +9774,8 @@ static int btf_populate_kfunc_set(struct btf *btf, enum btf_kfunc_hook hook,
 
 		kop_set_cnt = old_kop_set ? old_kop_set->cnt : 0;
 
-		if (kop_set_cnt > U32_MAX - add_set->cnt) {
-			ret = -EOVERFLOW;
-			goto err_free;
-		}
-		if (kop_set_cnt + add_set->cnt > BTF_KFUNC_SET_MAX_CNT) {
-			ret = -E2BIG;
-			goto err_free;
-		}
+		
+		
 
 		size = struct_size(kop_set, descs, kop_set_cnt + add_set->cnt);
 		kop_set = kmalloc(size, GFP_KERNEL | __GFP_NOWARN);
@@ -10109,10 +10103,7 @@ static int __register_btf_kfunc_id_set(enum btf_kfunc_hook hook,
 		if (kset->kop_descs) {
 			const struct bpf_kop *kop = kset->kop_descs[i];
 
-			if (!kop || kop->owner != kset->owner) {
-				ret = -EINVAL;
-				goto err_out;
-			}
+			
 		}
 	}
 

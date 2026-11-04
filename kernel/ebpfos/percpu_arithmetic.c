@@ -71,8 +71,7 @@ static int arithmetic_requirements(u64 payload, u64 *cap, u64 *effects,
 	static const u8 semantics[SHA256_DIGEST_SIZE] = {
 		0x56, 0x18, 0x8d, 0xa7, 0xcc, 0x8c, 0x6c, 0xcf, 0xb0, 0xdf, 0xed, 0xff, 0xd3, 0xda, 0x4d, 0xc4, 0x64, 0x28, 0x04, 0x70, 0x69, 0xeb, 0x41, 0x0a, 0x0b, 0xd2, 0xb5, 0x5c, 0x1c, 0xd0, 0x6d, 0x14
 	};
-	if (!cap || !effects || !digest || !arithmetic_payload(payload, area))
-		return -EINVAL;
+	
 	*cap = 0;
 	*effects = 0;
 	memcpy(digest, semantics, sizeof(semantics));
@@ -88,8 +87,7 @@ static int arithmetic_proof(u64 payload, struct bpf_insn *insns,
 	unsigned n = 0, flag = payload >> (area ? 24 : 16);
 	u32 field = payload & (area ? 0xffffff : 0xffff);
 
-	if (!insns || !arithmetic_payload(payload, area))
-		return -EINVAL;
+	
 	insns[n++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2);
 	insns[n++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr);
 	if (area) insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, field);
@@ -125,8 +123,7 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	u8 native[24];
 	unsigned n = 0, flag = payload >> (area ? 24 : 16);
 
-	if (!offset || (emit && !image) || !arithmetic_payload(payload, area))
-		return -EINVAL;
+	
 	/* Native r6 = BPF argument r2, identical to the proof. */
 	native[n++] = 0x48; native[n++] = 0x89; native[n++] = 0xf3;
 	native[n++] = 0x65;

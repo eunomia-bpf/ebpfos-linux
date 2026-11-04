@@ -128,12 +128,11 @@ int ebpfos_ptview_pointer_change(unsigned long address, const void *bytes,
  ebpfos_ptview_visit visit, void *data)
 {
  unsigned long at = address, end = address + sizeof(void *);
- if (end < address) return -EINVAL;
+ 
  while (at < end) {
   unsigned int level;
   pte_t *pte = lookup_address(at, &level);
-  if (!pte || !pte_present(*pte) || pte_write(*pte) || !(pte_val(*pte) & _PAGE_NX))
-   return -EOPNOTSUPP;
+  
   at += min_t(unsigned long, end - at, PAGE_SIZE - offset_in_page(at));
  }
  return visit(address, bytes, sizeof(void *), data);
@@ -168,8 +167,7 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
  int error = -EINVAL;
  unsigned long flags, sequence;
  /* These are admission restrictions, not checks in the replaced code. */
- if (!count || pgtable_l5_enabled() ||
-     boot_cpu_has(X86_FEATURE_PCID)) return ERR_PTR(-EOPNOTSUPP);
+ 
  view = kzalloc(struct_size(view, pages, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
  refcount_set(&view->refs, 1);view->owner = owner;INIT_LIST_HEAD(&view->text);
@@ -180,7 +178,7 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
   size_t offset = offset_in_page(changes[i].address);
   unsigned int level;
   pte_t *pte;
-  if (address < PAGE_OFFSET || !changes[i].size || changes[i].size > PAGE_SIZE - offset) {error = -EINVAL;goto fail;}
+  
   for (j = 0; j < view->count; ++j) if (view->pages[j].address == address) break;
   if (j == view->count) {
    /* CPA splits only the containing large mapping, retaining the global bit
@@ -190,7 +188,7 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
    error = set_memory_nonglobal(address, 1);
    if (error) goto fail;
    pte = lookup_address(address, &level);
-   if (!pte || level != PG_LEVEL_4K || !pte_present(*pte)) {error = -EINVAL;goto fail;}
+   
    view->pages[j].copy = alloc_page(GFP_KERNEL);
    if (!view->pages[j].copy) {error = -ENOMEM;goto fail;}
    view->pages[j].address = address;
@@ -331,13 +329,13 @@ int ebpfos_ptview_bind(struct ebpfos_ptview *view)
  struct ptview_mm *old, *next = NULL;
  unsigned int i;
  int error = 0;
- if (!mm) return -EINVAL;
+ 
  mmap_write_lock(mm);
  old = mm->context.ptview;
  if ((old ? old->view : NULL) == view) goto out;
  /* Different thread choices need different mms. The prototype refuses to
   * mutate a shared mm, and the owner drains its queued work before rebinding. */
- if (atomic_read(&mm->mm_users) != 1) {error = -EBUSY;goto out;}
+ 
  if (view) {
   next = kzalloc(sizeof(*next), GFP_KERNEL);
   if (!next) {error = -ENOMEM;goto out;}

@@ -64,7 +64,7 @@ static int rep_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service = rep_service(payload);
  unsigned n = 0;
- if (!insns || !service) return -EINVAL;
+ 
  /* Native inputs: r1=RDI/destination, r2=RSI/source, r4=RCX/elements.
   * Only this proof uses the C service ABI; none of it runs at runtime.
   */
@@ -118,7 +118,7 @@ static int repq_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service = repq_service(payload);
  unsigned n = 0;
- if (!insns || !service) return -EINVAL;
+ 
  /* Native inputs: r1=RDI/destination, r2=RSI/source, r4=RCX/elements.
   * Only this proof uses the C service ABI; none of it runs at runtime.
   */

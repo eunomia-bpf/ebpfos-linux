@@ -633,18 +633,7 @@ walk_cfg:
 	 * validator; do not merely ignore its branches or ldimm64 boundaries.
 	 * Ordinary verification continues to reject unreachable instructions.
 	 */
-	bool diagnostic_native_edges = false;
-	if (bpf_native_seq_ablation())
-		for (i = 0; i < insn_cnt; i++)
-			if (bpf_native_seq_insn(&env->prog->insnsi[i])) {
-				diagnostic_native_edges = true;
-				break;
-			}
-	/* The diagnostic symbolic model visits every registered asm-goto
-	 * successor. Validate all their regions structurally here, as for the
-	 * retained Native format; do not grant any store or pointer permission.
-	 */
-	if (env->prog->aux->trusted_kernel || diagnostic_native_edges) {
+	if (env->prog->aux->trusted_kernel) {
 		for (; orphan < insn_cnt; orphan++) {
 			if (insn_state[orphan] != EXPLORED) {
 				insn_state[orphan] = DISCOVERED;

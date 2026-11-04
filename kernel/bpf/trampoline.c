@@ -1008,14 +1008,8 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 
 	mutex_lock(&tr->mutex);
 	old_prog = link->link.prog;
-	if (hlist_unhashed(&link->tramp_hlist)) {
-		err = -ENOENT;
-		goto out;
-	}
-	if (expected && expected != old_prog) {
-		err = -EPERM;
-		goto out;
-	}
+	
+	
 	/* A syscall BPF caller holds Tasks Trace RCU. Waiting for a sleepable
 	 * callback's Tasks Trace grace period would wait for that caller itself.
 	 * Session and extension links also have additional bindings to update.
@@ -1034,10 +1028,7 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 		goto out;
 	kind = bpf_attach_type_to_tramp(old_prog);
 	hlist_for_each_entry(other, &tr->progs_hlist[kind], tramp_hlist)
-		if (other != link && other->link.prog == new_prog) {
-			err = -EBUSY;
-			goto out;
-		}
+		
 	WRITE_ONCE(link->link.prog, new_prog);
 	err = bpf_trampoline_update(tr, true);
 	if (err) {

@@ -37,8 +37,7 @@ static int ptr_tag_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
 
-	if (!spec || !insns)
-		return -EINVAL;
+	
 	memcpy(insns, spec->proof, sizeof(spec->proof));
 	return ARRAY_SIZE(spec->proof);
 }
@@ -48,8 +47,7 @@ static int ptr_tag_requirements(u64 payload, u64 *capabilities, u64 *effects,
 {
 	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
 
-	if (!spec || !capabilities || !effects || !digest)
-		return -EINVAL;
+	
 	*capabilities = 0;
 	*effects = 0;
 	memcpy(digest, spec->digest, sizeof(spec->digest));
@@ -61,8 +59,7 @@ static int ptr_tag_emit_x86(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
 
-	if (!spec || !offset || (emit && !image))
-		return -EINVAL;
+	
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;

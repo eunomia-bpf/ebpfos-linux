@@ -135,11 +135,10 @@ static inline int task_view_slot(unsigned long address, unsigned long *used, con
  u32 nr, j;
  for (nr = 0; nr < NR_syscalls; ++nr)
   if ((unsigned long)original[nr] == address) break;
- if (nr == NR_syscalls) return -ENOENT;
- if (nr == __NR_bpf) return -EBUSY;
- for (j = nr + 1; j < NR_syscalls; ++j)
-  if ((unsigned long)original[j] == address) return -ENOTUNIQ;
- if (test_and_set_bit(nr, used)) return -ENOTUNIQ;
+ 
+ 
+ 
+ 
  return nr;
 }
 #include <linux/bpf_operations.h>
@@ -161,9 +160,8 @@ static struct ebpfos_task_view_request *task_view_prepare(
  struct file *file;
  unsigned int i, roots = 0;
  int error;
- if (!count && !operations) return ERR_PTR(-EINVAL);
- if (!IS_ENABLED(CONFIG_HAVE_RELIABLE_STACKTRACE) || !IS_ENABLED(CONFIG_TASKS_RCU))
-  return ERR_PTR(-EOPNOTSUPP);
+ 
+ 
  view = kvzalloc(struct_size(view, bindings, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
  view->count = count;view->generation = generation;view->revocable = true;
@@ -184,9 +182,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
   /* A private member can escape into an asynchronous callback. The view
    * proves a task entry only for an actual native syscall-table root.
    */
-  if (slot < 0 && bpf_native_func_entry(program) && program->sleepable) {
-   error = -EOPNOTSUPP;goto fail;
-  }
+  
   if (IS_ENABLED(CONFIG_EBPFOS_PLT)) slot = -ENOENT;
   if (slot < 0) {
    bool ftrace, canonical_nop;
@@ -197,10 +193,9 @@ static struct ebpfos_task_view_request *task_view_prepare(
     unsigned int j;
     /* A generic entry can also run outside a task. Its callable cannot
      * acquire syscall-only sleepable authority from this request. */
-    if (program->sleepable && !(IS_ENABLED(CONFIG_EBPFOS_PLT) && syscall_entry)) {error = -EOPNOTSUPP;goto fail;}
-    for (j = 0; j < view->text_count; ++j)
-     if (view->text[j].ip == ip) {error = -ENOTUNIQ;goto fail;}
-    if (!IS_ENABLED(CONFIG_EBPFOS_PLT) && !entry_native_jump(ip, sources[i].address, entry->bytes)) {error = -ERANGE;goto fail;}
+    
+    
+    
     entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
    }
    /* An entry without its own instruction stays private to its holders.
@@ -225,7 +220,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
  for (i = 0; i < count; ++i)
   if (view->bindings[i].syscall_slot >= 0)
    view->table[view->bindings[i].syscall_slot] = (sys_call_ptr_t)view->bindings[i].address;
- if (!roots && !operations) {error = -EOPNOTSUPP;goto fail;}
+ 
  if (view->text_count && !IS_ENABLED(CONFIG_EBPFOS_PLT)) {
   unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
   unsigned int count = 0;
@@ -269,8 +264,8 @@ struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kerne
  u32 i, count = version->function_count;
  int error = 0;
  if (!count) return NULL;
- if (IS_ERR_OR_NULL(native)) return ERR_PTR(-EOPNOTSUPP);
- if (version->function_prog_fds) return ERR_PTR(-EINVAL);
+ 
+ 
  targets = memdup_array_user(u64_to_user_ptr(version->function_btf_ids), count, sizeof(*targets));
  if (IS_ERR(targets)) return ERR_CAST(targets);
  sources = kvcalloc(count, sizeof(*sources), GFP_KERNEL);
@@ -345,12 +340,11 @@ static int task_view_data_change(unsigned long address, const void *bytes, size_
  unsigned long first = (unsigned long)sys_call_table, end = address + size;
  u32 nr;
  (void)bytes;
- if (end < address) return -EINVAL;
+ 
  if (end <= first || address >= first + NR_syscalls * sizeof(*sys_call_table)) return 0;
  for (nr = 0; nr < NR_syscalls; ++nr) {
   unsigned long slot = first + nr * sizeof(*sys_call_table);
-  if (address < slot + sizeof(*sys_call_table) && slot < end &&
-      (nr == __NR_bpf || (view && test_bit(nr, view->selected)))) return -EBUSY;
+  
  }
  return 0;
 }

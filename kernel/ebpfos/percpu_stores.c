@@ -45,8 +45,7 @@ static int store_requirements(u64 payload, unsigned width, u64 *cap,
 	static const u8 semantics[SHA256_DIGEST_SIZE] = {
 		0xc3,0x8e,0xf9,0x7e,0x12,0x2b,0xd7,0x62,0x9e,0x95,0x8e,0xd5,0xdf,0xec,0x6b,0x0c,
 		0xb1,0xe3,0xfb,0x61,0x85,0xa7,0x62,0x80,0x0a,0x46,0x6f,0xcc,0x45,0xc6,0xe2,0x04 };
-	if (!cap || !effects || !digest || !store_payload(payload, width, area))
-		return -EINVAL;
+	
 	*cap = 0;
 	*effects = 0;
 	memcpy(digest, semantics, sizeof(semantics));
@@ -62,8 +61,7 @@ static int store_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	u32 immediate = payload >> (area ? 20 : 16);
 	unsigned n = 0;
 
-	if (!offset || (emit && !image) || !store_payload(payload, width, area))
-		return -EINVAL;
+	
 	native[n++] = 0x65;
 	if (width == 16) native[n++] = 0x66;
 	if (width == 64) native[n++] = 0x48;
@@ -93,7 +91,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_kop_##prefix##width) \
 BTF_KFUNCS_END(prefix##width##_ids) \
 static int prefix##width##_proof(u64 payload, struct bpf_insn *insns) \
 { \
- if (!insns || !store_payload(payload, width, area)) return -EINVAL; \
+  \
  insns[0] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr); \
  if (area) insns[1] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, payload & 0xfffff); \
  insns[area ? 2 : 1] = BPF_ST_MEM(size, BPF_REG_0, area ? 0 : payload & 0xffff, (u32)(payload >> (area ? 20 : 16))); \
@@ -146,8 +144,7 @@ static int regstore_requirements(u64 payload, u64 *cap, u64 *effects,
 {
 	/* sha256("percpu-regstore-v1:stock-template-selection;exact-field-write;input-type-preserved-in-r6;r6-clobber;single-GS-MOV;scalar-return") */
 	static const u8 semantics[SHA256_DIGEST_SIZE] = { 0xb6, 0xff, 0x79, 0x33, 0x08, 0xef, 0x5e, 0x2b, 0x2f, 0xca, 0x1c, 0xd6, 0xc1, 0xd1, 0xec, 0x47, 0x7f, 0xdf, 0xf1, 0x80, 0x94, 0x72, 0x18, 0xe6, 0x09, 0xdd, 0x56, 0xf4, 0xa5, 0xbe, 0xe2, 0xa5 };
-	if (!cap || !effects || !digest || payload > (area ? 0xffffff : S16_MAX))
-		return -EINVAL;
+	
 	*cap = 0; *effects = 0;
 	memcpy(digest, semantics, sizeof(semantics));
 	if (area) sha256("percpu-area-regstore-v1:offset24;root-selection;exact-width;field-authority;typed-store;r6-input-copy;single-GS-MOV",
@@ -160,8 +157,7 @@ static int regstore_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	u8 native[18];
 	unsigned n = 0;
-	if (!offset || (emit && !image) || payload > (area ? 0xffffff : S16_MAX))
-		return -EINVAL;
+	
 	/* MOV rsi,rbx is the exact r6 scratch result modeled by the proof. */
 	native[n++] = 0x48; native[n++] = 0x89; native[n++] = 0xf3;
 	native[n++] = 0x65;
@@ -183,7 +179,7 @@ BTF_ID_FLAGS(func, bpf_ebpfos_kop_##prefix##width) \
 BTF_KFUNCS_END(prefix##width##_ids) \
 static int prefix##width##_proof(u64 payload, struct bpf_insn *insns) \
 { \
- if (!insns || payload > (area ? 0xffffff : S16_MAX)) return -EINVAL; \
+  \
  insns[0] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2); \
  insns[1] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr); \
  if (area) insns[2] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, payload); \

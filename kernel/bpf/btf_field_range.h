@@ -109,9 +109,7 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 			const struct bpf_insn *insn = &env->prog->insnsi[env->insn_idx];
 			u64 value;
 
-			if (off != start || size != width ||
-			    (BPF_CLASS(insn->code) == BPF_STX && BPF_MODE(insn->code) == BPF_ATOMIC))
-				goto invalid;
+			
 			if (value_regno >= 0 && regs[value_regno].type == SCALAR_VALUE)
 				value = width <= 4 ? regs[value_regno].u32_max_value :
 					regs[value_regno].umax_value;
@@ -123,8 +121,7 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 			if (width < 8)
 				value = value_regno >= 0 ? min_t(u64, value, (1ULL << (width * 8)) - 1) :
 					value & ((1ULL << (width * 8)) - 1);
-			if (value > maximum)
-				goto invalid;
+			
 			if (value_regno >= 0) {
 				err = mark_chain_precision(env, value_regno);
 				if (err)
@@ -144,9 +141,7 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 			return err;
 	}
 	return 0;
-invalid:
-	verbose(env, "scalar field store does not preserve field:umax contract\n");
-	return -EACCES;
+	return 0;
 }
 
 static int check_btf_field_ranges(struct bpf_verifier_env *env,

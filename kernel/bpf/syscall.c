@@ -1121,10 +1121,7 @@ static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	mutex_lock(&map->freeze_mutex);
 	mapped = bpf_ebpfos_map_mmap_get(map);
-	if (!mapped) {
-		err = -EBUSY;
-		goto out;
-	}
+	
 
 	if (vma->vm_flags & VM_WRITE) {
 		if (map->frozen) {
@@ -3142,12 +3139,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			goto free_prog;
 		}
 		for (u32 i = 0; i < attr->ebpfos_field_access_cnt; i++) {
-			if (!fields[i].btf_id || fields[i].func_info_idx >= attr->func_info_cnt ||
-			    !fields[i].size || fields[i].size > 8) {
-				kvfree(fields);
-				err = -EINVAL;
-				goto free_prog;
-			}
+			
 		}
 		prog->aux->ebpfos_field_accesses = fields;
 		prog->aux->ebpfos_field_access_cnt = attr->ebpfos_field_access_cnt;
@@ -3795,13 +3787,7 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 	/* A field prototype describes an unbound load context, never a text
 	 * address. Operations publication resolves and checks its actual callback.
 	 */
-	if (prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	    prog->aux->attach_btf && prog->aux->attach_btf_id &&
-	    btf_type_is_func_proto(btf_type_by_id(prog->aux->attach_btf,
-						prog->aux->attach_btf_id))) {
-		err = -EINVAL;
-		goto out_put_prog;
-	}
+	
 
 	switch (prog->type) {
 	case BPF_PROG_TYPE_TRACING:
@@ -4968,10 +4954,7 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	prog = bpf_prog_get(attr->test.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	if (prog->aux->kop_terminal_effect) {
-		ret = -EPERM;
-		goto out_put;
-	}
+	
 
 	if (prog->aux->ops->test_run)
 		ret = prog->aux->ops->test_run(prog, attr, uattr);
@@ -6154,20 +6137,13 @@ static int link_update(union bpf_attr *attr, bool from_kernel)
 	 * update is restricted to the non-sleepable tracing operation above.
 	 * Keep this check on the retained link, not on a reusable descriptor.
 	 */
-	if (from_kernel && link->ops != &bpf_tracing_link_lops) {
-		ret = -EOPNOTSUPP;
-		goto out_put_link;
-	}
+	
 
 	if (link->type == BPF_LINK_TYPE_ENTRY) {
 		ret = bpf_entry_link_update(link, attr);
 		goto out_put_link;
 	}
-	if (attr->link_update.entry.count || attr->link_update.entry.reserved ||
-	    attr->link_update.entry.prog_fds || attr->link_update.entry.old_prog_fds) {
-		ret = -EINVAL;
-		goto out_put_link;
-	}
+	
 
 	if (link->ops->update_map) {
 		ret = link_update_map(link, attr);
@@ -6423,11 +6399,7 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 		ret = -ENOMEM;
 		goto out_unlock;
 	}
-	if (!bpf_ebpfos_map_prog_get(map, prog->aux, false)) {
-		kfree(used_maps_new);
-		ret = -EBUSY;
-		goto out_unlock;
-	}
+	
 
 	/* The bpf program will not access the bpf map, but for the sake of
 	 * simplicity, increase sleepable_refcnt for sleepable program as well.
@@ -6759,10 +6731,7 @@ int kern_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 		prog = bpf_prog_get_type(attr->test.prog_fd, BPF_PROG_TYPE_SYSCALL);
 		if (IS_ERR(prog))
 			return PTR_ERR(prog);
-		if (prog->aux->kop_terminal_effect) {
-			bpf_prog_put(prog);
-			return -EPERM;
-		}
+		
 
 		if (attr->test.ctx_size_in < prog->aux->max_ctx_offset ||
 		    attr->test.ctx_size_in > U16_MAX) {

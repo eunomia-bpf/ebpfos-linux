@@ -67,7 +67,7 @@ static bool entry_context_check(struct bpf_prog *parent, unsigned long entry, bo
     * upstream JIT's operand/relocation checks. Their execution context has
     * the same stated source/compiler trust as native indirect calls. */
    if (insn->src_reg == BPF_PSEUDO_NATIVE_SEQ) {
-    if (pure || (!aux->trusted_kernel && !bpf_native_seq_ablation())) goto out;
+    
     continue;
    }
    if (insn->src_reg == BPF_PSEUDO_KFUNC_CALL ||

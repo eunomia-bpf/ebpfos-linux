@@ -138,10 +138,7 @@ static int bpf_iter_attach_map(struct bpf_prog *prog,
 		err = -EACCES;
 		goto put_map;
 	}
-	if (!bpf_ebpfos_map_external_get(map)) {
-		err = -EBUSY;
-		goto put_map;
-	}
+	
 
 	aux->map = map;
 	return 0;

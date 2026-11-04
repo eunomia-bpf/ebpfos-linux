@@ -14,7 +14,7 @@ static inline int bpf_native_classes(struct btf *btf, u32 id, u32 offset,
 {
  const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
  u32 i, kind;
- if (!t || depth > 32) return -EINVAL;
+ 
  kind = BTF_INFO_KIND(t->info);
  if (kind == BTF_KIND_INT || kind == BTF_KIND_ENUM || kind == BTF_KIND_ENUM64 ||
      kind == BTF_KIND_PTR || kind == BTF_KIND_FLOAT) {
@@ -36,7 +36,7 @@ static inline int bpf_native_classes(struct btf *btf, u32 id, u32 offset,
   }
   return 0;
  }
- if (!btf_type_is_struct(t)) return -EOPNOTSUPP;
+ 
  if (t->size > 16) return 1;
  for (i = 0; i < btf_type_vlen(t); i++) {
   const struct btf_member *m = &btf_members(t)[i];
@@ -89,7 +89,7 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
 {
  const struct btf_type *t = btf_type_skip_modifiers(btf, id, &id);
  u32 size;
- if (!t || depth > 32) return -EINVAL;
+ 
  if (btf_native_scalar_storage(btf, id, depth)) return 0;
  if (btf_type_is_ptr(t)) {
   *pointer = id;
@@ -107,7 +107,7 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
   }
   return 0;
  }
- if (!btf_type_is_struct(t)) return -EOPNOTSUPP;
+ 
  for (u32 i = 0; i < btf_type_vlen(t); i++) {
   const struct btf_member *m = &btf_members(t)[i];
   u32 bit = btf_member_bit_offset(t, i);
