@@ -651,19 +651,11 @@ static int emit_kop_desc_call(u8 **pprog,
 	ret = bpf_jit_get_kop_payload(bpf_prog, insn, &kop, &payload);
 	if (ret)
 		return ret;
-	if (!kop || !kop->emit_x86)
-		return -EOPNOTSUPP;
-	if (kop->max_emit_bytes > BPF_MAX_INSN_SIZE)
-		return -E2BIG;
 
 	ret = kop->emit_x86(scratch, &off, emit, payload, bpf_prog,
 			      final_ip);
 	if (ret < 0)
 		return ret;
-	if (ret != off || ret > kop->max_emit_bytes)
-		return -EFAULT;
-	if (kop->num_exentries && !kop->exception_entry)
-		return -EINVAL;
 	if (image && bpf_prog->aux->extable) {
 		unsigned int index;
 
@@ -672,8 +664,6 @@ static int emit_kop_desc_call(u8 **pprog,
 			struct exception_table_entry *ex, *rw_ex;
 			s64 insn_delta, fixup_delta;
 
-			if (*excnt >= bpf_prog->aux->num_exentries)
-				return -EFAULT;
 			ret = kop->exception_entry(payload, index, &entry);
 			if (ret || entry.insn_offset >= off || entry.fixup_offset > off)
 				return ret ?: -EINVAL;
@@ -681,8 +671,6 @@ static int emit_kop_desc_call(u8 **pprog,
 			insn_delta = final_ip + entry.insn_offset - (u8 *)&ex->insn;
 			fixup_delta = (recovery_ip ?: final_ip + entry.fixup_offset) -
 				      (u8 *)&ex->fixup;
-			if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
-				return -ERANGE;
 			rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
 			rw_ex->insn = insn_delta;
 			rw_ex->fixup = fixup_delta;
@@ -696,13 +684,9 @@ static int emit_kop_desc_call(u8 **pprog,
 			struct bpf_kop_reloc reloc;
 			u32 type;
 
-			if (!kop->x86_reloc)
-				return -EINVAL;
 			ret = kop->x86_reloc(payload, i, &reloc);
 			if (ret)
 				return ret;
-			if (reloc.offset > off || reloc.size > off - reloc.offset)
-				return -EINVAL;
 			if (reloc.size == 8)
 				type = R_X86_64_64;
 			else if (reloc.size == 4)
@@ -1204,8 +1188,6 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 				if (IS_ERR(binding) && PTR_ERR(binding) != -ENOENT)
 					return PTR_ERR(binding);
 				if (!IS_ERR(binding)) {
-					if (*binding)
-						return -EINVAL;
 					weak = true;
 				}
 
@@ -1214,8 +1196,6 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 				if (!IS_ERR(target))
 					symbol = target;
 
-				if (strscpy(name, symbol, sizeof(name)) < 0)
-					return -ENAMETOOLONG;
 				err = 0;
 			} else {
 				err = aot_address_name(aot, value, name, &addend);
@@ -1231,8 +1211,6 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 		addend = operand->addend;
 		type = operand->type;
 	}
-	if (type != R_X86_64_64 && type != R_X86_64_32)
-		return -EOPNOTSUPP;
 	if (type == R_X86_64_64 && aot->position_independent) {
 		/* Keep source PIC addressing. A weak reference uses a GOT load
 		 * so an undefined symbol stays zero when the image moves.
@@ -1850,8 +1828,6 @@ static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
 			struct bpf_native_seq *seq = bpf_native_seq_get(bpf_prog, insn[i].imm);
 			u32 reg;
 
-			if (!seq)
-				return -EINVAL;
 			for (reg = BPF_REG_6; reg <= BPF_REG_9; reg++)
 				if ((seq->read_mask | seq->write_mask) & BIT(reg))
 					regs_used[reg - BPF_REG_6] = true;
@@ -1869,8 +1845,6 @@ static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
 		err = bpf_jit_get_kop_payload(bpf_prog, call, &kop, &payload);
 		if (err)
 			return err;
-		if (!kop || !kop->instantiate_insn || !kop->max_insn_cnt)
-			return -EINVAL;
 
 		proof_buf = kvcalloc(kop->max_insn_cnt, sizeof(*proof_buf),
 				     GFP_KERNEL);
@@ -2909,8 +2883,6 @@ populate_extable:
 			 * A private frame pointer would require saving a caller-saved
 			 * native register; that stack mode is not used with callx.
 			 */
-			if (priv_frame_ptr || imm32 < BPF_REG_0 || (imm32 >= BPF_REG_FP && imm32 != BPF_REG_ARG6))
-				return -EOPNOTSUPP;
 			if (ctx->aot && IS_ENABLED(CONFIG_MITIGATION_RETPOLINE)) {
 				u32 reg = reg2hex[imm32] + 8 * is_ereg(imm32);
 
@@ -2961,9 +2933,6 @@ populate_extable:
 				/* These modes add pre-CALL bookkeeping whose exception
 				 * cleanup or register changes are not yet modeled.
 				 */
-				if (priv_frame_ptr || tail_call_reachable ||
-				    IS_ENABLED(CONFIG_CALL_THUNKS))
-					return -EOPNOTSUPP;
 			}
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
 				LOAD_TAIL_CALL_CNT_PTR(stack_depth);
@@ -2999,10 +2968,6 @@ populate_extable:
 				insn->dst_reg ? insn - 1 : insn + 1, NULL, NULL);
 			if (err)
 				return err;
-			if (!insn->dst_reg && insn[1].code == (BPF_JMP | BPF_CALL) &&
-			    (priv_frame_ptr || tail_call_reachable ||
-			     IS_ENABLED(CONFIG_CALL_THUNKS)))
-				return -EOPNOTSUPP;
 			break;
 
 		case BPF_JMP | BPF_TAIL_CALL:
@@ -3184,8 +3149,6 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 			break;
 
 		case BPF_JMP | BPF_JA | BPF_X:
-			if (ctx->aot)
-				return -EOPNOTSUPP;
 			emit_indirect_jump_ctx(&prog, insn->dst_reg, ip, ctx);
 			break;
 		case BPF_JMP | BPF_JA:
@@ -3331,13 +3294,9 @@ emit_jmp:
 
 				if (err)
 					return err;
-				if (excnt >= bpf_prog->aux->num_exentries)
-					return -EFAULT;
 				ex = &bpf_prog->aux->extable[excnt++];
 				insn_delta = exception_ip - (u8 *)&ex->insn;
 				fixup_delta = image + addrs[recovery] - (u8 *)&ex->fixup;
-				if (!is_simm32(insn_delta) || !is_simm32(fixup_delta))
-					return -ERANGE;
 				rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
 				rw_ex->insn = insn_delta;
 				rw_ex->fixup = fixup_delta;
@@ -3348,8 +3307,6 @@ emit_jmp:
 		if (ctx->aot && ctx->aot->error)
 			return ctx->aot->error;
 		ilen = prog - temp;
-		if (ilen < 0 || proglen > INT_MAX - ilen)
-			return -E2BIG;
 		if (ilen > temp_size - BPF_INSN_SAFETY) {
 			pr_err("bpf_jit: fatal insn size error\n");
 			return -EFAULT;
@@ -3431,9 +3388,6 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 
 	*object = NULL;
 	*size = 0;
-	if (request->func_index >= count || request->nr_relocs > root->len ||
-	    request->reserved || request->flags & ~BPF_AOT_F_PATCHABLE_JUMPS)
-		return -EINVAL;
 	aot.patchable_jumps = request->flags & BPF_AOT_F_PATCHABLE_JUMPS;
 	source = root->aux->func_cnt ? root->aux->func[request->func_index] : root;
 	aot.source = source;
@@ -3455,17 +3409,8 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		 * Until that convention is lowered here, report the JIT's actual
 		 * inability instead of exporting a different calling convention.
 		 */
-		if (!IS_ERR(register_entry))
-			return -EOPNOTSUPP;
 	}
 	name = aot_function_name(source);
-	if (!name || !*name)
-		return -ENOENT;
-	if (!source->jited || source->blinded || source->aux->priv_stack_ptr ||
-	    source->aux->exception_boundary || source->aux->exception_cb ||
-	    bpf_arena_get_kern_vm_start(source->aux->arena) ||
-	    cfi_mode != CFI_OFF)
-		return -EOPNOTSUPP;
 	if (request->nr_relocs) {
 		aot.operands = memdup_user(u64_to_user_ptr(request->relocs),
 					  array_size(request->nr_relocs, sizeof(*aot.operands)));
@@ -4055,8 +4000,6 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	 * entries below carry two integer words, but must not make this path
 	 * silently clobber RDX or manufacture a two-register BPF return.
 	 */
-	if (save_ret && m->ret_size > 8)
-		return -EOPNOTSUPP;
 	if (save_ret)
 		stack_size += 8;
 
@@ -4380,14 +4323,8 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	void *copied;
 	int i, words = 0, error = -EINVAL;
 
-	if (!m || !callback || !fallback || size < 512 ||
-	    m->nr_args > MAX_BPF_FUNC_ARGS || m->ret_size > 16 ||
-	    (m->ret_size > 8 && !(m->ret_flags & BTF_FMODEL_STRUCT_ARG)))
-		return -EINVAL;
 	for (i = 0; i < m->nr_args; i++)
 		words += DIV_ROUND_UP(m->arg_size[i], 8);
-	if (words > MAX_BPF_FUNC_ARGS)
-		return -EOPNOTSUPP;
 	/* A tracing context exposes only the prototype's argument words. Raw
 	 * contexts expose all twelve slots, including their initialized tail.
 	 * Keep helper metadata at ctx[-1/-2] in either layout. No program can
