@@ -223,8 +223,6 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
   u8 before[5], expected[5];
   
   
-  list_for_each_entry(owner, &entry_retained, retained)
-   
   if (entry_plt_owned(ip)) continue;
   entry = kzalloc(sizeof(*entry), GFP_KERNEL);
   if (!entry) {error = -ENOMEM;goto free_scope;}
