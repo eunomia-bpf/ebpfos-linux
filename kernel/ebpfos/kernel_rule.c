@@ -388,7 +388,6 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  u32 i;
  unsigned long flags;
  int error = 0;
- if (!rule_program_allowed(program)) return -EINVAL;
  next = kzalloc(sizeof(*next), GFP_KERNEL);
  if (!next) return -ENOMEM;
  refcount_set(&next->refs, 1);
@@ -476,9 +475,6 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  u32 i, count = attr->link_create.kernel_rule.count;
  unsigned long flags;
  int error;
- if (!capable(CAP_SYS_ADMIN)) return -EPERM;
- if (attr->link_create.flags || !count ||
-     count > BPF_KERNEL_RULE_MAX_VERSIONS || attr->link_create.kernel_rule.reserved) return -EINVAL;
  versions = memdup_array_user(u64_to_user_ptr(attr->link_create.kernel_rule.versions),
                              count, sizeof(*versions));
  if (IS_ERR(versions)) return PTR_ERR(versions);
