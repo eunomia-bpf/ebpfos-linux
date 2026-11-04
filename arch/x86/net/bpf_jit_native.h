@@ -146,8 +146,6 @@ static int native_parse_sequence(struct bpf_prog *prog, struct native_sequence *
 			seq->text = i;
 	}
 
-	for (i = 1; i < seq->symbol_count; i++)
-
 	return 0;
 }
 
