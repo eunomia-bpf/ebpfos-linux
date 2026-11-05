@@ -5283,6 +5283,8 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 		void *object = NULL;
 		u32 size = 0;
 
+		err = copy_from_user(&request, u64_to_user_ptr(info.aot_request),
+				     sizeof(request));
 #if defined(CONFIG_X86_64) && defined(CONFIG_BPF_JIT)
 		err = bpf_jit_aot(prog, &request, &object, &size);
 #else
