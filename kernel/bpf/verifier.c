@@ -19424,6 +19424,17 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 			if (err) return err;
 			continue;
 		}
+		if (!result && !i) {
+			if (is_pointer_value(env, BPF_REG_0)) {
+				verbose(env, "R%d leaks addr as return value\n", BPF_REG_0);
+				return -EACCES;
+			}
+			if (reg->type != SCALAR_VALUE) {
+				verbose(env, "At subprogram exit the register R0 is not a scalar value (%s)\n",
+					reg_type_str(env, reg->type));
+				return -EINVAL;
+			}
+		}
 		if (bytes == 1 && btf_type_is_int(result) && (btf_int_encoding(result) & BTF_INT_BOOL)) {
 			struct bpf_reg_state value = *reg;
 
