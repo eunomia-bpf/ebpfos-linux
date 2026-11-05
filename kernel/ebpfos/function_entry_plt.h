@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Experimental scope publication in the existing entry journal. All selection
- * data is cold; generated entries use only r10/r11, without a frame or call. */
+/* Experimental scope publication in the existing entry journal. Binding maps
+ * live outside code; generated entries use only r10/r11, without a frame or call. */
 #include <asm/current.h>
 #include <asm/preempt.h>
 #include <linux/overflow.h>
+#include <linux/rcupdate.h>
 #include "function_binding.h"
 
+struct plt_case { u32 id; unsigned long address; };
+struct plt_entry;
 struct plt_image {
  struct delayed_work retire;
  void *text;
@@ -13,6 +16,10 @@ struct plt_image {
  u32 size, allocation;
  struct entry_set *code;
  struct module *source;
+ struct plt_entry *owner;
+ u32 count, max_id;
+ u32 *table;
+ struct plt_case cases[];
 };
 struct plt_entry {
  struct list_head node;
@@ -20,6 +27,8 @@ struct plt_entry {
  struct module *source;
  struct ftrace_text_reservation *ftrace;
  struct plt_image *image, *next;
+ refcount_t refs;
+ u32 *table;
 };
 struct bpf_entry_scope {
  struct list_head node;
@@ -29,8 +38,10 @@ struct bpf_entry_scope {
  struct ebpfos_function_binding bindings[];
 };
 static void plt_scope_release(struct work_struct *work);
+static void plt_entry_put(struct plt_entry *entry);
 static LIST_HEAD(plt_entries);
 static LIST_HEAD(plt_scopes);
+static LIST_HEAD(plt_free_scopes);
 static u32 plt_next_id;
 static bool entry_plt_owned(unsigned long ip)
 {
@@ -54,14 +65,21 @@ static void plt_image_free(struct plt_image *image)
  }
  bpf_entry_code_put(image->code);
  module_put(image->source);
+ plt_entry_put(image->owner);
  kfree(image);
 }
 static void plt_retire(struct work_struct *work)
 {
  struct plt_image *image = container_of(to_delayed_work(work), struct plt_image, retire);
- if (ebpfos_code_quiescent(plt_contains, image))
+ if (image->header && ebpfos_code_quiescent(plt_contains, image))
   schedule_delayed_work(&image->retire, HZ / 10);
- else plt_image_free(image);
+ else {
+  /* The frameless map lookup cannot voluntarily schedule. Involuntary
+   * preemption is not a Tasks RCU quiescent state. This also covers older
+   * retired stubs that loaded a newer map before its next publication. */
+  synchronize_rcu_tasks();
+  plt_image_free(image);
+ }
 }
 static void plt_holes(void *area, unsigned int size) { memset(area, 0xcc, size); }
 static void plt_u32(u8 **p, u32 value) { memcpy(*p, &value, 4);*p += 4; }
@@ -79,35 +97,31 @@ static const struct ebpfos_function_binding *plt_binding(struct bpf_entry_scope 
   if (scope->bindings[i].native_address == address) return &scope->bindings[i];
  return NULL;
 }
-struct plt_case { u32 id; unsigned long address; };
 static int plt_case_order(const void *a, const void *b)
 {
  const struct plt_case *left = a, *right = b;
  return (left->id > right->id) - (left->id < right->id);
 }
 #define PLT_BYTES(...) do { const u8 bytes[] = {__VA_ARGS__};memcpy(p, bytes, sizeof(bytes));p += sizeof(bytes); } while (0)
-/* Split ordered scope IDs. Leaf equality preserves the native choice for IDs
- * belonging only to other entries. Internal relocations stay in this buffer;
- * body relocations use the existing direct-branch relocation result. */
+/* The immutable map supplies a live physical case ID or native0. Leaves
+ * therefore jump directly; sparse global scope IDs never enter this tree. */
 static bool plt_tree(u8 **cursor, u8 *base, unsigned long ip,
- const struct plt_case *cases, u32 count, u8 *fallback, bool tail)
+ const struct plt_case *cases, u32 count)
 {
  u8 *p = *cursor;
  bool fits;
  if (count == 1) {
   u8 *branch;
-  PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, cases[0].id);
-  PLT_BYTES(0x0f,0x84);branch = p;
+  PLT_BYTES(0xe9);branch = p;
   fits = plt_rel(&p, base, ip, cases[0].address);p = branch + 4;
-  if (!tail) {PLT_BYTES(0xe9);plt_u32(&p, fallback - (p + 4));}
  } else {
   u32 left = count - count / 2;
   u8 *branch, *fixup;
   PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, cases[left - 1].id);
   PLT_BYTES(0x0f,0x86);branch = p;p += 4;
-  fits = plt_tree(&p, base, ip, cases + left, count - left, fallback, false);
+  fits = plt_tree(&p, base, ip, cases + left, count - left);
   fixup = branch;plt_u32(&fixup, p - (branch + 4));
-  fits = plt_tree(&p, base, ip, cases, left, fallback, tail) & fits;
+  fits = plt_tree(&p, base, ip, cases, left) && fits;
  }
  *cursor = p;return fits;
 }
@@ -119,8 +133,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  struct bpf_entry_scope *scope;
  struct plt_image *image;
  struct bpf_prog **programs;
- struct plt_case *cases;
- u32 count = 0, i = 0, capacity;
+ u32 count = 0, i = 0, capacity, match;
  u8 *buffer, *p, *irq_default, *thread_default;
 #ifdef CONFIG_PREEMPT_RT
  u8 *softirq_default;
@@ -131,19 +144,55 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node)
   if (plt_binding(scope, entry->slot.target[1])) ++count;
  if (!count) return NULL;
- capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 81U : 64U) + 31U * count - 18U;
- image = kzalloc(sizeof(*image), GFP_KERNEL);
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 18U * (count + 1);
+ image = kzalloc(sizeof(*image) + ((size_t)count + 1) * sizeof(image->cases[0]) +
+  ((size_t)plt_next_id + 1) * sizeof(u32), GFP_KERNEL);
  buffer = kmalloc(capacity, GFP_KERNEL);
- programs = kvmalloc_array(count, sizeof(*programs) + sizeof(*cases), GFP_KERNEL);
+ programs = kvmalloc_array(count, sizeof(*programs), GFP_KERNEL);
  if (!image || !buffer || !programs) {kfree(image);kfree(buffer);kvfree(programs);return ERR_PTR(-ENOMEM);}
- cases = (void *)(programs + count);
- image->header = bpf_jit_binary_pack_alloc(capacity, (u8 **)&image->text, 8,
-  &image->writable, &writable_text, plt_holes, false);
- if (!image->header) {kfree(image);kfree(buffer);kvfree(programs);return ERR_PTR(-ENOMEM);}
- image->allocation = image->writable->size;
+ image->owner = entry;refcount_inc(&entry->refs);
  image->source = entry->source;
  if (image->source) __module_get(image->source);
  INIT_DELAYED_WORK(&image->retire, plt_retire);
+ image->table = (u32 *)(image->cases + count + 1);
+ image->cases[0] = (struct plt_case){0, fallback};image->count = 1;
+ image->max_id = entry->image ? entry->image->max_id : 0;
+ list_for_each_entry(scope, &plt_scopes, node) {
+  const struct ebpfos_function_binding *binding = plt_binding(scope, entry->slot.target[1]);
+  u32 selected, id;
+  if (!binding) continue;
+  programs[i++] = binding->program;
+  for (selected = 1; selected < image->count; ++selected)
+   if (image->cases[selected].address == binding->address) break;
+  if (selected == image->count) {
+   id = 0;
+   if (entry->image) {
+    for (u32 old = 1; old < entry->image->count; ++old)
+     if (entry->image->cases[old].address == binding->address) {
+      id = entry->image->cases[old].id;break;
+     }
+   }
+   if (!id) id = ++image->max_id;
+   image->cases[image->count++] = (struct plt_case){id, binding->address};
+  }
+  image->table[scope->id] = image->cases[selected].id;
+ }
+ sort(image->cases, image->count, sizeof(image->cases[0]), plt_case_order, NULL);
+ match = 0;
+ if (entry->image && entry->image->count == image->count)
+  for (; match < image->count; ++match)
+   if (entry->image->cases[match].id != image->cases[match].id ||
+       entry->image->cases[match].address != image->cases[match].address) break;
+ if (match == image->count) {
+  image->text = entry->image->text;image->size = entry->image->size;
+  image->allocation = entry->image->allocation;
+  kfree(buffer);kvfree(programs);return image;
+ }
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 18U * image->count;
+ image->header = bpf_jit_binary_pack_alloc(capacity, (u8 **)&image->text, 8,
+  &image->writable, &writable_text, plt_holes, false);
+ if (!image->header) {kfree(buffer);kvfree(programs);schedule_delayed_work(&image->retire, 0);return ERR_PTR(-ENOMEM);}
+ image->allocation = image->writable->size;
  p = buffer;ip = (unsigned long)image->text;
  PLT_BYTES(0xf3,0x0f,0x1e,0xfa); /* endbr64 */
  PLT_BYTES(0x65,0x44,0x8b,0x14,0x25);plt_u32(&p, (unsigned long)&__preempt_count);
@@ -158,21 +207,18 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  PLT_BYTES(0x0f,0x85);softirq_default = p;p += 4;
 #endif
  PLT_BYTES(0x45,0x8b,0x93);plt_u32(&p, offsetof(struct task_struct, ebpfos_version));
- list_for_each_entry(scope, &plt_scopes, node) {
-  const struct ebpfos_function_binding *binding = plt_binding(scope, entry->slot.target[1]);
-  if (!binding) continue;
-  programs[i] = binding->program;
-  cases[i++] = (struct plt_case){scope->id, binding->address};
- }
- sort(cases, count, sizeof(*cases), plt_case_order, NULL);
- if (!plt_tree(&p, buffer, ip, cases, count, buffer + capacity - 5, true)) goto range;
- { u8 *fixup = irq_default;plt_u32(&fixup, p - (irq_default + 4));
-   fixup = thread_default;plt_u32(&fixup, p - (thread_default + 4)); }
+ /* x86 load ordering pairs with publication's release store. The entry is
+  * held by this image; Tasks RCU protects the immutable table after the load. */
+ PLT_BYTES(0x49,0xbb);{u64 address = (unsigned long)&entry->table;memcpy(p, &address, 8);p += 8;}
+ PLT_BYTES(0x4d,0x8b,0x1b); /* mov (r11),r11 */
+ PLT_BYTES(0x47,0x8b,0x14,0x93); /* mov (r11,r10,4),r10d */
+ if (!plt_tree(&p, buffer, ip, image->cases, image->count)) goto range;
+ /* Sorted native0 is the last emitted leaf. */
+ { u8 *fixup = irq_default;plt_u32(&fixup, p - 5 - (irq_default + 4));
+   fixup = thread_default;plt_u32(&fixup, p - 5 - (thread_default + 4)); }
 #ifdef CONFIG_PREEMPT_RT
- { u8 *fixup = softirq_default;plt_u32(&fixup, p - (softirq_default + 4)); }
+ { u8 *fixup = softirq_default;plt_u32(&fixup, p - 5 - (softirq_default + 4)); }
 #endif
- PLT_BYTES(0xe9);
- if (!plt_rel(&p, buffer, ip, fallback)) goto range;
  #undef PLT_BYTES
  image->size = p - buffer;
  image->code = bpf_entry_code_get(programs, count);
@@ -186,9 +232,16 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
 range:
  kfree(buffer);kvfree(programs);schedule_delayed_work(&image->retire, 0);return ERR_PTR(-ERANGE);
 }
+static void plt_entry_put(struct plt_entry *entry)
+{
+ if (refcount_dec_and_test(&entry->refs)) {
+  module_put(entry->source);kfree(entry);
+ }
+}
 static void plt_entry_free(struct plt_entry *entry)
 {
- list_del(&entry->node);ftrace_text_release(entry->ftrace);module_put(entry->source);kfree(entry);
+ list_del(&entry->node);ftrace_text_release(entry->ftrace);entry->ftrace = NULL;
+ plt_entry_put(entry);
 }
 /* Prepare every changed entry before a single existing batched transaction.
  * Tasks receive the new token only after all its direct branches are visible. */
@@ -206,28 +259,45 @@ static int plt_publish(void)
   struct entry_native_slot slot = entry->slot;
   entry->next = plt_generate(entry);
   if (IS_ERR(entry->next)) {error = PTR_ERR(entry->next);entry->next = NULL;goto fail;}
+  if (entry->image && entry->next && entry->image->text == entry->next->text) continue;
   pairs[i].addr = (void *)slot.ip;
   slot.target[0] = (unsigned long)(entry->image ? entry->image->text : NULL);
   entry_native_instruction(&slot, entry->image ? 1 : 0, pairs[i].before);
-  
   slot.target[0] = (unsigned long)(entry->next ? entry->next->text : NULL);
   entry_native_instruction(&slot, entry->next ? 1 : 0, pairs[i].after);
-  
   ++i;
  }
- sort(pairs, count, sizeof(*pairs), entry_native_pair_order, NULL);
- mutex_lock(&text_mutex);
- error = smp_text_poke_transaction(pairs, count);
- mutex_unlock(&text_mutex);
+ /* Existing IDs retain their physical cases. Publish maps before entry text
+  * so a newly patched entry never sees NULL. New tokens follow success. */
+ list_for_each_entry(entry, &plt_entries, node)
+  if (entry->next) smp_store_release(&entry->table, entry->next->table);
+ sort(pairs, i, sizeof(*pairs), entry_native_pair_order, NULL);
+ if (i) {
+  mutex_lock(&text_mutex);
+  error = smp_text_poke_transaction(pairs, i);
+  mutex_unlock(&text_mutex);
+ }
  if (error) goto fail;
  list_for_each_entry_safe(entry, next, &plt_entries, node) {
+  if (entry->image && entry->next && entry->image->text == entry->next->text) {
+   /* The code and its program leases continue in the new map generation.
+    * Old metadata owns only its old map and retires after Tasks RCU. */
+   entry->next->header = entry->image->header;entry->image->header = NULL;
+   entry->next->code = entry->image->code;entry->image->code = NULL;
+  }
   if (entry->image) schedule_delayed_work(&entry->image->retire, 0);
   entry->image = entry->next;entry->next = NULL;
   if (!entry->image) plt_entry_free(entry);
  }
  kvfree(pairs);return 0;
 fail:
- list_for_each_entry(entry, &plt_entries, node) {if (entry->next) schedule_delayed_work(&entry->next->retire, 0);entry->next = NULL;}
+ list_for_each_entry(entry, &plt_entries, node) {
+  if (entry->image) smp_store_release(&entry->table, entry->image->table);
+  /* A newly introduced entry retains its prepared map until its possible
+   * callers have left; its image also owns the entry object. */
+  if (entry->next) schedule_delayed_work(&entry->next->retire, 0);
+  entry->next = NULL;
+ }
  kvfree(pairs);return error;
 }
 struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding *bindings, u32 count)
@@ -248,7 +318,12 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
  scope = kzalloc(struct_size(scope, bindings, count), GFP_KERNEL);
  if (!scope) {error = -ENOMEM;goto fail;}
  
- scope->id = ++plt_next_id;scope->count = count;refcount_set(&scope->refs, 1);
+ if (list_empty(&plt_free_scopes)) scope->id = ++plt_next_id;
+ else {
+  struct bpf_entry_scope *free = list_first_entry(&plt_free_scopes, struct bpf_entry_scope, node);
+  scope->id = free->id;list_del(&free->node);kfree(free);
+ }
+ scope->count = count;refcount_set(&scope->refs, 1);
  memcpy(scope->bindings, bindings, count * sizeof(*bindings));
  for (i = 0; i < count; ++i) {
   bool ftrace, canonical_nop;
@@ -259,6 +334,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
   if (entry_plt_owned(ip)) continue;
   entry = kzalloc(sizeof(*entry), GFP_KERNEL);
   if (!entry) {error = -ENOMEM;goto free_scope;}
+  refcount_set(&entry->refs, 1);
   entry->slot.ip = ip;entry->slot.ftrace = ftrace;entry->slot.canonical_nop = canonical_nop;
   /* target[1] is cold lookup identity, never an emitted second branch. */
   entry->slot.target[1] = bindings[i].native_address;
@@ -285,7 +361,7 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
 out:
  mutex_unlock(&entry_lock);return scope;
 free_scope:
- kfree(scope);
+ list_add_tail(&scope->node, &plt_free_scopes);
  list_for_each_entry_safe(entry, next, &plt_entries, node)
   if (!entry->image) plt_entry_free(entry);
 fail:
@@ -306,7 +382,7 @@ static void plt_scope_release(struct work_struct *work)
  for (i = 0; i < scope->count; ++i) {
   bpf_prog_put(scope->bindings[i].program);module_put(scope->bindings[i].source_module);
  }
- kfree(scope);
+ mutex_lock(&entry_lock);list_add_tail(&scope->node, &plt_free_scopes);mutex_unlock(&entry_lock);
 }
 void bpf_entry_scope_put(struct bpf_entry_scope *scope)
 {

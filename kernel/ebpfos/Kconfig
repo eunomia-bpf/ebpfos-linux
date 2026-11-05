@@ -38,6 +38,7 @@ config EBPFOS_ENTRY_LINK
 config EBPFOS_PLT
  bool "Prototype task-selected direct entry stubs"
  depends on EBPFOS_ENTRY_LINK
+ select TASKS_RCU
  default n
  help
    Experimental direct-branch selection at multi-version function entries.
