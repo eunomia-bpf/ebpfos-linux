@@ -133,13 +133,14 @@ static const struct file_operations task_view_ops = {
 static inline int task_view_slot(unsigned long address, unsigned long *used, const sys_call_ptr_t *original)
 {
  u32 nr, j;
+ int slot = -ENOENT;
  for (nr = 0; nr < NR_syscalls; ++nr)
-  if ((unsigned long)original[nr] == address) break;
+  if ((unsigned long)original[nr] == address) {slot = nr;break;}
  
  
  
  
- return nr;
+ return slot;
 }
 #include <linux/bpf_operations.h>
 struct bpf_entry_target {
