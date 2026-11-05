@@ -3758,8 +3758,7 @@ static int bpf_tracing_link_update(struct bpf_link *link,
 	struct bpf_tracing_link *tr_link =
 		container_of(link, struct bpf_tracing_link, link.link);
 
-	if (tr_link->tgt_prog)
-		return -EOPNOTSUPP;
+
 	return bpf_trampoline_update_link(&tr_link->link,
 					 tr_link->trampoline, new_prog, expected);
 }

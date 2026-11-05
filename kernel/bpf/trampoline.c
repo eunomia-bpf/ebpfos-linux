@@ -952,13 +952,7 @@ int bpf_trampoline_detach_link(struct bpf_tramp_link *link,
 			__bpf_trampoline_unlink_prog(link, tr, tgt_prog) : 0;
 		goto out;
 	}
-	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
-	    prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
-	    (prog->expected_attach_type != BPF_TRACE_FENTRY &&
-	     prog->expected_attach_type != BPF_TRACE_FEXIT &&
-	     prog->expected_attach_type != BPF_MODIFY_RETURN &&
-	     prog->expected_attach_type != BPF_TRACE_REPLACE))
-		goto out;
+
 	if (hlist_unhashed(&link->tramp_hlist)) {
 		err = 0;
 		goto out;
@@ -1011,14 +1005,7 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 	 * callback's Tasks Trace grace period would wait for that caller itself.
 	 * Session and extension links also have additional bindings to update.
 	 */
-	if (!IS_ENABLED(CONFIG_TASKS_RCU) ||
-	    old_prog->type != BPF_PROG_TYPE_TRACING ||
 
-	    (old_prog->expected_attach_type != BPF_TRACE_FENTRY &&
-	     old_prog->expected_attach_type != BPF_TRACE_FEXIT &&
-	     old_prog->expected_attach_type != BPF_MODIFY_RETURN &&
-	     old_prog->expected_attach_type != BPF_TRACE_REPLACE))
-		goto out;
 	kind = bpf_attach_type_to_tramp(old_prog);
 	WRITE_ONCE(link->link.prog, new_prog);
 	err = bpf_trampoline_update(tr, true);
