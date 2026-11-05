@@ -10693,7 +10693,7 @@ static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *bt
 static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
                                                   const struct btf_type **declaration)
 {
-	const struct btf_type *type = btf_type_by_id(btf, id);
+	const struct btf_type *type = btf ? btf_type_by_id(btf, id) : NULL;
 
 	*declaration = NULL;
 	if (type && btf_type_is_func(type)) {
@@ -14695,6 +14695,16 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	u32 i, nargs;
 	int err;
 
+	/* Missing metadata carries no pointer or result-shape facts. Keep the
+	 * native ABI call and its possible RAX/RDX result as unknown scalars.
+	 */
+	if (!prototype) {
+		clear_caller_saved_regs(env, regs);
+		mark_reg_unknown(env, regs, BPF_REG_0);
+		mark_reg_unknown(env, regs, BPF_REG_3);
+		cur_aux(env)->returns_two_regs = true;
+		return 0;
+	}
 	err = native_call_named_args(env, btf, meta.func_proto, declaration, &nargs);
 	if (err) return err;
 
