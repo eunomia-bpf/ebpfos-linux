@@ -5597,22 +5597,10 @@ static bool is_var_ctx_off_allowed(struct bpf_prog *prog)
 
 static u32 syscall_ctx_access_size(const struct bpf_prog *prog)
 {
-	if (prog->aux->ebpfos_component)
-		return EBPFOS_COMPONENT_CALL_CONTEXT_SIZE;
 	return U16_MAX;
 }
 
-static bool ebpfos_component_ctx_access_ok(u64 start, u64 end,
-					   enum bpf_access_type type)
-{
-	u64 output_start = offsetof(struct ebpfos_component_call_frame, status);
 
-	if (start < output_start && end <= output_start)
-		return type == BPF_READ;
-	if (start >= output_start && end <= EBPFOS_COMPONENT_CALL_CONTEXT_SIZE)
-		return type == BPF_READ || type == BPF_WRITE;
-	return false;
-}
 
 static int check_ebpfos_component_ctx_range(struct bpf_verifier_env *env,
 					    u32 regno, int off, int size,
@@ -7323,8 +7311,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	if (size < 0)
 		return size;
 
-	if (reg->type == PTR_TO_CTX && env->prog->aux->ebpfos_component)
-		strict_alignment_once = true;
+
 	err = check_ptr_alignment(env, reg, off, size, strict_alignment_once);
 	if (err)
 		return err;
@@ -10895,31 +10882,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 					return ret;
 			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
-			if (arg->nonnull) {
-				struct bpf_call_arg_meta meta = {};
-
-				/* A nonzero scalar is not a pointer. Probe reads retain
-				 * their fault protection, but cannot establish a pointer
-				 * precondition for an independently verified global.
-				 */
-				/* Historical probe-only producers (untrusted formals and
-				 * rdonly_cast) may represent NULL without MAYBE_NULL.
-				 * Their pointer class alone cannot discharge this new
-				 * precondition. Do not infer trust or a new null fact.
-				 */
-				if (base_type(arg->arg_type) == ARG_PTR_TO_BTF_ID) {
-					/* Retain read-only, untrusted semantics. A matching
-					 * pointee is not a promise of live or writable memory.
-					 * Interior pointers need a separately modeled contract.
-					 */
-				} else {
-					ret = check_reg_type(env, regno, ARG_PTR_TO_MEM | MEM_RDONLY,
-							     NULL, &meta, true);
-					ret = ret ?: check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
-					if (ret)
-						return ret;
-				}
-			}
+			
 			/*
 			 * Without the explicit nonnull precondition, anything is
 			 * allowed: these arguments are read-only and probe reads
