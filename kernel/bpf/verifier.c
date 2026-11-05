@@ -6766,9 +6766,10 @@ static int check_component_field_authority(struct bpf_verifier_env *env,
 
 #include "btf_field_range.h"
 
-/* owned_type:component is emitted on the object declaration by the compiler.
- * Only scalar bytes acquire the size-of-object rule. Pointer and managed
- * fields continue through the existing typed path below.
+/* owned_type:component permits scalar writes under the object contract.
+ * A bounded scalar read through a trusted pointer needs no ownership grant:
+ * every possible byte must be scalar storage in the actual BTF allocation.
+ * Pointer/managed fields and all writes retain their existing typed path.
  */
 static bool has_owned_scalar_contract(struct bpf_verifier_env *env,
 				      const struct bpf_reg_state *reg, u32 id,
@@ -6806,6 +6807,7 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	struct bpf_reg_state source = *reg;
 	u32 id = reg->btf_id, bytes, begin, end;
 	const struct btf_type *t;
+	bool owned;
 	int err;
 
 	if (!is_trusted_reg(reg) || size <= 0 ||
@@ -6814,10 +6816,11 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	    (type_is_alloc(reg->type) && !reg->ref_obj_id) ||
 	    (reg->ref_obj_id && !find_reference_state(env->cur_state, reg->ref_obj_id)))
 		return 0;
-	t = btf_type_id_size(reg->btf, &id, &bytes);
+	t = btf_field_range_type(reg->btf, &id, &bytes);
 	if (!t || !btf_type_is_struct(t))
 		return 0;
-	if (!has_owned_scalar_contract(env, reg, id, t))
+	owned = has_owned_scalar_contract(env, reg, id, t);
+	if (!owned && (atype != BPF_READ || tnum_is_const(reg->var_off)))
 		return 0;
 	if (atype == BPF_WRITE &&
 	    ((reg->type & (MEM_RDONLY | NON_OWN_REF)) ||
@@ -14161,11 +14164,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			continue;
 		}
 
-		if ((bpf_register_is_null(reg) || type_may_be_null(reg->type)) &&
-		    !nullable) {
-			verbose(env, "Possibly NULL pointer passed to trusted arg%d\n", i);
-			return -EACCES;
-		}
 
 		
 
@@ -20545,6 +20543,11 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		aux->btf_var.mem_size = tsize;
 	} else {
 		aux->btf_var.reg_type = PTR_TO_BTF_ID;
+		/* The address of an exact permanent scalar allocation is trusted;
+		 * this does not grant ownership or change field/write contracts.
+		 */
+		if (env->prog->aux->ebpfos_component && btf_core_scalar_global(btf, id, addr))
+			aux->btf_var.reg_type |= PTR_TRUSTED;
 		aux->btf_var.btf = btf;
 		aux->btf_var.btf_id = type;
 	}

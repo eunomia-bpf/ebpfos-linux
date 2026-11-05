@@ -83,15 +83,13 @@ static bool btf_plain_scalar_global(const struct btf *btf, u32 id)
 	return false;
 }
 
-static bool btf_writable_scalar_global(struct btf *btf, u32 id, u64 addr)
+static bool btf_core_scalar_global(struct btf *btf, u32 id, u64 addr)
 {
 	const struct btf_type *var = btf_type_by_id(btf, id), *type;
 	unsigned long end;
 	u32 bytes;
 
 	if (!btf_is_vmlinux(btf) || !var || !btf_type_is_var(var))
-		return false;
-	if (!btf_plain_scalar_global(btf, var->type))
 		return false;
 	type = btf_type_skip_modifiers(btf, var->type, NULL);
 	if (!type || IS_ERR(btf_resolve_size(btf, type, &bytes)) || !bytes ||
@@ -109,6 +107,18 @@ static bool btf_writable_scalar_global(struct btf *btf, u32 id, u64 addr)
 	return !(addr < (unsigned long)__end_rodata && end > (unsigned long)__start_rodata) &&
 	       !(addr < (unsigned long)__end_ro_after_init &&
 		 end > (unsigned long)__start_ro_after_init);
+}
+
+/* Preserve the scalar/array VAR route. Fully scalar records retain their
+ * actual record ID and ordinary field/value/authority checks in the verifier.
+ */
+static bool btf_writable_scalar_global(struct btf *btf, u32 id, u64 addr)
+{
+	const struct btf_type *var = btf_type_by_id(btf, id);
+
+	return var && btf_type_is_var(var) &&
+	       btf_plain_scalar_global(btf, var->type) &&
+	       btf_core_scalar_global(btf, id, addr);
 }
 
 static int check_btf_global_access(struct bpf_verifier_env *env,
