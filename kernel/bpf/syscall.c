@@ -6198,10 +6198,7 @@ static int link_detach(union bpf_attr *attr, bool from_kernel)
 	if (IS_ERR(link))
 		return PTR_ERR(link);
 
-	/* Other link operations can wait for the helper's own Tasks Trace reader. */
-	if (from_kernel && link->ops != &bpf_tracing_link_lops)
-		ret = -EOPNOTSUPP;
-	else if (link->ops->detach)
+	if (link->ops->detach)
 		ret = link->ops->detach(link);
 	else
 		ret = -EOPNOTSUPP;
