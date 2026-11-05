@@ -79,6 +79,38 @@ static const struct ebpfos_function_binding *plt_binding(struct bpf_entry_scope 
   if (scope->bindings[i].native_address == address) return &scope->bindings[i];
  return NULL;
 }
+struct plt_case { u32 id; unsigned long address; };
+static int plt_case_order(const void *a, const void *b)
+{
+ const struct plt_case *left = a, *right = b;
+ return (left->id > right->id) - (left->id < right->id);
+}
+#define PLT_BYTES(...) do { const u8 bytes[] = {__VA_ARGS__};memcpy(p, bytes, sizeof(bytes));p += sizeof(bytes); } while (0)
+/* Split ordered scope IDs. Leaf equality preserves the native choice for IDs
+ * belonging only to other entries. Internal relocations stay in this buffer;
+ * body relocations use the existing direct-branch relocation result. */
+static bool plt_tree(u8 **cursor, u8 *base, unsigned long ip,
+ const struct plt_case *cases, u32 count, u8 *fallback, bool tail)
+{
+ u8 *p = *cursor;
+ bool fits;
+ if (count == 1) {
+  u8 *branch;
+  PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, cases[0].id);
+  PLT_BYTES(0x0f,0x84);branch = p;
+  fits = plt_rel(&p, base, ip, cases[0].address);p = branch + 4;
+  if (!tail) {PLT_BYTES(0xe9);plt_u32(&p, fallback - (p + 4));}
+ } else {
+  u32 left = count - count / 2;
+  u8 *branch, *fixup;
+  PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, cases[left - 1].id);
+  PLT_BYTES(0x0f,0x86);branch = p;p += 4;
+  fits = plt_tree(&p, base, ip, cases + left, count - left, fallback, false);
+  fixup = branch;plt_u32(&fixup, p - (branch + 4));
+  fits = plt_tree(&p, base, ip, cases, left, fallback, tail) & fits;
+ }
+ *cursor = p;return fits;
+}
 /* Preserve Linux's six argument registers, rax (including vararg AL), stack
  * arguments and ENDBR. Only ordinary C entry scratch registers are clobbered.
  * An original jump (including an AOT image body) is the default continuation. */
@@ -87,6 +119,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  struct bpf_entry_scope *scope;
  struct plt_image *image;
  struct bpf_prog **programs;
+ struct plt_case *cases;
  u32 count = 0, i = 0, capacity;
  u8 *buffer, *p, *irq_default, *thread_default;
 #ifdef CONFIG_PREEMPT_RT
@@ -98,11 +131,12 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node)
   if (plt_binding(scope, entry->slot.target[1])) ++count;
  if (!count) return NULL;
- capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 81U : 64U) + 13U * count;
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 81U : 64U) + 31U * count - 18U;
  image = kzalloc(sizeof(*image), GFP_KERNEL);
  buffer = kmalloc(capacity, GFP_KERNEL);
- programs = kvmalloc_array(count, sizeof(*programs), GFP_KERNEL);
+ programs = kvmalloc_array(count, sizeof(*programs) + sizeof(*cases), GFP_KERNEL);
  if (!image || !buffer || !programs) {kfree(image);kfree(buffer);kvfree(programs);return ERR_PTR(-ENOMEM);}
+ cases = (void *)(programs + count);
  image->header = bpf_jit_binary_pack_alloc(capacity, (u8 **)&image->text, 8,
   &image->writable, &writable_text, plt_holes, false);
  if (!image->header) {kfree(image);kfree(buffer);kvfree(programs);return ERR_PTR(-ENOMEM);}
@@ -111,7 +145,6 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  if (image->source) __module_get(image->source);
  INIT_DELAYED_WORK(&image->retire, plt_retire);
  p = buffer;ip = (unsigned long)image->text;
- #define PLT_BYTES(...) do { const u8 bytes[] = {__VA_ARGS__};memcpy(p, bytes, sizeof(bytes));p += sizeof(bytes); } while (0)
  PLT_BYTES(0xf3,0x0f,0x1e,0xfa); /* endbr64 */
  PLT_BYTES(0x65,0x44,0x8b,0x14,0x25);plt_u32(&p, (unsigned long)&__preempt_count);
  PLT_BYTES(0x41,0xf7,0xc2);plt_u32(&p, NMI_MASK | HARDIRQ_MASK |
@@ -128,11 +161,11 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node) {
   const struct ebpfos_function_binding *binding = plt_binding(scope, entry->slot.target[1]);
   if (!binding) continue;
-  programs[i++] = binding->program;
-  PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, scope->id);
-  PLT_BYTES(0x0f,0x84);
-  if (!plt_rel(&p, buffer, ip, binding->address)) goto range;
+  programs[i] = binding->program;
+  cases[i++] = (struct plt_case){scope->id, binding->address};
  }
+ sort(cases, count, sizeof(*cases), plt_case_order, NULL);
+ if (!plt_tree(&p, buffer, ip, cases, count, buffer + capacity - 5, true)) goto range;
  { u8 *fixup = irq_default;plt_u32(&fixup, p - (irq_default + 4));
    fixup = thread_default;plt_u32(&fixup, p - (thread_default + 4)); }
 #ifdef CONFIG_PREEMPT_RT
