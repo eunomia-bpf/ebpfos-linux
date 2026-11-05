@@ -7,6 +7,10 @@
 struct bpf_kernel_rule_ctx {
  __u64 task, cgroup, process_subtree, netns;
  __u64 object, sample_hash, binding, epoch;
+#if !defined(__KERNEL__) || defined(CONFIG_EBPFOS_PLT)
+ __u64 process; /* Origin TGID; task remains the origin TID. */
+ __u64 file_descriptor; /* SQE fd | native FIXED_FILE bit << 32; otherwise U64_MAX. */
+#endif
 };
 
 /* Zero returns the empty set; result i selects prepared set i-1. A set

@@ -94,6 +94,9 @@ bool ebpfos_rule_active(void) { return READ_ONCE(rule_count) != 0; }
 void ebpfos_rule_context(struct bpf_kernel_rule_ctx *ctx, u64 object, u64 binding)
 {
  memset(ctx, 0, sizeof(*ctx));
+#ifdef CONFIG_EBPFOS_PLT
+ ctx->file_descriptor = ~0ULL;
+#endif
  ctx->object = object;ctx->binding = binding;
  /* Object identities are supplied by their owner. The hash is stable across
   * epochs and independent of unrelated rule changes. */
@@ -101,6 +104,9 @@ void ebpfos_rule_context(struct bpf_kernel_rule_ctx *ctx, u64 object, u64 bindin
  ctx->epoch = ebpfos_rule_epoch();
  if (in_task()) {
   ctx->task = task_pid_nr(current);
+#ifdef CONFIG_EBPFOS_PLT
+  ctx->process = task_tgid_nr(current);
+#endif
   rcu_read_lock();
   ctx->process_subtree = task_tgid_nr(rcu_dereference(current->real_parent));
 #ifdef CONFIG_CGROUPS

@@ -7,6 +7,9 @@
 #include <linux/sched/signal.h>
 #include <linux/io_uring.h>
 #include <linux/indirect_call_wrapper.h>
+#ifdef CONFIG_EBPFOS_PLT
+#include <linux/ebpfos_task_rule.h>
+#endif
 
 #include "io_uring.h"
 #include "tctx.h"
@@ -14,6 +17,19 @@
 #include "rw.h"
 #include "eventfd.h"
 #include "wait.h"
+
+#ifdef CONFIG_EBPFOS_PLT
+/* Native callback dispatch under the retained file/request decision. */
+static inline void io_run_bound_work(struct io_kiocb *req, struct io_tw_state ts)
+{
+ struct ebpfos_task_rule_state binding = ebpfos_task_rule_enter(req->ebpfos_binding);
+ INDIRECT_CALL_2(req->io_task_work.func, io_poll_task_func, io_req_rw_complete,
+  (struct io_tw_req){req}, ts);
+ ebpfos_task_rule_leave(binding);
+}
+#else
+#define io_run_bound_work(req, ts) INDIRECT_CALL_2(req->io_task_work.func, io_poll_task_func, io_req_rw_complete, (struct io_tw_req){req}, ts)
+#endif
 
 void io_fallback_req_func(struct work_struct *work)
 {
@@ -27,7 +43,11 @@ void io_fallback_req_func(struct work_struct *work)
 	mutex_lock(&ctx->uring_lock);
 	ts.cancel = io_should_terminate_tw(ctx);
 	llist_for_each_entry_safe(req, tmp, node, io_task_work.node)
+#ifdef CONFIG_EBPFOS_PLT
+		io_run_bound_work(req, ts);
+#else
 		req->io_task_work.func((struct io_tw_req){req}, ts);
+#endif
 	io_submit_flush_completions(ctx);
 	mutex_unlock(&ctx->uring_lock);
 	percpu_ref_put(&ctx->refs);
@@ -69,9 +89,7 @@ struct llist_node *io_handle_tw_list(struct llist_node *node,
 			percpu_ref_get(&ctx->refs);
 			ts.cancel = io_should_terminate_tw(ctx);
 		}
-		INDIRECT_CALL_2(req->io_task_work.func,
-				io_poll_task_func, io_req_rw_complete,
-				(struct io_tw_req){req}, ts);
+		io_run_bound_work(req, ts);
 		node = next;
 		(*count)++;
 		if (unlikely(need_resched())) {
@@ -312,9 +330,7 @@ static int __io_run_local_work_loop(struct llist_node **node,
 		struct llist_node *next = (*node)->next;
 		struct io_kiocb *req = container_of(*node, struct io_kiocb,
 						    io_task_work.node);
-		INDIRECT_CALL_2(req->io_task_work.func,
-				io_poll_task_func, io_req_rw_complete,
-				(struct io_tw_req){req}, tw);
+		io_run_bound_work(req, tw);
 		*node = next;
 		if (++ret >= events)
 			break;

@@ -55,6 +55,9 @@
 #include <linux/nospec.h>
 #include <linux/task_work.h>
 #include <linux/io_uring.h>
+#ifdef CONFIG_EBPFOS_PLT
+#include <linux/ebpfos_task_rule.h>
+#endif
 #include <linux/io_uring/cmd.h>
 #include <linux/audit.h>
 #include <linux/security.h>
@@ -180,6 +183,10 @@ static inline void io_req_add_to_cache(struct io_kiocb *req, struct io_ring_ctx 
 {
 	if (IS_ENABLED(CONFIG_KASAN))
 		io_poison_cached_req(req);
+
+#ifdef CONFIG_EBPFOS_PLT
+	req->ebpfos_binding = NULL;
+#endif
 	wq_stack_add_head(&req->comp_list, &ctx->submit_state.free_list);
 }
 
@@ -1129,6 +1136,9 @@ static void io_free_batch_list(struct io_ring_ctx *ctx,
 				io_clean_op(req);
 		}
 		io_put_file(req);
+#ifdef CONFIG_EBPFOS_PLT
+		ebpfos_task_rule_put(req->ebpfos_binding);
+#endif
 		io_req_put_rsrc_nodes(req);
 		io_put_task(req);
 
@@ -1396,7 +1406,13 @@ static inline int __io_issue_sqe(struct io_kiocb *req,
 	if (!def->audit_skip)
 		audit_uring_entry(req->opcode);
 
+#ifdef CONFIG_EBPFOS_PLT
+	struct ebpfos_task_rule_state binding = ebpfos_task_rule_enter(req->ebpfos_binding);
+#endif
 	ret = def->issue(req, issue_flags);
+#ifdef CONFIG_EBPFOS_PLT
+	ebpfos_task_rule_leave(binding);
+#endif
 
 	if (!def->audit_skip)
 		audit_uring_exit(!ret, ret);
@@ -1738,6 +1754,9 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	const struct io_issue_def *def;
 	unsigned int sqe_flags;
 	int personality;
+#ifdef CONFIG_EBPFOS_PLT
+	u64 descriptor = ~0ULL;
+#endif
 
 	req->ctx = ctx;
 	req->opcode = READ_ONCE(sqe->opcode);
@@ -1815,6 +1834,9 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		struct io_submit_state *state = &ctx->submit_state;
 
 		req->cqe.fd = READ_ONCE(sqe->fd);
+#ifdef CONFIG_EBPFOS_PLT
+		descriptor = ((u64)(req->flags & REQ_F_FIXED_FILE) << 32) | (u32)req->cqe.fd;
+#endif
 
 		/*
 		 * Plug now if we have more than 2 IO left after this, and the
@@ -1843,7 +1865,15 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		req->flags |= REQ_F_CREDS;
 	}
 
+#ifdef CONFIG_EBPFOS_PLT
+	req->ebpfos_binding = ebpfos_task_rule_request((u64)req, req->cqe.user_data, descriptor);
+	struct ebpfos_task_rule_state binding = ebpfos_task_rule_enter(req->ebpfos_binding);
+	int ret = def->prep(req, sqe);
+	ebpfos_task_rule_leave(binding);
+	return ret;
+#else
 	return def->prep(req, sqe);
+#endif
 }
 
 static __cold int io_submit_fail_init(const struct io_uring_sqe *sqe,

@@ -734,6 +734,9 @@ struct io_kiocb {
 
 	struct io_ring_ctx		*ctx;
 	struct io_uring_task		*tctx;
+#ifdef CONFIG_EBPFOS_PLT
+	struct ebpfos_task_rule		*ebpfos_binding;
+#endif
 
 	union {
 		/* stores selected buf, valid IFF REQ_F_BUFFER_SELECTED is set */
