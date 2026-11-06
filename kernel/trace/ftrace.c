@@ -7646,13 +7646,10 @@ static int ftrace_process_locs(struct module *mod,
 	 * modules will free them when they are removed.
 	 * Force a new page to be allocated for modules.
 	 */
-	if (!mod) {
-		WARN_ON(ftrace_pages || ftrace_pages_start);
-		/* First initialization */
+	/* The core image may have no sites; its first module owns the head. */
+	if (!ftrace_pages) {
 		ftrace_pages = ftrace_pages_start = start_pg;
 	} else {
-		if (!ftrace_pages)
-			goto out;
 
 		if (WARN_ON(ftrace_pages->next)) {
 			/* Hmm, we have free pages? */
@@ -7728,7 +7725,6 @@ static int ftrace_process_locs(struct module *mod,
 	if (!mod)
 		local_irq_restore(flags);
 	ret = 0;
- out:
 	mutex_unlock(&ftrace_lock);
 
 	/* We should have used all pages unless we skipped some */
@@ -7843,8 +7839,6 @@ ops_references_ip(struct ftrace_ops *ops, unsigned long ip)
 
 #ifdef CONFIG_MODULES
 
-#define next_to_ftrace_page(p) container_of(p, struct ftrace_page, next)
-
 static LIST_HEAD(ftrace_mod_maps);
 
 static int referenced_filters(struct dyn_ftrace *rec)
@@ -7934,7 +7928,7 @@ void ftrace_release_mod(struct module *mod)
 	struct dyn_ftrace *rec;
 	struct ftrace_page **last_pg;
 	struct ftrace_page *tmp_page = NULL;
-	struct ftrace_page *pg;
+	struct ftrace_page *pg, *previous = NULL;
 
 	mutex_lock(&ftrace_lock);
 
@@ -7961,24 +7955,20 @@ void ftrace_release_mod(struct module *mod)
 	for (pg = ftrace_pages_start; pg; pg = *last_pg) {
 		rec = &pg->records[0];
 		if (within_module(rec->ip, mod)) {
-			/*
-			 * As core pages are first, the first
-			 * page should never be a module page.
-			 */
-			if (WARN_ON(pg == ftrace_pages_start))
-				goto out_unlock;
 
 			/* Check if we are deleting the last page */
 			if (pg == ftrace_pages)
-				ftrace_pages = next_to_ftrace_page(last_pg);
+				ftrace_pages = previous;
 
 			ftrace_update_tot_cnt -= pg->index;
 			*last_pg = pg->next;
 
 			pg->next = tmp_page;
 			tmp_page = pg;
-		} else
+		} else {
+			previous = pg;
 			last_pg = &pg->next;
+		}
 	}
  out_unlock:
 	mutex_unlock(&ftrace_lock);
@@ -8325,7 +8315,7 @@ void ftrace_free_mem(struct module *mod, void *start_ptr, void *end_ptr)
 	unsigned long end = (unsigned long)(end_ptr);
 	struct ftrace_page **last_pg = &ftrace_pages_start;
 	struct ftrace_page *tmp_page = NULL;
-	struct ftrace_page *pg;
+	struct ftrace_page *pg, *previous = NULL;
 	struct dyn_ftrace *rec;
 	struct dyn_ftrace key;
 	struct ftrace_mod_map *mod_map = NULL;
@@ -8345,16 +8335,16 @@ void ftrace_free_mem(struct module *mod, void *start_ptr, void *end_ptr)
 	if (mod && ftrace_ops_list != &ftrace_list_end)
 		mod_map = allocate_ftrace_mod_map(mod, start, end);
 
-	for (pg = ftrace_pages_start; pg; last_pg = &pg->next, pg = *last_pg) {
+	for (pg = ftrace_pages_start; pg;) {
 		if (end < pg->records[0].ip ||
 		    start >= (pg->records[pg->index - 1].ip + MCOUNT_INSN_SIZE))
-			continue;
+			goto next;
  again:
 		rec = bsearch(&key, pg->records, pg->index,
 			      sizeof(struct dyn_ftrace),
 			      ftrace_cmp_recs);
 		if (!rec)
-			continue;
+			goto next;
 
 		/* rec will be cleared from hashes after ftrace_lock unlock */
 		add_to_clear_hash_list(&clear_hash, rec);
@@ -8368,15 +8358,19 @@ void ftrace_free_mem(struct module *mod, void *start_ptr, void *end_ptr)
 			*last_pg = pg->next;
 			pg->next = tmp_page;
 			tmp_page = pg;
-			pg = container_of(last_pg, struct ftrace_page, next);
 			if (!(*last_pg))
-				ftrace_pages = pg;
+				ftrace_pages = previous;
+			pg = *last_pg;
 			continue;
 		}
 		memmove(rec, rec + 1,
 			(pg->index - (rec - pg->records)) * sizeof(*rec));
 		/* More than one function may be in this block */
 		goto again;
+ next:
+		previous = pg;
+		last_pg = &pg->next;
+		pg = pg->next;
 	}
 	mutex_unlock(&ftrace_lock);
 
@@ -8410,7 +8404,7 @@ void __init ftrace_init(void)
 {
 	extern unsigned long __start_mcount_loc[];
 	extern unsigned long __stop_mcount_loc[];
-	unsigned long count, flags;
+	unsigned long flags;
 	int ret;
 
 	local_irq_save(flags);
@@ -8418,12 +8412,6 @@ void __init ftrace_init(void)
 	local_irq_restore(flags);
 	if (ret)
 		goto failed;
-
-	count = __stop_mcount_loc - __start_mcount_loc;
-	if (!count) {
-		pr_info("ftrace: No functions to be traced?\n");
-		goto failed;
-	}
 
 	ret = ftrace_process_locs(NULL,
 				  __start_mcount_loc,
