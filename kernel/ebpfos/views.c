@@ -17,6 +17,7 @@
 #include <linux/resume_user_mode.h>
 #include <linux/bitmap.h>
 #include <asm/syscall.h>
+#include <asm/ibt.h>
 #include <asm/ptrace.h>
 #include <asm/unistd.h>
 #include <linux/anon_inodes.h>
@@ -187,19 +188,15 @@ static struct ebpfos_task_view_request *task_view_prepare(
    bool ftrace, canonical_nop;
    unsigned long ip = bpf_entry_text_location(sources[i].source_module,
     sources[i].native_address, &ftrace, &canonical_nop);
-   if (ip) {
-    struct task_text_entry *entry = &view->text[view->text_count];
-    unsigned int j;
-    /* A generic entry can also run outside a task. Its callable cannot
-     * acquire syscall-only sleepable authority from this request. */
-    
-    
-    
-  entry_native_jump(ip, sources[i].address, entry->bytes);
-    entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
-   }
-   /* An entry without its own instruction stays private to its holders.
-    * Its loaded graph still needs the same independent lifetime lease. */
+   struct task_text_entry *entry = &view->text[view->text_count];
+   /* The selected view patches its private page, not global Native text.
+    * Original entry instructions therefore need no reserved NOP. Preserve
+    * an IBT landing pad before branching into the replacement body. */
+   if (!ip)
+    ip = sources[i].native_address +
+     (is_endbr((u32 *)sources[i].native_address) ? ENDBR_INSN_SIZE : 0);
+   entry_native_jump(ip, sources[i].address, entry->bytes);
+   entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
   }
   bpf_prog_inc(program);
   view->bindings[i].program = program;
