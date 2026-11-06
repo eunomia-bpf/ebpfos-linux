@@ -166,3 +166,21 @@ Communication and Support
 * Bugzilla: https://bugzilla.kernel.org/
 * MAINTAINERS file: Lists subsystem maintainers and mailing lists
 * Email Clients: Documentation/process/email-clients.rst
+
+
+eBPFOS integration lineage
+=========================
+
+The eBPFOS integration at 81cbe1a0f17b0f99d658a25dc9a7abd9e1d3f38b
+retains the components exercised by the passing rung-6 Native50/AOT51
+cohort: dynamic native-callee descriptors (cd88892a5), singleton JIT fixups
+(2145f9d7f), native entries (953da4cd2), and device-table symbol retention
+(d8428df79). It also retains the subsequent removal of project-added checks,
+AOT request transfer repair (e78ef91c9), and callx repair (81cbe1a0f).
+The historical rung-6 source was a locally modified frozen tree; its complete
+Git identity is unknown. Its A/B receipts do not qualify this integration.
+
+The owning eBPFOS repository records the selected parent/kernel/toolchain and
+execution receipts in experiments/versions/VKERNEL.md. Its AGENTS.md is the
+single authority for the one-version policy. Historical source overlays are
+receipt inputs, not alternative development kernels.
