@@ -7,6 +7,7 @@
 #include <linux/kallsyms.h>
 #include <linux/rcupdate.h>
 #include <linux/ftrace.h>
+#include <asm/ibt.h>
 /* Only Linux's existing function-trace entry; no compiler reservations. */
 static inline unsigned long ebpfos_ftrace_entry(unsigned long address)
 {
@@ -15,6 +16,12 @@ static inline unsigned long ebpfos_ftrace_entry(unsigned long address)
  if (ip && (ip < address || ip - address > FTRACE_MCOUNT_MAX_OFFSET)) return 0;
 #endif
  return ip;
+}
+/* Private page views need an instruction address, not reserved patch space. */
+static inline unsigned long ebpfos_view_entry(unsigned long address)
+{
+ unsigned long ip = ebpfos_ftrace_entry(address);
+ return ip ? ip : address + (is_endbr((u32 *)address) ? ENDBR_INSN_SIZE : 0);
 }
 /* Module BTF may label C globals STATIC. Global and weak ELF definitions
  * retain the public callable ABI; private definitions may have specialized

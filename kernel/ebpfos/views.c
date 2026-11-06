@@ -17,7 +17,6 @@
 #include <linux/resume_user_mode.h>
 #include <linux/bitmap.h>
 #include <asm/syscall.h>
-#include <asm/ibt.h>
 #include <asm/ptrace.h>
 #include <asm/unistd.h>
 #include <linux/anon_inodes.h>
@@ -193,8 +192,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
     * Original entry instructions therefore need no reserved NOP. Preserve
     * an IBT landing pad before branching into the replacement body. */
    if (!ip)
-    ip = sources[i].native_address +
-     (is_endbr((u32 *)sources[i].native_address) ? ENDBR_INSN_SIZE : 0);
+    ip = ebpfos_view_entry(sources[i].native_address);
    entry_native_jump(ip, sources[i].address, entry->bytes);
    entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
   }
