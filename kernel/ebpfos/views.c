@@ -132,15 +132,13 @@ static const struct file_operations task_view_ops = {
  * beneath it. Each other task retains its own lease through sleeping calls. */
 static inline int task_view_slot(unsigned long address, unsigned long *used, const sys_call_ptr_t *original)
 {
- u32 nr, j;
- int slot = -ENOENT;
+ u32 nr;
  for (nr = 0; nr < NR_syscalls; ++nr)
-  if ((unsigned long)original[nr] == address) {slot = nr;break;}
- 
- 
- 
- 
- return slot;
+  if ((unsigned long)original[nr] == address) {
+   __set_bit(nr, used);
+   return nr;
+  }
+ return -ENOENT;
 }
 #include <linux/bpf_operations.h>
 struct bpf_entry_target {
