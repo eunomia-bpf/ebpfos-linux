@@ -8585,6 +8585,21 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		enum bpf_type_flag pointer_flags = 0;
 		int id = btf_named_start_id(btf, false) - 1;
 
+		/* Optimized private functions can retain their source prototype
+		 * after argument elimination/promotion. The compiler's physical
+		 * frame has no slot for these source-only arguments.
+		 */
+		if (sub->native_frame) {
+			const struct bpf_native_arg *location =
+				&sub->native_abi.args[i + sub->native_abi.result_buffer];
+
+			if (location->reg < 0 && location->stack_offset >= sub->native_arg_in) {
+				sub->args[i].arg_type = ARG_DONTCARE;
+				prog->aux->func_info_aux[subprog].unused_arg_mask |= BIT_ULL(i);
+				continue;
+			}
+		}
+
 		/* 'arg:<tag>' decl_tag takes precedence over derivation of
 		 * register type from BTF type itself
 		 */
