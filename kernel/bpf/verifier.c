@@ -21504,7 +21504,8 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 
 			ret = grow_stack_state(env, state->frame[0], end);
 			if (ret) goto out;
-			for (u32 byte = 0; byte < sub->native_abi.tail_stack_start; byte += 8) {
+			/* Initialize the named bytes present in the physical incoming frame. */
+			for (u32 byte = 0; byte < min_t(u32, sub->native_arg_in, sub->native_abi.tail_stack_start); byte += 8) {
 				struct bpf_stack_state *slot = &state->frame[0]->stack[(end - byte - 1) / 8];
 
 				__mark_reg_unknown(env, &slot->spilled_ptr);
