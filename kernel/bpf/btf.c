@@ -8975,6 +8975,7 @@ int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
 		const struct btf_type *fn = btf_type_by_id(prog->aux->btf, prog->aux->func_info[subprog].type_id);
 
 		info->native_frame = true;
+		info->native_arg_in = prog->aux->func[subprog]->aux->native_arg_in;
 		error = bpf_native_abi_plan(prog->aux->btf,
 			btf_type_by_id(prog->aux->btf, fn->type), &info->native_abi,
 			prog->aux->trusted_kernel);
