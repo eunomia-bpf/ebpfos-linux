@@ -10723,6 +10723,46 @@ static int check_native_callback_arg(struct bpf_verifier_env *env, struct btf *b
 	return 0;
 }
 
+/* A callee may write through a writable memory argument, so the caller's
+ * stack bytes it can reach hold unknown values after the call. This is the
+ * call's state transition, never a refusal. The access check that also
+ * performed it was removed with the refusal checks (3929c1669), and the
+ * verifier then folded branches on stale bytes as dead code (tree B run of
+ * 2026-11-07: acpi_hw_get_mode lost the result of its out-parameter).
+ */
+static void clobber_stack_argument(struct bpf_verifier_env *env,
+				   struct bpf_reg_state *reg, u32 size)
+{
+	struct bpf_func_state *state;
+	s64 low, high, i;
+	int j, slot, spi;
+
+	if (base_type(reg->type) != PTR_TO_STACK)
+		return;
+	state = bpf_func(env, reg);
+	low = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smin_value;
+	high = (tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smax_value) + size;
+	/* An unknown extent reaches the top of the frame. */
+	if (!size || high > 0)
+		high = 0;
+	if (low < -(s64)state->allocated_stack)
+		low = -(s64)state->allocated_stack;
+	for (i = low; i < high; i++) {
+		u8 *stype;
+
+		slot = -i - 1;
+		spi = slot / BPF_REG_SIZE;
+		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
+		if (bpf_is_spilled_reg(&state->stack[spi])) {
+			__mark_reg_unknown(env, &state->stack[spi].spilled_ptr);
+			for (j = 0; j < BPF_REG_SIZE; j++)
+				scrub_spilled_slot(&state->stack[spi].slot_type[j]);
+		} else if (*stype == STACK_ZERO || *stype == STACK_INVALID) {
+			*stype = STACK_MISC;
+		}
+	}
+}
+
 static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				    const struct btf *btf,
 				    struct bpf_reg_state *regs)
@@ -10915,6 +10955,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				bpf_log(log, "arg#%d is expected to be non-NULL\n", i);
 				return -EINVAL;
 			}
+			if (!(arg->arg_type & MEM_RDONLY))
+				clobber_stack_argument(env, reg, arg->mem_size);
 		} else if (base_type(arg->arg_type) == ARG_PTR_TO_ARENA) {
 			/*
 			 * Can pass any value and the kernel won't crash, but
