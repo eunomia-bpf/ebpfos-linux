@@ -14008,12 +14008,20 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id), &nargs);
 	if (ret) return ret;
 	if (native) {
-		ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
-				  env->prog->aux->trusted_kernel);
-		if (ret) return ret;
-		ret = bpf_native_abi_tail(meta->btf, meta->func_decl ?:
-			btf_type_by_id(meta->btf, meta->func_id), &abi);
-		if (ret) return ret;
+		if (meta->desc && meta->desc->native_abi_cached) {
+			abi = meta->desc->native_abi;
+		} else {
+			ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
+					  env->prog->aux->trusted_kernel);
+			if (ret) return ret;
+			ret = bpf_native_abi_tail(meta->btf, meta->func_decl ?:
+				btf_type_by_id(meta->btf, meta->func_id), &abi);
+			if (ret) return ret;
+			if (meta->desc) {
+				meta->desc->native_abi = abi;
+				meta->desc->native_abi_cached = true;
+			}
+		}
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
@@ -14821,6 +14829,8 @@ int bpf_fetch_kfunc_arg_meta(struct bpf_verifier_env *env,
 	meta->func_id = kfunc.id;
 	meta->func_proto = kfunc.proto;
 	meta->func_name = kfunc.name;
+	if (env->prog->aux->kfunc_tab)
+		meta->desc = find_kfunc_desc(env->prog, func_id, offset);
 
 	if (!kfunc.flags || !btf_kfunc_is_allowed(kfunc.btf, kfunc.id, env->prog)) {
 		/* The administrator's source component may use an ordinary native

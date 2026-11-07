@@ -1471,6 +1471,7 @@ struct bpf_kfunc_call_arg_meta {
 	const struct btf_type *func_proto;
 	/* Declaration contracts survive bare-prototype native call checking. */
 	const struct btf_type *func_decl;
+	struct bpf_kfunc_desc *desc;
 	const char *func_name;
 	bool native_call;
 	/* Out parameters */
@@ -1601,6 +1602,9 @@ enum bpf_reg_arg_type {
 
 struct bpf_kfunc_desc {
 	struct btf_func_model func_model;
+	/* Static BTF layout is shared by every verifier visit to this callee. */
+	struct bpf_native_abi native_abi;
+	bool native_abi_cached;
 	const struct bpf_kop *kop;
 	bool native_call;
 	u32 func_id;
