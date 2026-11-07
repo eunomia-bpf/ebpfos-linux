@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* A verifier-checked terminal effect with no machine-root controls. */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -743,21 +742,8 @@ EBPFOS_X86_FIXED_EFFECT_ROWS(EBPFOS_PORT_IO_IDS)
 #define EBPFOS_DEFINE_TYPED_OPCODE_KOP(name, opcode, available) \
 static int ebpfos_kop_##name##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-	 \
 	return ebpfos_kop_bind_typed_proof(EBPFOS_KOP_OPCODE_##opcode, \
 		ebpfos_kprog_##name##_service_ids.pairs[0].id, insns); \
-} \
-static int ebpfos_kop_##name##_requirements(u64 payload, \
-		u64 *capability_mask, u64 *effect_mask, \
-		u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
-{ \
-	const struct ebpfos_kop_opcode_spec *spec = \
-		&ebpfos_kop_opcode_specs[EBPFOS_KOP_OPCODE_##opcode]; \
-	 \
-	*capability_mask = 0; \
-	*effect_mask = 0; \
-	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE); \
-	return 0; \
 } \
 static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
 		u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
@@ -768,7 +754,6 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
 	(void)final_ip; \
 	if (!IS_ENABLED(CONFIG_X86) || !(available)) \
 		return -EOPNOTSUPP; \
-	 \
 	if (emit) \
 		memcpy(image + *offset, spec->native, spec->native_len); \
 	*offset += spec->native_len; \
@@ -777,7 +762,6 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
 static struct bpf_kop ebpfos_kop_##name = { \
 	.max_insn_cnt = EBPFOS_KOP_PROOF_LEN_##opcode, \
 	.max_emit_bytes = 48, \
-	.requirements = ebpfos_kop_##name##_requirements, \
 	.instantiate_insn = ebpfos_kop_##name##_instantiate, \
 	.emit_x86 = ebpfos_kop_##name##_emit_x86, \
 }; \
@@ -880,23 +864,6 @@ static int ebpfos_kop_cmp_mask_instantiate(u64 payload,
 	return 4;
 }
 
-static int ebpfos_kop_cmp_mask_requirements(u64 payload,
-		u64 *capability_mask, u64 *effect_mask,
-		u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	static const u8 digest32[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_CMP_MASK32_SEMANTIC_SHA256;
-	static const u8 digest64[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_CMP_MASK64_SEMANTIC_SHA256;
-	int width = ebpfos_kop_cmp_mask_op(payload);
-
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, width == 32 ? digest32 : digest64,
-	       SHA256_DIGEST_SIZE);
-	return 0;
-}
-
 static int ebpfos_kop_cmp_mask_emit_x86(u8 *image, u32 *offset,
 			bool emit, u64 payload, const struct bpf_prog *prog,
 			const u8 *final_ip)
@@ -923,7 +890,7 @@ static int ebpfos_kop_cmp_mask_emit_x86(u8 *image, u32 *offset,
 static struct bpf_kop ebpfos_kop_cmp_mask = {
 	.max_insn_cnt = 4,
 	.max_emit_bytes = 6,
-	.requirements = ebpfos_kop_cmp_mask_requirements,
+
 	.instantiate_insn = ebpfos_kop_cmp_mask_instantiate,
 	.emit_x86 = ebpfos_kop_cmp_mask_emit_x86,
 };
@@ -943,19 +910,6 @@ static int ebpfos_kop_current_task_instantiate(u64 payload,
 	insns[0] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
 				BPF_FUNC_get_current_task_btf);
 	return 1;
-}
-
-static int ebpfos_kop_current_task_requirements(u64 payload,
-		u64 *capability_mask, u64 *effect_mask,
-		u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	static const u8 digest[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_CURRENT_TASK_SEMANTIC_SHA256;
-
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, digest, sizeof(digest));
-	return 0;
 }
 
 static int ebpfos_kop_current_task_emit_x86(u8 *image, u32 *offset,
@@ -997,7 +951,7 @@ static struct bpf_kop ebpfos_kop_current_task = {
 	.x86_reloc = ebpfos_kop_current_task_reloc,
 	.max_insn_cnt = 1,
 	.max_emit_bytes = 9,
-	.requirements = ebpfos_kop_current_task_requirements,
+
 	.instantiate_insn = ebpfos_kop_current_task_instantiate,
 	.emit_x86 = ebpfos_kop_current_task_emit_x86,
 };
@@ -1015,19 +969,6 @@ static int ebpfos_kop_load32_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	insns[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0);
 	return 1;
-}
-
-static int ebpfos_kop_load32_requirements(u64 payload,
-		u64 *capability_mask, u64 *effect_mask,
-		u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	static const u8 digest[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_LOAD32_SEMANTIC_SHA256;
-
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, digest, sizeof(digest));
-	return 0;
 }
 
 static int ebpfos_kop_load32_emit_x86(u8 *image, u32 *offset,
@@ -1050,7 +991,7 @@ static int ebpfos_kop_load32_emit_x86(u8 *image, u32 *offset,
 static struct bpf_kop ebpfos_kop_load32 = {
 	.max_insn_cnt = 1,
 	.max_emit_bytes = 2,
-	.requirements = ebpfos_kop_load32_requirements,
+
 	.instantiate_insn = ebpfos_kop_load32_instantiate,
 	.emit_x86 = ebpfos_kop_load32_emit_x86,
 };
@@ -1096,19 +1037,6 @@ static int ebpfos_kop_tzcnt64_instantiate(u64 payload,
 	return n;
 }
 
-static int ebpfos_kop_tzcnt64_requirements(u64 payload,
-		u64 *capability_mask, u64 *effect_mask,
-		u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	static const u8 digest[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_TZCNT64_SEMANTIC_SHA256;
-
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, digest, sizeof(digest));
-	return 0;
-}
-
 static int ebpfos_kop_tzcnt64_emit_x86(u8 *image, u32 *offset,
 			bool emit, u64 payload, const struct bpf_prog *prog,
 			const u8 *final_ip)
@@ -1132,7 +1060,7 @@ static int ebpfos_kop_tzcnt64_emit_x86(u8 *image, u32 *offset,
 static struct bpf_kop ebpfos_kop_tzcnt64 = {
 	.max_insn_cnt = 34,
 	.max_emit_bytes = 5,
-	.requirements = ebpfos_kop_tzcnt64_requirements,
+
 	.instantiate_insn = ebpfos_kop_tzcnt64_instantiate,
 	.emit_x86 = ebpfos_kop_tzcnt64_emit_x86,
 };
@@ -1166,23 +1094,6 @@ static int ebpfos_kop_compiler_barrier_instantiate(u64 payload,
 	return 1;
 }
 
-static int ebpfos_kop_compiler_barrier_requirements(u64 payload,
-		u64 *capability_mask, u64 *effect_mask,
-		u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	static const u8 digest[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_COMPILER_BARRIER_SEMANTIC_SHA256;
-	static const u8 pause_digest[SHA256_DIGEST_SIZE] =
-		EBPFOS_KOP_PAUSE_SEMANTIC_SHA256;
-	int op = ebpfos_kop_barrier_op(payload);
-
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, op == 1 ? digest : pause_digest,
-	       sizeof(digest));
-	return 0;
-}
-
 static int ebpfos_kop_compiler_barrier_emit_x86(u8 *image, u32 *offset,
 				bool emit, u64 payload, const struct bpf_prog *prog,
 				const u8 *final_ip)
@@ -1204,7 +1115,7 @@ static int ebpfos_kop_compiler_barrier_emit_x86(u8 *image, u32 *offset,
 static struct bpf_kop ebpfos_kop_compiler_barrier = {
 	.max_insn_cnt = 1,
 	.max_emit_bytes = 4,
-	.requirements = ebpfos_kop_compiler_barrier_requirements,
+
 	.instantiate_insn = ebpfos_kop_compiler_barrier_instantiate,
 	.emit_x86 = ebpfos_kop_compiler_barrier_emit_x86,
 };
@@ -1247,7 +1158,6 @@ static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
 	int n = 0;
 
-	
 	/* x86 memory bit indexing uses a signed word offset and bit modulo 64. */
 	insns[n++] = BPF_MOV64_REG(BPF_REG_3, BPF_REG_1);
 	insns[n++] = BPF_MOV64_REG(BPF_REG_4, BPF_REG_2);
@@ -1316,19 +1226,6 @@ static int ebpfos_kop_bit64_instantiate(u64 payload, struct bpf_insn *insns)
 	return n;
 }
 
-static int ebpfos_kop_bit64_requirements(
-	u64 payload, u64 *capability_mask, u64 *effect_mask,
-	u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	const struct ebpfos_kop_bit64_spec *spec = ebpfos_kop_bit64_spec(payload);
-
-	
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
-	return 0;
-}
-
 static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
 				     u64 payload, const struct bpf_prog *prog,
 				     const u8 *final_ip)
@@ -1337,7 +1234,7 @@ static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	
+
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -1347,7 +1244,7 @@ static int ebpfos_kop_bit64_emit_x86(u8 *image, u32 *offset, bool emit,
 static struct bpf_kop ebpfos_kop_bit64 = {
 	.max_insn_cnt = 18,
 	.max_emit_bytes = 17,
-	.requirements = ebpfos_kop_bit64_requirements,
+
 	.instantiate_insn = ebpfos_kop_bit64_instantiate,
 	.emit_x86 = ebpfos_kop_bit64_emit_x86,
 };
@@ -1399,7 +1296,6 @@ static int ebpfos_kop_atomic32_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_atomic32_spec *spec =
 		ebpfos_kop_atomic32_spec(payload);
 
-	
 	switch (spec->op) {
 	case EBPFOS_KOP_ATOMIC32_CMPXCHG:
 		insns[0] = BPF_MOV32_REG(BPF_REG_0, BPF_REG_3);
@@ -1434,20 +1330,6 @@ static int ebpfos_kop_atomic32_instantiate(u64 payload, struct bpf_insn *insns)
 	return 2;
 }
 
-static int ebpfos_kop_atomic32_requirements(
-	u64 payload, u64 *capability_mask, u64 *effect_mask,
-	u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	const struct ebpfos_kop_atomic32_spec *spec =
-		ebpfos_kop_atomic32_spec(payload);
-
-	
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
-	return 0;
-}
-
 static int ebpfos_kop_atomic32_emit_x86(u8 *image, u32 *offset, bool emit,
 					u64 payload, const struct bpf_prog *prog,
 					const u8 *final_ip)
@@ -1457,7 +1339,7 @@ static int ebpfos_kop_atomic32_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	
+
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -1467,7 +1349,7 @@ static int ebpfos_kop_atomic32_emit_x86(u8 *image, u32 *offset, bool emit,
 static struct bpf_kop ebpfos_kop_atomic32 = {
 	.max_insn_cnt = 3,
 	.max_emit_bytes = 9,
-	.requirements = ebpfos_kop_atomic32_requirements,
+
 	.instantiate_insn = ebpfos_kop_atomic32_instantiate,
 	.emit_x86 = ebpfos_kop_atomic32_emit_x86,
 };
@@ -1495,33 +1377,21 @@ static bool ebpfos_kop_local_add##width##_payload(u64 payload) \
 } \
 static int ebpfos_kop_local_add##width##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-	 \
 	insns[0] = BPF_LDX_MEM(bpf_width, BPF_REG_0, BPF_REG_1, 0); \
 	insns[1] = BPF_MOV##word##_REG(BPF_REG_4, BPF_REG_0); \
 	insns[2] = BPF_ALU##word##_REG(BPF_ADD, BPF_REG_4, BPF_REG_2); \
 	insns[3] = BPF_STX_MEM(bpf_width, BPF_REG_1, BPF_REG_4, 0); \
 	return 4; \
 } \
-static int ebpfos_kop_local_add##width##_requirements(u64 payload, u64 *capability_mask, \
-	u64 *effect_mask, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
-{ \
-	static const u8 digest[SHA256_DIGEST_SIZE] = EBPFOS_KOP_LOCAL_ADD##width##_SEMANTIC_SHA256; \
-	 \
-	*capability_mask = 0; *effect_mask = 0; \
-	memcpy(semantic_sha256, digest, sizeof(digest)); \
-	return 0; \
-} \
 static int ebpfos_kop_local_add##width##_emit_x86(u8 *image, u32 *offset, bool emit, \
 	u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
 	static const u8 native[] = EBPFOS_KOP_LOCAL_ADD##width##_NATIVE_BYTES; \
-	 \
 	if (emit) memcpy(image + *offset, native, sizeof(native)); \
 	*offset += sizeof(native); return sizeof(native); \
 } \
 static struct bpf_kop ebpfos_kop_local_add##width = { \
 	.max_insn_cnt = 4, .max_emit_bytes = 8, \
-	.requirements = ebpfos_kop_local_add##width##_requirements, \
 	.instantiate_insn = ebpfos_kop_local_add##width##_instantiate, \
 	.emit_x86 = ebpfos_kop_local_add##width##_emit_x86, \
 }; \
@@ -1566,7 +1436,6 @@ static int ebpfos_kop_atomic64_instantiate(u64 payload, struct bpf_insn *insns)
 	const struct ebpfos_kop_atomic64_spec *spec =
 		ebpfos_kop_atomic64_spec(payload);
 
-	
 	switch (spec->op) {
 	case EBPFOS_KOP_ATOMIC64_CMPXCHG:
 		insns[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_3);
@@ -1601,20 +1470,6 @@ static int ebpfos_kop_atomic64_instantiate(u64 payload, struct bpf_insn *insns)
 	return 2;
 }
 
-static int ebpfos_kop_atomic64_requirements(
-	u64 payload, u64 *capability_mask, u64 *effect_mask,
-	u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	const struct ebpfos_kop_atomic64_spec *spec =
-		ebpfos_kop_atomic64_spec(payload);
-
-	
-	*capability_mask = 0;
-	*effect_mask = 0;
-	memcpy(semantic_sha256, spec->semantic_sha256, SHA256_DIGEST_SIZE);
-	return 0;
-}
-
 static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
 					u64 payload, const struct bpf_prog *prog,
 					const u8 *final_ip)
@@ -1624,7 +1479,7 @@ static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
 
 	(void)prog;
 	(void)final_ip;
-	
+
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -1634,7 +1489,7 @@ static int ebpfos_kop_atomic64_emit_x86(u8 *image, u32 *offset, bool emit,
 static struct bpf_kop ebpfos_kop_atomic64 = {
 	.max_insn_cnt = 3,
 	.max_emit_bytes = 12,
-	.requirements = ebpfos_kop_atomic64_requirements,
+
 	.instantiate_insn = ebpfos_kop_atomic64_instantiate,
 	.emit_x86 = ebpfos_kop_atomic64_emit_x86,
 };
@@ -1679,7 +1534,7 @@ static int ebpfos_kop_xadd64_emit_x86(u8 *image, u32 *offset, bool emit,
 static struct bpf_kop ebpfos_kop_xadd64 = {
 	.max_insn_cnt = 2,
 	.max_emit_bytes = 8,
-	.semantic_sha256 = EBPFOS_KOP_XADD64_SEMANTIC_SHA256,
+
 	.instantiate_insn = ebpfos_kop_xadd64_instantiate,
 	.emit_x86 = ebpfos_kop_xadd64_emit_x86,
 };
@@ -1693,14 +1548,6 @@ static const struct btf_kfunc_id_set ebpfos_kprog_atomic_set = {
 	.kop_descs = ebpfos_kprog_atomic_descs,
 };
 
-/* sha256("ebpfos-koperation-terminal-effect-v2:x86_64:f390:verified-native-backedge:verifier-noreturn") */
-static const u8 ebpfos_kprog_terminal_semantic_sha256[SHA256_DIGEST_SIZE] = {
-	0xf4, 0xae, 0x65, 0xa5, 0x34, 0xd1, 0xa6, 0xb0,
-	0x5d, 0xae, 0x97, 0x22, 0xcd, 0xad, 0xaa, 0x25,
-	0xa3, 0xf0, 0x97, 0x01, 0x75, 0x51, 0x85, 0x69,
-	0x37, 0x5c, 0x2b, 0xf2, 0x70, 0x71, 0x62, 0x93,
-};
-
 static bool ebpfos_kprog_terminal_payload(u64 payload)
 {
 	return ebpfos_kprog_terminal_ids.cnt == 1 &&
@@ -1710,23 +1557,8 @@ static bool ebpfos_kprog_terminal_payload(u64 payload)
 static int ebpfos_kprog_terminal_instantiate(u64 payload,
 					      struct bpf_insn *insns)
 {
-	u32 effect_tag;
-
-	effect_tag = get_unaligned_le32(
-		ebpfos_kprog_terminal_semantic_sha256) & S32_MAX;
-	insns[0] = BPF_MOV64_IMM(BPF_REG_0, effect_tag);
+	insns[0] = BPF_MOV64_IMM(BPF_REG_0, payload);
 	return 1;
-}
-
-static int ebpfos_kprog_terminal_requirements(
-	u64 payload, u64 *capability_mask, u64 *effect_mask,
-	u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
-	*capability_mask = EBPFOS_CAP_KPROG_TERMINAL_ROOT;
-	*effect_mask = EBPFOS_EFFECT_KPROG_TERMINAL_WAIT;
-	memcpy(semantic_sha256, ebpfos_kprog_terminal_semantic_sha256,
-	       SHA256_DIGEST_SIZE);
-	return 0;
 }
 
 static int ebpfos_kprog_terminal_emit_x86(
@@ -1749,13 +1581,7 @@ static struct bpf_kop ebpfos_kprog_terminal = {
 	.noreturn_native_backedge = true,
 	.capability_mask = EBPFOS_CAP_KPROG_TERMINAL_ROOT,
 	.effect_mask = EBPFOS_EFFECT_KPROG_TERMINAL_WAIT,
-	.semantic_sha256 = {
-		0xf4, 0xae, 0x65, 0xa5, 0x34, 0xd1, 0xa6, 0xb0,
-		0x5d, 0xae, 0x97, 0x22, 0xcd, 0xad, 0xaa, 0x25,
-		0xa3, 0xf0, 0x97, 0x01, 0x75, 0x51, 0x85, 0x69,
-		0x37, 0x5c, 0x2b, 0xf2, 0x70, 0x71, 0x62, 0x93,
-	},
-	.requirements = ebpfos_kprog_terminal_requirements,
+
 	.instantiate_insn = ebpfos_kprog_terminal_instantiate,
 	.emit_x86 = ebpfos_kprog_terminal_emit_x86,
 };
@@ -1974,7 +1800,6 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 #define EBPFOS_REGISTER_READ_CR(number) \
 	do { \
-		 \
 		ebpfos_kop_read_cr##number.proof_kfunc_id = \
 			ebpfos_kprog_read_cr##number##_service_ids.pairs[0].id; \
 		err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, \
@@ -2034,7 +1859,6 @@ static int __init ebpfos_kprog_register(void)
 		return err;
 #ifdef CONFIG_X86
 #define EBPFOS_PORT_IO_REGISTER(name) \
-  \
  ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
  err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
  if (err) return err; \
@@ -2164,7 +1988,6 @@ static int __init ebpfos_kprog_register(void)
 #undef EBPFOS_LOCAL_BITS_REGISTER
 #ifdef CONFIG_X86
 #define EBPFOS_FRAME_ADDRESS_REGISTER(name, upper, value) \
-  \
  ebpfos_kop_##name.proof_kfunc_id = ebpfos_kprog_##name##_service_ids.pairs[0].id; \
  err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &ebpfos_kprog_##name##_service_set); \
  if (err) return err; \

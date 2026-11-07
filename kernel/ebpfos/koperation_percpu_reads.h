@@ -34,31 +34,15 @@ static bool ebpfos_kop_##prefix##width##_payload(u64 payload) \
 } \
 static int ebpfos_kop_##prefix##width##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-  \
  insns[0] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr); \
  if (area) insns[1] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, payload & 0xffffff); \
  insns[area ? 2 : 1] = BPF_LDX_MEM(size, BPF_REG_0, BPF_REG_0, area ? 0 : payload & 0xffff); \
  return 2 + area; \
 } \
-static int ebpfos_kop_##prefix##width##_requirements(u64 payload, u64 *cap, u64 *effects, \
- u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
-{ \
- /* sha256("ebpfos-percpu-read-v1:original-template;root-only;GS-load;" \
-  * "payload=id<<16|nonnegative-s16-offset;width-by-descriptor;stock-helper-and-load-proof") */ \
- static const u8 digest[SHA256_DIGEST_SIZE] = { \
-  0x34,0xd8,0x50,0x90,0x49,0xe7,0x48,0x69,0x9d,0x2d,0xde,0x43,0x92,0xbd,0x32,0xca, \
-  0x4c,0xdd,0x47,0xde,0xf4,0x15,0x36,0x00,0x0a,0xdb,0xc4,0xca,0x8c,0x3a,0x1d,0xfa }; \
-  \
- *cap = 0; *effects = 0; memcpy(semantic_sha256,digest,sizeof(digest)); \
- if (area) sha256("percpu-area-read-v1:offset24;root-selection;exact-width;single-GS-load", \
-  strlen("percpu-area-read-v1:offset24;root-selection;exact-width;single-GS-load"),semantic_sha256); \
- return 0; \
-} \
 static int ebpfos_kop_##prefix##width##_emit_x86(u8 *image, u32 *offset, bool emit, \
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
  u8 native[9]; unsigned n = 0; \
-  \
  native[n++] = 0x65; \
  if (wide) native[n++] = 0x48; \
  native[n++] = opcode; \
@@ -70,7 +54,6 @@ static int ebpfos_kop_##prefix##width##_emit_x86(u8 *image, u32 *offset, bool em
 } \
 static struct bpf_kop ebpfos_kop_##prefix##width = { \
  .max_insn_cnt = 2 + area, .max_emit_bytes = 9, \
- .requirements = ebpfos_kop_##prefix##width##_requirements, \
  .instantiate_insn = ebpfos_kop_##prefix##width##_instantiate, \
  .emit_x86 = ebpfos_kop_##prefix##width##_emit_x86 }; \
 static const struct bpf_kop * const ebpfos_kprog_##prefix##width##_descs[] = { \

@@ -3200,101 +3200,30 @@ bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
 }
 
 int bpf_prog_kop_requirements(const struct bpf_prog *prog,
-			      u64 *capability_mask, u64 *effect_mask,
-			      u8 semantic_set_sha256[SHA256_DIGEST_SIZE])
+                              u64 *capability_mask, u64 *effect_mask)
 {
-	static const u8 domain_v1[] = "eBPFOS-kprog-semantic-set-v1";
-	static const u8 domain_v2[] = "eBPFOS-kprog-semantic-set-v2";
-	struct bpf_kfunc_desc_tab *tab;
-	struct sha256_ctx state;
-	u64 capabilities = 0;
-	u64 effects = 0;
-	bool bind_control_flags = false;
-	u32 count = 0;
-	u32 index;
+    struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+    u64 capabilities = 0, effects = 0;
+    u32 index;
 
-	tab = prog->aux->kfunc_tab;
-	if (prog->aux->ebpfos_kop_requirements_valid) {
-		*capability_mask = prog->aux->ebpfos_kop_capability_mask;
-		*effect_mask = prog->aux->ebpfos_kop_effect_mask;
-		memcpy(semantic_set_sha256,
-		       prog->aux->ebpfos_kop_semantic_set_sha256,
-		       SHA256_DIGEST_SIZE);
-		return 0;
-	}
-	for (index = 0; tab && index < prog->len; index++) {
-		const struct bpf_insn *call = &prog->insnsi[index];
-		const struct bpf_kfunc_desc *desc;
+    if (prog->aux->ebpfos_kop_requirements_valid) {
+        *capability_mask = prog->aux->ebpfos_kop_capability_mask;
+        *effect_mask = prog->aux->ebpfos_kop_effect_mask;
+        return 0;
+    }
+    for (index = 0; tab && index < prog->len; index++) {
+        const struct bpf_insn *call = &prog->insnsi[index];
+        const struct bpf_kfunc_desc *desc;
 
-		if (!bpf_pseudo_kop_call(call))
-			continue;
-		desc = find_kfunc_desc(prog, call->imm, call->off);
-		if (desc && desc->kop && desc->flags & KF_NORETURN) {
-			bind_control_flags = true;
-			break;
-		}
-	}
-	sha256_init(&state);
-	if (bind_control_flags)
-		sha256_update(&state, domain_v2, sizeof(domain_v2));
-	else
-		sha256_update(&state, domain_v1, sizeof(domain_v1));
-	for (index = 0; index < prog->len; index++) {
-		const struct bpf_insn *call = &prog->insnsi[index];
-		const struct bpf_kfunc_desc *desc;
-		const struct bpf_kop *kop;
-		u8 semantic_sha256[SHA256_DIGEST_SIZE];
-		u64 capability_mask;
-		u64 effect_mask;
-		u64 payload;
-		__le64 capability;
-		__le64 effect;
-		__le32 control_flags;
-		int error;
-
-		if (!bpf_pseudo_kop_call(call))
-			continue;
-		desc = find_kfunc_desc(prog, call->imm, call->off);
-		kop = desc->kop;
-		payload = bpf_kop_sidecar_payload(call - 1);
-		if (kop->requirements) {
-			error = kop->requirements(payload, &capability_mask,
-						  &effect_mask,
-						  semantic_sha256);
-			if (error)
-				return error;
-		} else {
-			capability_mask = kop->capability_mask;
-			effect_mask = kop->effect_mask;
-			memcpy(semantic_sha256, kop->semantic_sha256,
-			       sizeof(semantic_sha256));
-		}
-
-		capabilities |= capability_mask;
-		effects |= effect_mask;
-		capability = cpu_to_le64(capability_mask);
-		effect = cpu_to_le64(effect_mask);
-		sha256_update(&state, (const u8 *)&capability,
-			      sizeof(capability));
-		sha256_update(&state, (const u8 *)&effect, sizeof(effect));
-		sha256_update(&state, semantic_sha256,
-			      sizeof(semantic_sha256));
-		if (bind_control_flags) {
-			control_flags = cpu_to_le32(desc->flags & KF_NORETURN);
-			sha256_update(&state, (const u8 *)&control_flags,
-				      sizeof(control_flags));
-		}
-		count++;
-	}
-	{
-		__le32 le_count = cpu_to_le32(count);
-
-		sha256_update(&state, (const u8 *)&le_count, sizeof(le_count));
-	}
-	sha256_final(&state, semantic_set_sha256);
-	*capability_mask = capabilities;
-	*effect_mask = effects;
-	return 0;
+        if (!bpf_pseudo_kop_call(call))
+            continue;
+        desc = find_kfunc_desc(prog, call->imm, call->off);
+        capabilities |= desc->kop->capability_mask;
+        effects |= desc->kop->effect_mask;
+    }
+    *capability_mask = capabilities;
+    *effect_mask = effects;
+    return 0;
 }
 
 static int validate_call_exception_annotation(struct bpf_verifier_env *env,
@@ -3352,7 +3281,6 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
-	u8 semantic_set[SHA256_DIGEST_SIZE];
 	u64 capabilities = 0;
 	u64 effects = 0;
 	u32 cap = env->kop_call_cnt;
@@ -3382,7 +3310,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		 * Seal their exact requirements before that verifier-only rewrite.
 		 */
 		err = bpf_prog_kop_requirements(env->prog, &capabilities,
-						&effects, semantic_set);
+						&effects);
 		if (err)
 			return err;
 		err = bpf_validate_kop_single_entry(env, env->prog->insnsi,
@@ -3583,8 +3511,6 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		env->prog->aux->ebpfos_kop_count = cap;
 		env->prog->aux->ebpfos_kop_capability_mask = capabilities;
 		env->prog->aux->ebpfos_kop_effect_mask = effects;
-		memcpy(env->prog->aux->ebpfos_kop_semantic_set_sha256,
-		       semantic_set, sizeof(semantic_set));
 		/* Publish the immutable verifier snapshot last. */
 		env->prog->aux->ebpfos_kop_requirements_valid = true;
 	}

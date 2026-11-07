@@ -56,36 +56,30 @@ static u32 wrmsr_service(u64 payload)
 { return wrmsr_valid(payload) ? wrmsr_services.pairs[0].id : 0; }
 static int wrmsr_proof(u64 payload, struct bpf_insn *insns)
 {
- 
+
  insns[0] = BPF_CALL_KFUNC(0, wrmsr_services.pairs[0].id);
  return 1;
 }
 static int wrmsr_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- 
+
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_WRMSR_INSN,
   .fixup_offset = EBPFOS_WRMSR_FIXUP, .data = EX_TYPE_WRMSR_SAFE | (8 << 8) };
  return 0;
 }
-static int wrmsr_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 digest[] = EBPFOS_WRMSR_SHA256;
- 
- *capability = 0; *effect = 0; memcpy(sha, digest, 32);
- return 0;
-}
+
 static int wrmsr_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                      const struct bpf_prog *prog, const u8 *final_ip)
 {
- 
+
  if (emit) memcpy(image + *offset, wrmsr_native, sizeof(wrmsr_native));
  *offset += sizeof(wrmsr_native); return sizeof(wrmsr_native);
 }
 static struct bpf_kop wrmsr_kop = { .max_insn_cnt = 1,
  .max_emit_bytes = sizeof(wrmsr_native), .num_exentries = 1,
  .exception_entry = wrmsr_exception, .instantiate_insn = wrmsr_proof,
- .emit_x86 = wrmsr_emit, .requirements = wrmsr_requirements,
- .proof_kfunc_id_for_payload = wrmsr_service, .semantic_sha256 = EBPFOS_WRMSR_SHA256 };
+ .emit_x86 = wrmsr_emit,
+ .proof_kfunc_id_for_payload = wrmsr_service, };
 static const struct bpf_kop * const wrmsr_descs[] = { &wrmsr_kop };
 static int wrmsr_context_filter(const struct bpf_prog *prog, u32 id);
 static const struct btf_kfunc_id_set wrmsr_service_set = { .set = &wrmsr_services, .filter = wrmsr_context_filter };
@@ -97,40 +91,33 @@ static u32 wrmsr_unchecked_service(u64 payload)
 { return wrmsr_unchecked_valid(payload) ? wrmsr_unchecked_services.pairs[0].id : 0; }
 static int wrmsr_unchecked_proof(u64 payload, struct bpf_insn *insns)
 {
- 
+
  insns[0] = BPF_CALL_KFUNC(0, wrmsr_unchecked_services.pairs[0].id);
  return 1;
 }
 static int wrmsr_unchecked_exception(u64 payload, unsigned int index,
                                    struct bpf_kop_exception *entry)
 {
- 
+
  *entry = (struct bpf_kop_exception) {
   .insn_offset = EBPFOS_WRMSR_UNCHECKED_INSN,
   .fixup_offset = EBPFOS_WRMSR_UNCHECKED_FIXUP, .data = EX_TYPE_WRMSR };
  return 0;
 }
-static int wrmsr_unchecked_requirements(u64 payload, u64 *capability,
-                                       u64 *effect, u8 sha[32])
-{
- static const u8 digest[] = EBPFOS_WRMSR_UNCHECKED_SHA256;
- 
- *capability = 0; *effect = 0; memcpy(sha, digest, 32);
- return 0;
-}
+
 static int wrmsr_unchecked_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                                const struct bpf_prog *prog, const u8 *final_ip)
 {
- 
+
  if (emit) memcpy(image + *offset, wrmsr_unchecked_native, sizeof(wrmsr_unchecked_native));
  *offset += sizeof(wrmsr_unchecked_native); return sizeof(wrmsr_unchecked_native);
 }
 static struct bpf_kop wrmsr_unchecked_kop = { .max_insn_cnt = 1,
  .max_emit_bytes = sizeof(wrmsr_unchecked_native), .num_exentries = 1,
  .exception_entry = wrmsr_unchecked_exception, .instantiate_insn = wrmsr_unchecked_proof,
- .emit_x86 = wrmsr_unchecked_emit, .requirements = wrmsr_unchecked_requirements,
+ .emit_x86 = wrmsr_unchecked_emit,
  .proof_kfunc_id_for_payload = wrmsr_unchecked_service,
- .semantic_sha256 = EBPFOS_WRMSR_UNCHECKED_SHA256 };
+ };
 static const struct bpf_kop * const wrmsr_unchecked_descs[] = { &wrmsr_unchecked_kop };
 static const struct btf_kfunc_id_set wrmsr_unchecked_service_set = {
  .set = &wrmsr_unchecked_services, .filter = wrmsr_context_filter };

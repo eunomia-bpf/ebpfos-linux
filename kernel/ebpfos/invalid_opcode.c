@@ -50,7 +50,7 @@ static struct bpf_kop ud2_kop = {
 	.max_emit_bytes = 2,
 	.instantiate_insn = ud2_proof,
 	.emit_x86 = ud2_emit,
-	.semantic_sha256 = EBPFOS_UD2_TERMINAL_SHA256,
+
 };
 static const struct bpf_kop * const ud2_descs[] = { &ud2_kop };
 static const struct btf_kfunc_id_set ud2_set = {

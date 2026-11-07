@@ -64,7 +64,7 @@ static int rep_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service = rep_service(payload);
  unsigned n = 0;
- 
+
  /* Native inputs: r1=RDI/destination, r2=RSI/source, r4=RCX/elements.
   * Only this proof uses the C service ABI; none of it runs at runtime.
   */
@@ -82,14 +82,7 @@ static int rep_exception(u64 payload, unsigned int index, struct bpf_kop_excepti
   .fixup_offset = EBPFOS_FAULT_REP_MOVSB_FIXUP, .data = payload & 255 };
  return 0;
 }
-static int rep_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 ordinary[] = EBPFOS_FAULT_REP_MOVSB_SHA256_3;
- static const u8 machine_check[] = EBPFOS_FAULT_REP_MOVSB_SHA256_14;
- *capability = 0; *effect = 0;
- memcpy(sha, (payload & 255) == EX_TYPE_UACCESS ? ordinary : machine_check, 32);
- return 0;
-}
+
 static int rep_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                     const struct bpf_prog *prog, const u8 *final_ip)
 {
@@ -100,8 +93,8 @@ static struct bpf_kop rep_kop = {
  .max_insn_cnt = 5, .max_emit_bytes = sizeof(rep_native),
  .num_exentries = 1, .exception_entry = rep_exception,
  .instantiate_insn = rep_proof, .emit_x86 = rep_emit,
- .requirements = rep_requirements, .proof_kfunc_id_for_payload = rep_service,
- .semantic_sha256 = EBPFOS_FAULT_REP_MOVSB_SHA256_3,
+  .proof_kfunc_id_for_payload = rep_service,
+
 };
 static const u8 repq_native[] = EBPFOS_FAULT_REP_MOVSQ_NATIVE;
 static bool repq_valid(u64 payload)
@@ -118,7 +111,7 @@ static int repq_proof(u64 payload, struct bpf_insn *insns)
 {
  u32 service = repq_service(payload);
  unsigned n = 0;
- 
+
  /* Native inputs: r1=RDI/destination, r2=RSI/source, r4=RCX/elements.
   * Only this proof uses the C service ABI; none of it runs at runtime.
   */
@@ -144,14 +137,7 @@ static int repq_exception(u64 payload, unsigned int index, struct bpf_kop_except
   .fixup_offset = EBPFOS_FAULT_REP_MOVSQ_FIXUP, .data = payload & 255 };
  return 0;
 }
-static int repq_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 ordinary[] = EBPFOS_FAULT_REP_MOVSQ_SHA256_3;
- static const u8 machine_check[] = EBPFOS_FAULT_REP_MOVSQ_SHA256_14;
- *capability = 0; *effect = 0;
- memcpy(sha, (payload & 255) == EX_TYPE_UACCESS ? ordinary : machine_check, 32);
- return 0;
-}
+
 static int repq_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                     const struct bpf_prog *prog, const u8 *final_ip)
 {
@@ -162,8 +148,8 @@ static struct bpf_kop repq_kop = {
  .max_insn_cnt = 10, .max_emit_bytes = sizeof(repq_native),
  .num_exentries = 1, .exception_entry = repq_exception,
  .instantiate_insn = repq_proof, .emit_x86 = repq_emit,
- .requirements = repq_requirements, .proof_kfunc_id_for_payload = repq_service,
- .semantic_sha256 = EBPFOS_FAULT_REP_MOVSQ_SHA256_3,
+  .proof_kfunc_id_for_payload = repq_service,
+
 };
 static const struct bpf_kop * const rep_descs[] = { &rep_kop, &repq_kop };
 static const struct btf_kfunc_id_set rep_service_set3 = { .set = &rep_services3 };

@@ -51,13 +51,13 @@ BTF_KFUNCS_END(window_close_ids)
 
 static int window_open_proof(u64 payload, struct bpf_insn *insns)
 {
-	
+
 	insns[0] = BPF_CALL_KFUNC(0, window_open_services.pairs[0].id);
 	return 1;
 }
 static int window_close_proof(u64 payload, struct bpf_insn *insns)
 {
-	
+
 	insns[0] = BPF_CALL_KFUNC(0, window_close_services.pairs[0].id);
 	return 1;
 }
@@ -69,7 +69,7 @@ static int window_open_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 		0, 0, 0, 0, 0, 0, 0, 0 };
 	u64 cookie = (unsigned long)&window_cookie;
 	static const u8 instruction[] = EBPFOS_USER_STAC_INSN;
-	
+
 	memcpy(native + 5, &cookie, sizeof(cookie));
 	memcpy(native, instruction, sizeof(instruction));
 	if (emit)
@@ -83,7 +83,7 @@ static int window_close_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	/* CLAC, then MOV (not XOR) to preserve the source arithmetic flags. */
 	u8 native[] = { 0x0f, 0x01, 0xca, 0xb8, 0, 0, 0, 0 };
 	static const u8 instruction[] = EBPFOS_USER_CLAC_INSN;
-	
+
 	memcpy(native, instruction, sizeof(instruction));
 	if (emit)
 		memcpy(image + *offset, native, sizeof(native));
@@ -93,12 +93,12 @@ static int window_close_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 static struct bpf_kop window_open_kop = {
 	.max_insn_cnt = 1, .max_emit_bytes = 13,
 	.instantiate_insn = window_open_proof, .emit_x86 = window_open_emit,
-	.semantic_sha256 = EBPFOS_USER_STAC_SHA256,
+
 };
 static struct bpf_kop window_close_kop = {
 	.max_insn_cnt = 1, .max_emit_bytes = 8,
 	.instantiate_insn = window_close_proof, .emit_x86 = window_close_emit,
-	.semantic_sha256 = EBPFOS_USER_CLAC_SHA256,
+
 };
 /* Each singleton owns its exact semantic descriptor; BTF sets are sorted. */
 static const struct bpf_kop * const window_open_descriptors[] = { &window_open_kop };

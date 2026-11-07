@@ -34,7 +34,6 @@ static bool ebpfos_kop_local_##op##width##_payload(u64 payload) \
   payload == ebpfos_kprog_local_##op##width##_ids.pairs[0].id; } \
 static int ebpfos_kop_local_##op##width##_instantiate(u64 payload, struct bpf_insn *insns) \
 { \
-  \
  insns[0] = BPF_LDX_MEM(span, BPF_REG_3, BPF_REG_1, 0); \
  insns[1] = BPF_ALU##alu##_REG(BPF_##upper, BPF_REG_3, BPF_REG_2); \
  insns[2] = BPF_STX_MEM(span, BPF_REG_1, BPF_REG_3, 0); \
@@ -42,24 +41,15 @@ static int ebpfos_kop_local_##op##width##_instantiate(u64 payload, struct bpf_in
  insns[4] = BPF_MOV32_IMM(BPF_REG_0, 0); \
  return 5; \
 } \
-static int ebpfos_kop_local_##op##width##_requirements(u64 payload, u64 *cap, \
- u64 *effects, u8 semantic_sha256[SHA256_DIGEST_SIZE]) \
-{ \
- static const u8 digest[] = EBPFOS_KOP_LOCAL_##upper##width##_SEMANTIC_SHA256; \
-  \
- *cap = 0; *effects = 0; memcpy(semantic_sha256, digest, sizeof(digest)); return 0; \
-} \
 static int ebpfos_kop_local_##op##width##_emit_x86(u8 *image, u32 *offset, bool emit, \
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_LOCAL_##upper##width##_NATIVE_BYTES; \
-  \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \
 static struct bpf_kop ebpfos_kop_local_##op##width = { \
  .max_insn_cnt = 5, .max_emit_bytes = 16, \
- .requirements = ebpfos_kop_local_##op##width##_requirements, \
  .instantiate_insn = ebpfos_kop_local_##op##width##_instantiate, \
  .emit_x86 = ebpfos_kop_local_##op##width##_emit_x86, \
 }; \

@@ -50,33 +50,23 @@ static u32 family##width##_service(u64 payload) \
 static int family##width##_proof(u64 payload, struct bpf_insn *insns) \
 { \
  u32 service = family##width##_service(payload); \
- \
  insns[0] = BPF_CALL_KFUNC(0, service); return 1; \
 } \
 static int family##width##_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry) \
 { \
- \
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_FAULT_##stem##width##_INSN, \
   .fixup_offset = EBPFOS_FAULT_##stem##width##_FIXUP, .data = payload & 255 }; return 0; \
-} \
-static int family##width##_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32]) \
-{ \
- static const u8 ordinary[] = EBPFOS_FAULT_##stem##width##_SHA256_1; \
- static const u8 uaccess[] = EBPFOS_FAULT_##stem##width##_SHA256_3; \
- \
- *capability = 0; *effect = 0; memcpy(sha, (payload & 255) == 1 ? ordinary : uaccess, 32); return 0; \
 } \
 static int family##width##_emit(u8 *image, u32 *offset, bool emit, u64 payload, \
                               const struct bpf_prog *prog, const u8 *final_ip) \
 { \
- \
  if (emit) memcpy(image + *offset, family##width##_native, sizeof(family##width##_native)); \
  *offset += sizeof(family##width##_native); return sizeof(family##width##_native); \
 } \
 static struct bpf_kop family##width##_kop = { .max_insn_cnt = 1, .max_emit_bytes = sizeof(family##width##_native), \
  .num_exentries = 1, .exception_entry = family##width##_exception, .instantiate_insn = family##width##_proof, \
- .emit_x86 = family##width##_emit, .requirements = family##width##_requirements, \
- .proof_kfunc_id_for_payload = family##width##_service, .semantic_sha256 = EBPFOS_FAULT_##stem##width##_SHA256_3 }; \
+ .emit_x86 = family##width##_emit,  \
+ .proof_kfunc_id_for_payload = family##width##_service, }; \
 static const struct bpf_kop * const family##width##_descs[] = { &family##width##_kop }; \
 static const struct btf_kfunc_id_set family##width##_set1 = { .set = &family##width##_services1 }; \
 static const struct btf_kfunc_id_set family##width##_set3 = { .set = &family##width##_services3 }; \

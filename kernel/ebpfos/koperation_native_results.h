@@ -38,30 +38,23 @@ static bool ebpfos_result2_payload(u64 payload)
 }
 static int ebpfos_result2_instantiate(u64 payload, struct bpf_insn *insns)
 {
- 
+
  insns[0] = (struct bpf_insn) { .code = BPF_JMP | BPF_CALL,
   .src_reg = BPF_PSEUDO_KFUNC_CALL, .imm = ebpfos_kprog_native_result2_service_ids.pairs[0].id };
  return 1;
 }
-static int ebpfos_result2_requirements(u64 payload, u64 *cap, u64 *effects,
- u8 semantic_sha256[SHA256_DIGEST_SIZE])
-{
- static const u8 digest[] = EBPFOS_KOP_NATIVE_RESULT2_SEMANTIC_SHA256;
- 
- *cap = 0; *effects = 0; memcpy(semantic_sha256, digest, sizeof(digest)); return 0;
-}
+
 static int ebpfos_result2_emit_x86(u8 *image, u32 *offset, bool emit,
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip)
 {
  static const u8 native[] = EBPFOS_KOP_NATIVE_RESULT2_NATIVE_BYTES;
- 
- 
+
  if (emit) memcpy(image + *offset, native, sizeof(native));
  *offset += sizeof(native); return sizeof(native);
 }
 static struct bpf_kop ebpfos_kop_native_result2 = {
  .max_insn_cnt = 1, .max_emit_bytes = 8,
- .requirements = ebpfos_result2_requirements, .instantiate_insn = ebpfos_result2_instantiate,
+  .instantiate_insn = ebpfos_result2_instantiate,
  .emit_x86 = ebpfos_result2_emit_x86,
 };
 static const struct bpf_kop * const ebpfos_kprog_native_result2_descs[] = { &ebpfos_kop_native_result2 };

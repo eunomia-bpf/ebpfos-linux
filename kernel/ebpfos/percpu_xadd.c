@@ -2,7 +2,6 @@
 /* Unlocked GS XADD, including its old-value result. Stock selection and
  * load/add/store checks retain the source field's type and write authority.
  */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -27,23 +26,10 @@ static bool xadd_payload(u64 payload, bool area)
 	return payload <= (area ? 0xffffff : S16_MAX);
 }
 
-static int xadd_requirements(u64 payload, u64 *cap, u64 *effects,
-			     u8 digest[SHA256_DIGEST_SIZE], bool area)
-{
-	const char *semantics = area ?
-		"percpu-area-xadd-v1:offset24;stock-selection;checked-load-add-store;old-value;single-unlocked-GS-XADD;r6-wide-sum;r3-zero" :
-		"percpu-xadd-v1:offset15;stock-selection;checked-load-add-store;old-value;single-unlocked-GS-XADD;r6-wide-sum;r3-zero";
-	
-	*cap = 0;
-	*effects = 0;
-	sha256(semantics, strlen(semantics), digest);
-	return 0;
-}
-
 static int xadd_proof(u64 payload, struct bpf_insn *insns, unsigned size, bool area)
 {
 	unsigned n = 0;
-	
+
 	insns[n++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2);
 	insns[n++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr);
 	if (area) insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, payload);
@@ -60,7 +46,7 @@ static int xadd_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	u8 native[24];
 	unsigned n = 0;
-	
+
 	if (width <= 16) {
 		if (width == 8) native[n++] = 0x40; /* SIL needs REX. */
 		native[n++] = 0x0f;
@@ -108,10 +94,8 @@ static int prefix##width##_proof(u64 p, struct bpf_insn *i) \
 static int prefix##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return xadd_emit(i, o, emit, p, width, area); } \
-static int prefix##width##_requirements(u64 p, u64 *c, u64 *e, u8 d[SHA256_DIGEST_SIZE]) \
-{ return xadd_requirements(p, c, e, d, area); } \
 static const struct bpf_kop prefix##width##_desc = { \
- .max_insn_cnt = 7 + area, .max_emit_bytes = 24, .requirements = prefix##width##_requirements, \
+ .max_insn_cnt = 7 + area, .max_emit_bytes = 24,  \
  .instantiate_insn = prefix##width##_proof, .emit_x86 = prefix##width##_emit }; \
 static const struct bpf_kop * const prefix##width##_descs[] = { &prefix##width##_desc }; \
 static const struct btf_kfunc_id_set prefix##width##_set = { \

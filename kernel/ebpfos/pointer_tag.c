@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Preserve pointer provenance while masking the separate scalar tag half. */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
@@ -37,21 +36,8 @@ static int ptr_tag_instantiate(u64 payload, struct bpf_insn *insns)
 {
 	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
 
-	
 	memcpy(insns, spec->proof, sizeof(spec->proof));
 	return ARRAY_SIZE(spec->proof);
-}
-
-static int ptr_tag_requirements(u64 payload, u64 *capabilities, u64 *effects,
-			       u8 digest[SHA256_DIGEST_SIZE])
-{
-	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
-
-	
-	*capabilities = 0;
-	*effects = 0;
-	memcpy(digest, spec->digest, sizeof(spec->digest));
-	return 0;
 }
 
 static int ptr_tag_emit_x86(u8 *image, u32 *offset, bool emit, u64 payload,
@@ -59,7 +45,6 @@ static int ptr_tag_emit_x86(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	const struct ebpfos_ptr_tag_spec *spec = ptr_tag_spec(payload);
 
-	
 	if (emit)
 		memcpy(image + *offset, spec->native, spec->native_len);
 	*offset += spec->native_len;
@@ -69,7 +54,7 @@ static int ptr_tag_emit_x86(u8 *image, u32 *offset, bool emit, u64 payload,
 static struct bpf_kop ptr_tag_kop = {
 	.max_insn_cnt = 4,
 	.max_emit_bytes = 15,
-	.requirements = ptr_tag_requirements,
+
 	.instantiate_insn = ptr_tag_instantiate,
 	.emit_x86 = ptr_tag_emit_x86,
 };

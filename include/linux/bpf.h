@@ -1099,28 +1099,13 @@ struct bpf_kop {
 	 * its proof and still treats the operation itself as terminal.
 	 */
 	bool noreturn_native_backedge;
-	/*
-	 * Sealed component admission binds this verifier-visible operation
-	 * identity before its native emitter can become reachable.  These fields
-	 * describe one canonical eBPF semantic operation, not a native fallback.
-	 */
+	/* Fixed capability and effect metadata for this operation. */
 	u64 capability_mask;
 	u64 effect_mask;
-	u8 semantic_sha256[SHA256_DIGEST_SIZE];
 	/* One exact typed effect call allowed inside this descriptor's proof. */
 	u32 proof_kfunc_id;
 	/* Select one exact typed proof service for a declarative payload instance. */
 	u32 (*proof_kfunc_id_for_payload)(u64 payload);
-	/*
-	 * A descriptor may cover a finite declarative payload family.  When
-	 * present, requirements() resolves the exact sidecar instance to the
-	 * verifier-visible authority/effect/semantic identity.  The fixed fields
-	 * above remain the compatibility path for one-identity descriptors.
-	 */
-	int (*requirements)(u64 payload, u64 *capability_mask,
-			    u64 *effect_mask,
-			    u8 semantic_sha256[SHA256_DIGEST_SIZE]);
-
 	int (*instantiate_insn)(u64 payload, struct bpf_insn *insn_buf);
 
 	int (*emit_x86)(u8 *image, u32 *off, bool emit,
@@ -1974,7 +1959,6 @@ struct bpf_prog_aux {
 	u32 ebpfos_kop_count;
 	u64 ebpfos_kop_capability_mask;
 	u64 ebpfos_kop_effect_mask;
-	u8 ebpfos_kop_semantic_set_sha256[SHA256_DIGEST_SIZE];
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;
@@ -3339,8 +3323,7 @@ void bpf_cgrp_storage_free(struct cgroup *cgroup);
 bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog);
 bool bpf_prog_has_kop_call(const struct bpf_prog *prog);
 int bpf_prog_kop_requirements(const struct bpf_prog *prog,
-			      u64 *capability_mask, u64 *effect_mask,
-			      u8 semantic_set_sha256[SHA256_DIGEST_SIZE]);
+			      u64 *capability_mask, u64 *effect_mask);
 const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn);
@@ -3642,8 +3625,7 @@ static inline bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
 
 static inline int
 bpf_prog_kop_requirements(const struct bpf_prog *prog,
-			  u64 *capability_mask, u64 *effect_mask,
-			  u8 semantic_set_sha256[SHA256_DIGEST_SIZE])
+			  u64 *capability_mask, u64 *effect_mask)
 {
 	return -EOPNOTSUPP;
 }

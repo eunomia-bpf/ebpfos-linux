@@ -24,8 +24,7 @@ BTF_KFUNCS_START(prefetch_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_prefetcht0_protected)
 BTF_KFUNCS_END(prefetch_services)
 static u32 prefetch_id, prefetch_typed_service;
-static u8 prefetch_typed_sha[32];
-static u64 prefetch_capability, prefetch_effect;
+
 static const u8 prefetch_native[] = EBPFOS_FAULT_PREFETCHT0_NATIVE;
 static u32 prefetch_service(u64 payload)
 {
@@ -43,12 +42,7 @@ static int prefetch_exception(u64 payload, unsigned int index, struct bpf_kop_ex
  *entry=(struct bpf_kop_exception) { .insn_offset=0,
   .fixup_offset=EBPFOS_FAULT_PREFETCHT0_FIXUP, .data=EX_TYPE_DEFAULT }; return 0;
 }
-static int prefetch_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 digest[]=EBPFOS_FAULT_PREFETCHT0_SHA256;
- *capability=prefetch_capability; *effect=prefetch_effect;
- memcpy(sha,payload==prefetch_id ? prefetch_typed_sha : digest,32); return 0;
-}
+
 static int prefetch_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                         const struct bpf_prog *prog, const u8 *final_ip)
 {
@@ -59,15 +53,13 @@ static const struct btf_kfunc_id_set prefetch_service_set={ .set=&prefetch_servi
 int ebpfos_prefetcht0_initialize(struct bpf_kop *kop, u32 id, u32 typed_service)
 {
  prefetch_id=id; prefetch_typed_service=typed_service;
- prefetch_capability=kop->capability_mask; prefetch_effect=kop->effect_mask;
- memcpy(prefetch_typed_sha,kop->semantic_sha256,32);
+
  /* One opcode descriptor. Plain hints keep their existing typed proof;
   * only an explicit protected payload accepts arbitrary addresses. The
   * extra fixup is unreachable for the plain proof's valid mapped objects. */
  kop->max_insn_cnt=1; kop->max_emit_bytes=sizeof(prefetch_native);
  kop->num_exentries=1; kop->exception_entry=prefetch_exception;
  kop->instantiate_insn=prefetch_proof; kop->emit_x86=prefetch_emit;
- kop->requirements=prefetch_requirements;
  kop->proof_kfunc_id_for_payload=prefetch_service;
  return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,&prefetch_service_set);
 }

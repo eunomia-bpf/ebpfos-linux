@@ -26,15 +26,7 @@ static int irq_restore_if_proof(u64 payload, struct bpf_insn *insns)
 	insns[0] = BPF_CALL_KFUNC(0, irq_restore_if_services.pairs[0].id);
 	return 1;
 }
-static int irq_restore_if_requirements(u64 payload, u64 *capability,
-				       u64 *effect, u8 sha[32])
-{
-	static const u8 semantics[] = EBPFOS_IRQ_RESTORE_IF_SHA256;
-	*capability = 0;
-	*effect = 0;
-	memcpy(sha, semantics, sizeof(semantics));
-	return 0;
-}
+
 static int irq_restore_if_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 			      const struct bpf_prog *prog, const u8 *final_ip)
 {
@@ -46,8 +38,7 @@ static int irq_restore_if_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 static struct bpf_kop irq_restore_if_kop = {
 	.max_insn_cnt = 1, .max_emit_bytes = sizeof(irq_restore_if_native),
 	.instantiate_insn = irq_restore_if_proof, .emit_x86 = irq_restore_if_emit,
-	.requirements = irq_restore_if_requirements,
-	.semantic_sha256 = EBPFOS_IRQ_RESTORE_IF_SHA256,
+
 };
 static const struct bpf_kop * const irq_restore_if_descs[] = { &irq_restore_if_kop };
 static const struct btf_kfunc_id_set irq_restore_if_service_set = {

@@ -3,7 +3,6 @@
  * read/modify/write are the proof. Neither scalar storage nor a pointer field
  * acquires write permission from this descriptor.
  */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -64,30 +63,12 @@ static bool arithmetic_payload(u64 payload, bool area)
 		(payload & 0xffff) <= S16_MAX && (payload >> 16) <= 2;
 }
 
-static int arithmetic_requirements(u64 payload, u64 *cap, u64 *effects,
-				   u8 digest[SHA256_DIGEST_SIZE], bool area)
-{
-	/* sha256("percpu-arithmetic-v1:original-symbol;stock-selection;exact-width-and-opcode;field-write-authority;typed-store-check;single-GS-memory-access;ZF-or-SF;proof-and-native-r3-zero;r6-input-copy") */
-	static const u8 semantics[SHA256_DIGEST_SIZE] = {
-		0x56, 0x18, 0x8d, 0xa7, 0xcc, 0x8c, 0x6c, 0xcf, 0xb0, 0xdf, 0xed, 0xff, 0xd3, 0xda, 0x4d, 0xc4, 0x64, 0x28, 0x04, 0x70, 0x69, 0xeb, 0x41, 0x0a, 0x0b, 0xd2, 0xb5, 0x5c, 0x1c, 0xd0, 0x6d, 0x14
-	};
-	
-	*cap = 0;
-	*effects = 0;
-	memcpy(digest, semantics, sizeof(semantics));
-	/* The area ABI adds a checked constant pointer offset to the proof. */
-	if (area) sha256("percpu-area-arithmetic-v1:offset24;root-selection;exact-width-and-opcode;field-authority;typed-store;single-GS;r3-zero;r6-copy;ZF-or-SF",
-		strlen("percpu-area-arithmetic-v1:offset24;root-selection;exact-width-and-opcode;field-authority;typed-store;single-GS;r3-zero;r6-copy;ZF-or-SF"), digest);
-	return 0;
-}
-
 static int arithmetic_proof(u64 payload, struct bpf_insn *insns,
 			    unsigned width, unsigned size, unsigned alu, bool unary, bool area)
 {
 	unsigned n = 0, flag = payload >> (area ? 24 : 16);
 	u32 field = payload & (area ? 0xffffff : 0xffff);
 
-	
 	insns[n++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2);
 	insns[n++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_this_cpu_ptr);
 	if (area) insns[n++] = BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, field);
@@ -123,7 +104,6 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	u8 native[24];
 	unsigned n = 0, flag = payload >> (area ? 24 : 16);
 
-	
 	/* Native r6 = BPF argument r2, identical to the proof. */
 	native[n++] = 0x48; native[n++] = 0x89; native[n++] = 0xf3;
 	native[n++] = 0x65;
@@ -158,10 +138,8 @@ static int prefix##op##width##_proof(u64 p, struct bpf_insn *i) \
 static int prefix##op##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return arithmetic_emit(i, o, emit, p, width, unary, opcode, area); } \
-static int prefix##op##width##_requirements(u64 p, u64 *c, u64 *e, u8 d[SHA256_DIGEST_SIZE]) \
-{ return arithmetic_requirements(p, c, e, d, area); } \
 static const struct bpf_kop prefix##op##width##_desc = { \
- .max_insn_cnt = 10 + area, .max_emit_bytes = 24, .requirements = prefix##op##width##_requirements, \
+ .max_insn_cnt = 10 + area, .max_emit_bytes = 24,  \
  .instantiate_insn = prefix##op##width##_proof, .emit_x86 = prefix##op##width##_emit }; \
 static const struct bpf_kop * const prefix##op##width##_descs[] = { &prefix##op##width##_desc }; \
 static const struct btf_kfunc_id_set prefix##op##width##_set = { \

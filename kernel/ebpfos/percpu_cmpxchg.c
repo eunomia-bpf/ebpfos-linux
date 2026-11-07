@@ -2,7 +2,6 @@
 /* One unlocked GS CMPXCHG. Stock CPU selection and exact-width ordinary
  * loads/stores check the destination, including a failed comparison.
  */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -26,23 +25,11 @@ static bool compare_payload(u64 payload)
 	return payload <= 0xffffff;
 }
 
-static int compare_requirements(u64 payload, u64 *cap, u64 *effects,
-				u8 digest[SHA256_DIGEST_SIZE])
-{
-	const char *semantics =
-		"percpu-area-cmpxchg-v1:offset24;stock-selection;exact-width;always-checked-store;zeroextended-old;single-unlocked-GS-CMPXCHG;r6-desired;r7-normalized-expected;r3-r4-r5-zero";
-	
-	*cap = 0;
-	*effects = 0;
-	sha256(semantics, strlen(semantics), digest);
-	return 0;
-}
-
 static int compare_proof(u64 payload, struct bpf_insn *insns,
 			 unsigned width, unsigned size)
 {
 	unsigned n = 0;
-	
+
 	insns[n++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_2);
 	insns[n++] = width == 64 ? BPF_MOV64_REG(BPF_REG_7, BPF_REG_3) :
 		BPF_MOV32_REG(BPF_REG_7, BPF_REG_3);
@@ -71,7 +58,7 @@ static int compare_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 {
 	u8 native[36];
 	unsigned n = 0;
-	
+
 	native[n++] = 0x48; native[n++] = 0x89; native[n++] = 0xf3; /* r6 = desired */
 	if (width < 32) {
 		native[n++] = 0x44; native[n++] = 0x0f;
@@ -111,7 +98,7 @@ static int compare##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return compare_emit(i, o, emit, p, width); } \
 static const struct bpf_kop compare##width##_desc = { \
- .max_insn_cnt = 14, .max_emit_bytes = 36, .requirements = compare_requirements, \
+ .max_insn_cnt = 14, .max_emit_bytes = 36,  \
  .instantiate_insn = compare##width##_proof, .emit_x86 = compare##width##_emit }; \
 static const struct bpf_kop * const compare##width##_descs[] = { &compare##width##_desc }; \
 static const struct btf_kfunc_id_set compare##width##_set = { \

@@ -61,36 +61,30 @@ static u32 rdmsr_service(u64 payload)
 { return rdmsr_valid(payload) ? rdmsr_services.pairs[0].id : 0; }
 static int rdmsr_proof(u64 payload, struct bpf_insn *insns)
 {
- 
+
  insns[0] = BPF_CALL_KFUNC(0, rdmsr_services.pairs[0].id);
  return 1;
 }
 static int rdmsr_exception(u64 payload, unsigned int index, struct bpf_kop_exception *entry)
 {
- 
+
  *entry = (struct bpf_kop_exception) { .insn_offset = EBPFOS_RDMSR_INSN,
   .fixup_offset = EBPFOS_RDMSR_FIXUP, .data = EX_TYPE_RDMSR_SAFE | (8 << 8) };
  return 0;
 }
-static int rdmsr_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 digest[] = EBPFOS_RDMSR_SHA256;
- 
- *capability = 0; *effect = 0; memcpy(sha, digest, 32);
- return 0;
-}
+
 static int rdmsr_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                      const struct bpf_prog *prog, const u8 *final_ip)
 {
- 
+
  if (emit) memcpy(image + *offset, rdmsr_native, sizeof(rdmsr_native));
  *offset += sizeof(rdmsr_native); return sizeof(rdmsr_native);
 }
 static struct bpf_kop rdmsr_kop = { .max_insn_cnt = 1,
  .max_emit_bytes = sizeof(rdmsr_native), .num_exentries = 1,
  .exception_entry = rdmsr_exception, .instantiate_insn = rdmsr_proof,
- .emit_x86 = rdmsr_emit, .requirements = rdmsr_requirements,
- .proof_kfunc_id_for_payload = rdmsr_service, .semantic_sha256 = EBPFOS_RDMSR_SHA256 };
+ .emit_x86 = rdmsr_emit,
+ .proof_kfunc_id_for_payload = rdmsr_service, };
 static const struct bpf_kop * const rdmsr_descs[] = { &rdmsr_kop };
 static int rdmsr_context_filter(const struct bpf_prog *prog, u32 id);
 static const struct btf_kfunc_id_set rdmsr_service_set = { .set = &rdmsr_services, .filter = rdmsr_context_filter };
@@ -102,40 +96,33 @@ static u32 rdmsr_unchecked_service(u64 payload)
 { return rdmsr_unchecked_valid(payload) ? rdmsr_unchecked_services.pairs[0].id : 0; }
 static int rdmsr_unchecked_proof(u64 payload, struct bpf_insn *insns)
 {
- 
+
  insns[0] = BPF_CALL_KFUNC(0, rdmsr_unchecked_services.pairs[0].id);
  return 1;
 }
 static int rdmsr_unchecked_exception(u64 payload, unsigned int index,
                                    struct bpf_kop_exception *entry)
 {
- 
+
  *entry = (struct bpf_kop_exception) {
   .insn_offset = EBPFOS_RDMSR_UNCHECKED_INSN,
   .fixup_offset = EBPFOS_RDMSR_UNCHECKED_FIXUP, .data = EX_TYPE_RDMSR };
  return 0;
 }
-static int rdmsr_unchecked_requirements(u64 payload, u64 *capability,
-                                       u64 *effect, u8 sha[32])
-{
- static const u8 digest[] = EBPFOS_RDMSR_UNCHECKED_SHA256;
- 
- *capability = 0; *effect = 0; memcpy(sha, digest, 32);
- return 0;
-}
+
 static int rdmsr_unchecked_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                                const struct bpf_prog *prog, const u8 *final_ip)
 {
- 
+
  if (emit) memcpy(image + *offset, rdmsr_unchecked_native, sizeof(rdmsr_unchecked_native));
  *offset += sizeof(rdmsr_unchecked_native); return sizeof(rdmsr_unchecked_native);
 }
 static struct bpf_kop rdmsr_unchecked_kop = { .max_insn_cnt = 1,
  .max_emit_bytes = sizeof(rdmsr_unchecked_native), .num_exentries = 1,
  .exception_entry = rdmsr_unchecked_exception, .instantiate_insn = rdmsr_unchecked_proof,
- .emit_x86 = rdmsr_unchecked_emit, .requirements = rdmsr_unchecked_requirements,
+ .emit_x86 = rdmsr_unchecked_emit,
  .proof_kfunc_id_for_payload = rdmsr_unchecked_service,
- .semantic_sha256 = EBPFOS_RDMSR_UNCHECKED_SHA256 };
+ };
 static const struct bpf_kop * const rdmsr_unchecked_descs[] = { &rdmsr_unchecked_kop };
 static const struct btf_kfunc_id_set rdmsr_unchecked_service_set = {
  .set = &rdmsr_unchecked_services, .filter = rdmsr_context_filter };

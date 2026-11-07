@@ -43,9 +43,8 @@ BTF_KFUNCS_START(zeropad_mov64_services)
 BTF_ID_FLAGS(func, bpf_ebpfos_x86_zeropad_mov64)
 BTF_KFUNCS_END(zeropad_mov64_services)
 static const u8 zeropad_mov64_native[] = EBPFOS_FAULT_MOV64_ZEROPAD_NATIVE;
-static const u8 zeropad_mov64_sha256[] = EBPFOS_FAULT_MOV64_ZEROPAD_SHA256;
-static const struct btf_kfunc_id_set zeropad_mov64_service_set = { .set = &zeropad_mov64_services };
 
+static const struct btf_kfunc_id_set zeropad_mov64_service_set = { .set = &zeropad_mov64_services };
 
 static int fault_mov_component_filter(const struct bpf_prog *prog, u32 id);
 
@@ -71,7 +70,6 @@ static u32 fault_mov##width##_service(u64 payload) \
 static int fault_mov##width##_proof(u64 payload, struct bpf_insn *insns) \
 { \
  u32 service = fault_mov##width##_service(payload); \
- \
  insns[0] = BPF_MOV64_REG(BPF_REG_1, BPF_REG_2); \
  insns[1] = BPF_MOV64_REG(BPF_REG_2, BPF_REG_3); \
  insns[2] = BPF_CALL_KFUNC(0, service); \
@@ -80,7 +78,6 @@ static int fault_mov##width##_proof(u64 payload, struct bpf_insn *insns) \
 static int fault_mov##width##_exception(u64 payload, unsigned int index, \
                                       struct bpf_kop_exception *entry) \
 { \
- \
  *entry = (struct bpf_kop_exception) { \
   .insn_offset = EBPFOS_FAULT_MOV##width##_INSN, \
   .fixup_offset = EBPFOS_FAULT_MOV##width##_FIXUP, .data = EX_TYPE_UACCESS }; \
@@ -90,19 +87,10 @@ static int fault_mov##width##_exception(u64 payload, unsigned int index, \
  } \
  return 0; \
 } \
-static int fault_mov##width##_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32]) \
-{ \
- static const u8 ordinary_sha[] = EBPFOS_FAULT_MOV##width##_SHA256; \
- \
- *capability = 0; *effect = 0; \
- memcpy(sha, (payload & 255) == EX_TYPE_ZEROPAD ? zeropad_mov64_sha256 : ordinary_sha, 32); \
- return 0; \
-} \
 static int fault_mov##width##_emit(u8 *image, u32 *offset, bool emit, \
                     u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
  const u8 *bytes = fault_mov##width##_native; unsigned int size = sizeof(fault_mov##width##_native); \
- \
  if ((payload & 255) == EX_TYPE_ZEROPAD) { bytes = zeropad_mov64_native; size = sizeof(zeropad_mov64_native); } \
  if (emit) memcpy(image + *offset, bytes, size); \
  *offset += size; return size; \
@@ -111,8 +99,7 @@ static struct bpf_kop fault_mov##width##_kop = { \
  .max_insn_cnt = 3, .max_emit_bytes = sizeof(fault_mov##width##_native), \
  .num_exentries = 1, .exception_entry = fault_mov##width##_exception, \
  .instantiate_insn = fault_mov##width##_proof, .emit_x86 = fault_mov##width##_emit, \
- .requirements = fault_mov##width##_requirements, .proof_kfunc_id_for_payload = fault_mov##width##_service, \
- .semantic_sha256 = EBPFOS_FAULT_MOV##width##_SHA256, \
+  .proof_kfunc_id_for_payload = fault_mov##width##_service, \
 }; \
 static const struct bpf_kop * const fault_mov##width##_descs[] = { &fault_mov##width##_kop }; \
 static const struct btf_kfunc_id_set fault_mov##width##_service_set = { .set = &fault_mov##width##_services }; \
@@ -151,7 +138,6 @@ static int __init fault_mov_register(void)
  error = register_btf_kfunc_id_set(BPF_PROG_TYPE_RAW_TRACEPOINT, &zeropad_mov64_component_service_set);
  if (error) return error;
 #define FAULT_MOV_REGISTER(width, suffix, part) \
- \
  error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &fault_mov##width##_service_set); \
  if (error) return error; \
  error = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &fault_mov##width##_set); \

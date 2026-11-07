@@ -4,7 +4,6 @@
  * native emission supplies the indivisible exchange. Register MOV scaffolding
  * preserves R1-R5 and architectural flags around that one memory operation.
  */
-#include <crypto/sha2.h>
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -34,28 +33,20 @@ static bool xchg##width##_payload(u64 p) \
 { return xchg##width##_ids.cnt == 1 && p == xchg##width##_ids.pairs[0].id; } \
 static int xchg##width##_proof(u64 p, struct bpf_insn *insns) \
 { \
-  \
  insns[0] = BPF_LDX_MEM(size, BPF_REG_0, BPF_REG_1, 0); \
  insns[1] = BPF_STX_MEM(size, BPF_REG_1, BPF_REG_2, 0); \
  return 2; \
-} \
-static int xchg##width##_requirements(u64 p, u64 *cap, u64 *effects, u8 d[SHA256_DIGEST_SIZE]) \
-{ \
- static const u8 digest[] = EBPFOS_KOP_LOCKED_XCHG##width##_SEMANTIC_SHA256; \
-  \
- *cap = 0; *effects = 0; memcpy(d, digest, sizeof(digest)); return 0; \
 } \
 static int xchg##width##_emit(u8 *image, u32 *offset, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_LOCKED_XCHG##width##_NATIVE_BYTES; \
-  \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \
 static const struct bpf_kop xchg##width##_desc = { \
  .max_insn_cnt = 2, .max_emit_bytes = 16, \
- .requirements = xchg##width##_requirements, .instantiate_insn = xchg##width##_proof, \
+  .instantiate_insn = xchg##width##_proof, \
  .emit_x86 = xchg##width##_emit }; \
 static const struct bpf_kop * const xchg##width##_descs[] = { &xchg##width##_desc }; \
 static const struct btf_kfunc_id_set xchg##width##_set = { \

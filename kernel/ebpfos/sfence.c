@@ -27,22 +27,15 @@ BTF_KFUNCS_END(sfence_ids)
 static const u8 sfence_native[] = EBPFOS_SFENCE_NATIVE;
 static int sfence_proof(u64 payload, struct bpf_insn *insns)
 {
-	
+
 	insns[0] = BPF_CALL_KFUNC(0, sfence_services.pairs[0].id);
 	return 1;
 }
-static int sfence_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
-	static const u8 semantics[] = EBPFOS_SFENCE_SHA256;
-	
-	*capability = 0; *effect = 0;
-	memcpy(sha, semantics, sizeof(semantics));
-	return 0;
-}
+
 static int sfence_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 		      const struct bpf_prog *prog, const u8 *final_ip)
 {
-	
+
 	if (emit) memcpy(image + *offset, sfence_native, sizeof(sfence_native));
 	*offset += sizeof(sfence_native);
 	return sizeof(sfence_native);
@@ -50,7 +43,7 @@ static int sfence_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 static struct bpf_kop sfence_kop = {
 	.max_insn_cnt = 1, .max_emit_bytes = sizeof(sfence_native),
 	.instantiate_insn = sfence_proof, .emit_x86 = sfence_emit,
-	.requirements = sfence_requirements, .semantic_sha256 = EBPFOS_SFENCE_SHA256,
+
 };
 static const struct bpf_kop * const sfence_descs[] = { &sfence_kop };
 static const struct btf_kfunc_id_set sfence_service_set = { .set = &sfence_services };

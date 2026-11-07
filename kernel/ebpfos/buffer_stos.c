@@ -54,14 +54,7 @@ static int stos_proof(u64 payload, struct bpf_insn *insns)
  insns[0] = BPF_CALL_KFUNC(0, service);
  return 1;
 }
-static int stos_requirements(u64 payload, u64 *capability, u64 *effect, u8 sha[32])
-{
- static const u8 digest[] = EBPFOS_BUFFER_STOSB_SHA256;
- *capability = 0;
- *effect = 0;
- memcpy(sha, digest, 32);
- return 0;
-}
+
 static int stos_emit(u8 *image, u32 *offset, bool emit, u64 payload,
                      const struct bpf_prog *prog, const u8 *final_ip)
 {
@@ -73,8 +66,8 @@ static int stos_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 static struct bpf_kop stos_kop = {
  .max_insn_cnt = 1, .max_emit_bytes = sizeof(stos_native),
  .instantiate_insn = stos_proof, .emit_x86 = stos_emit,
- .requirements = stos_requirements, .proof_kfunc_id_for_payload = stos_service,
- .semantic_sha256 = EBPFOS_BUFFER_STOSB_SHA256,
+  .proof_kfunc_id_for_payload = stos_service,
+
 };
 static const struct bpf_kop * const stos_descs[] = { &stos_kop };
 static const struct btf_kfunc_id_set stos_service_set = { .set = &stos_services };

@@ -2,7 +2,6 @@
 config EBPFOS
 	bool "eBPFOS transactional component graph"
 	depends on BPF_SYSCALL && BPF_JIT
-	select CRYPTO_LIB_SHA256
 	select DEBUG_KERNEL
 	select KALLSYMS
 	select KALLSYMS_ALL
