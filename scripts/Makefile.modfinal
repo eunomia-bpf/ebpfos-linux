@@ -22,10 +22,10 @@ part-of-module = y
 GCOV_PROFILE := n
 ccflags-remove-y := $(CC_FLAGS_CFI)
 
-%.mod.o: %.mod.c FORCE
+%.mod.o: %.mod.c $(objtree)/include/config/auto.conf FORCE
 	$(call if_changed_rule,cc_o_c)
 
-.module-common.o: $(srctree)/scripts/module-common.c FORCE
+.module-common.o: $(srctree)/scripts/module-common.c $(objtree)/include/config/auto.conf FORCE
 	$(call if_changed_rule,cc_o_c)
 
 ifneq ($(WARN_ON_UNUSED_TRACEPOINTS),)
