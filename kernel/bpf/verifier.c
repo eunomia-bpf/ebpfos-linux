@@ -14686,7 +14686,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 static int check_native_prototype_call(struct bpf_verifier_env *env,
                                       struct btf *btf,
                                       const struct btf_type *prototype,
-                                      bool direct, const struct btf_type *declaration)
+                                      bool direct, const struct btf_type *declaration,
+                                      struct bpf_kfunc_desc *desc)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_kfunc_call_arg_meta meta = {
@@ -14695,6 +14696,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		.func_id = U32_MAX,
 		.func_name = "native call",
 		.func_decl = declaration,
+		.desc = desc,
 		.native_call = direct,
 	};
 	struct bpf_reg_state native_result = {};
@@ -14747,7 +14749,8 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 
 static int check_native_function_call(struct bpf_verifier_env *env, struct btf *btf,
                                       const struct btf_type *prototype,
-                                      const struct btf_type *declaration)
+                                      const struct btf_type *declaration,
+                                      struct bpf_kfunc_desc *desc)
 {
 	struct bpf_verifier_state *state = env->cur_state;
 	u32 owner = cur_func(env)->subprogno;
@@ -14756,7 +14759,7 @@ static int check_native_function_call(struct bpf_verifier_env *env, struct btf *
 	/* An implicit current-task or global argument can also consume a
 	 * resource. A memory contract does not describe those effects.
 	 */
-	err = check_native_prototype_call(env, btf, prototype, true, declaration);
+	err = check_native_prototype_call(env, btf, prototype, true, declaration, desc);
 	if (!err) {
 		env->subprog_info[owner].has_native_call = true;
 		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
@@ -14795,9 +14798,9 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 		/* An exact symbol may use the ordinary Native contract. Registered
 		 * effects still require their kfunc protocol, never a bare callx.
 		 */
-		err = check_native_function_call(env, target->btf, prototype, declaration);
+		err = check_native_function_call(env, target->btf, prototype, declaration, NULL);
 	} else {
-		err = check_native_prototype_call(env, target->btf, prototype, false, NULL);
+		err = check_native_prototype_call(env, target->btf, prototype, false, NULL, NULL);
 	}
 	if (err)
 		return err;
@@ -15260,7 +15263,7 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return err;
 	if (meta.native_call)
 		return check_native_function_call(env, meta.btf, meta.func_proto,
-			btf_type_by_id(meta.btf, meta.func_id));
+			btf_type_by_id(meta.btf, meta.func_id), meta.desc);
 	desc_btf = meta.btf;
 	func_name = meta.func_name;
 	insn_aux = &env->insn_aux_data[insn_idx];
