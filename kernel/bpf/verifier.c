@@ -13979,15 +13979,32 @@ static int native_call_named_args(struct bpf_verifier_env *env, struct btf *btf,
 
  cell_function_parameters(prototype, &count, &variadic);
 
- if (variadic) {
-  /* The Native provider's complete body proof is the authority. A callback
-   * prototype or caller-owned annotation cannot assert that another body
-   * ignores its anonymous list. Fixed arguments retain every ordinary check.
-   */
-  u32 tail = cell_variadic_scalar_tail(btf, declaration);
- }
  *named = count;
  return 0;
+}
+
+/* A Native callee contributes static ABI data, not a kfunc effect contract. */
+static int native_call_abi(struct bpf_verifier_env *env,
+                           const struct bpf_kfunc_call_arg_meta *meta,
+                           struct bpf_native_abi *abi)
+{
+	int ret;
+
+	if (meta->desc && meta->desc->native_abi_cached) {
+		*abi = meta->desc->native_abi;
+		return 0;
+	}
+	ret = bpf_native_abi_plan(meta->btf, meta->func_proto, abi,
+				  env->prog->aux->trusted_kernel);
+	if (ret) return ret;
+	ret = bpf_native_abi_tail(meta->btf, meta->func_decl ?:
+		btf_type_by_id(meta->btf, meta->func_id), abi);
+	if (ret) return ret;
+	if (meta->desc) {
+		meta->desc->native_abi = *abi;
+		meta->desc->native_abi_cached = true;
+	}
+	return 0;
 }
 
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_arg_meta *meta,
@@ -14008,20 +14025,8 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		meta->func_decl ?: btf_type_by_id(meta->btf, meta->func_id), &nargs);
 	if (ret) return ret;
 	if (native) {
-		if (meta->desc && meta->desc->native_abi_cached) {
-			abi = meta->desc->native_abi;
-		} else {
-			ret = bpf_native_abi_plan(meta->btf, meta->func_proto, &abi,
-					  env->prog->aux->trusted_kernel);
-			if (ret) return ret;
-			ret = bpf_native_abi_tail(meta->btf, meta->func_decl ?:
-				btf_type_by_id(meta->btf, meta->func_id), &abi);
-			if (ret) return ret;
-			if (meta->desc) {
-				meta->desc->native_abi = abi;
-				meta->desc->native_abi_cached = true;
-			}
-		}
+		ret = native_call_abi(env, meta, &abi);
+		if (ret) return ret;
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
@@ -14702,7 +14707,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	struct bpf_reg_state native_result = {};
 	u32 native_result_size = 0;
 	const struct btf_type *type;
-	u32 i, nargs;
+	struct bpf_native_abi abi = {};
 	int err;
 
 	/* Missing metadata carries no pointer or result-shape facts. Keep the
@@ -14715,10 +14720,16 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		cur_aux(env)->returns_two_regs = true;
 		return 0;
 	}
-	err = native_call_named_args(env, btf, meta.func_proto, declaration, &nargs);
-	if (err) return err;
-
-	check_kfunc_args(env, &meta, env->insn_idx, &native_result, &native_result_size);
+	/* Ordinary Native calls do not have a registered kfunc effect contract.
+	 * Its argument checker formerly ran here with its error discarded.
+	 * Retain only the ABI result facts needed by subsequent instructions.
+	 */
+	if (env->subprog_info[cur_func(env)->subprogno].native_frame &&
+	    !native_call_abi(env, &meta, &abi) && abi.result_buffer) {
+		native_result = regs[BPF_REG_1];
+		native_result_size = abi.args[0].size;
+		native_prototype_record_result(env, btf, prototype, true);
+	}
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
 	clear_caller_saved_regs(env, regs);
 	if (native_result_size) {
