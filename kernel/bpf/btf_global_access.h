@@ -127,12 +127,7 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 				  int value_regno)
 {
 	struct bpf_reg_state *reg = &regs[regno];
-	const struct bpf_prog_aux *aux = env->prog->aux;
-	const struct btf_type *var = btf_type_by_id(reg->btf, reg->btf_id), *type;
-	u32 owner = cur_func(env)->subprogno, bytes;
-	const char *tag;
-	char key[KSYM_NAME_LEN + 80];
-	int len, err;
+	const struct btf_type *var = btf_type_by_id(reg->btf, reg->btf_id);
 
 	if (btf_pointer_global(reg->btf, var->type))
 		return check_btf_pointer_global(env, regs, regno, off, size, atype, value_regno);
@@ -141,14 +136,7 @@ static int check_btf_global_access(struct bpf_verifier_env *env,
 	 * writable global. VAR pointers originate only at checked symbol loads.
 	 */
 
-	if (atype == BPF_WRITE) {
-		len = snprintf(key, sizeof(key), "write:kernel_global:%s:%llu:%d",
-			btf_name_by_offset(reg->btf, var->name_off),
-			(unsigned long long)(off + reg->var_off.value), size);
-		tag = btf_find_decl_tag_value(aux->btf,
-			btf_type_by_id(aux->btf, aux->func_info[owner].type_id), -1, key);
-	} else if (value_regno >= 0) {
+	if (atype != BPF_WRITE && value_regno >= 0)
 		mark_reg_unknown(env, regs, value_regno);
-	}
 	return 0;
 }
