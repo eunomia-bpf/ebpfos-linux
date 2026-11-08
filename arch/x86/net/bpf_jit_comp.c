@@ -781,7 +781,10 @@ static int __bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		goto out;
 	ret = 1;
 	if (memcmp(ip, new_insn, X86_PATCH_SIZE)) {
-		smp_text_poke_single(ip, new_insn, X86_PATCH_SIZE, NULL);
+		/* Restore the compiler NOP byte-for-byte; the INT3 protocol
+		 * emulates the canonical same-length NOP. */
+		smp_text_poke_single(ip, new_insn, X86_PATCH_SIZE,
+			     new_t == BPF_MOD_NOP || !new_addr ? x86_nops[5] : NULL);
 		ret = 0;
 	}
 out:
