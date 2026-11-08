@@ -3818,12 +3818,19 @@ static int invoke_bpf(const struct btf_func_model *m, u8 **pprog,
 		      struct bpf_tramp_links *tl, int stack_size,
 		      int run_ctx_off, int func_meta_off, bool save_ret,
 		      void *image, void *rw_image, u64 func_meta,
-		      int cookie_off)
+		      int cookie_off, struct bpf_tramp_link **replacement)
 {
 	int i, cur_cookie = (cookie_off - stack_size) / 8;
 	u8 *prog = *pprog;
 
 	for (i = 0; i < tl->nr_links; i++) {
+		if (replacement && tl->links[i]->link.prog->expected_attach_type == BPF_TRACE_REPLACE) {
+			/* New links are at the head; older versions remain available
+			 * when the selected replacement is detached. */
+			if (!*replacement)
+				*replacement = tl->links[i];
+			continue;
+		}
 		if (tl->links[i]->link.prog->call_session_cookie) {
 			emit_store_stack_imm64(&prog, BPF_REG_0, -func_meta_off,
 				func_meta | (cur_cookie << BPF_TRAMP_COOKIE_INDEX_SHIFT));
@@ -3949,6 +3956,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	struct bpf_tramp_links *fentry = &tlinks[BPF_TRAMP_FENTRY];
 	struct bpf_tramp_links *fexit = &tlinks[BPF_TRAMP_FEXIT];
 	struct bpf_tramp_links *fmod_ret = &tlinks[BPF_TRAMP_MODIFY_RETURN];
+	struct bpf_tramp_link *replacement = NULL;
 	void *orig_call = func_addr;
 	int cookie_off, cookie_cnt;
 	u8 **branches = NULL;
@@ -4052,7 +4060,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	arg_stack_off = stack_size;
 
-	if (flags & BPF_TRAMP_F_CALL_ORIG) {
+	if ((flags & BPF_TRAMP_F_CALL_ORIG) && !(flags & BPF_TRAMP_F_NATIVE_REPLACE)) {
 		/* skip patched call instruction and point orig_call to actual
 		 * body of the kernel function.
 		 */
@@ -4125,8 +4133,9 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	if (fentry->nr_links) {
 		if (invoke_bpf(m, &prog, fentry, regs_off, run_ctx_off, func_meta_off,
-			       flags & BPF_TRAMP_F_RET_FENTRY_RET, image, rw_image,
-			       func_meta, cookie_off))
+			       (flags & BPF_TRAMP_F_RET_FENTRY_RET) && !(flags & BPF_TRAMP_F_NATIVE_REPLACE),
+			       image, rw_image, func_meta, cookie_off,
+			       flags & BPF_TRAMP_F_NATIVE_REPLACE ? &replacement : NULL))
 			return -EINVAL;
 	}
 
@@ -4143,7 +4152,17 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		}
 	}
 
-	if (flags & BPF_TRAMP_F_CALL_ORIG) {
+	if (flags & BPF_TRAMP_F_NATIVE_REPLACE) {
+		if (invoke_bpf_prog(m, &prog, replacement, regs_off, run_ctx_off,
+				    true, image, rw_image)) {
+			ret = -EINVAL;
+			goto cleanup;
+		}
+		im->ip_after_call = image + (prog - (u8 *)rw_image);
+		emit_nops(&prog, X86_PATCH_SIZE);
+	}
+
+	if ((flags & BPF_TRAMP_F_CALL_ORIG) && !(flags & BPF_TRAMP_F_NATIVE_REPLACE)) {
 		restore_regs(m, &prog, regs_off);
 		save_args(m, &prog, arg_stack_off, true, flags);
 
@@ -4193,7 +4212,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	if (fexit->nr_links) {
 		if (invoke_bpf(m, &prog, fexit, regs_off, run_ctx_off, func_meta_off,
-			       false, image, rw_image, func_meta, cookie_off)) {
+			       false, image, rw_image, func_meta, cookie_off, NULL)) {
 			ret = -EINVAL;
 			goto cleanup;
 		}

@@ -1541,6 +1541,8 @@ struct bpf_tramp_image {
 	int size;
 	struct bpf_ksym ksym;
 	struct percpu_ref pcref;
+	/* Owned through the image's last invocation, including sleeping bodies. */
+	struct bpf_prog *replacement_prog;
 	void *ip_after_call;
 	void *ip_epilogue;
 	union {

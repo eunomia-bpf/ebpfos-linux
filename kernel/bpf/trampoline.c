@@ -471,6 +471,8 @@ static void bpf_tramp_image_free(struct bpf_tramp_image *im)
 	arch_free_bpf_trampoline(im->image, im->size);
 	bpf_jit_uncharge_modmem(im->size);
 	percpu_ref_exit(&im->pcref);
+	if (im->replacement_prog)
+		bpf_prog_put(im->replacement_prog);
 	kfree_rcu(im, rcu);
 }
 
@@ -612,6 +614,7 @@ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mut
 	struct bpf_tramp_links *tlinks;
 	u32 orig_flags = tr->flags;
 	bool ip_arg = false;
+	struct bpf_prog *replacement_prog = NULL;
 	int err, total, size;
 
 	tlinks = bpf_trampoline_get_progs(tr, &total, &ip_arg);
@@ -630,11 +633,16 @@ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mut
 	/* clear all bits except SHARE_IPMODIFY and TAIL_CALL_CTX */
 	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX);
 
-	if (tlinks[BPF_TRAMP_FENTRY].nr_links == 1 &&
-	    tlinks[BPF_TRAMP_FENTRY].links[0]->link.prog->expected_attach_type ==
-		BPF_TRACE_REPLACE) {
+	for (int i = 0; i < tlinks[BPF_TRAMP_FENTRY].nr_links; ++i)
+		if (tlinks[BPF_TRAMP_FENTRY].links[i]->link.prog->expected_attach_type == BPF_TRACE_REPLACE) {
+			replacement_prog = tlinks[BPF_TRAMP_FENTRY].links[i]->link.prog;
+			break;
+		}
+	/* Observer count does not select which body runs. The emitter executes
+	 * observers and the newest replacement as separate phases. */
+	if (replacement_prog) {
 		tr->flags |= BPF_TRAMP_F_RET_FENTRY_RET | BPF_TRAMP_F_SKIP_FRAME |
-			     BPF_TRAMP_F_NATIVE_REPLACE;
+			     BPF_TRAMP_F_NATIVE_REPLACE | BPF_TRAMP_F_CALL_ORIG;
 	} else if (tlinks[BPF_TRAMP_FEXIT].nr_links ||
 		   tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links) {
 		/* NOTE: BPF_TRAMP_F_RESTORE_REGS and BPF_TRAMP_F_SKIP_FRAME
@@ -682,6 +690,11 @@ again:
 	if (IS_ERR(im)) {
 		err = PTR_ERR(im);
 		goto out;
+	}
+
+	if (replacement_prog) {
+		bpf_prog_inc(replacement_prog);
+		im->replacement_prog = replacement_prog;
 	}
 
 	err = arch_prepare_bpf_trampoline(im, im->image, im->image + size,
@@ -784,11 +797,6 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 	struct hlist_head *prog_list;
 	int err = 0;
 	int cnt = 0, i;
-
-	/* Two-word native results require the entry service's exact verified
-	 * subprogram and checked result-register operation. This trampoline has
-	 * a scalar result slot and cannot preserve the second result word.
-	 */
 
 	kind = bpf_attach_type_to_tramp(link->link.prog);
 	if (tr->extension_prog)
@@ -1464,9 +1472,32 @@ void notrace __bpf_tramp_exit(struct bpf_tramp_image *tr)
 	percpu_ref_put(&tr->pcref);
 }
 
+/* Body lifetime belongs to the trampoline image's invocation reference.
+ * Unlike an observation, a function body can sleep or recurse without
+ * changing its caller's RCU/preemption context. */
+static u64 notrace __bpf_prog_enter_body(struct bpf_prog *prog,
+                                       struct bpf_tramp_run_ctx *run_ctx)
+{
+	run_ctx->saved_run_ctx = bpf_set_run_ctx(&run_ctx->run_ctx);
+	return bpf_prog_start_time();
+}
+
+static void notrace __bpf_prog_exit_body(struct bpf_prog *prog, u64 start,
+                                       struct bpf_tramp_run_ctx *run_ctx)
+{
+	bpf_reset_run_ctx(run_ctx->saved_run_ctx);
+	/* Only the per-CPU statistics update needs a CPU pin. */
+	preempt_disable_notrace();
+	update_prog_stats(prog, start);
+	preempt_enable_notrace();
+}
+
 bpf_trampoline_enter_t bpf_trampoline_enter(const struct bpf_prog *prog)
 {
 	bool sleepable = prog->sleepable;
+
+	if (prog->expected_attach_type == BPF_TRACE_REPLACE)
+		return __bpf_prog_enter_body;
 
 	if (bpf_prog_check_recur(prog))
 		return sleepable ? __bpf_prog_enter_sleepable_recur :
@@ -1482,6 +1513,9 @@ bpf_trampoline_enter_t bpf_trampoline_enter(const struct bpf_prog *prog)
 bpf_trampoline_exit_t bpf_trampoline_exit(const struct bpf_prog *prog)
 {
 	bool sleepable = prog->sleepable;
+
+	if (prog->expected_attach_type == BPF_TRACE_REPLACE)
+		return __bpf_prog_exit_body;
 
 	if (bpf_prog_check_recur(prog))
 		return sleepable ? __bpf_prog_exit_sleepable_recur :
