@@ -10680,9 +10680,13 @@ static void clobber_stack_argument(struct bpf_verifier_env *env,
 		spi = slot / BPF_REG_SIZE;
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
 		if (bpf_is_spilled_reg(&state->stack[spi])) {
+			struct bpf_reg_state held = state->stack[spi].spilled_ptr;
+
 			__mark_reg_unknown(env, &state->stack[spi].spilled_ptr);
 			for (j = 0; j < BPF_REG_SIZE; j++)
 				scrub_spilled_slot(&state->stack[spi].slot_type[j]);
+			/* The callee can follow an address stored in this memory. */
+			clobber_stack_argument(env, &held, 0);
 		} else if (*stype == STACK_ZERO || *stype == STACK_INVALID) {
 			*stype = STACK_MISC;
 		}
@@ -14656,6 +14660,69 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
  * Direct source calls and typed callbacks share every argument/result check.
  * Native callee safety and progress remain the mixed-tier trust assumption.
  */
+static bool btf_pointee_is_const(const struct btf *btf, const struct btf_type *pointer)
+{
+	const struct btf_type *t = btf_type_by_id(btf, pointer->type);
+
+	while (t) {
+		switch (BTF_INFO_KIND(t->info)) {
+		case BTF_KIND_CONST:
+			return true;
+		case BTF_KIND_TYPEDEF:
+		case BTF_KIND_VOLATILE:
+		case BTF_KIND_RESTRICT:
+		case BTF_KIND_TYPE_TAG:
+			t = btf_type_by_id(btf, t->type);
+			break;
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
+/* A native callee may write through every pointer to non-const memory it
+ * receives, to an extent only it knows. What this frame recorded from the
+ * pointer to the top of the frame no longer holds, or a later test of an
+ * out parameter is decided from the value it had before the call. This
+ * drops knowledge; it checks no access.
+ */
+static void native_call_clobbers_stack(struct bpf_verifier_env *env,
+				       struct bpf_kfunc_call_arg_meta *meta)
+{
+	struct bpf_reg_state *regs = cur_regs(env);
+	const struct btf_param *args = btf_params(meta->func_proto);
+	u32 nargs = btf_type_vlen(meta->func_proto);
+	struct bpf_native_abi abi = {};
+	bool located = env->subprog_info[cur_func(env)->subprogno].native_frame &&
+		       !native_call_abi(env, meta, &abi);
+
+	if (located && abi.result_buffer)
+		clobber_stack_argument(env, &regs[BPF_REG_1], abi.args[0].size);
+	for (u32 i = 0; i < nargs; i++) {
+		const struct btf_type *t = btf_type_skip_modifiers(meta->btf, args[i].type, NULL);
+		struct native_arg_scope scope __free(native_arg) = {};
+		int regno;
+
+		if (!t || !btf_type_is_ptr(t) || btf_pointee_is_const(meta->btf, t))
+			continue;
+		if (!located && i >= MAX_BPF_FUNC_REG_ARGS)
+			continue;
+		regno = located ? native_call_arg_reg(env, meta->btf, &abi, i, &scope) : bpf_arg_regno(i);
+		if (regno >= 0)
+			clobber_stack_argument(env, &regs[regno], 0);
+	}
+	for (u32 i = 0; located && i < abi.tail_count; i++) {
+		struct bpf_native_arg arg = bpf_native_tail_arg(&abi, i);
+		struct native_arg_scope scope __free(native_arg) = {};
+
+		if (arg.reg >= 0)
+			clobber_stack_argument(env, &regs[bpf_arg_regno(arg.reg)], 0);
+		else if (!native_stack_arg_at(env, &arg, &scope, 13, arg.size))
+			clobber_stack_argument(env, &regs[13], 0);
+	}
+}
+
 static int check_native_prototype_call(struct bpf_verifier_env *env,
                                       struct btf *btf,
                                       const struct btf_type *prototype,
@@ -14682,6 +14749,8 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	 * native ABI call and its possible RAX/RDX result as unknown scalars.
 	 */
 	if (!prototype) {
+		for (u32 i = 0; i < MAX_BPF_FUNC_REG_ARGS; i++)
+			clobber_stack_argument(env, &regs[bpf_arg_regno(i)], 0);
 		clear_caller_saved_regs(env, regs);
 		mark_reg_unknown(env, regs, BPF_REG_0);
 		mark_reg_unknown(env, regs, BPF_REG_3);
@@ -14698,6 +14767,7 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 		native_result_size = abi.args[0].size;
 		native_prototype_record_result(env, btf, prototype, true);
 	}
+	native_call_clobbers_stack(env, &meta);
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
 	clear_caller_saved_regs(env, regs);
 	if (native_result_size) {
