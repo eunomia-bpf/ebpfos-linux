@@ -22490,6 +22490,7 @@ static bool can_be_sleepable(struct bpf_prog *prog)
 		return true;
 	if (prog->type == BPF_PROG_TYPE_TRACING) {
 		switch (prog->expected_attach_type) {
+		case BPF_TRACE_REPLACE:
 		case BPF_TRACE_FENTRY:
 		case BPF_TRACE_FEXIT:
 		case BPF_MODIFY_RETURN:
