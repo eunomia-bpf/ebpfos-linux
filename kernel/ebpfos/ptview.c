@@ -164,40 +164,44 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
 {
  struct ebpfos_ptview *view;
  unsigned int i, j;
+ size_t capacity = 0;
  int error = -EINVAL;
  unsigned long flags, sequence;
- /* These are admission restrictions, not checks in the replaced code. */
- 
- view = kvzalloc(struct_size(view, pages, count), GFP_KERNEL);
+ /* A change can span pages; reserve metadata for each touched page before
+  * composing overlapping changes into the same private snapshot. */
+ for (i = 0; i < count; ++i)
+  capacity += DIV_ROUND_UP(offset_in_page(changes[i].address) + changes[i].size, PAGE_SIZE);
+ view = kvzalloc(struct_size(view, pages, capacity), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
  refcount_set(&view->refs, 1);view->owner = owner;INIT_LIST_HEAD(&view->text);
  mutex_lock(&text_mutex);
  sequence = READ_ONCE(text_stop_sequence);
  for (i = 0; i < count; ++i) {
-  unsigned long address = changes[i].address & PAGE_MASK;
-  size_t offset = offset_in_page(changes[i].address);
-  unsigned int level;
-  pte_t *pte;
-  
-  for (j = 0; j < view->count; ++j) if (view->pages[j].address == address) break;
-  if (j == view->count) {
-   /* CPA splits only the containing large mapping, retaining the global bit
-    * on every unchanged neighbour. It also invalidates existing global TLBs. */
-   error = set_memory_4k(address, 1);
-   if (error) goto fail;
-   error = set_memory_nonglobal(address, 1);
-   if (error) goto fail;
-   pte = lookup_address(address, &level);
-   
-   view->pages[j].copy = alloc_page(GFP_KERNEL);
-   if (!view->pages[j].copy) {error = -ENOMEM;goto fail;}
-   view->pages[j].address = address;
-   /* Preparation is independent of the preparing task's current view. */
-   memcpy(page_address(view->pages[j].copy), page_address(pfn_to_page(pte_pfn(*pte))), PAGE_SIZE);
-   ++view->count;
+  size_t consumed = 0;
+  while (consumed < changes[i].size) {
+   unsigned long at = changes[i].address + consumed, address = at & PAGE_MASK;
+   size_t offset = offset_in_page(at);
+   size_t bytes = min_t(size_t, changes[i].size - consumed, PAGE_SIZE - offset);
+   unsigned int level;
+   pte_t *pte;
+   for (j = 0; j < view->count; ++j) if (view->pages[j].address == address) break;
+   if (j == view->count) {
+    /* Split only this mapping; unchanged neighbours retain their global bit. */
+    error = set_memory_4k(address, 1);
+    if (error) goto fail;
+    error = set_memory_nonglobal(address, 1);
+    if (error) goto fail;
+    pte = lookup_address(address, &level);
+    view->pages[j].copy = alloc_page(GFP_KERNEL);
+    if (!view->pages[j].copy) {error = -ENOMEM;goto fail;}
+    view->pages[j].address = address;
+    memcpy(page_address(view->pages[j].copy), page_address(pfn_to_page(pte_pfn(*pte))), PAGE_SIZE);
+    ++view->count;
+   }
+   memcpy(page_address(view->pages[j].copy) + offset, changes[i].bytes + consumed, bytes);
+   bitmap_set(view->pages[j].changed, offset, bytes);
+   consumed += bytes;
   }
-  memcpy(page_address(view->pages[j].copy) + offset, changes[i].bytes, changes[i].size);
-  bitmap_set(view->pages[j].changed, offset, changes[i].size);
  }
  raw_spin_lock_irqsave(&text_views_lock, flags);
  list_add_tail_rcu(&view->text, &text_views);
