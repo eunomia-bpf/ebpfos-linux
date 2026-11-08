@@ -3668,6 +3668,37 @@ static void restore_regs(const struct btf_func_model *m, u8 **prog,
 	}
 }
 
+/* Native integer-class results occupy RAX and, for a second word, RDX.
+ * Keep the words contiguous after the argument context as callbacks expect. */
+static int trampoline_ret_size(const struct btf_func_model *m)
+{
+	return m->ret_size > 8 ? 16 : 8;
+}
+
+static void save_trampoline_ret(u8 **prog, const struct btf_func_model *m)
+{
+	int size = trampoline_ret_size(m);
+	emit_stx(prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -size);
+	if (size > 8)
+		emit_stx(prog, BPF_DW, BPF_REG_FP, BPF_REG_3, -size + 8);
+}
+
+static void clear_trampoline_ret(u8 **prog, const struct btf_func_model *m)
+{
+	int size = trampoline_ret_size(m);
+	emit_store_stack_imm64(prog, BPF_REG_0, -size, 0);
+	if (size > 8)
+		emit_store_stack_imm64(prog, BPF_REG_0, -size + 8, 0);
+}
+
+static void restore_trampoline_ret(u8 **prog, const struct btf_func_model *m)
+{
+	int size = trampoline_ret_size(m);
+	emit_ldx(prog, BPF_DW, BPF_REG_0, BPF_REG_FP, -size);
+	if (size > 8)
+		emit_ldx(prog, BPF_DW, BPF_REG_3, BPF_REG_FP, -size + 8);
+}
+
 static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 			   struct bpf_tramp_link *l, int stack_size,
 			   int run_ctx_off, bool save_ret,
@@ -3735,7 +3766,7 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 	 * value of BPF_PROG_TYPE_STRUCT_OPS prog.
 	 */
 	if (save_ret)
-		emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
+		save_trampoline_ret(&prog, m);
 
 	/* replace 2 nops with JE insn, since jmp target is known */
 	jmp_insn[0] = X86_JE;
@@ -3817,19 +3848,18 @@ static int invoke_bpf_mod_ret(const struct btf_func_model *m, u8 **pprog,
 	/* The first fmod_ret program will receive a garbage return value.
 	 * Set this to 0 to avoid confusing the program.
 	 */
-	emit_mov_imm32(&prog, false, BPF_REG_0, 0);
-	emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
+	clear_trampoline_ret(&prog, m);
 	for (i = 0; i < tl->nr_links; i++) {
 		if (invoke_bpf_prog(m, &prog, tl->links[i], stack_size, run_ctx_off, true,
 				    image, rw_image))
 			return -EINVAL;
 
-		/* mod_ret prog stored return value into [rbp - 8]. Emit:
-		 * if (*(u64 *)(rbp - 8) !=  0)
+		/* mod_ret prog stored its result at [rbp - ret_size]. Emit:
+		 * if (*(u64 *)(rbp - ret_size) != 0)
 		 *	goto do_fexit;
 		 */
-		/* cmp QWORD PTR [rbp - 0x8], 0x0 */
-		EMIT4(0x48, 0x83, 0x7d, 0xf8); EMIT1(0x00);
+		/* cmp QWORD PTR [rbp - ret_size], 0x0 */
+		EMIT4(0x48, 0x83, 0x7d, -trampoline_ret_size(m)); EMIT1(0x00);
 
 		/* Save the location of the branch and Generate 6 nops
 		 * (4 bytes for an offset and 2 bytes for the jump) These nops
@@ -3951,7 +3981,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 	 * RBP + 8         [ return address  ]
 	 * RBP + 0         [ RBP             ]
 	 *
-	 * RBP - 8         [ return value    ]  BPF_TRAMP_F_CALL_ORIG or
+	 * RBP - ret_size  [ return value(s) ]  BPF_TRAMP_F_CALL_ORIG or
 	 *                                      BPF_TRAMP_F_RET_FENTRY_RET flags
 	 *
 	 *                 [ reg_argN        ]  always
@@ -3975,12 +4005,10 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 
 	/* room for return value of orig_call or fentry prog */
 	save_ret = flags & (BPF_TRAMP_F_CALL_ORIG | BPF_TRAMP_F_RET_FENTRY_RET);
-	/* This tracing/struct_ops trampoline saves only RAX. Native direct
-	 * entries below carry two integer words, but must not make this path
-	 * silently clobber RDX or manufacture a two-register BPF return.
-	 */
+	/* The result tuple follows the saved argument context. Observers may
+	 * clobber every caller-saved register, including the second result word. */
 	if (save_ret)
-		stack_size += 8;
+		stack_size += trampoline_ret_size(m);
 
 	stack_size += nr_regs * 8;
 	regs_off = stack_size;
@@ -4092,7 +4120,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		for (int i = 0; i < cookie_cnt; i++)
 			emit_store_stack_imm64(&prog, BPF_REG_0, -cookie_off + 8 * i, 0);
 		/* clear the return value to make sure fentry always get 0 */
-		emit_store_stack_imm64(&prog, BPF_REG_0, -8, 0);
+		clear_trampoline_ret(&prog, m);
 	}
 
 	if (fentry->nr_links) {
@@ -4137,7 +4165,7 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 			}
 		}
 		/* remember return value in a stack for bpf prog to access */
-		emit_stx(&prog, BPF_DW, BPF_REG_FP, BPF_REG_0, -8);
+		save_trampoline_ret(&prog, m);
 		im->ip_after_call = image + (prog - (u8 *)rw_image);
 		emit_nops(&prog, X86_PATCH_SIZE);
 	}
@@ -4193,9 +4221,9 @@ static int __arch_prepare_bpf_trampoline(struct bpf_tramp_image *im, void *rw_im
 		LOAD_TRAMP_TAIL_CALL_CNT_PTR(stack_size);
 	}
 
-	/* restore return value of orig_call or fentry prog back into RAX */
+	/* restore the complete native result after every callback */
 	if (save_ret)
-		emit_ldx(&prog, BPF_DW, BPF_REG_0, BPF_REG_FP, -8);
+		restore_trampoline_ret(&prog, m);
 
 	emit_ldx(&prog, BPF_DW, BPF_REG_6, BPF_REG_FP, -rbx_off);
 
