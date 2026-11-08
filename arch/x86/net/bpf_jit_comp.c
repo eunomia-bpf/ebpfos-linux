@@ -11,6 +11,7 @@
 #include <linux/bitfield.h>
 #include <linux/bpf.h>
 #include <linux/memory.h>
+#include <linux/module.h>
 #include <linux/sort.h>
 #include <linux/extable.h>
 #include <linux/bpf_native_seq.h>
@@ -766,8 +767,8 @@ int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       void *new_addr)
 {
 	if (!is_kernel_text((long)ip) &&
+	    !is_module_text_address((unsigned long)ip) &&
 	    !is_bpf_text_address((long)ip))
-		/* BPF poking in modules is not supported */
 		return -EINVAL;
 
 	/*
