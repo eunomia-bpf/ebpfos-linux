@@ -9,16 +9,18 @@
 #include <asm/cpufeature.h>
 #include "koperation_user_window.generated.h"
 
-/* No fields, destructor or transfer API: this object cannot be dereferenced. */
+/* No fields, destructor or transfer API: this object cannot be dereferenced.
+ * The token is global: an AOT body carries its address as a relocation, so
+ * the image that runs the body supplies its own address. */
 struct bpf_ebpfos_user_access_window {};
-static struct bpf_ebpfos_user_access_window window_cookie;
+struct bpf_ebpfos_user_access_window ebpfos_user_access_window_cookie;
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc struct bpf_ebpfos_user_access_window *
 bpf_ebpfos_x86_user_access_open(void)
 {
 	asm volatile("stac" : : : "memory");
-	return &window_cookie;
+	return &ebpfos_user_access_window_cookie;
 }
 __bpf_kfunc void bpf_ebpfos_x86_user_access_close(
 		struct bpf_ebpfos_user_access_window *window)
@@ -67,7 +69,7 @@ static int window_open_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	/* STAC, then a flag-preserving return of the stable opaque token. */
 	u8 native[] = { 0x0f, 0x01, 0xcb, 0x48, 0xb8,
 		0, 0, 0, 0, 0, 0, 0, 0 };
-	u64 cookie = (unsigned long)&window_cookie;
+	u64 cookie = (unsigned long)&ebpfos_user_access_window_cookie;
 	static const u8 instruction[] = EBPFOS_USER_STAC_INSN;
 
 	memcpy(native + 5, &cookie, sizeof(cookie));
@@ -90,7 +92,18 @@ static int window_close_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	*offset += sizeof(native);
 	return sizeof(native);
 }
+static int window_open_reloc(u64 payload, unsigned int index,
+		struct bpf_kop_reloc *reloc)
+{
+	/* The MOVABS immediate after STAC and its REX.W B8 opcode. */
+	*reloc = (struct bpf_kop_reloc) {
+		.offset = sizeof((u8[])EBPFOS_USER_STAC_INSN) + 2, .size = 8,
+		.symbol = "ebpfos_user_access_window_cookie",
+	};
+	return 0;
+}
 static struct bpf_kop window_open_kop = {
+	.num_x86_relocs = 1, .x86_reloc = window_open_reloc,
 	.max_insn_cnt = 1, .max_emit_bytes = 13,
 	.instantiate_insn = window_open_proof, .emit_x86 = window_open_emit,
 
