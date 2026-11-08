@@ -147,7 +147,7 @@ void ebpfos_ptview_put(struct ebpfos_ptview *view)
  if (!list_empty(&view->text)) list_del_rcu(&view->text);
  raw_spin_unlock_irqrestore(&text_views_lock, flags);
  for (i = 0; i < view->count; ++i) __free_page(view->pages[i].copy);
- kfree(view);
+ kvfree(view);
 }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_put);
 
@@ -168,7 +168,7 @@ struct ebpfos_ptview *ebpfos_ptview_prepare(const struct ebpfos_ptview_change *c
  unsigned long flags, sequence;
  /* These are admission restrictions, not checks in the replaced code. */
  
- view = kzalloc(struct_size(view, pages, count), GFP_KERNEL);
+ view = kvzalloc(struct_size(view, pages, count), GFP_KERNEL);
  if (!view) return ERR_PTR(-ENOMEM);
  refcount_set(&view->refs, 1);view->owner = owner;INIT_LIST_HEAD(&view->text);
  mutex_lock(&text_mutex);
@@ -220,7 +220,7 @@ struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsign
  for (n = 0; n < count; ++n) maximum += views[n]->count;
  if (!maximum) return NULL;
  if (count == 1) return ebpfos_ptview_get(views[0]);
- result = kzalloc(struct_size(result, pages, maximum), GFP_KERNEL);
+ result = kvzalloc(struct_size(result, pages, maximum), GFP_KERNEL);
  if (!result) return ERR_PTR(-ENOMEM);
  refcount_set(&result->refs, 1);
  INIT_LIST_HEAD(&result->text);
