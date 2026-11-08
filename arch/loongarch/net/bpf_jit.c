@@ -1572,7 +1572,7 @@ void *bpf_arch_text_copy(void *dst, void *src, size_t len)
 
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr)
+		       void *new_addr, u8 *saved_nop)
 {
 	int ret;
 	bool is_call;

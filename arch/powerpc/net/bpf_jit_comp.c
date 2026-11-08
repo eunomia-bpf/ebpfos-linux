@@ -1295,7 +1295,7 @@ static void do_isync(void *info __maybe_unused)
  */
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr)
+		       void *new_addr, u8 *saved_nop)
 {
 	unsigned long bpf_func, bpf_func_end, size, offset;
 	ppc_inst_t old_inst, new_inst;

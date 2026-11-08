@@ -1567,6 +1567,8 @@ struct bpf_trampoline {
 		struct btf_func_model model;
 		void *addr;
 		bool ftrace_managed;
+		/* x86 restores its original five-byte NOP encoding. */
+		u8 entry_nop[5];
 	} func;
 	/* if !NULL this is BPF_PROG_TYPE_EXT program that extends another BPF
 	 * program by replacing one of its functions. func.addr is the address
@@ -4176,7 +4178,7 @@ enum bpf_text_poke_type {
 
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr);
+		       void *new_addr, u8 *saved_nop);
 
 void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 			       struct bpf_prog *new, struct bpf_prog *old);

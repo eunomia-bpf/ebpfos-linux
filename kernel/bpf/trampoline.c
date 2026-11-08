@@ -385,7 +385,7 @@ static int bpf_trampoline_update_fentry(struct bpf_trampoline *tr, u32 orig_flag
 	else if (bpf_trampoline_use_jmp(orig_flags))
 		old_t = BPF_MOD_JUMP;
 
-	return bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr);
+	return bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr, tr->func.entry_nop);
 }
 
 static int unregister_fentry(struct bpf_trampoline *tr, u32 orig_flags,
@@ -548,7 +548,7 @@ static void bpf_tramp_image_put(struct bpf_tramp_image *im)
 	if (im->ip_after_call) {
 		int err = bpf_arch_text_poke(im->ip_after_call, BPF_MOD_NOP,
 					     BPF_MOD_JUMP, NULL,
-					     im->ip_epilogue);
+					     im->ip_epilogue, NULL);
 		WARN_ON(err);
 		if (IS_ENABLED(CONFIG_TASKS_RCU))
 			call_rcu_tasks(&im->rcu, __bpf_tramp_image_put_rcu_tasks);
@@ -821,7 +821,7 @@ static int __bpf_trampoline_link_prog(struct bpf_tramp_link *link,
 			return err;
 		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_NOP,
 					  BPF_MOD_JUMP, NULL,
-					  link->link.prog->bpf_func);
+					  link->link.prog->bpf_func, tr->func.entry_nop);
 		if (!err) {
 			tr->extension_prog = link->link.prog;
 			tr->extension_link = link;
@@ -893,7 +893,7 @@ static int __bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 		WARN_ON_ONCE(!tr->extension_prog);
 		err = bpf_arch_text_poke(tr->func.addr, BPF_MOD_JUMP,
 					 BPF_MOD_NOP,
-					 tr->extension_prog->bpf_func, NULL);
+					 tr->extension_prog->bpf_func, NULL, tr->func.entry_nop);
 		if (err)
 			return err;
 		tr->extension_prog = NULL;

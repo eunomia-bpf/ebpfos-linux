@@ -2941,7 +2941,7 @@ static int gen_branch_or_nop(enum aarch64_insn_branch_type type, void *ip,
  */
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr)
+		       void *new_addr, u8 *saved_nop)
 {
 	int ret;
 	u32 old_insn;

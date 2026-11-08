@@ -16,6 +16,8 @@
 #include <linux/extable.h>
 #include <linux/bpf_native_seq.h>
 #include <asm/extable.h>
+#include <asm/insn.h>
+#include <asm/insn-eval.h>
 #include <asm/ftrace.h>
 #include <asm/set_memory.h>
 #include <asm/nospec-branch.h>
@@ -718,11 +720,27 @@ static int emit_jump(u8 **pprog, void *func, void *ip)
 	return emit_patch(pprog, func, ip, 0xE9);
 }
 
+/* Compiler patch sites may contain one or several NOP instructions. Decode
+ * their original encoding once; the trampoline owns it through restoration. */
+static bool bpf_text_poke_nops(const void *ip)
+{
+	unsigned int offset = 0;
+	struct insn insn;
+
+	while (offset < X86_PATCH_SIZE) {
+		if (insn_decode(&insn, ip + offset, X86_PATCH_SIZE - offset, INSN_MODE_64) ||
+	    !insn_is_nop(&insn))
+			return false;
+		offset += insn.length;
+	}
+	return offset == X86_PATCH_SIZE;
+}
+
 static int __bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 				enum bpf_text_poke_type new_t,
-				void *old_addr, void *new_addr)
+				void *old_addr, void *new_addr, u8 *saved_nop)
 {
-	const u8 *nop_insn = x86_nops[5];
+	const u8 *nop_insn = saved_nop && old_t != BPF_MOD_NOP ? saved_nop : x86_nops[5];
 	u8 old_insn[X86_PATCH_SIZE];
 	u8 new_insn[X86_PATCH_SIZE];
 	u8 *prog;
@@ -750,6 +768,15 @@ static int __bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 
 	ret = -EBUSY;
 	mutex_lock(&text_mutex);
+	/* The old exact-byte comparison also accepts the compiler's NOP forms.
+	 * All work stays on the cold publication path under text_mutex. */
+	if (saved_nop && old_t == BPF_MOD_NOP && bpf_text_poke_nops(ip)) {
+		memcpy(saved_nop, ip, X86_PATCH_SIZE);
+		memcpy(old_insn, saved_nop, X86_PATCH_SIZE);
+		if (new_t == BPF_MOD_NOP)
+			memcpy(new_insn, saved_nop, X86_PATCH_SIZE);
+	}
+
 	if (memcmp(ip, old_insn, X86_PATCH_SIZE))
 		goto out;
 	ret = 1;
@@ -764,7 +791,7 @@ out:
 
 int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 		       enum bpf_text_poke_type new_t, void *old_addr,
-		       void *new_addr)
+		       void *new_addr, u8 *saved_nop)
 {
 	if (!is_kernel_text((long)ip) &&
 	    !is_module_text_address((unsigned long)ip) &&
@@ -778,7 +805,7 @@ int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 	if (is_endbr(ip))
 		ip += ENDBR_INSN_SIZE;
 
-	return __bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr);
+	return __bpf_arch_text_poke(ip, old_t, new_t, old_addr, new_addr, saved_nop);
 }
 
 #define EMIT_LFENCE()	EMIT3(0x0F, 0xAE, 0xE8)
@@ -1063,12 +1090,12 @@ static void bpf_tail_call_direct_fixup(struct bpf_prog *prog)
 						   BPF_MOD_NOP, BPF_MOD_JUMP,
 						   NULL,
 						   (u8 *)target->bpf_func +
-						   poke->adj_off);
+						   poke->adj_off, NULL);
 			BUG_ON(ret < 0);
 			ret = __bpf_arch_text_poke(poke->tailcall_bypass,
 						   BPF_MOD_JUMP, BPF_MOD_NOP,
 						   (u8 *)poke->tailcall_target +
-						   X86_PATCH_SIZE, NULL);
+						   X86_PATCH_SIZE, NULL, NULL);
 			BUG_ON(ret < 0);
 		}
 		WRITE_ONCE(poke->tailcall_target_stable, true);
@@ -4891,20 +4918,20 @@ void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 		t = old_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
 		ret = __bpf_arch_text_poke(poke->tailcall_target,
 					   t, BPF_MOD_JUMP,
-					   old_addr, new_addr);
+					   old_addr, new_addr, NULL);
 		BUG_ON(ret < 0);
 		if (!old) {
 			ret = __bpf_arch_text_poke(poke->tailcall_bypass,
 						   BPF_MOD_JUMP, BPF_MOD_NOP,
 						   poke->bypass_addr,
-						   NULL);
+						   NULL, NULL);
 			BUG_ON(ret < 0);
 		}
 	} else {
 		t = old_bypass_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
 		ret = __bpf_arch_text_poke(poke->tailcall_bypass,
 					   t, BPF_MOD_JUMP, old_bypass_addr,
-					   poke->bypass_addr);
+					   poke->bypass_addr, NULL);
 		BUG_ON(ret < 0);
 		/* let other CPUs finish the execution of program
 		 * so that it will not possible to expose them
@@ -4914,7 +4941,7 @@ void bpf_arch_poke_desc_update(struct bpf_jit_poke_descriptor *poke,
 			synchronize_rcu();
 		t = old_addr ? BPF_MOD_JUMP : BPF_MOD_NOP;
 		ret = __bpf_arch_text_poke(poke->tailcall_target,
-					   t, BPF_MOD_NOP, old_addr, NULL);
+					   t, BPF_MOD_NOP, old_addr, NULL, NULL);
 		BUG_ON(ret < 0);
 	}
 }

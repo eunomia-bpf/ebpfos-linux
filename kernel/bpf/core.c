@@ -3403,7 +3403,7 @@ int __weak skb_copy_bits(const struct sk_buff *skb, int offset, void *to,
 
 int __weak bpf_arch_text_poke(void *ip, enum bpf_text_poke_type old_t,
 			      enum bpf_text_poke_type new_t, void *old_addr,
-			      void *new_addr)
+			      void *new_addr, u8 *saved_nop)
 {
 	return -ENOTSUPP;
 }
