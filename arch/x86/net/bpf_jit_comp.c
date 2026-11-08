@@ -3412,6 +3412,8 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		 */
 	}
 	name = aot_function_name(source);
+	if (!name)
+		return -EOPNOTSUPP;
 	if (request->nr_relocs) {
 		aot.operands = memdup_user(u64_to_user_ptr(request->relocs),
 					  array_size(request->nr_relocs, sizeof(*aot.operands)));

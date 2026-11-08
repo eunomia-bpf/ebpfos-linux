@@ -20568,6 +20568,8 @@ static int check_pseudo_btf_id(struct bpf_verifier_env *env,
 	btf_fd = insn[1].imm;
 	if (btf_fd == BPF_BTF_SOURCE) {
 		btf = env->prog->aux->btf;
+		if (!btf)
+			return -EINVAL;
 		btf_get(btf);
 	} else if (btf_fd) {
 		btf = btf_get_by_fd(btf_fd);

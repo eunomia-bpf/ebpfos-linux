@@ -69,6 +69,10 @@ static int aot_map_name(struct bpf_aot_context *aot, u64 address,
 		    map->ops->map_direct_value_addr(map, &base, 0) ||
 		    address < base || address - base > map->value_size * (u64)map->max_entries)
 			continue;
+		/* The binding is named through BTF; the JIT cannot emit it without. */
+		if (!map->btf || !source->btf || !source->func_info ||
+		    source->func_idx >= source->func_info_cnt)
+			return -EOPNOTSUPP;
 		type = btf_type_by_id(map->btf, map->btf_value_type_id);
 		section = btf_name_by_offset(map->btf, type->name_off);
 		snprintf(prefix, sizeof(prefix), "aot:constant-pool:%s:", section);
@@ -103,11 +107,15 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 		    address >= (unsigned long)func->bpf_func + func->jited_len)
 			continue;
 		found = aot_function_name(func);
+		if (!found)
+			return -EOPNOTSUPP;
 		strscpy(name, found, BPF_AOT_SYMBOL_LEN);
 		*addend = address - (unsigned long)func->bpf_func;
 		return 0;
 	}
 	found = kallsyms_lookup(address, &size, &offset, &module, buffer);
+	if (!found)
+		return -EOPNOTSUPP;
 	strscpy(name, found, BPF_AOT_SYMBOL_LEN);
 	*addend = offset;
 	return 0;
