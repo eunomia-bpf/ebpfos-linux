@@ -10332,6 +10332,13 @@ static int native_stack_arg_at(struct bpf_verifier_env *env,
 
 	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, input_bytes, BPF_READ);
 	off = (s64)sp->var_off.value + arg->stack_offset;
+	/* A slot the frame never grew to has no recorded value. */
+	if (off >= 0 || -off > frame->allocated_stack) {
+		native_value_scope(env, scope, regno);
+		__mark_reg_unknown(env, scope->reg);
+		env->native_arg_temps |= BIT(regno);
+		return 0;
+	}
 	slot = &frame->stack[bpf_get_spi(off)];
 	for (u32 byte = 0; byte < input_bytes; byte++) {
 		u8 type = slot->slot_type[7 - byte];
