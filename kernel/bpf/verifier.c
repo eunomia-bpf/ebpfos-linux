@@ -11603,12 +11603,9 @@ static int prepare_func_exit(struct bpf_verifier_env *env, int *insn_idx)
 
 	callee = state->frame[state->curframe];
 	r0 = &callee->regs[BPF_REG_0];
-	if (r0->type == PTR_TO_STACK) {
-		/* technically it's ok to return caller's stack pointer
-		 * (or caller's caller's pointer) back to the caller,
-		 * since these pointers are valid. Only current stack
-		 * pointer will be invalid as soon as function exits,
-		 * but let's be conservative
+	if (r0->type == PTR_TO_STACK && r0->frameno >= state->curframe) {
+		/* Ancestor frames remain live after this return. Preserve their
+		 * actual pointer state, but never let the exiting frame escape.
 		 */
 		verbose(env, "cannot return stack pointer to the caller\n");
 		return -EINVAL;
