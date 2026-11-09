@@ -1050,8 +1050,8 @@ static bool can_be_local_fp(int depth, int regno, struct arg_track *at)
 	       (at->frame == ARG_IMPRECISE && (at->mask & BIT(depth)));
 }
 
-/* Model only a declared global result here. The independent verifier pass
- * proves that relationship before the program can execute.
+/* A declared result guides liveness only; it grants no register capability.
+ * Possible frame aliases are conservatively retained by the caller below.
  */
 static struct arg_track argument_result_track(struct bpf_verifier_env *env,
 		struct bpf_insn *insn, int insn_idx, struct arg_track *regs,
@@ -1154,6 +1154,21 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 		result = argument_result_track(env, insn, insn_idx, at_out,
 					       at_stack_out, depth);
+		/* A body can return a caller address reached through a stack
+		 * argument or one of its spills. Keep all possible ancestor
+		 * slots live when that result is later used as an address. This
+		 * is a may-alias fact, never a pointer type for the verifier.
+		 */
+		if (bpf_pseudo_call(insn))
+			for (r = 0; r < MAX_BPF_NATIVE_REG_ARGS; r++) {
+				if (!arg_is_fp(&at_out[bpf_arg_regno(r)]))
+					continue;
+				result = (struct arg_track){
+					.frame = ARG_IMPRECISE,
+					.mask = (1u << (depth + 1)) - 1,
+				};
+				break;
+			}
 		/*
 		 * at_stack_out[slot] is not cleared by the helper and subprog calls.
 		 * The fill_from_stack() may return the stale spill — which is an FP-derived arg_track
@@ -1166,15 +1181,15 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		 * actually accessed. The verifier preserves more state than necessary across calls,
 		 * which is conservative.
 		 *
-		 * helpers can scratch stack slots, but they won't make a valid pointer out of it.
-		 * subprogs are allowed to write into parent slots, but they cannot write
-		 * _any_ FP-derived pointer into it (either their own or parent's FP).
+		 * This analysis only retains possibly reachable slots. The normal
+		 * verifier still checks actual stores, returned capabilities and
+		 * native clobbers; no memory value is restored from this hint.
 		 */
 		for (r = 0; r < MAX_BPF_REG; r++)
 			if (r == BPF_REG_0 || bpf_is_arg_reg(r))
 				at_out[r] = none;
-		/* Preserve the returned caller-frame address across the call. The
-		 * normal verifier still proves the declaration on every callee exit.
+		/* Retain possible return aliases for liveness. The normal body
+		 * verifier independently proves every returned value and lifetime.
 		 */
 		at_out[BPF_REG_0] = result;
 	} else if (class == BPF_LDX) {
