@@ -6792,6 +6792,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	bool pointer_field = false;
 	bool owned_scalar = false;
 	struct bpf_reg_state source = *reg;
+	int access_off = off;
+	bool array_access = false;
 	int ret;
 
 	/* A checked read-only result grants no write authority, including when
@@ -6824,7 +6826,42 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	if (ret || owned_scalar)
 		return ret;
 
-	if (!tnum_is_const(reg->var_off)) {
+	/* Every fixed-array element has the same layout. The bytecode bounds
+	 * and tnum must prove a fixed within-element offset at every index.
+	 * The ordinary walk still supplies all value and lifetime flags.
+	 */
+	if (!tnum_is_const(reg->var_off) && atype == BPF_READ &&
+	    !type_is_alloc(reg->type) && btf_type_is_struct(t) && off >= 0 &&
+	    reg->smin_value >= 0 && reg->umax_value <= t->size) {
+		const struct btf_member *member;
+		u32 i;
+
+		for_each_member(i, t, member) {
+			const struct btf_type *array, *element;
+			u32 moff = __btf_member_bit_offset(t, member) / 8, bytes;
+			u64 end, inner;
+
+			array = btf_type_skip_modifiers(reg->btf, member->type, NULL);
+			if (__btf_member_bitfield_size(t, member) || !array ||
+			    !btf_type_is_array(array) || !btf_array(array)->nelems)
+				continue;
+			element = btf_type_skip_modifiers(reg->btf, btf_array(array)->type, NULL);
+			if (!element || IS_ERR(btf_resolve_size(reg->btf, element, &bytes)) ||
+			    !is_power_of_2(bytes) || (reg->var_off.mask & (bytes - 1)))
+				continue;
+			end = (u64)moff + (u64)bytes * btf_array(array)->nelems;
+			if (end > t->size || (u64)off + reg->smin_value < moff ||
+			    (u64)off + reg->umax_value + size > end)
+				continue;
+			inner = ((u64)off + reg->var_off.value - moff) & (bytes - 1);
+			if (inner + size > bytes)
+				continue;
+			off = moff + inner;
+			array_access = true;
+			break;
+		}
+	}
+	if (!tnum_is_const(reg->var_off) && !array_access) {
 		char tn_buf[48];
 
 		tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
@@ -6834,7 +6871,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		return -EACCES;
 	}
 
-	off += reg->var_off.value;
+	if (!array_access)
+		off += reg->var_off.value;
 
 	if (off < 0) {
 		verbose(env,
@@ -7013,7 +7051,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			return ret;
 		if (regs[value_regno].type == SCALAR_VALUE) {
 			ret = check_btf_field_ranges(env, regs, regno,
-					off - source.var_off.value, size, atype, value_regno, &source);
+					access_off, size, atype, value_regno, &source);
 			if (ret)
 				return ret;
 		}
