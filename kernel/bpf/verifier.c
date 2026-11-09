@@ -11164,7 +11164,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				if (reg->type != PTR_TO_STACK || !tnum_is_const(reg->var_off))
 					continue;
 				frame = bpf_func(env, reg);
-				off = reg->off + (s64)reg->var_off.value;
+				off = (s64)reg->var_off.value;
 				for (u32 spi = 0; off < 0 &&
 				     spi < min_t(u64, -(off / 8), frame->allocated_stack / 8); spi++) {
 					struct bpf_stack_state *slot = &frame->stack[spi];
