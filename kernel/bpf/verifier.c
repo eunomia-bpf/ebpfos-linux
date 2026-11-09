@@ -11144,8 +11144,8 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	if (!state->active_rcu_locks && !state->active_locks)
 		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
 	/* An independent byte-memory summary clobbers reachable stack values.
-	 * Select body verification before that transition when actual register
-	 * arguments carry caller stack storage. BTF selects operands, not types.
+	 * Select body verification when reachable stack storage holds pointer
+	 * spills that the summary would erase. BTF only selects operands.
 	 */
 	if (bpf_subprog_is_global(env, subprog) && !btf_prepare_func_args(env, subprog)) {
 		for (u32 i = 0; i < sub->arg_cnt; i++) {
@@ -11157,9 +11157,22 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				continue;
 			for (u32 word = 0; word < words; word++) {
 				u32 regno = bpf_arg_regno((arg ? arg->reg : i) + word);
+				struct bpf_reg_state *reg = &caller->regs[regno];
+				struct bpf_func_state *frame;
+				s64 off;
 
-				if (caller->regs[regno].type == PTR_TO_STACK)
-					caller_stack = true;
+				if (reg->type != PTR_TO_STACK || !tnum_is_const(reg->var_off))
+					continue;
+				frame = bpf_func(env, reg);
+				off = reg->off + (s64)reg->var_off.value;
+				for (u32 spi = 0; off < 0 &&
+				     spi < min_t(u64, -(off / 8), frame->allocated_stack / 8); spi++) {
+					struct bpf_stack_state *slot = &frame->stack[spi];
+
+					if (bpf_is_spilled_reg(slot) &&
+					    __is_pointer_value(false, &slot->spilled_ptr))
+						caller_stack = true;
+				}
 			}
 		}
 	}

@@ -383,7 +383,11 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			if (subprog < 0)
 				return -EFAULT;
 
-			if (bpf_subprog_is_global(env, subprog)) {
+			/* Caller-context proof records the callee instructions even
+			 * for a global symbol. Follow that actual history as a normal
+			 * call frame; only an adjacent continuation used a summary.
+			 */
+			if (bpf_subprog_is_global(env, subprog) && idx + 1 == subseq_idx) {
 				/* check that jump history doesn't have any
 				 * extra instructions from subprog; the next
 				 * instruction after call to global subprog
