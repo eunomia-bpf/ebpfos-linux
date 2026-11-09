@@ -7584,7 +7584,7 @@ error:
 
 int btf_struct_access(struct bpf_verifier_log *log,
 		      const struct bpf_reg_state *reg,
-		      int off, int size, enum bpf_access_type atype __maybe_unused,
+		      int off, int size, enum bpf_access_type atype,
 		      u32 *next_btf_id, enum bpf_type_flag *flag,
 		      const char **field_name)
 {
@@ -7618,6 +7618,36 @@ int btf_struct_access(struct bpf_verifier_log *log,
 
 	t = btf_type_by_id(btf, id);
 	do {
+		/* A wide integer copy can span adjacent scalar fields. BTF must
+		 * cover every byte: no padding, bitfields, unions or pointer
+		 * storage participates. Special-field exclusions already ran;
+		 * the entire read must stay inside this struct.
+		 */
+		if (atype == BPF_READ && BTF_INFO_KIND(t->info) == BTF_KIND_STRUCT &&
+		    off >= 0 && size > 0 && (u64)off + size <= t->size) {
+			const struct btf_member *member;
+			u32 i, cursor = off, end = off + size, fields = 0;
+
+			for_each_member(i, t, member) {
+				const struct btf_type *field;
+				u32 moff = __btf_member_bit_offset(t, member) / 8, bytes;
+				u64 mend;
+
+				if (moff > cursor || moff >= end)
+					break;
+				field = btf_type_skip_modifiers(btf, member->type, NULL);
+				if (!field || IS_ERR(btf_resolve_size(btf, field, &bytes)))
+					break;
+				mend = (u64)moff + bytes;
+				if (cursor >= mend)
+					continue;
+				if (__btf_member_bitfield_size(t, member) || !btf_type_is_int(field))
+					break;
+				cursor = min_t(u64, end, mend);
+				if (++fields > 1 && cursor == end)
+					return SCALAR_VALUE;
+			}
+		}
 		err = btf_struct_walk(log, btf, t, off, size, &id, &tmp_flag, field_name, NULL);
 
 		switch (err) {
