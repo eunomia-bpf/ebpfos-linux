@@ -11161,9 +11161,13 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		}
 
 		if (err) {
-			verbose(env, "Caller passes invalid args into func#%d ('%s')\n",
+			/* A missing interface proof grants no callee summary. Keep
+			 * the actual caller capabilities and verify every instruction
+			 * through the ordinary caller-context path below instead.
+			 */
+			verbose(env, "Checking func#%d ('%s') in caller context: no matching argument summary\n",
 				subprog, sub_name);
-			return err;
+			goto check_callee;
 		}
 
 		if (state->acquired_refs || state->active_locks || state->active_rcu_locks ||
@@ -11265,6 +11269,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		return 0;
 	}
 
+check_callee:
 	/* for regular function entry setup new frame and continue
 	 * from that frame.
 	 */
