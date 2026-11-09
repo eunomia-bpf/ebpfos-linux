@@ -10398,7 +10398,7 @@ static const struct btf_type *native_subprog_result_type(struct bpf_verifier_env
  const struct btf *btf = env->prog->aux->btf;
  const struct btf_type *function, *proto;
 
- if (!env->subprog_info[subprog].native_frame || !btf || !env->prog->aux->func_info)
+ if (!btf || !env->prog->aux->func_info)
   return NULL;
  function = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
  proto = function ? btf_type_by_id(btf, function->type) : NULL;
@@ -11122,7 +11122,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_verifier_state *state = env->cur_state;
 	struct bpf_func_state *caller;
 	int err, subprog, target_insn;
-	bool caller_stack = false;
+	bool caller_stack = false, caller_result = false;
 
 	target_insn = *insn_idx + insn->imm + 1;
 	subprog = bpf_find_subprog(env, target_insn);
@@ -11148,6 +11148,14 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	 * spills that the summary would erase. BTF only selects operands.
 	 */
 	if (bpf_subprog_is_global(env, subprog) && !btf_prepare_func_args(env, subprog)) {
+		const struct btf_type *result = native_subprog_result_type(env, subprog);
+
+		/* A result type selects body proof; only its actual returned
+		 * register can establish a pointer capability or lifetime.
+		 */
+		caller_result = result && btf_type_is_ptr(result) &&
+			!sub->result_argument && !sub->null_result &&
+			!sub->readonly_result_btf_id && !sub->readonly_result_size;
 		for (u32 i = 0; i < sub->arg_cnt; i++) {
 			const struct bpf_native_arg *arg = sub->native_frame ?
 				&sub->native_abi.args[i + sub->native_abi.result_buffer] : NULL;
@@ -11176,7 +11184,8 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			}
 		}
 	}
-	err = caller_stack ? 0 : btf_check_subprog_call(env, subprog, caller->regs);
+	err = (caller_stack || caller_result) ? 0 :
+		btf_check_subprog_call(env, subprog, caller->regs);
 	if (err == -EFAULT)
 		return err;
 	if (bpf_subprog_is_global(env, subprog)) {
@@ -11194,14 +11203,14 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			return -EINVAL;
 		}
 
-		if (err || caller_stack) {
+		if (err || caller_stack || caller_result) {
 			/* Do not use an independent summary for this call. Keep
 			 * the actual caller capabilities and verify every instruction
 			 * through the ordinary caller-context path below instead.
 			 */
 			verbose(env, "Checking func#%d ('%s') in caller context: %s\n",
 				subprog, sub_name, caller_stack ? "stack argument" :
-				"no matching argument summary");
+				"actual caller state");
 			goto check_callee;
 		}
 
@@ -11268,14 +11277,16 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		} else if (!subprog_returns_void(env, subprog)) {
 			mark_reg_unknown(env, caller->regs, BPF_REG_0);
 			caller->regs[BPF_REG_0].subreg_def = DEF_NOT_SUBREG;
-			mark_native_scalar_result(env, native_subprog_result_type(env, subprog));
+			mark_native_scalar_result(env, sub->native_frame ?
+				native_subprog_result_type(env, subprog) : NULL);
 			if (bpf_subprog_returns_two_regs(env, subprog)) {
 				mark_reg_unknown(env, caller->regs, BPF_REG_3);
 				caller->regs[BPF_REG_3].subreg_def = DEF_NOT_SUBREG;
 			}
 			for (u32 word = 0; word < 2; word++) {
 				u32 regno = word ? BPF_REG_3 : BPF_REG_0;
-				const struct btf_type *result = native_subprog_result_type(env, subprog);
+				const struct btf_type *result = sub->native_frame ?
+					native_subprog_result_type(env, subprog) : NULL;
 				u32 bytes = sub->readonly_record_result_size[word];
 
 				if (result && btf_type_is_struct(result))
@@ -19496,7 +19507,8 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		u32 regno = i ? BPF_REG_3 : BPF_REG_0;
 		struct bpf_reg_state *reg = reg_state(env, regno);
 
-		const struct btf_type *result = native_subprog_result_type(env, frame->subprogno);
+		const struct btf_type *result = sub->native_frame ?
+			native_subprog_result_type(env, frame->subprogno) : NULL;
 		u32 bytes = i ? 8 : native_scalar_result_bytes(result);
 
 		if (result && btf_type_is_struct(result))
