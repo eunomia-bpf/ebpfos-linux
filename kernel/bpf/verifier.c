@@ -11122,6 +11122,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_verifier_state *state = env->cur_state;
 	struct bpf_func_state *caller;
 	int err, subprog, target_insn;
+	bool caller_stack = false;
 
 	target_insn = *insn_idx + insn->imm + 1;
 	subprog = bpf_find_subprog(env, target_insn);
@@ -11142,7 +11143,27 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
 	if (!state->active_rcu_locks && !state->active_locks)
 		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
-	err = btf_check_subprog_call(env, subprog, caller->regs);
+	/* An independent byte-memory summary clobbers reachable stack values.
+	 * Select body verification before that transition when actual register
+	 * arguments carry caller stack storage. BTF selects operands, not types.
+	 */
+	if (bpf_subprog_is_global(env, subprog) && !btf_prepare_func_args(env, subprog)) {
+		for (u32 i = 0; i < sub->arg_cnt; i++) {
+			const struct bpf_native_arg *arg = sub->native_frame ?
+				&sub->native_abi.args[i + sub->native_abi.result_buffer] : NULL;
+			u32 words = arg ? arg->words : 1;
+
+			if (arg && arg->reg < 0)
+				continue;
+			for (u32 word = 0; word < words; word++) {
+				u32 regno = bpf_arg_regno((arg ? arg->reg : i) + word);
+
+				if (caller->regs[regno].type == PTR_TO_STACK)
+					caller_stack = true;
+			}
+		}
+	}
+	err = caller_stack ? 0 : btf_check_subprog_call(env, subprog, caller->regs);
 	if (err == -EFAULT)
 		return err;
 	if (bpf_subprog_is_global(env, subprog)) {
@@ -11160,13 +11181,14 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			return -EINVAL;
 		}
 
-		if (err) {
-			/* A missing interface proof grants no callee summary. Keep
+		if (err || caller_stack) {
+			/* Do not use an independent summary for this call. Keep
 			 * the actual caller capabilities and verify every instruction
 			 * through the ordinary caller-context path below instead.
 			 */
-			verbose(env, "Checking func#%d ('%s') in caller context: no matching argument summary\n",
-				subprog, sub_name);
+			verbose(env, "Checking func#%d ('%s') in caller context: %s\n",
+				subprog, sub_name, caller_stack ? "stack argument" :
+				"no matching argument summary");
 			goto check_callee;
 		}
 
