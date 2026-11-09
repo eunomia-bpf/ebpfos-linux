@@ -17520,13 +17520,13 @@ static int adjust_reg_min_max_vals(struct bpf_verifier_env *env,
 		return 0;
 	}
 
-	/* A nonnegative immediate mask projects address bits to a scalar.
-	 * Discard every pointer fact; the ordinary scalar AND supplies only
-	 * bit/bounds facts. The existing address-disclosure policy still applies.
+	/* Integer bit extraction carries no pointer capability. Discard every
+	 * pointer fact before the ordinary scalar transfer, including ALU32
+	 * zero extension. The existing address-disclosure policy still applies.
 	 */
-	if (env->allow_ptr_leaks && !alu32 && opcode == BPF_AND &&
-	    BPF_SRC(insn->code) == BPF_K && insn->imm >= 0 &&
-	    dst_reg->type != SCALAR_VALUE)
+	if (env->allow_ptr_leaks && BPF_SRC(insn->code) == BPF_K &&
+	    dst_reg->type != SCALAR_VALUE &&
+	    ((!alu32 && opcode == BPF_AND && insn->imm >= 0) || opcode == BPF_RSH))
 		mark_reg_unknown(env, regs, insn->dst_reg);
 
 	if (dst_reg->type != SCALAR_VALUE)
