@@ -7266,6 +7266,63 @@ static void add_scalar_to_reg(struct bpf_reg_state *dst_reg, s64 val)
  * if t==write && value_regno==-1, some unknown value is stored into memory
  * if t==read && value_regno==-1, don't care what we read from memory
  */
+/* Option B: the compiler names unchecked source-use coordinates. This is
+ * conditional on Linux's source invariant, never a capability from a type.
+ * Existing managed lifetimes, address spaces and memory bounds stay separate.
+ */
+static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_state *reg)
+{
+	const struct btf *btf = env->prog->aux->btf;
+	const struct btf_type *function;
+	const struct bpf_line_info *line;
+	const char *condition, *filename;
+	u32 subprog = cur_func(env)->subprogno;
+	u8 class = BPF_CLASS(env->prog->insnsi[env->insn_idx].code);
+
+	if (class != BPF_LDX && class != BPF_ST && class != BPF_STX)
+		return;
+	if (!env->allow_ptr_leaks || !env->prog->aux->ebpfos_component ||
+	    base_type(reg->type) != PTR_TO_BTF_ID ||
+	    !(reg->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED)) ||
+	    reg->type & (MEM_USER | MEM_PERCPU | MEM_RCU | MEM_ALLOC | NON_OWN_REF) ||
+	    !btf || !env->prog->aux->func_info)
+		return;
+	function = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
+	condition = btf_find_decl_tag_value(btf, function, -1, "source:unchecked:");
+	line = bpf_find_linfo(env->prog, env->insn_idx);
+	if (IS_ERR(condition) || !line)
+		return;
+	filename = btf_name_by_offset(btf, line->file_name_off);
+	while (*condition) {
+		const char *end = strchrnul(condition, ';');
+		const char *split = strchr(condition, '|');
+
+		if (!split || split >= end)
+			return;
+		if (strlen(filename) == split - condition &&
+		    !strncmp(filename, condition, split - condition)) {
+			const char *number = split + 1;
+
+			while (number < end) {
+				char *next;
+				unsigned long coordinate = simple_strtoul(number, &next, 10);
+
+				if (next == number || next > end)
+					break;
+				if (coordinate == line->line_col) {
+					reg->type &= ~(PTR_MAYBE_NULL | PTR_UNTRUSTED);
+					reg->type |= PTR_TRUSTED;
+					verbose(env, "func#%u relies on verifier option B; name='%s'\n",
+						subprog, bpf_verifier_subprog_name(env, subprog));
+					return;
+				}
+				number = next + (next < end && *next == ',');
+			}
+		}
+		condition = end + !!*end;
+	}
+}
+
 static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regno,
 			    int off, int bpf_size, enum bpf_access_type t,
 			    int value_regno, bool strict_alignment_once, bool is_ldsx)
@@ -7274,6 +7331,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	struct bpf_reg_state *reg = regs + regno;
 	int size, err = 0;
 
+	use_source_invariant(env, reg);
 	size = bpf_size_to_bytes(bpf_size);
 	if (size < 0)
 		return size;
