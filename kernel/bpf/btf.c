@@ -296,6 +296,16 @@ struct btf {
 	char name[MODULE_NAME_LEN];
 	bool kernel_btf;
 	__u32 *base_id_map; /* map from distilled base BTF -> vmlinux BTF ids */
+	/* Decl tags of this BTF and its bases by target, built on first use. */
+	struct btf_decl_tag_index *decl_tag_index;
+};
+
+struct btf_decl_tag_index {
+	u32 cnt;
+	struct btf_decl_tag_entry {
+		const struct btf_type *target;
+		u32 id;
+	} tags[];
 };
 
 enum verifier_phase {
@@ -1907,6 +1917,7 @@ static void btf_free(struct btf *btf)
 	if (!btf_is_vmlinux(btf))
 		kvfree(btf->data);
 	kvfree(btf->base_id_map);
+	kvfree(btf->decl_tag_index);
 	kfree(btf);
 }
 
@@ -3672,12 +3683,83 @@ static int btf_find_kptr(const struct btf *btf, const struct btf_type *t,
 	return BTF_FIELD_FOUND;
 }
 
+static int btf_decl_tag_entry_cmp(const void *a, const void *b)
+{
+	const struct btf_decl_tag_entry *x = a, *y = b;
+
+	if (x->target != y->target)
+		return (unsigned long)x->target < (unsigned long)y->target ? -1 : 1;
+	return x->id < y->id ? -1 : x->id > y->id;
+}
+
+/* Every decl tag of BTF (bases included) ordered by target type, then by
+ * id. BTF never changes after load, so the index is built once, on first
+ * use, and kept until the BTF is freed; a concurrent builder's copy is
+ * dropped. Without memory the callers fall back to scanning every type.
+ */
+static const struct btf_decl_tag_index *btf_decl_tag_index(const struct btf *btf)
+{
+	struct btf_decl_tag_index *index = READ_ONCE(btf->decl_tag_index), *built;
+	u32 i, n = btf_nr_types(btf), cnt = 0;
+
+	if (index)
+		return index;
+	for (i = 1; i < n; i++)
+		cnt += btf_type_is_decl_tag(btf_type_by_id(btf, i));
+	built = kvmalloc(struct_size(built, tags, cnt), GFP_KERNEL | __GFP_NOWARN);
+	if (!built)
+		return NULL;
+	built->cnt = 0;
+	for (i = 1; i < n && built->cnt < cnt; i++) {
+		const struct btf_type *t = btf_type_by_id(btf, i);
+
+		if (!btf_type_is_decl_tag(t))
+			continue;
+		built->tags[built->cnt].target = btf_type_by_id(btf, t->type);
+		built->tags[built->cnt++].id = i;
+	}
+	sort(built->tags, built->cnt, sizeof(built->tags[0]), btf_decl_tag_entry_cmp, NULL);
+	index = cmpxchg(&((struct btf *)btf)->decl_tag_index, NULL, built);
+	if (index) {
+		kvfree(built);
+		return index;
+	}
+	return built;
+}
+
 int btf_find_next_decl_tag(const struct btf *btf, const struct btf_type *pt,
 			   int comp_idx, const char *tag_key, int last_id)
 {
+	const struct btf_decl_tag_index *index = btf_decl_tag_index(btf);
 	int len = strlen(tag_key);
 	int i, n;
 
+	/* The same first match as the scan below, from the target's tags only. */
+	if (index) {
+		u32 low = 0, high = index->cnt;
+
+		while (low < high) {
+			u32 middle = low + (high - low) / 2;
+
+			if ((unsigned long)index->tags[middle].target < (unsigned long)pt)
+				low = middle + 1;
+			else
+				high = middle;
+		}
+		for (; low < index->cnt && index->tags[low].target == pt; low++) {
+			const struct btf_type *t;
+
+			if ((s64)index->tags[low].id <= last_id)
+				continue;
+			t = btf_type_by_id(btf, index->tags[low].id);
+			if (btf_type_decl_tag(t)->component_idx != comp_idx)
+				continue;
+			if (strncmp(__btf_name_by_offset(btf, t->name_off), tag_key, len))
+				continue;
+			return index->tags[low].id;
+		}
+		return -ENOENT;
+	}
 	for (i = last_id + 1, n = btf_nr_types(btf); i < n; i++) {
 		const struct btf_type *t = btf_type_by_id(btf, i);
 
