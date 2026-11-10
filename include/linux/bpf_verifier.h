@@ -848,6 +848,10 @@ struct bpf_subprog_info {
 	bool type_authority: 1;
 	bool probe_read_scope: 1;
 
+	/* Option B's source:unchecked: coordinates of this subprogram: NULL
+	 * without a tag, an error pointer for duplicate tags.
+	 */
+	const char *source_unchecked;
 	enum priv_stack_mode priv_stack_mode;
 	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_ARGS + 1];
 	struct bpf_native_abi native_abi;
@@ -959,6 +963,7 @@ struct bpf_verifier_env {
 	int exception_callback_subprog;
 	bool explore_alu_limits;
 	u16 native_arg_temps;
+	bool source_unchecked_found;	/* subprog_info[].source_unchecked are set */
 	bool allow_ptr_leaks;
 	/* Allow access to uninitialized stack memory. Writes with fixed offset are
 	 * always allowed, so this refers to reads (with fixed or variable offset),

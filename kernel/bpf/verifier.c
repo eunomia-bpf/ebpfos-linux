@@ -7266,6 +7266,35 @@ static void add_scalar_to_reg(struct bpf_reg_state *dst_reg, s64 val)
  * if t==write && value_regno==-1, some unknown value is stored into memory
  * if t==read && value_regno==-1, don't care what we read from memory
  */
+/* One pass over the program's BTF finds every subprogram's source-use
+ * condition, the same decl tag btf_find_decl_tag_value() returns, at the
+ * first memory use that consults it. A use then reads its subprogram's
+ * string instead of scanning every BTF type again.
+ */
+static void find_source_unchecked(struct bpf_verifier_env *env, const struct btf *btf)
+{
+	static const char key[] = "source:unchecked:";
+	u32 id, n = btf_nr_types(btf), i;
+
+	env->source_unchecked_found = true;
+	for (id = btf_named_start_id(btf, false); id < n; id++) {
+		const struct btf_type *t = btf_type_by_id(btf, id);
+		const char *name;
+
+		if (!t || BTF_INFO_KIND(t->info) != BTF_KIND_DECL_TAG ||
+		    ((const struct btf_decl_tag *)(t + 1))->component_idx != -1)
+			continue;
+		name = btf_name_by_offset(btf, t->name_off);
+		if (!name || strncmp(name, key, sizeof(key) - 1))
+			continue;
+		for (i = 0; i < env->subprog_cnt && i < env->prog->aux->func_info_cnt; i++)
+			if (env->prog->aux->func_info[i].type_id == t->type)
+				env->subprog_info[i].source_unchecked =
+					env->subprog_info[i].source_unchecked ?
+					ERR_PTR(-EEXIST) : name + sizeof(key) - 1;
+	}
+}
+
 /* Option B: the compiler names unchecked source-use coordinates. This is
  * conditional on Linux's source invariant, never a capability from a type.
  * Existing managed lifetimes, address spaces and memory bounds stay separate.
@@ -7273,7 +7302,6 @@ static void add_scalar_to_reg(struct bpf_reg_state *dst_reg, s64 val)
 static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_state *reg)
 {
 	const struct btf *btf = env->prog->aux->btf;
-	const struct btf_type *function;
 	const struct bpf_line_info *line;
 	const char *condition, *filename;
 	u32 subprog = cur_func(env)->subprogno;
@@ -7287,10 +7315,11 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 	    reg->type & (MEM_USER | MEM_PERCPU | MEM_RCU | MEM_ALLOC | NON_OWN_REF) ||
 	    !btf || !env->prog->aux->func_info)
 		return;
-	function = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
-	condition = btf_find_decl_tag_value(btf, function, -1, "source:unchecked:");
+	if (!env->source_unchecked_found)
+		find_source_unchecked(env, btf);
+	condition = env->subprog_info[subprog].source_unchecked;
 	line = bpf_find_linfo(env->prog, env->insn_idx);
-	if (IS_ERR(condition) || !line)
+	if (IS_ERR_OR_NULL(condition) || !line)
 		return;
 	filename = btf_name_by_offset(btf, line->file_name_off);
 	while (*condition) {
