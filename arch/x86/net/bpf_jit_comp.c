@@ -4585,6 +4585,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 	struct jit_context ctx = {};
 	bool extra_pass = false;
 	bool padding = false;
+	bool retried = false;
 	u8 *rw_image = NULL;
 	u8 *image = NULL;
 	int *addrs;
@@ -4649,6 +4650,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_pr
 	 * Before first pass, make a rough estimation of addrs[]
 	 * each BPF instruction is translated to less than 64 bytes
 	 */
+restart:
 	for (proglen = 0, i = 0; i <= prog->len; i++) {
 		proglen += 64;
 		addrs[i] = proglen;
@@ -4666,6 +4668,32 @@ skip_init_addrs:
 		if (!padding && pass >= PADDING_PASSES)
 			padding = true;
 		proglen = do_jit(env, prog, addrs, image, rw_image, oldproglen, &ctx, padding);
+		if (proglen <= 0 && image && !retried && !extra_pass && !prog->is_func) {
+			/*
+			 * The image pass produced code of another size than the pass
+			 * that sized it (an encoding that depends on the final address).
+			 * Start again with every pass padded to its largest encoding,
+			 * once, instead of leaving the program without a JIT image.
+			 */
+			retried = true;
+			padding = true;
+			if (prog->aux->native_image) {
+				native_image_free(prog->aux->native_image);
+				prog->aux->native_image = NULL;
+			}
+			if (header) {
+				bpf_arch_text_copy(&header->size, &rw_header->size,
+						   sizeof(rw_header->size));
+				bpf_jit_binary_pack_free(header, rw_header);
+			}
+			header = NULL;
+			rw_header = NULL;
+			image = NULL;
+			rw_image = NULL;
+			oldproglen = 0;
+			ctx = (struct jit_context){};
+			goto restart;
+		}
 		if (proglen <= 0) {
 out_image:
 			image = NULL;
