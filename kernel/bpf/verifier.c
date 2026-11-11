@@ -21455,10 +21455,6 @@ next_insn:
 /* drop refcnt of maps used by the rejected program */
 static void release_maps(struct bpf_verifier_env *env)
 {
-	int i;
-
-	for (i = 0; i < env->used_map_cnt; i++)
-		bpf_ebpfos_map_prog_put(env->used_maps[i], env->prog->aux);
 	__bpf_free_used_maps(env->prog->aux, env->used_maps,
 			     env->used_map_cnt);
 }

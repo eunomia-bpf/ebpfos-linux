@@ -375,23 +375,6 @@ static inline bool bpf_ebpfos_map_prog_get(struct bpf_map *map,
 	return allowed;
 }
 
-static inline void bpf_ebpfos_map_prog_put(struct bpf_map *map,
-					   struct bpf_prog_aux *aux)
-{
-	spin_lock_bh(&map->owner_lock);
-	if (WARN_ON_ONCE(!map->ebpfos_prog_users))
-		goto out;
-
-	map->ebpfos_prog_users--;
-	if (map->ebpfos_component_owner == aux) {
-		WARN_ON_ONCE(map->ebpfos_prog_users);
-		if (!map->ebpfos_prog_users)
-			map->ebpfos_component_owner = NULL;
-	}
-out:
-	spin_unlock_bh(&map->owner_lock);
-}
-
 static inline bool bpf_ebpfos_map_external_get(struct bpf_map *map)
 {
 	bool allowed = false;

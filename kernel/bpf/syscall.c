@@ -2411,14 +2411,6 @@ void bpf_prog_free_id(struct bpf_prog *prog)
 static void __bpf_prog_put_rcu(struct rcu_head *rcu)
 {
 	struct bpf_prog_aux *aux = container_of(rcu, struct bpf_prog_aux, rcu);
-	u32 i;
-
-	/*
-	 * Keep map exclusivity until after the program's execution grace period.
-	 * bpf_prog_free() drops the actual map references asynchronously later.
-	 */
-	for (i = 0; i < aux->used_map_cnt; i++)
-		bpf_ebpfos_map_prog_put(aux->used_maps[i], aux);
 
 	kvfree(aux->func_info);
 	kfree(aux->func_info_aux);
