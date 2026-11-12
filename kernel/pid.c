@@ -159,8 +159,6 @@ void free_pids(struct pid **pids)
 struct pid *alloc_pid(struct pid_namespace *ns, pid_t *arg_set_tid,
 		      size_t arg_set_tid_size)
 {
-	int set_tid[MAX_PID_NS_LEVEL + 1] = {};
-	int pid_max[MAX_PID_NS_LEVEL + 1] = {};
 	struct pid *pid;
 	enum pid_type type;
 	int i, nr;
@@ -179,6 +177,9 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *arg_set_tid,
 	 */
 	if (arg_set_tid_size > ns->level + 1)
 		return ERR_PTR(-EINVAL);
+
+	int set_tid[MAX_PID_NS_LEVEL + 1] = {};
+	int pid_max[MAX_PID_NS_LEVEL + 1] = {};
 
 	/*
 	 * Prep before we take locks:
