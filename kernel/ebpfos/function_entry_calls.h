@@ -47,11 +47,13 @@ static int entry_call_scan_range(unsigned long address, unsigned long size,
 
   if (slots) {
    /* Aliases may describe the same instruction more than once. */
-   for (j = 0; j < *count; ++j) if (slots[j].ip == ip) break;
+   for (j = 0; j < *count; ++j)
+    if (slots[j].ip == ip + instruction.length - instruction.immediate.nbytes) break;
    if (j < *count) continue;
 
-   slots[*count] = (struct entry_native_slot){ .ip = ip, .original = target,
-    .call = instruction.opcode.bytes[0] == 0xe8 };
+   slots[*count] = (struct entry_native_slot){
+    .ip = ip + instruction.length - instruction.immediate.nbytes,
+    .original = target, .displacement_size = instruction.immediate.nbytes };
   }
   ++*count;
  }

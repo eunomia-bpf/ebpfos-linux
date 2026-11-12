@@ -261,6 +261,7 @@ static int plt_publish(void)
   if (IS_ERR(entry->next)) {error = PTR_ERR(entry->next);entry->next = NULL;goto fail;}
   if (entry->image && entry->next && entry->image->text == entry->next->text) continue;
   pairs[i].addr = (void *)slot.ip;
+  pairs[i].length = 5;
   slot.target[0] = (unsigned long)(entry->image ? entry->image->text : NULL);
   entry_native_instruction(&slot, entry->image ? 1 : 0, pairs[i].before);
   slot.target[0] = (unsigned long)(entry->next ? entry->next->text : NULL);

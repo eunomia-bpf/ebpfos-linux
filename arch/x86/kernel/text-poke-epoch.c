@@ -33,7 +33,8 @@ static int text_poke_quiescent_update(void *opaque)
 		} else {
 			for (i = 0; i < transaction->count; ++i)
 				text_poke(transaction->pairs[i].addr,
-					  transaction->pairs[i].after, 5);
+					  transaction->pairs[i].after,
+					  transaction->pairs[i].length ?: 5);
 		}
 		smp_store_release(&transaction->finished, 1);
 	} else {
@@ -67,7 +68,7 @@ static int text_poke_quiescent_transaction_locked(const struct text_poke_pair *p
 		unsigned long address = (unsigned long)pairs[i].addr;
 		u8 actual[5];
 
-		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual)))
+		if (copy_from_kernel_nofault(actual, pairs[i].addr, pairs[i].length ?: 5))
 			return -ESTALE;
 	}
 	return stop_machine_cpuslocked(text_poke_quiescent_update, &transaction,

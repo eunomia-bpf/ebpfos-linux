@@ -50,6 +50,9 @@ extern void smp_text_poke_batch_finish(void);
 struct text_poke_pair {
 	void *addr;
 	u8 before[5], after[5];
+	/* Zero retains the five-byte branch/NOP interface. Stopped caller
+	 * updates publish only the decoded one- or four-byte displacement. */
+	u8 length;
 };
 extern int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int count);
 

@@ -16,6 +16,9 @@ static const unsigned char entry_native_emulation[5] = { 0x0f, 0x1f, 0x44, 0, 0 
 struct entry_native_slot {
  unsigned long ip, target[2], original;
  bool call, ftrace, canonical_nop;
+ /* Direct callers retain their opcode, prefixes and instruction length.
+  * Only the decoded relative displacement is published while CPUs stop. */
+ unsigned char displacement_size;
 };
 
 static inline bool entry_native_jump(unsigned long ip, unsigned long target,
@@ -35,6 +38,15 @@ static inline bool entry_native_instruction(const struct entry_native_slot *slot
 {
  unsigned int i;
  if (generation > 2) return false;
+ if (slot->displacement_size) {
+  unsigned long distance = (generation ? slot->target[generation - 1] : slot->original) -
+   (slot->ip + slot->displacement_size);
+  if (distance != (slot->displacement_size == 1 ?
+      (unsigned long)(long)(signed char)distance : (unsigned long)(long)(int)distance))
+   return false;
+  for (i = 0; i < slot->displacement_size; ++i) instruction[i] = distance >> (i * 8);
+  return true;
+ }
  if (generation || slot->original) {
   if (!entry_native_jump(slot->ip, generation ? slot->target[generation - 1] : slot->original, instruction)) return false;
   if (slot->call) instruction[0] = 0xe8;

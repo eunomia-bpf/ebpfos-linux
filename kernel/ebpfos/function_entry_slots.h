@@ -98,6 +98,7 @@ static struct text_poke_pair *entry_native_pairs(struct entry_native_slot *old,
  if (!pairs) return ERR_PTR(-ENOMEM);
  for (i = 0; i < count; ++i) {
   pairs[i].addr = (void *)old[i].ip;
+  pairs[i].length = old[i].displacement_size ? old[i].displacement_size : 5;
   
   if (!entry_native_instruction(&old[i], from, pairs[i].before) ||
       !entry_native_instruction(&next[i], to, pairs[i].after)) goto fail;
