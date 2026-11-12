@@ -6781,7 +6781,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
 				   enum bpf_access_type atype,
-				   int value_regno)
+				   int value_regno, bool probe_read)
 {
 	struct bpf_reg_state *reg = regs + regno;
 	const struct btf_type *t = btf_type_by_id(reg->btf, reg->btf_id);
@@ -6945,10 +6945,11 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	 * existing paths; no pointer or callable capability comes from this read.
 	 */
 	if (ret < 0 && atype == BPF_READ && value_regno >= 0 &&
-	    (reg->type & PTR_UNTRUSTED) && !type_is_alloc(reg->type)) {
+	    (probe_read || (reg->type & PTR_UNTRUSTED)) && !type_is_alloc(reg->type)) {
 		ret = SCALAR_VALUE;
 		btf_id = 0;
 		flag = 0;
+		note_probe_read_scope(env);
 		verbose(env, "relies on verifier option A: probe-safe scalar read outside a BTF field view\n");
 	}
 
@@ -7372,6 +7373,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
+	bool probe_read = reg->type & PTR_UNTRUSTED;
 	int size, err = 0;
 
 	use_source_invariant(env, reg);
@@ -7593,7 +7595,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	} else if (base_type(reg->type) == PTR_TO_BTF_ID &&
 		   !type_may_be_null(reg->type)) {
 		err = check_ptr_to_btf_access(env, regs, regno, off, size, t,
-					      value_regno);
+					      value_regno, probe_read);
 	} else if (reg->type == CONST_PTR_TO_MAP) {
 		err = check_ptr_to_map_access(env, regs, regno, off, size, t,
 					      value_regno);
@@ -8078,7 +8080,7 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 				zero_size_allowed, access_type, meta);
 	case PTR_TO_BTF_ID:
 		return check_ptr_to_btf_access(env, regs, regno, 0,
-					       access_size, access_type, -1);
+					       access_size, access_type, -1, false);
 	case PTR_TO_CTX:
 		/* Only permit reading or writing syscall context using helper calls. */
 		if (is_var_ctx_off_allowed(env->prog)) {
