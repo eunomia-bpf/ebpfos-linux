@@ -6938,6 +6938,20 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		ret = btf_struct_access(&env->log, reg, off, size, atype, &btf_id, &flag, &field_name);
 	}
 
+	/* Option A already makes an untrusted kernel-pointer load probe-safe.
+	 * A source cast can read a larger record than the nominal BTF header.
+	 * When no field view covers that load, retain only scalar bits. Helpers,
+	 * writes, allocated objects, NULL and variable-offset rules stay on their
+	 * existing paths; no pointer or callable capability comes from this read.
+	 */
+	if (ret < 0 && atype == BPF_READ && value_regno >= 0 &&
+	    (reg->type & PTR_UNTRUSTED) && !type_is_alloc(reg->type)) {
+		ret = SCALAR_VALUE;
+		btf_id = 0;
+		flag = 0;
+		verbose(env, "relies on verifier option A: probe-safe scalar read outside a BTF field view\n");
+	}
+
 	if (ret < 0)
 		return ret;
 
