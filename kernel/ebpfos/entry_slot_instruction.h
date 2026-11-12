@@ -21,6 +21,14 @@ struct entry_native_slot {
  unsigned char displacement_size;
 };
 
+/* A body's internal backedges and recursive calls stay in that body.
+ * Only a different resident range supplies external entry callers. */
+static inline bool entry_native_external_range(unsigned long address,
+ unsigned long size, unsigned long target)
+{
+ return target < address || target - address >= size;
+}
+
 static inline bool entry_native_jump(unsigned long ip, unsigned long target,
  unsigned char instruction[5])
 {

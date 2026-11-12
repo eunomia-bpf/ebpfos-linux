@@ -24,6 +24,10 @@ static int entry_call_scan_range(unsigned long address, unsigned long size,
 {
  unsigned long offset = 0;
  int error = 0;
+ /* A short loop to this body's first instruction is internal control flow,
+  * not an entry binding to redirect to a remote replacement. Range membership
+  * also covers aliases describing the same target inside a resident body. */
+ if (!entry_native_external_range(address, size, target)) return 0;
  while (offset < size) {
   struct insn instruction;
   unsigned long ip = address + offset, destination;
