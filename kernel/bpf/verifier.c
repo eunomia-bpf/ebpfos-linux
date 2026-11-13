@@ -4012,8 +4012,19 @@ static bool native_kop_string_call(const struct bpf_prog *prog,
 		0x83, 0xe9, 0x40, 0x48, 0x83, 0xf9, 0x40, 0x73, 0xd3, 0x83, 0xf9, 0x08,
 		0x73, 0xb8, 0x85, 0xc9, 0x75, 0xa9, 0xc3,
 	};
+	static const u8 copy_movsq[] = {
+		0xeb, 0x01, 0xc3, 0x48, 0x8b, 0x06, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x47,
+		0x08, 0x48, 0x83, 0xe0, 0xf8, 0x48, 0x29, 0xf8, 0x48, 0x01, 0xc7, 0x48,
+		0x01, 0xc6, 0x48, 0x29, 0xc1, 0x48, 0x89, 0xc8, 0x48, 0xc1, 0xe9, 0x03,
+		0x83, 0xe0, 0x07, 0xf3, 0x48, 0xa5, 0x89, 0xc1, 0x85, 0xc9, 0x75, 0xa5,
+		0xc3, 0x48, 0x8d, 0x0c, 0xc8, 0xeb, 0x9e,
+	};
 	static const u8 copy_faults[][2] = {
 		{0x0f, 0x1e}, {0x11, 0x1e}, {0x20, 0x0f}, {0x23, 0x0f}, {0x3a, 0x3c},
+	};
+	static const u8 copy_movsq_faults[][2] = {
+		{0x0f, 0x1e}, {0x11, 0x1e}, {0x20, 0x0f}, {0x23, 0x0f},
+		{0x3d, 0x0f}, {0x40, 0x0f}, {0x61, 0x6b},
 	};
 	static const u8 fill_faults[][2] = {
 		{0x0f, 0x19}, {0x1a, 0x0f}, {0x30, 0x0f}, {0x33, 0x0f}, {0x37, 0x0f},
@@ -4024,16 +4035,28 @@ static bool native_kop_string_call(const struct bpf_prog *prog,
 	u32 size = store ? sizeof(fill) : sizeof(copy);
 	u32 count = store ? ARRAY_SIZE(fill_faults) : ARRAY_SIZE(copy_faults), i;
 	unsigned long address = native_kop_call_at(prog, object, section, offset);
-	u8 body[sizeof(fill)];
+	u8 body[sizeof(fill) + sizeof(copy_movsq)];
 
-	/* The COPY large arm here is the resident ERMS REP arm. Its unused
-	 * MOVSQ implementation is not reached by any branch in this prefix.
-	 * A CPU which selected that other body retains the old trusted route.
-	 */
 	if (!core_kernel_text(address) || !core_kernel_text(address + size - 1) ||
-	    copy_from_kernel_nofault(body, (const void *)address, size) ||
-	    memcmp(body, expected, size))
+	    copy_from_kernel_nofault(body, (const void *)address, size))
 		return false;
+	if (memcmp(body, expected, size)) {
+		u32 prefix = sizeof(copy) - 3;
+
+		/* Without ERMS, the first word covers the initial eight bytes;
+		 * rounding the destination up advances by 1..8 within count>=64.
+		 * MOVSQ then covers whole words and its recovery reconstructs
+		 * remaining bytes as RCX*8+RAX before entering the byte tail.
+		 */
+		if (store || memcmp(body, copy, prefix) ||
+		    !core_kernel_text(address + prefix + sizeof(copy_movsq) - 1) ||
+		    copy_from_kernel_nofault(body + prefix,
+					    (const void *)(address + prefix), sizeof(copy_movsq)) ||
+		    memcmp(body + prefix, copy_movsq, sizeof(copy_movsq)))
+			return false;
+		faults = copy_movsq_faults;
+		count = ARRAY_SIZE(copy_movsq_faults);
+	}
 	for (i = 0; i < count; i++) {
 		const struct exception_table_entry *exception =
 			search_kernel_exception_table(address + faults[i][0]);
