@@ -3302,11 +3302,14 @@ struct native_kop_object {
 	u32 text_size, text_index;
 };
 
+enum native_kop_metadata { NATIVE_KOP_ALTERNATIVES = 1, NATIVE_KOP_MSR_RECOVERY = 2 };
+
 /* A matcher-local view only: unrecognised records retain their old route. */
 static bool native_kop_object(const struct bpf_prog *prog,
 			      const struct bpf_insn *insn,
-			      struct native_kop_object *object, bool alternatives)
+			      struct native_kop_object *object, u32 metadata)
 {
+	bool alternatives = metadata & NATIVE_KOP_ALTERNATIVES;
 	const struct bpf_native_seq *seq;
 	const Elf64_Ehdr *elf;
 	const Elf64_Shdr *sections, *names;
@@ -3355,11 +3358,13 @@ static bool native_kop_object(const struct bpf_prog *prog,
 		 * Leave those sequences on their existing trusted route.
 		 */
 		if ((!alternatives && !strcmp(name, ".altinstructions")) ||
-		    !strcmp(name, "__jump_table") || !strcmp(name, "__ex_table"))
+		    !strcmp(name, "__jump_table") ||
+		    (!(metadata & NATIVE_KOP_MSR_RECOVERY) && !strcmp(name, "__ex_table")))
 			return false;
 		if ((section->sh_flags & SHF_ALLOC) &&
 		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table") &&
 		    !(alternatives && !strcmp(name, ".altinstructions")) &&
+		    !((metadata & NATIVE_KOP_MSR_RECOVERY) && !strcmp(name, "__ex_table")) &&
 		    !(!(section->sh_flags & SHF_WRITE) && section->sh_type == SHT_PROGBITS &&
 		      (!strcmp(name, ".rodata") || !strncmp(name, ".rodata.", 8))))
 			return false;
@@ -3417,10 +3422,10 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 	return begin && end;
 }
 
-/* Resolve an alternative's PC-relative field into this native record only.
+/* Resolve a metadata PC-relative field into this native record only.
  * S+A is its section-relative target; Linux adds the relocated field address.
  */
-static bool native_kop_alt_target(const struct native_kop_object *object,
+static bool native_kop_rel_target(const struct native_kop_object *object,
 				  u32 table, u32 field, u32 *target, u32 *offset)
 {
 #ifdef CONFIG_X86_64
@@ -3485,10 +3490,10 @@ static bool native_kop_preserving_alternatives(const struct native_kop_object *o
 		 * transformations have effects beyond byte replacement.
 		 */
 		if ((get_unaligned_le32(bytes + at + 8) & 0xfffe0000) || new_size > old_size ||
-		    !native_kop_alt_target(object, table, at, &source, &begin) ||
+		    !native_kop_rel_target(object, table, at, &source, &begin) ||
 		    source != object->text_index || old_size > object->text_size - begin ||
 		    !native_kop_preserving_bytes(object->text, object->text_size, begin, begin + old_size) ||
-		    !native_kop_alt_target(object, table, at + 4, &replacement, &start))
+		    !native_kop_rel_target(object, table, at + 4, &replacement, &start))
 			return false;
 		code = &object->sections[replacement];
 		if (replacement == object->text_index || !(code->sh_flags & SHF_EXECINSTR) ||
@@ -3499,7 +3504,7 @@ static bool native_kop_preserving_alternatives(const struct native_kop_object *o
 					code->sh_size, start, start + new_size))
 			return false;
 		for (earlier = 0; earlier < at; earlier += 14) {
-			if (!native_kop_alt_target(object, table, earlier, &other, &start))
+			if (!native_kop_rel_target(object, table, earlier, &other, &start))
 				return false;
 			finish = start + bytes[earlier + 12];
 			if (begin < finish && start < begin + old_size &&
@@ -3519,7 +3524,7 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 	const char *strings;
 	u32 i, j, alternatives = 0;
 
-	if (!native_kop_object(prog, insn, &object, true))
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_ALTERNATIVES))
 		return false;
 	seq = object.seq;
 	sections = object.sections;
@@ -3803,9 +3808,9 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 {
 	struct native_kop_object object;
 	u16 physical_writes;
-	u32 i;
+	u32 i, recovery = 0;
 
-	if (!native_kop_object(prog, insn, &object, false) || object.seq->scratch_mask ||
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_MSR_RECOVERY) || object.seq->scratch_mask ||
 	    object.text[0] != 0x0f || object.text_size < 2)
 		return false;
 	operation->reads = operation->writes = physical_writes = 0;
@@ -3841,10 +3846,40 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &object.sections[i];
+		const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
+		const char *strings = (const void *)object.elf + names->sh_offset;
 
 		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
 		    section->sh_size && section->sh_info == object.text_index)
 			return false;
+		if (section->sh_size && !strcmp(strings + section->sh_name, "__ex_table")) {
+			const u8 *entry = (const void *)object.elf + section->sh_offset;
+			u32 original, continuation, start, end, j, k;
+
+			/* Linux's unchecked handlers (WRMSR=8, RDMSR=9) either
+			 * preserve GPRs or zero AX/DX, and resume after this opcode.
+			 * Both outcomes fit the same abstract transfer. Safe forms
+			 * that write an error register need a different contract.
+			 */
+			if (recovery || section->sh_type != SHT_PROGBITS || section->sh_size != 12 ||
+			    object.text_size != 2 || (object.text[1] != 0x30 && object.text[1] != 0x32) ||
+			    get_unaligned_le32(entry + 8) != (object.text[1] == 0x32 ? 9 : 8) ||
+			    !native_kop_rel_target(&object, i, 0, &original, &start) ||
+			    !native_kop_rel_target(&object, i, 4, &continuation, &end) ||
+			    original != object.text_index || continuation != original || start || end != 2)
+				return false;
+			recovery = i;
+			for (j = 1; j < object.elf->e_shnum; j++) {
+				const Elf64_Shdr *rel = &object.sections[j];
+				const Elf64_Rela *entries = (const void *)object.elf + rel->sh_offset;
+
+				if (rel->sh_type != SHT_RELA || rel->sh_info != i)
+					continue;
+				for (k = 0; k < rel->sh_size / sizeof(*entries); k++)
+					if (entries[k].r_offset != 0 && entries[k].r_offset != 4)
+						return false;
+			}
+		}
 	}
 	return true;
 }
