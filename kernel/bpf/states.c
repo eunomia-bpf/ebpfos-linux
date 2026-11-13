@@ -548,6 +548,11 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
 		return false;
 	if (rold->native_input_bits != rcur->native_input_bits)
 		return false;
+	/* An address word admits a dereference, so a state that carries the
+	 * origin is not interchangeable with one that does not.
+	 */
+	if (rold->address_word != rcur->address_word)
+		return false;
 	if (!check_ids(rold->mem_size_id, rcur->mem_size_id, idmap))
 		return false;
 

@@ -124,6 +124,13 @@ struct bpf_reg_state {
 	 * Zero retains the ordinary complete-register state.
 	 */
 	u8 native_input_bits;
+	/* A component read this scalar out of kernel memory through the
+	 * option-A probe-safe load, so it is an address the kernel supplies,
+	 * exactly as the native function's own load was. Only that origin
+	 * admits a scalar dereference; option B trust transfer, arithmetic on
+	 * a program value and every untouched scalar stay out.
+	 */
+	bool address_word;
 	struct tnum var_off;
 	/* Used to determine if any memory access using this register will
 	 * result in a bad access.
@@ -706,6 +713,10 @@ struct bpf_insn_aux_data {
 	u32 rcu_call_unprotected:1;
 	/* A global call was visited while the caller held modeled resources. */
 	u32 native_call_resource_held:1;
+	/* A compiled definition dereferenced an address word, so this load
+	 * needs the JIT's fault-handled mode. Set while checking the load.
+	 */
+	u32 probe_load:1;
 	/*
 	 * CFG strongly connected component this instruction belongs to,
 	 * zero if it is a singleton SCC.

@@ -3737,10 +3737,11 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 }
 
 struct native_percpu_load {
-	u32 dst, size, type, base, width;
+	u32 dst, size, type, base, width, literal_size, scale;
+	s16 index;
 	s32 offset;
 	struct btf *btf;
-	bool address, scalar, indirect, percpu;
+	bool address, scalar, indirect, percpu, literal;
 };
 
 #ifdef CONFIG_X86_64
@@ -3927,29 +3928,69 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 #endif
 }
 
-/* RIP-relative LEA accesses no memory. Its result is conservatively scalar
- * except for a complete local Linux bug-table record, whose emitted section
- * and resident BTF together establish a live bug_entry object.
+/* RIP-relative LEA retains local allocation identity. A record-owned readonly
+ * object supplies its exact extent; a bug-table record uses resident BTF.
+ * One following MOVZX can consume the readonly object at a scalar index.
  */
 static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *insn,
 			   struct native_percpu_load *result)
 {
 #ifdef CONFIG_X86_64
 	struct native_kop_object object;
-	const Elf64_Shdr *target = NULL;
+	const Elf64_Shdr *target = NULL, *target_symbols = NULL;
 	s64 offset = 0;
-	u32 i, physical, relocations = 0;
+	u32 i, physical, relocations = 0, target_index = 0;
+	s32 displacement = 0;
+	u16 reads = 0;
+	bool local = false, tail;
 	int dst, id;
 
-	if (!native_kop_object(prog, insn, &object, false) || object.seq->read_mask ||
-	    object.seq->scratch_mask || object.seq->bindings_count != 1 ||
-	    object.text_size != 7 || (object.text[0] & ~4) != 0x48 ||
+	if (!native_kop_object(prog, insn, &object, false) ||
+	    object.seq->scratch_mask || object.text_size < 7 || (object.text[0] & ~4) != 0x48 ||
 	    object.text[1] != 0x8d || (object.text[2] & 0xc7) != 5)
 		return false;
 	physical = ((object.text[2] >> 3) & 7) | (object.text[0] & 4 ? 8 : 0);
 	dst = native_kop_bpf_register(physical);
 	if (dst < 0 || object.seq->write_mask != BIT(dst) ||
 	    (object.seq->clobber_mask & ~BIT(physical)))
+		return false;
+	tail = object.text_size != 7;
+	result->index = -1;
+	result->scale = 1;
+	if (tail) {
+		struct insn decoded;
+		u32 base, index;
+
+		if (insn_decode(&decoded, object.text + 7, object.text_size - 7, INSN_MODE_64) ||
+		    decoded.length + 7 != object.text_size || decoded.addr_bytes != 8 ||
+		    decoded.prefixes.nbytes || decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
+		    (decoded.opnd_bytes != 4 && decoded.opnd_bytes != 8) ||
+		    decoded.opcode.nbytes != 2 || decoded.opcode.bytes[0] != 0x0f ||
+		    (decoded.opcode.bytes[1] != 0xb6 && decoded.opcode.bytes[1] != 0xb7) ||
+		    decoded.modrm.nbytes != 1 || X86_MODRM_MOD(decoded.modrm.value) == 3 ||
+		    decoded.immediate.nbytes ||
+		    (X86_MODRM_REG(decoded.modrm.value) | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0)) != physical)
+			return false;
+		base = X86_MODRM_RM(decoded.modrm.value);
+		if (base == 4) {
+			base = X86_SIB_BASE(decoded.sib.value);
+			index = X86_SIB_INDEX(decoded.sib.value) |
+				(X86_REX_X(decoded.rex_prefix.value) ? 8 : 0);
+			if (index != 4) {
+				result->index = native_kop_bpf_register(index);
+				if (result->index < 0 || result->index == dst)
+					return false;
+				reads = BIT(result->index);
+				result->scale = 1U << X86_SIB_SCALE(decoded.sib.value);
+			}
+		}
+		if ((base == 5 && !X86_MODRM_MOD(decoded.modrm.value)) ||
+		    (base | (X86_REX_B(decoded.rex_prefix.value) ? 8 : 0)) != physical)
+			return false;
+		displacement = decoded.displacement.value;
+		result->size = decoded.opcode.bytes[1] == 0xb6 ? BPF_B : BPF_H;
+	}
+	if (object.seq->read_mask != reads || object.seq->bindings_count != 1 + !!reads)
 		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &object.sections[i], *symbols;
@@ -3973,11 +4014,45 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 			 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
 		if (symbol->st_shndx < object.elf->e_shnum && symbol->st_shndx) {
 			target = &object.sections[symbol->st_shndx];
+			target_index = symbol->st_shndx;
+			target_symbols = symbols;
+			local = ELF64_ST_BIND(symbol->st_info) == STB_LOCAL;
 			offset = symbol->st_value + relocation->r_addend + 4;
 		}
 	}
 	result->dst = dst;
 	result->scalar = true;
+	if (target && local && target->sh_type == SHT_PROGBITS &&
+	    (target->sh_flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR)) == SHF_ALLOC &&
+	    target->sh_size && target->sh_size <= S32_MAX && offset >= 0 && offset <= target->sh_size) {
+		const Elf64_Sym *symbols = (const void *)object.elf + target_symbols->sh_offset;
+		u32 objects = 0;
+
+		/* The native ELF builder emits one local object per readonly
+		 * allocation. Section and object metadata identify it; equal
+		 * bytes in another allocation establish no alias or capability.
+		 */
+		for (i = 0; i < target_symbols->sh_size / sizeof(*symbols); i++)
+			if (ELF64_ST_TYPE(symbols[i].st_info) == STT_OBJECT &&
+			    ELF64_ST_BIND(symbols[i].st_info) == STB_LOCAL &&
+			    symbols[i].st_shndx == target_index && !symbols[i].st_value &&
+			    symbols[i].st_size == target->sh_size)
+				objects++;
+		if (objects == 1) {
+			offset += displacement;
+			if (offset < 0 || offset > target->sh_size ||
+			    (tail && bpf_size_to_bytes(result->size) > target->sh_size - offset))
+				return !tail;
+			result->literal = true;
+			result->scalar = false;
+			result->address = !tail;
+			result->literal_size = target->sh_size;
+			result->offset = offset;
+			return true;
+		}
+	}
+	if (tail)
+		return false;
 	if (target && offset >= 0) {
 		const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
 		const char *name = (const void *)object.elf + names->sh_offset + target->sh_name;
@@ -8490,6 +8565,13 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 					access_off, size, atype, value_regno, &source);
 			if (ret)
 				return ret;
+			/* A full-word read of kernel memory is an address the
+			 * kernel supplies; a compiled definition may dereference
+			 * it, as the native function did.
+			 */
+			if (atype == BPF_READ && size == BPF_REG_SIZE &&
+			    (source.type & PTR_UNTRUSTED))
+				regs[value_regno].address_word = true;
 		}
 	}
 
@@ -8902,11 +8984,21 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		 * Accesses to untrusted PTR_TO_MEM are done through probe
 		 * instructions, hence no need to check bounds in that case.
 		 */
-		if (rdonly_untrusted && t == BPF_READ)
+		if (rdonly_untrusted && t == BPF_READ) {
 			note_probe_read_scope(env);
-		if (!rdonly_untrusted)
-			err = check_mem_region_access(env, regno, off, size,
-						      reg->mem_size, false);
+			/* The kernel supplies this word and the JIT already reads it
+			 * with a fault-handled load. A compiled definition may
+			 * dereference it, as the native function did.
+			 */
+			if (value_regno >= 0) {
+				mark_reg_unknown(env, regs, value_regno);
+				regs[value_regno].address_word =
+					size == BPF_REG_SIZE;
+			}
+			return 0;
+		}
+		err = check_mem_region_access(env, regno, off, size,
+					      reg->mem_size, false);
 		if (!err && value_regno >= 0 && (t == BPF_READ || rdonly_mem))
 			mark_reg_unknown(env, regs, value_regno);
 	} else if (reg->type == PTR_TO_CTX) {
@@ -9045,6 +9137,20 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	} else if (reg->type == PTR_TO_ARENA) {
 		if (t == BPF_READ && value_regno >= 0)
 			mark_reg_unknown(env, regs, value_regno);
+	} else if (reg->type == SCALAR_VALUE && reg->address_word &&
+		   env->prog->aux->ebpfos_component &&
+		   t == BPF_READ && value_regno >= 0) {
+		/* A compiled definition dereferences an address it read out of
+		 * kernel memory, exactly as the native function's own load did.
+		 * The word arrived through an option-A probe-safe read, so the
+		 * kernel supplies the address and the same fault-handled read
+		 * mode covers this access: one probe-load fixup, no range test.
+		 * A full word read this way is itself an address; a narrower
+		 * word is a value.
+		 */
+		env->insn_aux_data[env->insn_idx].probe_load = true;
+		mark_reg_unknown(env, regs, value_regno);
+		regs[value_regno].address_word = size == BPF_REG_SIZE;
 	} else {
 		verbose(env, "R%d invalid mem access '%s'\n", regno,
 			reg_type_str(env, reg->type));
@@ -13960,6 +14066,38 @@ native_memory_done:
 		struct bpf_reg_state *result = &cur_regs(env)[native_load.dst];
 		bool partial = native_load.width && native_load.width < 4;
 		bool initialized = result->type == SCALAR_VALUE && !result->native_input_bits;
+
+		if (native_load.literal) {
+			if (!native_load.address && native_load.index >= 0) {
+				struct bpf_reg_state *index = &cur_regs(env)[native_load.index];
+				u32 remaining = native_load.literal_size - native_load.offset -
+					bpf_size_to_bytes(native_load.size);
+
+				err = check_reg_arg(env, native_load.index, SRC_OP);
+				if (err)
+					return err;
+				if (index->type != SCALAR_VALUE || index->smin_value < 0 ||
+				    index->umax_value > remaining / native_load.scale)
+					goto ordinary_helper;
+			}
+			err = check_reg_arg(env, native_load.dst, DST_OP);
+			if (err)
+				return err;
+			if (native_load.address) {
+				mark_reg_known_zero(env, cur_regs(env), native_load.dst);
+				result->type = PTR_TO_MEM | MEM_RDONLY;
+				result->mem_size = native_load.literal_size;
+				result->id = ++env->id_gen;
+				___mark_reg_known(result, native_load.offset);
+			} else {
+				/* Exact immutable allocation + bounded effective address.
+				 * The loaded bits remain unknown; MOVZX initializes the
+				 * whole output register at its actual memory width.
+				 */
+				coerce_reg_to_size(result, bpf_size_to_bytes(native_load.size));
+			}
+			return 0;
+		}
 
 		/* Width metadata is descriptive under current verifier relaxations.
 		 * A narrow MOV therefore needs an initialized old scalar or an
@@ -19306,10 +19444,17 @@ static int adjust_scalar_min_max_vals(struct bpf_verifier_env *env,
 	u8 opcode = BPF_OP(insn->code);
 	s16 off = insn->off;
 	bool alu32 = (BPF_CLASS(insn->code) != BPF_ALU64);
+	/* Native adds an index to the address it loaded: the sum is still an
+	 * address into the same object, and any other operation yields a
+	 * value, not an address.
+	 */
+	bool address = dst_reg->address_word &&
+		       (opcode == BPF_ADD || opcode == BPF_SUB) && !alu32;
 	int ret;
 
 	if (!is_safe_to_compute_dst_reg_range(insn, &src_reg)) {
 		__mark_reg_unknown(env, dst_reg);
+		dst_reg->address_word = address;
 		return 0;
 	}
 
@@ -19449,6 +19594,7 @@ static int adjust_scalar_min_max_vals(struct bpf_verifier_env *env,
 	 */
 	if (alu32 && opcode != BPF_END)
 		zext_32_to_64(dst_reg);
+	dst_reg->address_word = address;
 	reg_bounds_sync(dst_reg);
 	return 0;
 }

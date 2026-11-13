@@ -961,6 +961,20 @@ int bpf_convert_ctx_accesses(struct bpf_verifier_env *env)
 			continue;
 		}
 
+		if (type == BPF_READ && env->insn_aux_data[i + delta].probe_load) {
+			/* The verifier admitted an address word a compiled
+			 * definition read from kernel memory. Keep the JIT's
+			 * fault-handled mode: a bad address yields zero, as the
+			 * native function's own load would fault the same way.
+			 */
+			if (BPF_MODE(insn->code) == BPF_MEM)
+				insn->code = BPF_LDX | BPF_PROBE_MEM | BPF_SIZE(insn->code);
+			else
+				insn->code = BPF_LDX | BPF_PROBE_MEMSX | BPF_SIZE(insn->code);
+			env->prog->aux->num_exentries++;
+			continue;
+		}
+
 		switch ((int)env->insn_aux_data[i + delta].ptr_type) {
 		case PTR_TO_CTX:
 			if (!ops->convert_ctx_access)
