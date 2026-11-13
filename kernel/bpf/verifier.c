@@ -3478,6 +3478,143 @@ static bool native_kop_rel_target(const struct native_kop_object *object,
 #endif
 }
 
+/* The JIT gives any record-owned global definition precedence over kallsyms.
+ * A proof about resident text therefore needs the same external identity.
+ * This is local to CALL admission, not a new requirement on native input.
+ */
+static bool native_kop_external_identity(const struct bpf_prog *prog, const char *name)
+{
+	u32 i, j, k;
+
+	for (i = 0; i < prog->len; i++) {
+		struct native_kop_object object;
+
+		if (!bpf_native_seq_insn(&prog->insnsi[i]))
+			continue;
+		if (!native_kop_object(prog, &prog->insnsi[i], &object,
+			NATIVE_KOP_ALTERNATIVES | NATIVE_KOP_MSR_RECOVERY | NATIVE_KOP_SMP_LOCKS))
+			return false;
+		for (j = 1; j < object.elf->e_shnum; j++) {
+			const Elf64_Shdr *table = &object.sections[j], *strings;
+			const Elf64_Sym *symbols;
+			const char *names;
+
+			if (table->sh_type != SHT_SYMTAB)
+				continue;
+			if (table->sh_entsize != sizeof(*symbols) || table->sh_size % sizeof(*symbols) ||
+			    table->sh_link >= object.elf->e_shnum)
+				return false;
+			strings = &object.sections[table->sh_link];
+			names = (const void *)object.elf + strings->sh_offset;
+			symbols = (const void *)object.elf + table->sh_offset;
+			for (k = 1; k < table->sh_size / sizeof(*symbols); k++) {
+				const Elf64_Sym *symbol = &symbols[k];
+
+				if (symbol->st_shndx == SHN_UNDEF || !ELF64_ST_BIND(symbol->st_info))
+					continue;
+				if (symbol->st_name >= strings->sh_size ||
+				    !memchr(names + symbol->st_name, 0, strings->sh_size - symbol->st_name) ||
+				    !strcmp(names + symbol->st_name, name))
+					return false;
+			}
+		}
+	}
+	return true;
+}
+
+/* x86's THUNK calling convention wraps a normal C call with balanced saves
+ * of every caller-clobbered GPR and BP; C preserves the remaining registers.
+ * Match that actual resident body, not a list of thunk names. A no-argument
+ * void callee has no explicit memory interface; its implicit CPU/global
+ * effects retain the same source C/D premise as ordinary Native calls.
+ */
+static bool native_seq_preserving_thunk(const struct bpf_prog *prog,
+				      const struct bpf_insn *insn)
+{
+#ifdef CONFIG_X86_64
+	static const u8 save[] = {0x55, 0x48, 0x89, 0xe5, 0x57, 0x56, 0x52, 0x51, 0x50,
+		0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0xe8};
+	static const u8 restore[] = {0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58,
+		0x58, 0x59, 0x5a, 0x5e, 0x5f, 0x5d, 0xc3};
+	struct native_kop_object object;
+	const struct btf_type *function, *prototype, *result;
+	char buffer[KSYM_NAME_LEN], *module;
+	const char *name = NULL, *callee_name;
+	unsigned long address, callee, size, offset;
+	u8 body[sizeof(save) + 4 + sizeof(restore)];
+	struct btf *btf;
+	u32 i, j, found = 0;
+	s32 id;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    object.seq->read_mask || object.seq->write_mask || object.seq->clobber_mask ||
+	    object.text_size != 5 || object.text[0] != 0xe8)
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *rel = &object.sections[i], *table, *strings;
+		const Elf64_Rela *entries;
+
+		if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) ||
+		    !rel->sh_size || rel->sh_info != object.text_index)
+			continue;
+		if (rel->sh_type != SHT_RELA || rel->sh_size % sizeof(*entries) ||
+		    rel->sh_link >= object.elf->e_shnum)
+			return false;
+		table = &object.sections[rel->sh_link];
+		if (table->sh_type != SHT_SYMTAB || table->sh_entsize != sizeof(Elf64_Sym) ||
+		    table->sh_link >= object.elf->e_shnum)
+			return false;
+		strings = &object.sections[table->sh_link];
+		entries = (const void *)object.elf + rel->sh_offset;
+		for (j = 0; j < rel->sh_size / sizeof(*entries); j++) {
+			const Elf64_Rela *entry = &entries[j];
+			const Elf64_Sym *symbol;
+			u32 type = ELF64_R_TYPE(entry->r_info);
+
+			if (++found != 1 || entry->r_offset != 1 || entry->r_addend != -4 ||
+			    (type != R_X86_64_PC32 && type != R_X86_64_PLT32) ||
+			    ELF64_R_SYM(entry->r_info) >= table->sh_size / sizeof(*symbol))
+				return false;
+			symbol = (const void *)object.elf + table->sh_offset +
+				ELF64_R_SYM(entry->r_info) * sizeof(*symbol);
+			if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size ||
+			    !memchr((const void *)object.elf + strings->sh_offset + symbol->st_name,
+				    0, strings->sh_size - symbol->st_name))
+				return false;
+			name = (const void *)object.elf + strings->sh_offset + symbol->st_name;
+		}
+	}
+	if (found != 1 || !native_kop_external_identity(prog, name))
+		return false;
+	address = kallsyms_lookup_name(name);
+	if (!core_kernel_text(address) || !core_kernel_text(address + sizeof(body) - 1) ||
+	    copy_from_kernel_nofault(body, (const void *)address, sizeof(body)) ||
+	    memcmp(body, save, sizeof(save)) ||
+	    memcmp(body + sizeof(save) + 4, restore, sizeof(restore)))
+		return false;
+	callee = address + sizeof(save) + 4 + (s32)get_unaligned_le32(body + sizeof(save));
+	if (!core_kernel_text(callee))
+		return false;
+	callee_name = kallsyms_lookup(callee, &size, &offset, &module, buffer);
+	if (!callee_name || offset || module)
+		return false;
+	btf = bpf_get_btf_vmlinux();
+	if (IS_ERR_OR_NULL(btf))
+		return false;
+	id = btf_find_by_name_kind(btf, callee_name, BTF_KIND_FUNC);
+	if (id <= 0)
+		return false;
+	function = btf_type_by_id(btf, id);
+	prototype = btf_type_by_id(btf, function->type);
+	if (!prototype || !btf_type_is_func_proto(prototype) || btf_type_vlen(prototype))
+		return false;
+	result = btf_type_skip_modifiers(btf, prototype->type, NULL);
+	return result && btf_type_is_void(result);
+#else
+	return false;
+#endif
+}
+
 static bool native_kop_preserving_alternatives(const struct native_kop_object *object,
 					       u32 table)
 {
@@ -13257,6 +13394,17 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_scalar_rmw rmw;
 	struct native_arch_kop architectural;
 	struct native_scalar_bits bits;
+
+	if (bpf_native_seq_insn(insn) && native_seq_preserving_thunk(env->prog, insn)) {
+		u32 owner = cur_func(env)->subprogno;
+
+		env->subprog_info[owner].has_native_call = true;
+		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		return 0;
+	}
 
 	if (bpf_native_seq_insn(insn) && native_seq_scalar_bits(env->prog, insn, &bits)) {
 		struct bpf_reg_state *native_regs = cur_regs(env);

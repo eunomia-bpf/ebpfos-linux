@@ -467,6 +467,13 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 				return -EFAULT;
 			return 0;
 		} else if (opcode == BPF_CALL) {
+			/* Native operations can preserve arguments and define any
+			 * allocated GPR. The helper R0-only dependency rule does not
+			 * describe them. Use the existing all-precise fallback until
+			 * this instruction's full dependency transfer is available.
+			 */
+			if (bpf_native_seq_insn(insn))
+				return -ENOTSUPP;
 			/* kfunc with imm==0 is invalid and fixup_kfunc_call will
 			 * catch this error later. Make backtracking conservative
 			 * with ENOTSUPP.
