@@ -3455,15 +3455,18 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 
 	prog = kmemdup(source, bpf_prog_size(source->len), GFP_KERNEL);
 	aux = kmemdup(source->aux, sizeof(*aux), GFP_KERNEL);
-	if (aux)
+	if (aux) {
+		/* The copy borrows no resources from the live source, including
+		 * when a later request allocation fails before JIT emission.
+		 */
+		aux->extable = NULL;
+		aux->native_image = NULL;
 		aux->poke_tab = NULL;
+	}
 	addrs = kvmalloc_array(source->len + 1, sizeof(*addrs), GFP_KERNEL);
 	if (!prog || !aux || !addrs)
 		goto out;
 	prog->aux = aux;
-	aux->extable = NULL;
-	aux->native_image = NULL;
-	aux->poke_tab = NULL;
 	if (source->aux->size_poke_tab) {
 		aux->poke_tab = kmemdup(source->aux->poke_tab,
 			array_size(source->aux->size_poke_tab, sizeof(*aux->poke_tab)), GFP_KERNEL);
