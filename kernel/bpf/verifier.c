@@ -12617,6 +12617,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 	if (bpf_native_seq_insn(insn) && native_seq_scalar_rmw(env->prog, insn, &rmw)) {
 		struct bpf_reg_state *native_regs = cur_regs(env), saved;
+		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
 		bool scalar;
 
 		err = check_reg_arg(env, rmw.base, SRC_OP);
@@ -12628,17 +12629,28 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		if (base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID ||
 		    type_is_alloc(native_regs[rmw.base].type))
 			goto ordinary_helper;
-		saved = native_regs[BPF_REG_0];
+		saved = native_regs[temporary];
 		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
-				       BPF_READ, BPF_REG_0, false, false, NULL);
-		scalar = native_regs[BPF_REG_0].type == SCALAR_VALUE;
-		native_regs[BPF_REG_0] = saved;
-		if (err)
+				       BPF_READ, temporary, false, false, NULL);
+		scalar = native_regs[temporary].type == SCALAR_VALUE;
+		if (err) {
+			native_regs[temporary] = saved;
 			return err;
-		if (!scalar)
+		}
+		if (!scalar) {
+			native_regs[temporary] = saved;
 			goto ordinary_helper;
-		return check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
-					BPF_WRITE, -1, false, false, NULL);
+		}
+		/* A field's previous range is not its updated value. Supply an
+		 * unknown scalar of the written width to the ordinary store rule;
+		 * -1 would incorrectly treat the native marker's imm as the value.
+		 */
+		mark_reg_unknown(env, native_regs, temporary);
+		coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
+		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
+				       BPF_WRITE, temporary, false, false, NULL);
+		native_regs[temporary] = saved;
+		return err;
 	}
 
 	if (bpf_native_seq_insn(insn) &&
