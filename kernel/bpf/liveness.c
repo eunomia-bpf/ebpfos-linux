@@ -2,6 +2,7 @@
 /* Copyright (c) 2025 Meta Platforms, Inc. and affiliates. */
 
 #include <linux/bpf_verifier.h>
+#include <linux/bpf_native_seq.h>
 #include <linux/btf.h>
 #include <linux/hashtable.h>
 #include <linux/jhash.h>
@@ -2274,6 +2275,17 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 			break;
 		}
 		case BPF_CALL:
+			if (bpf_native_seq_insn(insn)) {
+				const struct bpf_native_seq *seq = bpf_native_seq_get(env->prog, insn->imm);
+
+				/* Native opcode proofs preserve every undeclared GPR.
+				 * Treating this as a helper kills live results of an
+				 * earlier operation across a register-preserving one.
+				 */
+				def = seq ? seq->write_mask : 0;
+				use = seq ? seq->read_mask | BIT(BPF_REG_ARG_SP) : 0xffff;
+				break;
+			}
 			def = ALL_CALLER_SAVED_REGS;
 			use |= BIT(BPF_REG_ARG_SP);
 			use = def & ~BIT(BPF_REG_0);
