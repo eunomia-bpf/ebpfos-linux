@@ -12443,7 +12443,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		 * there are no helper calls, spills or probe reads at run time.
 		 * Source/context option D supplies the current-CPU discipline.
 		 */
-		err = bpf_verifier_add_used_btf(env, btf_get(native_load.btf));
+		btf_get(native_load.btf);
+		err = bpf_verifier_add_used_btf(env, native_load.btf);
 		if (err)
 			return err;
 		err = check_reg_arg(env, native_load.dst, DST_OP);
