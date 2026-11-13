@@ -4178,6 +4178,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	operation->width = 4;
 	if (object.text[0] == 0x66)
 		port_at++;
+#ifdef CONFIG_X86_64
 	if (object.text_size >= 3 &&
 	    (object.text[0] == 0x0f || (object.text[0] & 0xf0) == 0x40)) {
 		u32 at = object.text[0] == 0x0f ? 0 : 1;
@@ -4209,6 +4210,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 		goto architectural_metadata;
 	}
 other_architecture:
+#endif
 	if (port_at < object.text_size &&
 	    (object.text[port_at] == 0xe6 || object.text[port_at] == 0xe7 ||
 	     object.text[port_at] == 0xee || object.text[port_at] == 0xef ||
@@ -4255,7 +4257,9 @@ other_architecture:
 	} else {
 		return false;
 	}
+#ifdef CONFIG_X86_64
 architectural_metadata:
+#endif
 	if (object.seq->read_mask != operation->reads || object.seq->write_mask != operation->writes ||
 	    (object.seq->clobber_mask & ~physical_writes))
 		return false;
