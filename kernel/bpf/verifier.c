@@ -18622,9 +18622,17 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	}
 
 	if (ptr_reg->type & PTR_MAYBE_NULL) {
-		verbose(env, "R%d pointer arithmetic on %s prohibited, null-check it first\n",
-			dst, reg_type_str(env, ptr_reg->type));
-		return -EACCES;
+		/* Native computes `p->field + n` on a pointer the source assumes
+		 * live; the offset is applied to the address the pointer holds,
+		 * and the result stays nullable so the source's own NULL test
+		 * still guards the dereference. Ordinary programs keep the
+		 * null-check-first rule.
+		 */
+		if (!env->prog->aux->ebpfos_component) {
+			verbose(env, "R%d pointer arithmetic on %s prohibited, null-check it first\n",
+				dst, reg_type_str(env, ptr_reg->type));
+			return -EACCES;
+		}
 	}
 
 	/*
@@ -20887,7 +20895,8 @@ static int regs_bounds_sanity_check_branches(struct bpf_verifier_env *env)
 	return err;
 }
 
-static void mark_ptr_or_null_reg(struct bpf_func_state *state,
+static void mark_ptr_or_null_reg(struct bpf_verifier_env *env,
+				 struct bpf_func_state *state,
 				 struct bpf_reg_state *reg, u32 id,
 				 bool is_null)
 {
@@ -20901,8 +20910,13 @@ static void mark_ptr_or_null_reg(struct bpf_func_state *state,
 		 * advance offset for the returned pointer. In those cases,
 		 * it is fine to expect to see reg->var_off.
 		 */
+		/* A component may add an offset while the pointer is still
+		 * nullable, so a non-zero offset at its NULL test is expected;
+		 * every other program keeps the zero-offset invariant.
+		 */
 		if (!(type_is_ptr_alloc_obj(reg->type) || type_is_non_owning_ref(reg->type)) &&
-		    WARN_ON_ONCE(!tnum_equals_const(reg->var_off, 0)))
+		    !tnum_equals_const(reg->var_off, 0) &&
+		    !(env && env->prog->aux->ebpfos_component))
 			return;
 		if (is_null) {
 			/* We don't need id and ref_obj_id from this point
@@ -20932,7 +20946,8 @@ static void mark_ptr_or_null_reg(struct bpf_func_state *state,
 /* The logic is similar to find_good_pkt_pointers(), both could eventually
  * be folded together at some point.
  */
-static void mark_ptr_or_null_regs(struct bpf_verifier_state *vstate, u32 regno,
+static void mark_ptr_or_null_regs(struct bpf_verifier_env *env,
+				  struct bpf_verifier_state *vstate, u32 regno,
 				  bool is_null)
 {
 	struct bpf_func_state *state = vstate->frame[vstate->curframe];
@@ -20948,7 +20963,7 @@ static void mark_ptr_or_null_regs(struct bpf_verifier_state *vstate, u32 regno,
 		WARN_ON_ONCE(release_reference_nomark(vstate, id));
 
 	bpf_for_each_reg_in_vstate(vstate, state, reg, ({
-		mark_ptr_or_null_reg(state, reg, id, is_null);
+		mark_ptr_or_null_reg(env, state, reg, id, is_null);
 	}));
 }
 
@@ -21402,9 +21417,9 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 		/* Mark all identical registers in each branch as either
 		 * safe or unknown depending R == 0 or R != 0 conditional.
 		 */
-		mark_ptr_or_null_regs(this_branch, insn->dst_reg,
+		mark_ptr_or_null_regs(env, this_branch, insn->dst_reg,
 				      opcode == BPF_JNE);
-		mark_ptr_or_null_regs(other_branch, insn->dst_reg,
+		mark_ptr_or_null_regs(env, other_branch, insn->dst_reg,
 				      opcode == BPF_JEQ);
 	} else if (!try_match_pkt_pointers(insn, dst_reg, &regs[insn->src_reg],
 					   this_branch, other_branch) &&
