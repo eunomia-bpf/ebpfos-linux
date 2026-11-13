@@ -19898,8 +19898,8 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 						 */
 						if (!is_src_reg_u32)
 							clear_scalar_id(dst_reg);
-						/* Only a full 64-bit copy carries an address. */
-						if (alu32)
+						/* A 32-bit copy is a value, not an address. */
+						if (BPF_CLASS(insn->code) == BPF_ALU)
 							dst_reg->address_word = false;
 						dst_reg->subreg_def = env->insn_idx + 1;
 					} else {
