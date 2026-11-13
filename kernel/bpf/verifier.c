@@ -3737,10 +3737,10 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 }
 
 struct native_percpu_load {
-	u32 dst, size, type, base;
+	u32 dst, size, type, base, width;
 	s32 offset;
 	struct btf *btf;
-	bool address, scalar, indirect;
+	bool address, scalar, indirect, percpu;
 };
 
 #ifdef CONFIG_X86_64
@@ -3826,11 +3826,11 @@ static bool native_kop_percpu_field(const struct native_kop_object *object,
 #endif
 }
 
-/* Decode one GS load, then bind its displacement relocation to the same
- * image BTF area used by the existing per-CPU read KOperations. Nothing
- * is inferred from a scalar input or from the source assembly spelling.
+/* Decode an ordinary or GS memory load. Absolute GS displacements bind
+ * to the existing resident BTF area. Narrow MOV preserves the rest of its
+ * GPR; its continuation is handled separately from zero-extending MOVZX.
  */
-static bool native_seq_percpu_load(const struct bpf_prog *prog,
+static bool native_seq_memory_load(const struct bpf_prog *prog,
 				   const struct bpf_insn *insn,
 				   struct native_percpu_load *load)
 {
@@ -3840,21 +3840,32 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	struct insn decoded;
 	u32 i, physical, bytes, width, base;
 	int dst, base_reg;
+	bool gs = false, operand16 = false;
 
 	if (!native_kop_object(prog, insn, &object, false) ||
 	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
-	    decoded.prefixes.nbytes != 1 || decoded.prefixes.bytes[0] != 0x65 ||
+	    decoded.prefixes.nbytes > 2 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
 	    X86_REX_X(decoded.rex_prefix.value) ||
 	    decoded.modrm.nbytes != 1 || X86_MODRM_MOD(decoded.modrm.value) == 3 ||
 	    decoded.immediate.nbytes)
 		return false;
+	for (i = 0; i < decoded.prefixes.nbytes; i++) {
+		if (decoded.prefixes.bytes[i] == 0x65 && !gs)
+			gs = true;
+		else if (decoded.prefixes.bytes[i] == 0x66 && !operand16)
+			operand16 = true;
+		else
+			return false;
+	}
 	width = decoded.opnd_bytes;
-	if (width != 4 && width != 8)
+	if (width != 2 && width != 4 && width != 8)
 		return false;
-	if (decoded.opcode.nbytes == 1 && decoded.opcode.bytes[0] == 0x8b)
+	if (decoded.opcode.nbytes == 1 && decoded.opcode.bytes[0] == 0x8a)
+		bytes = width = 1;
+	else if (decoded.opcode.nbytes == 1 && decoded.opcode.bytes[0] == 0x8b)
 		bytes = width;
 	else if (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f &&
 		 (decoded.opcode.bytes[1] == 0xb6 || decoded.opcode.bytes[1] == 0xb7))
@@ -3863,10 +3874,14 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 		return false;
 	physical = X86_MODRM_REG(decoded.modrm.value) |
 		   (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+	if (width == 1 && physical >= 4 && physical < 8 && !decoded.rex_prefix.nbytes)
+		return false; /* High-byte aliases do not write the low register lane. */
 	dst = native_kop_bpf_register(physical);
 	if (dst < 0 || object.seq->write_mask != BIT(dst) ||
 	    (object.seq->clobber_mask & ~BIT(physical)))
 		return false;
+	load->width = width;
+	load->percpu = gs;
 	sections = object.sections;
 	base = X86_MODRM_RM(decoded.modrm.value);
 	if (base == 4) {
@@ -3880,8 +3895,10 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	if (base != 5 || X86_MODRM_MOD(decoded.modrm.value)) {
 		base |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
 		base_reg = native_kop_bpf_register(base);
-		if (base_reg < 0 || object.seq->read_mask != BIT(base_reg) ||
-		    object.seq->bindings_count != 2)
+		if (base_reg < 0 ||
+		    (object.seq->read_mask != BIT(base_reg) &&
+		     !(width < 4 && object.seq->read_mask == (BIT(base_reg) | BIT(dst)))) ||
+		    object.seq->bindings_count < 2 || object.seq->bindings_count > 3)
 			return false;
 		for (i = 1; i < object.elf->e_shnum; i++)
 			if ((sections[i].sh_type == SHT_RELA || sections[i].sh_type == SHT_REL) &&
@@ -3894,7 +3911,9 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 		load->indirect = true;
 		return true;
 	}
-	if (object.seq->read_mask || object.seq->bindings_count != 1 ||
+	if (!gs || (object.seq->read_mask &&
+		    !(width < 4 && object.seq->read_mask == BIT(dst))) ||
+	    !object.seq->bindings_count || object.seq->bindings_count > 2 ||
 	    X86_REX_B(decoded.rex_prefix.value) || decoded.displacement.nbytes != 4)
 		return false;
 	if (!native_kop_percpu_field(&object, object.text_size - 4, bytes, load, NULL))
@@ -13901,9 +13920,21 @@ native_memory_done:
 	}
 
 	if (bpf_native_seq_insn(insn) &&
-	    (native_seq_percpu_load(env->prog, insn, &native_load) ||
+	    (native_seq_memory_load(env->prog, insn, &native_load) ||
 	     native_seq_lea(env->prog, insn, &native_load))) {
 		struct bpf_reg_state *result = &cur_regs(env)[native_load.dst];
+		bool partial = native_load.width && native_load.width < 4;
+		bool initialized = result->type == SCALAR_VALUE && !result->native_input_bits;
+
+		/* Width metadata is descriptive under current verifier relaxations.
+		 * A narrow MOV therefore needs an initialized old scalar or an
+		 * actual next instruction which discards every untouched bit.
+		 */
+		if (partial && !initialized &&
+		    !(env->insn_idx + 1 < env->prog->len &&
+		      native_input_normalizes(&env->prog->insnsi[env->insn_idx + 1],
+					      native_load.dst, 8 * native_load.width)))
+			goto ordinary_helper;
 
 		if (native_load.indirect) {
 			struct bpf_reg_state *native_regs = cur_regs(env), source, selected;
@@ -13912,8 +13943,20 @@ native_memory_done:
 			if (err)
 				return err;
 			source = native_regs[native_load.base];
-			if (!native_kop_select_cpu(&selected, &source))
-				goto ordinary_helper;
+			if (native_load.percpu) {
+				if (!native_kop_select_cpu(&selected, &source))
+					goto ordinary_helper;
+			} else {
+				/* These native bytes are a plain load, not the JIT's
+				 * fault-handled probe or context-layout conversion.
+				 */
+				if ((base_type(source.type) != PTR_TO_BTF_ID &&
+				     base_type(source.type) != PTR_TO_MEM &&
+				     source.type != PTR_TO_STACK && source.type != PTR_TO_MAP_VALUE) ||
+				    (source.type & PTR_UNTRUSTED))
+					goto ordinary_helper;
+				selected = source;
+			}
 			err = check_reg_arg(env, native_load.dst, DST_OP);
 			if (err)
 				return err;
@@ -13923,7 +13966,7 @@ native_memory_done:
 					       false, false, NULL);
 			if (native_load.base != native_load.dst)
 				native_regs[native_load.base] = source;
-			return err;
+			goto native_load_done;
 		}
 
 		/* This is the existing this_cpu_ptr/root/ordinary-load proof in
@@ -13946,9 +13989,19 @@ native_memory_done:
 		result->btf_id = native_load.type;
 		if (native_load.address)
 			return 0;
-		return check_mem_access(env, insn_idx, native_load.dst, native_load.offset,
-					native_load.size, BPF_READ, native_load.dst,
-					false, false, NULL);
+		err = check_mem_access(env, insn_idx, native_load.dst, native_load.offset,
+				       native_load.size, BPF_READ, native_load.dst,
+				       false, false, NULL);
+native_load_done:
+		if (!err && partial) {
+			/* An ordinary byte/half load zero-extends abstractly, while
+			 * native MOV preserves upper lanes. Forget those false zeros.
+			 */
+			mark_reg_unknown(env, cur_regs(env), native_load.dst);
+			if (!initialized)
+				result->native_input_bits = 8 * native_load.width;
+		}
+		return err;
 	}
 
 ordinary_helper:
