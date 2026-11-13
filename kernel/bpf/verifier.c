@@ -13547,16 +13547,11 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		saved = native_regs[temporary];
 		if (stack) {
 			struct bpf_call_arg_meta range = { .raw_mode = descriptor.store };
-			s64 start = (s64)native_regs[descriptor.base].off + descriptor.offset;
 
 			/* The existing helper range rule handles packed slots and
 			 * pointer spills without pretending ten bytes are one fill.
 			 */
-			if (start < S32_MIN || start > S32_MAX - 9) {
-				native_regs[descriptor.base] = original;
-				goto ordinary_helper;
-			}
-			err = check_stack_range_initialized(env, descriptor.base, start,
+			err = check_stack_range_initialized(env, descriptor.base, descriptor.offset,
 							  10, false, access, &range);
 			if (err || !descriptor.store)
 				goto descriptor_done;
