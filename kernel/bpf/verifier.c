@@ -3421,6 +3421,7 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 static bool native_kop_alt_target(const struct native_kop_object *object,
 				  u32 table, u32 field, u32 *target, u32 *offset)
 {
+#ifdef CONFIG_X86_64
 	u32 i, j, found = 0;
 
 	for (i = 1; i < object->elf->e_shnum; i++) {
@@ -3459,6 +3460,9 @@ static bool native_kop_alt_target(const struct native_kop_object *object,
 		}
 	}
 	return found == 1;
+#else
+	return false;
+#endif
 }
 
 static bool native_kop_preserving_alternatives(const struct native_kop_object *object,
@@ -3486,6 +3490,8 @@ static bool native_kop_preserving_alternatives(const struct native_kop_object *o
 			return false;
 		code = &object->sections[replacement];
 		if (replacement == object->text_index || !(code->sh_flags & SHF_EXECINSTR) ||
+		    code->sh_type != SHT_PROGBITS || code->sh_offset > object->seq->elf_size ||
+		    code->sh_size > object->seq->elf_size - code->sh_offset ||
 		    new_size > code->sh_size - start ||
 		    !native_kop_preserving_bytes((const void *)object->elf + code->sh_offset,
 					code->sh_size, start, start + new_size))
