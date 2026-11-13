@@ -3744,6 +3744,79 @@ static int native_kop_bpf_register(u32 physical)
 }
 #endif
 
+/* One resolver for native GS displacement relocations. All consumers retain
+ * the resident per-CPU storage identity and its existing aggregate BTF view.
+ */
+static bool native_kop_percpu_field(const struct native_kop_object *object,
+				   u32 displacement, u32 bytes,
+				   struct native_percpu_load *load,
+				   const char **native_name)
+{
+#ifdef CONFIG_X86_64
+	const Elf64_Shdr *sections = object->sections, *symbols = NULL, *strings;
+	const Elf64_Rela *relocation = NULL;
+	const Elf64_Sym *symbol;
+	const struct btf_type *variable, *type;
+	unsigned long address, start = (unsigned long)__per_cpu_start;
+	const char *name;
+	u32 i;
+	int id;
+
+	for (i = 1; i < object->elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &sections[i];
+
+		if ((section->sh_type != SHT_RELA && section->sh_type != SHT_REL) ||
+		    !section->sh_size || section->sh_info != object->text_index)
+			continue;
+		if (relocation || section->sh_type != SHT_RELA ||
+		    section->sh_size != sizeof(*relocation) ||
+		    section->sh_link >= object->elf->e_shnum)
+			return false;
+		relocation = (const void *)object->elf + section->sh_offset;
+		symbols = &sections[section->sh_link];
+	}
+	if (!relocation || relocation->r_offset != displacement ||
+	    (ELF64_R_TYPE(relocation->r_info) != R_X86_64_32S &&
+	     ELF64_R_TYPE(relocation->r_info) != R_X86_64_32) ||
+	    symbols->sh_type != SHT_SYMTAB || symbols->sh_entsize != sizeof(*symbol) ||
+	    ELF64_R_SYM(relocation->r_info) >= symbols->sh_size / sizeof(*symbol) ||
+	    symbols->sh_link >= object->elf->e_shnum)
+		return false;
+	symbol = (const void *)object->elf + symbols->sh_offset +
+		 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
+	strings = &sections[symbols->sh_link];
+	if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size)
+		return false;
+	name = (const void *)object->elf + strings->sh_offset + symbol->st_name;
+	if (!memchr(name, 0, strings->sh_size - symbol->st_name))
+		return false;
+	address = kallsyms_lookup_name(name);
+	if (!address || address < start || address >= (unsigned long)__per_cpu_end)
+		return false;
+	address += relocation->r_addend;
+	if (address < start || address > (unsigned long)__per_cpu_end - bytes)
+		return false;
+	load->btf = bpf_get_btf_vmlinux();
+	if (IS_ERR_OR_NULL(load->btf))
+		return false;
+	id = btf_find_by_name_kind(load->btf, "__percpu_area", BTF_KIND_VAR);
+	if (id < 1)
+		return false;
+	variable = btf_type_by_id(load->btf, id);
+	type = btf_type_skip_modifiers(load->btf, variable->type, &load->type);
+	if (!type || !btf_type_is_struct(type) ||
+	    address - start > type->size || bytes > type->size - (address - start))
+		return false;
+	load->offset = address - start;
+	load->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
+	if (native_name)
+		*native_name = name;
+	return true;
+#else
+	return false;
+#endif
+}
+
 /* Decode one GS load, then bind its displacement relocation to the same
  * image BTF area used by the existing per-CPU read KOperations. Nothing
  * is inferred from a scalar input or from the source assembly spelling.
@@ -3754,15 +3827,10 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 {
 #ifdef CONFIG_X86_64
 	struct native_kop_object object;
-	const Elf64_Shdr *sections, *symbols, *strings;
-	const Elf64_Rela *relocation = NULL;
-	const Elf64_Sym *symbol;
-	const struct btf_type *variable, *type;
-	const char *name;
+	const Elf64_Shdr *sections;
 	struct insn decoded;
-	unsigned long address, start = (unsigned long)__per_cpu_start;
 	u32 i, physical, bytes, width, base;
-	int id, dst, base_reg;
+	int dst, base_reg;
 
 	if (!native_kop_object(prog, insn, &object, false) ||
 	    object.seq->scratch_mask ||
@@ -3820,53 +3888,8 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	if (object.seq->read_mask || object.seq->bindings_count != 1 ||
 	    X86_REX_B(decoded.rex_prefix.value) || decoded.displacement.nbytes != 4)
 		return false;
-	for (i = 1; i < object.elf->e_shnum; i++) {
-		const Elf64_Shdr *section = &sections[i];
-
-		if ((section->sh_type != SHT_RELA && section->sh_type != SHT_REL) ||
-		    !section->sh_size || section->sh_info != object.text_index)
-			continue;
-		if (relocation || section->sh_type != SHT_RELA ||
-		    section->sh_size != sizeof(*relocation) ||
-		    section->sh_link >= object.elf->e_shnum)
-			return false;
-		relocation = (const void *)object.elf + section->sh_offset;
-		symbols = &sections[section->sh_link];
-	}
-	if (!relocation || relocation->r_offset != object.text_size - 4 ||
-	    (ELF64_R_TYPE(relocation->r_info) != R_X86_64_32S &&
-	     ELF64_R_TYPE(relocation->r_info) != R_X86_64_32) ||
-	    symbols->sh_type != SHT_SYMTAB || symbols->sh_entsize != sizeof(*symbol) ||
-	    ELF64_R_SYM(relocation->r_info) >= symbols->sh_size / sizeof(*symbol) ||
-	    symbols->sh_link >= object.elf->e_shnum)
+	if (!native_kop_percpu_field(&object, object.text_size - 4, bytes, load, NULL))
 		return false;
-	symbol = (const void *)object.elf + symbols->sh_offset +
-		 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
-	strings = &sections[symbols->sh_link];
-	if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size)
-		return false;
-	name = (const void *)object.elf + strings->sh_offset + symbol->st_name;
-	if (!memchr(name, 0, strings->sh_size - symbol->st_name))
-		return false;
-	address = kallsyms_lookup_name(name);
-	if (!address || address < start || address >= (unsigned long)__per_cpu_end)
-		return false;
-	address += relocation->r_addend;
-	if (address < start || address > (unsigned long)__per_cpu_end - bytes)
-		return false;
-	load->btf = bpf_get_btf_vmlinux();
-	if (IS_ERR_OR_NULL(load->btf))
-		return false;
-	id = btf_find_by_name_kind(load->btf, "__percpu_area", BTF_KIND_VAR);
-	if (id < 1)
-		return false;
-	variable = btf_type_by_id(load->btf, id);
-	type = btf_type_skip_modifiers(load->btf, variable->type, &load->type);
-	if (!type || !btf_type_is_struct(type) ||
-	    address - start > type->size || bytes > type->size - (address - start))
-		return false;
-	load->offset = address - start;
-	load->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
 	load->dst = dst;
 	return true;
 #else
@@ -3957,7 +3980,9 @@ struct native_scalar_rmw {
 	s16 input;
 	u16 inputs, outputs;
 	s16 condition;
-	bool percpu, bit_index, read_only;
+	bool percpu, bit_index, read_only, absolute;
+	struct btf *btf;
+	u32 type;
 };
 
 struct native_descriptor_kop {
@@ -4393,7 +4418,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	u16 inputs = 0, outputs = 0;
 	bool gs = false, lock = false;
 	int base, input = -1, condition = -1;
-	bool bit_index = false, read_only = false;
+	bool bit_index = false, read_only = false, absolute = false;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
 	    object.seq->scratch_mask ||
@@ -4513,20 +4538,41 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 			return false;
 		physical = X86_SIB_BASE(decoded.sib.value);
 	}
-	if (physical == 5 && !X86_MODRM_MOD(decoded.modrm.value))
-		return false;
-	physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
-	base = native_kop_bpf_register(physical);
 	if (input >= 0)
 		inputs |= BIT(input);
-	if (base < 0 || object.seq->read_mask != (BIT(base) | inputs) ||
+	if (physical == 5 && !X86_MODRM_MOD(decoded.modrm.value)) {
+		struct native_percpu_load root = {};
+		const char *name;
+
+		/* A GS absolute displacement denotes a resident per-CPU field,
+		 * not an incoming scalar address. Reuse the GS-load resolver.
+		 */
+		if (!gs || X86_MODRM_RM(decoded.modrm.value) != 4 ||
+		    X86_REX_B(decoded.rex_prefix.value) || decoded.displacement.nbytes != 4 ||
+		    !native_kop_percpu_field(&object, insn_offset_displacement(&decoded),
+					    bytes, &root, &name) ||
+		    !native_kop_external_identity(prog, name))
+			return false;
+		absolute = true;
+		base = BPF_REG_0; /* Temporary abstract view, restored before continuation. */
+		rmw->btf = root.btf;
+		rmw->type = root.type;
+		rmw->offset = root.offset;
+	} else {
+		physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
+		base = native_kop_bpf_register(physical);
+		if (base < 0)
+			return false;
+		rmw->offset = decoded.displacement.value;
+	}
+	if (object.seq->read_mask != ((absolute ? 0 : BIT(base)) | inputs) ||
 	    object.seq->write_mask != outputs || (object.seq->clobber_mask & ~physical_outputs))
 		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &object.sections[i];
 
 		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
-		    section->sh_size && section->sh_info == object.text_index)
+		    section->sh_size && section->sh_info == object.text_index && !absolute)
 			return false;
 		if (section->sh_size) {
 			const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
@@ -4555,8 +4601,8 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	}
 	rmw->base = base;
 	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : BPF_B;
-	rmw->offset = decoded.displacement.value;
 	rmw->percpu = gs;
+	rmw->absolute = absolute;
 	rmw->input = input;
 	rmw->inputs = inputs;
 	rmw->outputs = outputs;
@@ -13717,14 +13763,23 @@ descriptor_done:
 			     native_regs[i].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
 				goto ordinary_helper;
 		}
-		err = check_reg_arg(env, rmw.base, SRC_OP);
-		if (err)
-			return err;
+		if (!rmw.absolute) {
+			err = check_reg_arg(env, rmw.base, SRC_OP);
+			if (err)
+				return err;
+		}
 		if (rmw.percpu) {
 			source = native_regs[rmw.base];
-			if (!native_kop_select_cpu(&selected, &source))
-				goto ordinary_helper;
-			native_regs[rmw.base] = selected;
+			if (rmw.absolute) {
+				mark_reg_known_zero(env, native_regs, rmw.base);
+				native_regs[rmw.base].type = PTR_TO_BTF_ID;
+				native_regs[rmw.base].btf = rmw.btf;
+				native_regs[rmw.base].btf_id = rmw.type;
+			} else {
+				if (!native_kop_select_cpu(&selected, &source))
+					goto ordinary_helper;
+				native_regs[rmw.base] = selected;
+			}
 		}
 		/* Kernel fields are not tracked stack cells or resource-owned
 		 * allocations. Reuse their existing typed load/store rules.
