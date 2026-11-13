@@ -3399,7 +3399,7 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 	 * context discipline (option D); they are not erased at execution.
 	 * Whole streams compose these one-opcode semantics.
 	 */
-	static const struct { u8 size, bytes[3]; } operations[] = {
+	static const struct { u8 size, bytes[6]; } operations[] = {
 		{2, {0x0f, 0x0b}}, /* UD2: returning WARN continuation */
 		{1, {0xfa}}, {1, {0xfb}}, /* CLI, STI */
 		{2, {0xf3, 0x90}}, /* PAUSE */
@@ -3409,6 +3409,15 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 		{3, {0x0f, 0xae, 0xf0}}, /* MFENCE */
 		{3, {0x0f, 0xae, 0xf8}}, /* SFENCE */
 		{2, {0x0f, 0x09}}, /* WBINVD writes back before invalidating caches. */
+		/* Linux's SMP barrier reads/writes the same private stack word.
+		 * ADD zero preserves all bits, including undefined bits; it
+		 * establishes no new stack initialization or value fact.
+		 */
+		{6, {0xf0, 0x83, 0x44, 0x24, 0xfc, 0x00}},
+		/* HLT's returning interrupt frame preserves GPRs. Whether and
+		 * when it returns follows source context/progress options D/E.
+		 */
+		{1, {0xf4}},
 	};
 	u32 i, offset = 0;
 	bool begin = !first, end = !last;
