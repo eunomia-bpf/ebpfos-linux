@@ -40,6 +40,7 @@
 #include <asm/sections.h>
 #ifdef CONFIG_X86_64
 #include <asm/insn.h>
+#include <asm/cpufeature.h>
 #endif
 
 #include "disasm.h"
@@ -3804,7 +3805,7 @@ struct native_scalar_rmw {
 	s16 input;
 	u16 inputs, outputs;
 	s16 condition;
-	bool percpu, bit_index;
+	bool percpu, bit_index, read_only;
 };
 
 /* LLVM captures a native condition with SETcc followed by MOVZX of the same
@@ -3849,6 +3850,105 @@ static int native_kop_condition_output(const struct native_kop_object *object,
 }
 
 struct native_arch_kop { u16 reads, writes; u8 width; };
+
+struct native_scalar_bits {
+	u16 inputs, outputs;
+	u8 width, destination;
+	s8 scan_source, condition;
+	bool zero_defined;
+};
+
+/* Register BT masks its index within the operand. Memory BT instead uses
+ * the bounded scalar-word access below. BSR/BSF and their REP feature forms
+ * retain the old-destination possibility when a zero input is undefined.
+ */
+static bool native_seq_scalar_bits(const struct bpf_prog *prog,
+				   const struct bpf_insn *insn,
+				   struct native_scalar_bits *bits)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	struct insn decoded;
+	u32 i, physical, physical_outputs = 0, opcode;
+	int source, destination, index;
+	bool repeat;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
+	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
+	    decoded.prefixes.nbytes > 1 || decoded.opcode.nbytes != 2 ||
+	    decoded.opcode.bytes[0] != 0x0f || decoded.modrm.nbytes != 1 ||
+	    X86_MODRM_MOD(decoded.modrm.value) != 3 ||
+	    (decoded.opnd_bytes != 4 && decoded.opnd_bytes != 8))
+		return false;
+	repeat = decoded.prefixes.nbytes == 1;
+	if (repeat && decoded.prefixes.bytes[0] != 0xf3)
+		return false;
+	physical = X86_MODRM_RM(decoded.modrm.value) | (X86_REX_B(decoded.rex_prefix.value) ? 8 : 0);
+	source = native_kop_bpf_register(physical);
+	if (source < 0)
+		return false;
+	bits->inputs = BIT(source);
+	bits->outputs = 0;
+	bits->scan_source = bits->condition = -1;
+	bits->destination = U8_MAX;
+	bits->width = decoded.opnd_bytes;
+	bits->zero_defined = false;
+	opcode = decoded.opcode.bytes[1];
+	if (opcode == 0xbc || opcode == 0xbd) {
+		if (decoded.immediate.nbytes)
+			return false;
+		physical = X86_MODRM_REG(decoded.modrm.value) | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+		destination = native_kop_bpf_register(physical);
+		if (destination < 0)
+			return false;
+		bits->scan_source = source;
+		bits->destination = destination;
+		bits->outputs = BIT(destination);
+		/* A tied output can also declare its previous scalar value. */
+		if (object.seq->read_mask & BIT(destination))
+			bits->inputs |= BIT(destination);
+		physical_outputs = BIT(physical);
+		/* On CPUs without these features, REP BSF/BSR keeps its legacy
+		 * zero-input behavior. Linux's common capability is the same
+		 * feature premise already used by its native instruction paths.
+		 */
+		bits->zero_defined = repeat && (opcode == 0xbc ?
+			boot_cpu_has(X86_FEATURE_BMI1) : boot_cpu_has(X86_FEATURE_ABM));
+	} else if (!repeat && opcode == 0xa3 && !decoded.immediate.nbytes) {
+		index = native_kop_bpf_register(X86_MODRM_REG(decoded.modrm.value) |
+			(X86_REX_R(decoded.rex_prefix.value) ? 8 : 0));
+		if (index < 0)
+			return false;
+		bits->inputs |= BIT(index);
+	} else if (!repeat && opcode == 0xba && X86_MODRM_REG(decoded.modrm.value) == 4 &&
+		   decoded.immediate.nbytes == 1 && !X86_REX_R(decoded.rex_prefix.value)) {
+		/* Immediate BT, modulo the operand width. */
+	} else {
+		return false;
+	}
+	if (decoded.length < object.text_size) {
+		bits->condition = native_kop_condition_output(&object, decoded.length, &physical);
+		if (bits->condition < 0)
+			return false;
+		bits->outputs |= BIT(bits->condition);
+		physical_outputs |= BIT(physical);
+	}
+	if (object.seq->read_mask != bits->inputs || object.seq->write_mask != bits->outputs ||
+	    (object.seq->clobber_mask & ~physical_outputs))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+	}
+	return true;
+#else
+	return false;
+#endif
+}
 
 /* Balanced PUSHF/POP and PUSH/POPF use one private native stack slot,
  * restore SP and expose only a scalar flags word or the original CPU flags
@@ -4031,7 +4131,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	u16 inputs = 0, outputs = 0;
 	bool gs = false, lock = false;
 	int base, input = -1, condition = -1;
-	bool bit_index = false;
+	bool bit_index = false, read_only = false;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
 	    object.seq->scratch_mask ||
@@ -4062,10 +4162,14 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	}
 	if (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f) {
 		switch (decoded.opcode.bytes[1]) {
-		case 0xba: /* Immediate BTS/BTR/BTC selects within one word. */
-			if (operation < 5 || !decoded.immediate.nbytes)
+		case 0xba: /* Immediate BT/BTS/BTR/BTC selects within one word. */
+			if (operation < 4 || !decoded.immediate.nbytes)
 				return false;
+			read_only = operation == 4;
 			break;
+		case 0xa3: /* Register BT. */
+			read_only = true;
+			fallthrough;
 		case 0xab: case 0xb3: case 0xbb: /* Register BTS/BTR/BTC. */
 			bit_index = true;
 			input = native_kop_bpf_register(operation |
@@ -4139,7 +4243,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	} else {
 		return false;
 	}
-	if (bytes != 1 && bytes != 4 && bytes != 8)
+	if ((read_only && lock) || (bytes != 1 && bytes != 4 && bytes != 8))
 		return false;
 	physical = X86_MODRM_RM(decoded.modrm.value);
 	if (physical == 4) {
@@ -4196,6 +4300,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->outputs = outputs;
 	rmw->condition = condition;
 	rmw->bit_index = bit_index;
+	rmw->read_only = read_only;
 	return true;
 #else
 	return false;
@@ -13151,6 +13256,62 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_percpu_load native_load = {};
 	struct native_scalar_rmw rmw;
 	struct native_arch_kop architectural;
+	struct native_scalar_bits bits;
+
+	if (bpf_native_seq_insn(insn) && native_seq_scalar_bits(env->prog, insn, &bits)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		bool bounded = true;
+		u32 maximum = 8 * bits.width;
+
+		for (i = 0; i < MAX_BPF_REG; i++) {
+			if (!(bits.inputs & BIT(i)))
+				continue;
+			err = __check_reg_arg(env, native_regs, i, SRC_OP, bits.width);
+			if (err)
+				return err;
+			if (native_regs[i].type != SCALAR_VALUE)
+				goto ordinary_helper;
+		}
+		if (bits.scan_source >= 0 && !bits.zero_defined) {
+			struct bpf_reg_state *input = &native_regs[bits.scan_source];
+			bool nonzero = bits.width == 4 ? input->u32_min_value > 0 ||
+				input->s32_min_value > 0 || input->s32_max_value < 0 :
+				input->umin_value > 0 || input->smin_value > 0 || input->smax_value < 0;
+
+			if (!nonzero && bits.destination != bits.condition) {
+				/* Undefined zero-source results may retain old bits. Never
+				 * turn an unread/uninitialized or pointer destination into
+				 * a fully initialized scalar through that possibility.
+				 */
+				err = check_reg_arg(env, bits.destination, SRC_OP);
+				if (err)
+					return err;
+				if (native_regs[bits.destination].type != SCALAR_VALUE)
+					goto ordinary_helper;
+				bounded = false;
+			}
+			maximum--;
+		}
+		for (i = 0; i < MAX_BPF_REG; i++) {
+			if (!(bits.outputs & BIT(i)))
+				continue;
+			err = check_reg_arg(env, i, DST_OP);
+			if (err)
+				return err;
+			if (i == bits.condition || (i == bits.destination && bounded)) {
+				struct bpf_reg_state *output = &native_regs[i];
+				u32 limit = i == bits.condition ? 1 : maximum;
+
+				output->var_off = tnum_range(0, limit);
+				output->umin_value = output->u32_min_value = 0;
+				output->smin_value = output->s32_min_value = 0;
+				output->umax_value = output->u32_max_value = limit;
+				output->smax_value = output->s32_max_value = limit;
+				reg_bounds_sync(output);
+			}
+		}
+		return 0;
+	}
 
 	if (bpf_native_seq_insn(insn) &&
 	    (native_seq_arch_kop(env->prog, insn, &architectural) ||
@@ -13229,10 +13390,12 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		 * unknown scalar of the written width to the ordinary store rule;
 		 * -1 would incorrectly treat the native marker's imm as the value.
 		 */
-		mark_reg_unknown(env, native_regs, temporary);
-		coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
-		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
-				       BPF_WRITE, temporary, false, false, NULL);
+		if (!rmw.read_only) {
+			mark_reg_unknown(env, native_regs, temporary);
+			coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
+			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
+					       BPF_WRITE, temporary, false, false, NULL);
+		}
 		native_regs[temporary] = saved;
 		if (rmw.percpu)
 			native_regs[rmw.base] = source;
