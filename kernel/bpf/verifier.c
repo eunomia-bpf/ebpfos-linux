@@ -3960,6 +3960,72 @@ struct native_scalar_rmw {
 	bool percpu, bit_index, read_only;
 };
 
+struct native_descriptor_kop {
+	u32 base;
+	s32 offset;
+	bool store, percpu;
+};
+
+/* Long-mode descriptor-table instructions transfer exactly ten bytes. The
+ * descriptor is memory, not a new GPR pointer capability. Table selection
+ * and execution context retain the source's option D obligations.
+ */
+static bool native_seq_descriptor(const struct bpf_prog *prog,
+				  const struct bpf_insn *insn,
+				  struct native_descriptor_kop *operation)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	struct insn decoded;
+	u32 physical, selector, i;
+	int base;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    object.seq->write_mask || object.seq->clobber_mask ||
+	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
+	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
+	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
+	    decoded.prefixes.nbytes > 1 ||
+	    (decoded.prefixes.nbytes && decoded.prefixes.bytes[0] != 0x65) ||
+	    decoded.opcode.nbytes != 2 || decoded.opcode.bytes[0] != 0x0f ||
+	    decoded.opcode.bytes[1] != 0x01 || decoded.modrm.nbytes != 1 ||
+	    X86_MODRM_MOD(decoded.modrm.value) == 3 || decoded.immediate.nbytes ||
+	    X86_REX_R(decoded.rex_prefix.value))
+		return false;
+	selector = X86_MODRM_REG(decoded.modrm.value);
+	if (selector > 3)
+		return false;
+	physical = X86_MODRM_RM(decoded.modrm.value);
+	if (physical == 4) {
+		if (X86_SIB_INDEX(decoded.sib.value) != 4 || X86_REX_X(decoded.rex_prefix.value))
+			return false;
+		physical = X86_SIB_BASE(decoded.sib.value);
+	}
+	if (physical == 5 && !X86_MODRM_MOD(decoded.modrm.value))
+		return false;
+	physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
+	base = native_kop_bpf_register(physical);
+	if (base < 0 || object.seq->read_mask != BIT(base))
+		return false;
+	if ((s32)decoded.displacement.value > S32_MAX - 9)
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+	}
+	operation->base = base;
+	operation->offset = decoded.displacement.value;
+	operation->store = selector < 2;
+	operation->percpu = decoded.prefixes.nbytes;
+	return true;
+#else
+	return false;
+#endif
+}
+
 /* LLVM captures a native condition with SETcc followed by MOVZX of the same
  * byte into its full 32-bit register. Together they define a complete scalar
  * boolean; a lone partial-register write is not this contract.
@@ -13453,6 +13519,76 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_scalar_rmw rmw;
 	struct native_arch_kop architectural;
 	struct native_scalar_bits bits;
+	struct native_descriptor_kop descriptor;
+
+	if (bpf_native_seq_insn(insn) && native_seq_descriptor(env->prog, insn, &descriptor)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		struct bpf_reg_state original, selected, saved;
+		u32 temporary = descriptor.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
+		enum bpf_access_type access = descriptor.store ? BPF_WRITE : BPF_READ;
+		bool stack;
+
+		err = check_reg_arg(env, descriptor.base, SRC_OP);
+		if (err)
+			return err;
+		original = native_regs[descriptor.base];
+		if (descriptor.percpu) {
+			if (!native_kop_select_cpu(&selected, &original))
+				goto ordinary_helper;
+			native_regs[descriptor.base] = selected;
+		}
+		stack = base_type(native_regs[descriptor.base].type) == PTR_TO_STACK;
+		if ((!stack && base_type(native_regs[descriptor.base].type) != PTR_TO_BTF_ID &&
+		     base_type(native_regs[descriptor.base].type) != PTR_TO_MEM) ||
+		    type_is_alloc(native_regs[descriptor.base].type)) {
+			native_regs[descriptor.base] = original;
+			goto ordinary_helper;
+		}
+		saved = native_regs[temporary];
+		if (stack) {
+			struct bpf_call_arg_meta range = { .raw_mode = descriptor.store };
+			s64 start = (s64)native_regs[descriptor.base].off + descriptor.offset;
+
+			/* The existing helper range rule handles packed slots and
+			 * pointer spills without pretending ten bytes are one fill.
+			 */
+			if (start < S32_MIN || start > S32_MAX - 9) {
+				native_regs[descriptor.base] = original;
+				goto ordinary_helper;
+			}
+			err = check_stack_range_initialized(env, descriptor.base, start,
+							  10, false, access, &range);
+			if (err || !descriptor.store)
+				goto descriptor_done;
+		}
+		/* Byte transfers preserve exact packed extents. A stack write
+		 * uses the existing raw-helper path (unknown STACK_MISC), not
+		 * a scalar spill whose one-slot history cannot describe ten bytes.
+		 */
+		for (i = 0; i < 10; i++) {
+			int value = -1;
+
+			if (descriptor.store && !stack) {
+				mark_reg_unknown(env, native_regs, temporary);
+				coerce_reg_to_size(&native_regs[temporary], 1);
+				value = temporary;
+			}
+			err = check_mem_access(env, insn_idx, descriptor.base, descriptor.offset + i,
+					       BPF_B, access, value, false, false, NULL);
+			if (err)
+				break;
+		}
+descriptor_done:
+		native_regs[temporary] = saved;
+		native_regs[descriptor.base] = original;
+		if (!err) {
+			u32 owner = cur_func(env)->subprogno;
+
+			verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+				owner, bpf_verifier_subprog_name(env, owner));
+		}
+		return err;
+	}
 
 	if (bpf_native_seq_insn(insn) && native_seq_preserving_thunk(env->prog, insn)) {
 		u32 owner = cur_func(env)->subprogno;
