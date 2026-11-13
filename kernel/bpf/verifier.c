@@ -3425,9 +3425,10 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 }
 
 struct native_percpu_load {
-	u32 dst, size, offset, type;
+	u32 dst, size, type, base;
+	s32 offset;
 	struct btf *btf;
-	bool address, scalar;
+	bool address, scalar, indirect;
 };
 
 #ifdef CONFIG_X86_64
@@ -3457,20 +3458,18 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	const char *name;
 	struct insn decoded;
 	unsigned long address, start = (unsigned long)__per_cpu_start;
-	u32 i, physical, bytes, width;
-	int id, dst;
+	u32 i, physical, bytes, width, base;
+	int id, dst, base_reg;
 
 	if (!native_kop_object(prog, insn, &object) ||
-	    object.seq->read_mask || object.seq->scratch_mask ||
-	    object.seq->bindings_count != 1 ||
+	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
 	    decoded.prefixes.nbytes != 1 || decoded.prefixes.bytes[0] != 0x65 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
-	    X86_REX_X(decoded.rex_prefix.value) || X86_REX_B(decoded.rex_prefix.value) ||
-	    decoded.modrm.nbytes != 1 || X86_MODRM_MOD(decoded.modrm.value) ||
-	    X86_MODRM_RM(decoded.modrm.value) != 4 || decoded.sib.value != 0x25 ||
-	    decoded.displacement.nbytes != 4 || decoded.immediate.nbytes)
+	    X86_REX_X(decoded.rex_prefix.value) ||
+	    decoded.modrm.nbytes != 1 || X86_MODRM_MOD(decoded.modrm.value) == 3 ||
+	    decoded.immediate.nbytes)
 		return false;
 	width = decoded.opnd_bytes;
 	if (width != 4 && width != 8)
@@ -3489,6 +3488,35 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	    (object.seq->clobber_mask & ~BIT(physical)))
 		return false;
 	sections = object.sections;
+	base = X86_MODRM_RM(decoded.modrm.value);
+	if (base == 4) {
+		if (X86_SIB_INDEX(decoded.sib.value) != 4)
+			return false;
+		base = X86_SIB_BASE(decoded.sib.value);
+	} else if (base == 5 && !X86_MODRM_MOD(decoded.modrm.value)) {
+		/* RIP-relative addressing adds a distinct implicit PC input. */
+		return false;
+	}
+	if (base != 5 || X86_MODRM_MOD(decoded.modrm.value)) {
+		base |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
+		base_reg = native_kop_bpf_register(base);
+		if (base_reg < 0 || object.seq->read_mask != BIT(base_reg) ||
+		    object.seq->bindings_count != 2)
+			return false;
+		for (i = 1; i < object.elf->e_shnum; i++)
+			if ((sections[i].sh_type == SHT_RELA || sections[i].sh_type == SHT_REL) &&
+			    sections[i].sh_size && sections[i].sh_info == object.text_index)
+				return false;
+		load->base = base_reg;
+		load->dst = dst;
+		load->offset = decoded.displacement.value;
+		load->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
+		load->indirect = true;
+		return true;
+	}
+	if (object.seq->read_mask || object.seq->bindings_count != 1 ||
+	    X86_REX_B(decoded.rex_prefix.value) || decoded.displacement.nbytes != 4)
+		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &sections[i];
 
@@ -12658,6 +12686,44 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	    (native_seq_percpu_load(env->prog, insn, &native_load) ||
 	     native_seq_lea(env->prog, insn, &native_load))) {
 		struct bpf_reg_state *result = &cur_regs(env)[native_load.dst];
+
+		if (native_load.indirect) {
+			struct bpf_reg_state *native_regs = cur_regs(env), source, selected;
+			const struct btf_type *type;
+			u32 bytes;
+
+			err = check_reg_arg(env, native_load.base, SRC_OP);
+			if (err)
+				return err;
+			source = native_regs[native_load.base];
+			if (base_type(source.type) != PTR_TO_BTF_ID ||
+			    !(source.type & MEM_PERCPU) || type_is_alloc(source.type))
+				goto ordinary_helper;
+			/* This is the stock this_cpu_ptr type transition. A GS
+			 * address operand must already be a typed per-CPU capability;
+			 * an integer-shaped source operand gains no pointer identity.
+			 */
+			selected = source;
+			selected.type &= ~MEM_PERCPU;
+			type = btf_type_skip_modifiers(source.btf, source.btf_id, NULL);
+			if (!btf_type_is_struct(type) &&
+			    !(btf_type_is_var(type) && btf_pointer_global(source.btf, type->type))) {
+				if (IS_ERR(btf_resolve_size(source.btf, type, &bytes)))
+					goto ordinary_helper;
+				selected.type = PTR_TO_MEM | MEM_RDONLY | type_flag(selected.type);
+				selected.mem_size = bytes;
+			}
+			err = check_reg_arg(env, native_load.dst, DST_OP);
+			if (err)
+				return err;
+			native_regs[native_load.base] = selected;
+			err = check_mem_access(env, insn_idx, native_load.base, native_load.offset,
+					       native_load.size, BPF_READ, native_load.dst,
+					       false, false, NULL);
+			if (native_load.base != native_load.dst)
+				native_regs[native_load.base] = source;
+			return err;
+		}
 
 		/* This is the existing this_cpu_ptr/root/ordinary-load proof in
 		 * abstract state. The JIT retains the original single GS load;
