@@ -3586,21 +3586,31 @@ static bool native_kop_external_identity(const struct bpf_prog *prog, const char
 /* A native CALL binds through one external ELF relocation. Share this
  * identity with every opcode/body summary; JIT globals must not shadow it.
  */
-static unsigned long native_kop_call_target(const struct bpf_prog *prog,
-                                           const struct native_kop_object *object)
+static unsigned long native_kop_call_at(const struct bpf_prog *prog,
+				       const struct native_kop_object *object,
+				       u32 section, u32 offset)
 {
 #ifdef CONFIG_X86_64
 	const char *name = NULL;
+	const Elf64_Shdr *text;
+	const u8 *bytes;
 	u32 i, j, found = 0;
 
-	if (object->text_size != 5 || object->text[0] != 0xe8)
+	if (section >= object->elf->e_shnum)
+		return 0;
+	text = &object->sections[section];
+	if (!(text->sh_flags & SHF_EXECINSTR) || offset > text->sh_size ||
+	    text->sh_size - offset < 5)
+		return 0;
+	bytes = (const void *)object->elf + text->sh_offset + offset;
+	if (bytes[0] != 0xe8)
 		return 0;
 	for (i = 1; i < object->elf->e_shnum; i++) {
 		const Elf64_Shdr *rel = &object->sections[i], *table, *strings;
 		const Elf64_Rela *entries;
 
 		if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) ||
-		    !rel->sh_size || rel->sh_info != object->text_index)
+		    !rel->sh_size || rel->sh_info != section)
 			continue;
 		if (rel->sh_type != SHT_RELA || rel->sh_size % sizeof(*entries) ||
 		    rel->sh_link >= object->elf->e_shnum)
@@ -3619,7 +3629,7 @@ static unsigned long native_kop_call_target(const struct bpf_prog *prog,
 			const Elf64_Sym *symbol;
 			u32 type = ELF64_R_TYPE(entry->r_info);
 
-			if (++found != 1 || entry->r_offset != 1 || entry->r_addend != -4 ||
+			if (++found != 1 || entry->r_offset != offset + 1 || entry->r_addend != -4 ||
 			    (type != R_X86_64_PC32 && type != R_X86_64_PLT32) ||
 			    ELF64_R_SYM(entry->r_info) >= table->sh_size / sizeof(*symbol))
 				return 0;
@@ -3638,6 +3648,13 @@ static unsigned long native_kop_call_target(const struct bpf_prog *prog,
 #else
 	return 0;
 #endif
+}
+
+static unsigned long native_kop_call_target(const struct bpf_prog *prog,
+					   const struct native_kop_object *object)
+{
+	return object->text_size == 5 ?
+		native_kop_call_at(prog, object, object->text_index, 0) : 0;
 }
 
 /* x86's THUNK calling convention wraps a normal C call with balanced saves
@@ -3963,13 +3980,77 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 }
 
 struct native_string_kop {
-	bool store, fault;
+	bool store, fault, call;
 };
 
+/* A resident leaf's byte/word loops implement bounded transfer effects.
+ * The byte tail advances after each successful store. Word faults retry
+ * that same span bytewise; all progress stays inside the original count.
+ * Match instructions, branches and recovery metadata, not helper names.
+ */
+static bool native_kop_string_call(const struct bpf_prog *prog,
+				   const struct native_kop_object *object,
+				   u32 section, u32 offset, bool store)
+{
+#ifdef CONFIG_X86_64
+	static const u8 copy[] = {
+		0x48, 0x83, 0xf9, 0x40, 0x73, 0x34, 0x83, 0xf9, 0x08, 0x73, 0x15, 0x85,
+		0xc9, 0x74, 0x0f, 0x8a, 0x06, 0x88, 0x07, 0x48, 0xff, 0xc7, 0x48, 0xff,
+		0xc6, 0x48, 0xff, 0xc9, 0x75, 0xf1, 0xc3, 0x90, 0x48, 0x8b, 0x06, 0x48,
+		0x89, 0x07, 0x48, 0x83, 0xc6, 0x08, 0x48, 0x83, 0xc7, 0x08, 0x83, 0xe9,
+		0x08, 0x74, 0xeb, 0x83, 0xf9, 0x08, 0x73, 0xe8, 0xeb, 0xd5, 0xf3, 0xa4,
+		0xc3,
+	};
+	static const u8 fill[] = {
+		0x48, 0x83, 0xf9, 0x40, 0x73, 0x2a, 0x83, 0xf9, 0x08, 0x73, 0x0f, 0x85,
+		0xc9, 0x74, 0x0a, 0x88, 0x07, 0x48, 0xff, 0xc7, 0x48, 0xff, 0xc9, 0x75,
+		0xf6, 0xc3, 0x48, 0x89, 0x07, 0x48, 0x83, 0xc7, 0x08, 0x83, 0xe9, 0x08,
+		0x74, 0xf3, 0x83, 0xf9, 0x08, 0x73, 0xef, 0xeb, 0xe2, 0x0f, 0x1f, 0x00,
+		0x48, 0x89, 0x07, 0x48, 0x89, 0x47, 0x08, 0x48, 0x89, 0x47, 0x10, 0x48,
+		0x89, 0x47, 0x18, 0x48, 0x89, 0x47, 0x20, 0x48, 0x89, 0x47, 0x28, 0x48,
+		0x89, 0x47, 0x30, 0x48, 0x89, 0x47, 0x38, 0x48, 0x83, 0xc7, 0x40, 0x48,
+		0x83, 0xe9, 0x40, 0x48, 0x83, 0xf9, 0x40, 0x73, 0xd3, 0x83, 0xf9, 0x08,
+		0x73, 0xb8, 0x85, 0xc9, 0x75, 0xa9, 0xc3,
+	};
+	static const u8 copy_faults[][2] = {
+		{0x0f, 0x1e}, {0x11, 0x1e}, {0x20, 0x0f}, {0x23, 0x0f}, {0x3a, 0x3c},
+	};
+	static const u8 fill_faults[][2] = {
+		{0x0f, 0x19}, {0x1a, 0x0f}, {0x30, 0x0f}, {0x33, 0x0f}, {0x37, 0x0f},
+		{0x3b, 0x0f}, {0x3f, 0x0f}, {0x43, 0x0f}, {0x47, 0x0f}, {0x4b, 0x0f},
+	};
+	const u8 *expected = store ? fill : copy;
+	const u8 (*faults)[2] = store ? fill_faults : copy_faults;
+	u32 size = store ? sizeof(fill) : sizeof(copy);
+	u32 count = store ? ARRAY_SIZE(fill_faults) : ARRAY_SIZE(copy_faults), i;
+	unsigned long address = native_kop_call_at(prog, object, section, offset);
+	u8 body[sizeof(fill)];
+
+	/* The COPY large arm here is the resident ERMS REP arm. Its unused
+	 * MOVSQ implementation is not reached by any branch in this prefix.
+	 * A CPU which selected that other body retains the old trusted route.
+	 */
+	if (!core_kernel_text(address) || !core_kernel_text(address + size - 1) ||
+	    copy_from_kernel_nofault(body, (const void *)address, size) ||
+	    memcmp(body, expected, size))
+		return false;
+	for (i = 0; i < count; i++) {
+		const struct exception_table_entry *exception =
+			search_kernel_exception_table(address + faults[i][0]);
+
+		if (!exception || exception->data != EX_TYPE_UACCESS ||
+		    (unsigned long)&exception->fixup + exception->fixup != address + faults[i][1])
+			return false;
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
 /* REP's returning state includes partial progress after a uaccess fault.
- * A CPU-selected CALL alternative is not the REP opcode: leave that arm on
- * its old route until its body has a separate semantics. Module finalization
- * and the AOT image's alternatives use the same boot feature selection.
+ * A selected CALL alternative needs its resident body's separate semantics.
+ * Module finalization and the AOT image use the same boot feature selection.
  */
 static bool native_seq_string_kop(const struct bpf_prog *prog,
 				  const struct bpf_insn *insn,
@@ -3979,7 +4060,7 @@ static bool native_seq_string_kop(const struct bpf_prog *prog,
 	struct native_kop_object object;
 	u32 at = 2, i, j, alternatives = 0, exceptions = 0;
 	u32 source, begin, target, end, reads, writes, optional = BIT(BPF_REG_ARG_SP);
-	bool store;
+	bool store, called = false;
 
 	if (!native_kop_object(prog, insn, &object,
 			      NATIVE_KOP_ALTERNATIVES | NATIVE_KOP_MSR_RECOVERY) ||
@@ -4024,9 +4105,14 @@ static bool native_seq_string_kop(const struct bpf_prog *prog,
 			    bytes[13] > object.sections[target].sh_size - end)
 				return false;
 			feature = get_unaligned_le32(bytes + 8);
-			if ((feature & 0xfffe0000) || (feature & 0xffff) >= NCAPINTS * 32 ||
-			    (!!boot_cpu_has(feature & 0xffff) ^ !!(feature & BIT(16))))
+			if ((feature & 0xfffe0000) || (feature & 0xffff) >= NCAPINTS * 32)
 				return false;
+			if (!!boot_cpu_has(feature & 0xffff) ^ !!(feature & BIT(16))) {
+				if (bytes[13] != 5 ||
+				    !native_kop_string_call(prog, &object, target, end, store))
+					return false;
+				called = true;
+			}
 		} else if (!strcmp(name, "__ex_table")) {
 			if (exceptions++ || section->sh_type != SHT_PROGBITS ||
 			    section->sh_size != 12 || get_unaligned_le32(bytes + 8) != EX_TYPE_UACCESS ||
@@ -4060,8 +4146,11 @@ static bool native_seq_string_kop(const struct bpf_prog *prog,
 					return false;
 		}
 	}
+	if (called && !store && !(object.seq->write_mask & BIT(BPF_REG_0)))
+		return false;
 	operation->store = store;
-	operation->fault = exceptions;
+	operation->fault = exceptions || called;
+	operation->call = called;
 	return true;
 #else
 	return false;
@@ -14122,7 +14211,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 			if (err)
 				return err;
 			if (string.store) {
-				err = __check_reg_arg(env, native_regs, BPF_REG_0, SRC_OP, 1);
+				err = __check_reg_arg(env, native_regs, BPF_REG_0, SRC_OP,
+						      string.call ? BPF_REG_SIZE : 1);
 				if (err)
 					return err;
 				if (native_regs[BPF_REG_0].type != SCALAR_VALUE)
@@ -14147,6 +14237,20 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 				err = check_reg_arg(env, BPF_REG_2, DST_OP);
 				if (err)
 					return err;
+				if (string.call) {
+					/* The byte tail writes AL, while zero/fault paths may
+					 * preserve AX. Do not initialize previously unread
+					 * bits merely because the asm declared AX clobbered.
+					 */
+					if (native_regs[BPF_REG_0].type != SCALAR_VALUE ||
+					    native_regs[BPF_REG_0].native_input_bits)
+						bpf_mark_reg_not_init(env, &native_regs[BPF_REG_0]);
+					else {
+						err = check_reg_arg(env, BPF_REG_0, DST_OP);
+						if (err)
+							return err;
+					}
+				}
 			}
 		}
 		err = check_reg_arg(env, BPF_REG_4, DST_OP);
@@ -14163,6 +14267,11 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 			reg_bounds_sync(count);
 		} else {
 			__mark_reg_known(&native_regs[BPF_REG_4], 0);
+		}
+		if (string.call) {
+			env->subprog_info[owner].has_native_call = true;
+			verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+				owner, bpf_verifier_subprog_name(env, owner));
 		}
 		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
 			owner, bpf_verifier_subprog_name(env, owner));
