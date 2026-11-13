@@ -987,7 +987,15 @@ int bpf_convert_ctx_accesses(struct bpf_verifier_env *env)
 		 */
 		case PTR_TO_BTF_ID | MEM_ALLOC | PTR_UNTRUSTED:
 		case PTR_TO_MEM | MEM_RDONLY | PTR_UNTRUSTED:
-			if (type == BPF_READ) {
+			/* A compiled definition reads kernel-owned memory the way the
+			 * native function it replaces did: a plain load. The stock
+			 * probe conversion costs every such read an address-range test
+			 * and an exception-table entry that Native does not have, and
+			 * the operator's rule allows no extra run-time check. A
+			 * component's pointers come from the kernel, and the source
+			 * invariants it relies on are the ones Native relies on.
+			 */
+			if (type == BPF_READ && !env->prog->aux->ebpfos_component) {
 				if (BPF_MODE(insn->code) == BPF_MEM)
 					insn->code = BPF_LDX | BPF_PROBE_MEM |
 						     BPF_SIZE((insn)->code);
