@@ -3490,7 +3490,7 @@ static bool native_kop_rel_target(const struct native_kop_object *object,
 
 /* The JIT gives any record-owned global definition precedence over kallsyms.
  * A proof about resident text therefore needs the same external identity.
- * This is local to CALL admission, not a new requirement on native input.
+ * Native CALL and per-CPU proofs share this identity, without an ordinary-code rule.
  */
 static bool native_kop_external_identity(const struct bpf_prog *prog, const char *name)
 {
@@ -3838,6 +3838,7 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 	struct native_kop_object object;
 	const Elf64_Shdr *sections;
 	struct insn decoded;
+	const char *name;
 	u32 i, physical, bytes, width, base;
 	int dst, base_reg;
 	bool gs = false, operand16 = false;
@@ -3916,7 +3917,8 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 	    !object.seq->bindings_count || object.seq->bindings_count > 2 ||
 	    X86_REX_B(decoded.rex_prefix.value) || decoded.displacement.nbytes != 4)
 		return false;
-	if (!native_kop_percpu_field(&object, object.text_size - 4, bytes, load, NULL))
+	if (!native_kop_percpu_field(&object, object.text_size - 4, bytes, load, &name) ||
+	    !native_kop_external_identity(prog, name))
 		return false;
 	load->dst = dst;
 	return true;
