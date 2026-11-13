@@ -11,6 +11,7 @@
 #include <linux/bpf.h>
 #include <linux/bpf_native_seq.h>
 #include <linux/elf.h>
+#include <linux/unaligned.h>
 #include <linux/bpf_kernel_rule_context.h>
 #include <linux/btf.h>
 #include "btf_record_return.h"
@@ -3304,7 +3305,7 @@ struct native_kop_object {
 /* A matcher-local view only: unrecognised records retain their old route. */
 static bool native_kop_object(const struct bpf_prog *prog,
 			      const struct bpf_insn *insn,
-			      struct native_kop_object *object)
+			      struct native_kop_object *object, bool alternatives)
 {
 	const struct bpf_native_seq *seq;
 	const Elf64_Ehdr *elf;
@@ -3353,13 +3354,17 @@ static bool native_kop_object(const struct bpf_prog *prog,
 		/* Patching or fault recovery can change the returning state.
 		 * Leave those sequences on their existing trusted route.
 		 */
-		if (!strcmp(name, ".altinstructions") ||
+		if ((!alternatives && !strcmp(name, ".altinstructions")) ||
 		    !strcmp(name, "__jump_table") || !strcmp(name, "__ex_table"))
 			return false;
 		if ((section->sh_flags & SHF_ALLOC) &&
-		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table"))
+		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table") &&
+		    !(alternatives && !strcmp(name, ".altinstructions")))
 			return false;
 		if (!(section->sh_flags & SHF_EXECINSTR))
+			continue;
+		if (alternatives && !strcmp(name, ".altinstr_replacement") &&
+		    section->sh_type == SHT_PROGBITS)
 			continue;
 		if (text || strcmp(name, ".text") || section->sh_type != SHT_PROGBITS)
 			return false;
@@ -3374,8 +3379,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	return text;
 }
 
-static bool native_seq_preserving_kop(const struct bpf_prog *prog,
-			      const struct bpf_insn *insn)
+static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u32 last)
 {
 	/* Each row's returning continuation preserves the BPF GPR/stack
 	 * state. IF/AC and ordering effects remain native and obey source
@@ -3392,26 +3396,144 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 		{3, {0x0f, 0xae, 0xf0}}, /* MFENCE */
 		{3, {0x0f, 0xae, 0xf8}}, /* SFENCE */
 	};
-	struct native_kop_object object;
-	const struct bpf_native_seq *seq;
-	const Elf64_Shdr *sections;
 	u32 i, offset = 0;
+	bool begin = !first, end = !last;
 
-	if (!native_kop_object(prog, insn, &object))
+	if (first > last || last > size)
 		return false;
-	seq = object.seq;
-	sections = object.sections;
-	if (seq->read_mask || seq->write_mask || seq->clobber_mask ||
-	    seq->scratch_mask || seq->bindings_count)
-		return false;
-	while (offset < object.text_size) {
+	while (offset < size) {
 		for (i = 0; i < ARRAY_SIZE(operations); i++)
-			if (operations[i].size <= object.text_size - offset &&
-			    !memcmp(object.text + offset, operations[i].bytes, operations[i].size))
+			if (operations[i].size <= size - offset &&
+			    !memcmp(bytes + offset, operations[i].bytes, operations[i].size))
 				break;
 		if (i == ARRAY_SIZE(operations))
 			return false;
 		offset += operations[i].size;
+		begin |= offset == first;
+		end |= offset == last;
+	}
+	return begin && end;
+}
+
+/* Resolve an alternative's PC-relative field into this native record only.
+ * S+A is its section-relative target; Linux adds the relocated field address.
+ */
+static bool native_kop_alt_target(const struct native_kop_object *object,
+				  u32 table, u32 field, u32 *target, u32 *offset)
+{
+	u32 i, j, found = 0;
+
+	for (i = 1; i < object->elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object->sections[i], *symbols;
+		const Elf64_Rela *relocations;
+
+		if ((section->sh_type != SHT_RELA && section->sh_type != SHT_REL) ||
+		    !section->sh_size || section->sh_info != table)
+			continue;
+		if (section->sh_type != SHT_RELA || section->sh_size % sizeof(*relocations) ||
+		    section->sh_link >= object->elf->e_shnum)
+			return false;
+		symbols = &object->sections[section->sh_link];
+		if (symbols->sh_type != SHT_SYMTAB || symbols->sh_entsize != sizeof(Elf64_Sym))
+			return false;
+		relocations = (const void *)object->elf + section->sh_offset;
+		for (j = 0; j < section->sh_size / sizeof(*relocations); j++) {
+			const Elf64_Rela *relocation = &relocations[j];
+			const Elf64_Sym *symbol;
+			u64 position;
+
+			if (relocation->r_offset != field)
+				continue;
+			if (++found != 1 || ELF64_R_TYPE(relocation->r_info) != R_X86_64_PC32 ||
+			    ELF64_R_SYM(relocation->r_info) >= symbols->sh_size / sizeof(*symbol))
+				return false;
+			symbol = (const void *)object->elf + symbols->sh_offset +
+				 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
+			if (!symbol->st_shndx || symbol->st_shndx >= object->elf->e_shnum)
+				return false;
+			position = symbol->st_value + relocation->r_addend;
+			if (position > object->sections[symbol->st_shndx].sh_size)
+				return false;
+			*target = symbol->st_shndx;
+			*offset = position;
+		}
+	}
+	return found == 1;
+}
+
+static bool native_kop_preserving_alternatives(const struct native_kop_object *object,
+					       u32 table)
+{
+	const Elf64_Shdr *section = &object->sections[table];
+	const u8 *bytes = (const void *)object->elf + section->sh_offset;
+	u32 at, earlier, source, replacement, begin, other, start, finish;
+
+	/* Linux's packed alt_instr: two rel32s, feature/flags, two lengths. */
+	if (section->sh_type != SHT_PROGBITS || section->sh_size % 14)
+		return false;
+	for (at = 0; at < section->sh_size; at += 14) {
+		u32 old_size = bytes[at + 12], new_size = bytes[at + 13];
+		const Elf64_Shdr *code;
+
+		/* NOT selects the other feature arm. DIRECT_CALL and unknown
+		 * transformations have effects beyond byte replacement.
+		 */
+		if ((get_unaligned_le32(bytes + at + 8) & 0xfffe0000) || new_size > old_size ||
+		    !native_kop_alt_target(object, table, at, &source, &begin) ||
+		    source != object->text_index || old_size > object->text_size - begin ||
+		    !native_kop_preserving_bytes(object->text, object->text_size, begin, begin + old_size) ||
+		    !native_kop_alt_target(object, table, at + 4, &replacement, &start))
+			return false;
+		code = &object->sections[replacement];
+		if (replacement == object->text_index || !(code->sh_flags & SHF_EXECINSTR) ||
+		    new_size > code->sh_size - start ||
+		    !native_kop_preserving_bytes((const void *)object->elf + code->sh_offset,
+					code->sh_size, start, start + new_size))
+			return false;
+		for (earlier = 0; earlier < at; earlier += 14) {
+			if (!native_kop_alt_target(object, table, earlier, &other, &start))
+				return false;
+			finish = start + bytes[earlier + 12];
+			if (begin < finish && start < begin + old_size &&
+			    (start != begin || finish != begin + old_size))
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool native_seq_preserving_kop(const struct bpf_prog *prog,
+				      const struct bpf_insn *insn)
+{
+	struct native_kop_object object;
+	const struct bpf_native_seq *seq;
+	const Elf64_Shdr *sections, *names;
+	const char *strings;
+	u32 i, j, alternatives = 0;
+
+	if (!native_kop_object(prog, insn, &object, true))
+		return false;
+	seq = object.seq;
+	sections = object.sections;
+	names = &sections[object.elf->e_shstrndx];
+	strings = (const void *)object.elf + names->sh_offset;
+	if (seq->read_mask || seq->write_mask || seq->clobber_mask ||
+	    seq->scratch_mask || seq->bindings_count)
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &sections[i];
+
+		if (!section->sh_size)
+			continue;
+		if ((section->sh_flags & SHF_EXECINSTR) &&
+		    !native_kop_preserving_bytes((const void *)object.elf + section->sh_offset,
+					section->sh_size, 0, section->sh_size))
+			return false;
+		if (!strcmp(strings + section->sh_name, ".altinstructions")) {
+			if (alternatives || !native_kop_preserving_alternatives(&object, i))
+				return false;
+			alternatives = i;
+		}
 	}
 	/* Relocations into executable bytes could replace the matched opcode. */
 	for (i = 1; i < object.elf->e_shnum; i++)
@@ -3420,6 +3542,16 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 			if (sections[i].sh_info >= object.elf->e_shnum ||
 			    (sections[sections[i].sh_info].sh_flags & SHF_EXECINSTR))
 				return false;
+			if (sections[i].sh_info == alternatives && alternatives) {
+				const Elf64_Rela *relocations = (const void *)object.elf + sections[i].sh_offset;
+
+				if (sections[i].sh_type != SHT_RELA || sections[i].sh_size % sizeof(*relocations))
+					return false;
+				for (j = 0; j < sections[i].sh_size / sizeof(*relocations); j++)
+					if (relocations[j].r_offset >= sections[alternatives].sh_size ||
+					    (relocations[j].r_offset % 14 != 0 && relocations[j].r_offset % 14 != 4))
+						return false;
+			}
 		}
 	return true;
 }
@@ -3461,7 +3593,7 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	u32 i, physical, bytes, width, base;
 	int id, dst, base_reg;
 
-	if (!native_kop_object(prog, insn, &object) ||
+	if (!native_kop_object(prog, insn, &object, false) ||
 	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
@@ -3585,7 +3717,7 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 	u32 i, physical, relocations = 0;
 	int dst, id;
 
-	if (!native_kop_object(prog, insn, &object) || object.seq->read_mask ||
+	if (!native_kop_object(prog, insn, &object, false) || object.seq->read_mask ||
 	    object.seq->scratch_mask || object.seq->bindings_count != 1 ||
 	    object.text_size != 7 || (object.text[0] & ~4) != 0x48 ||
 	    object.text[1] != 0x8d || (object.text[2] & 0xc7) != 5)
@@ -3665,7 +3797,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	bool gs = false, lock = false;
 	int base;
 
-	if (!native_kop_object(prog, insn, &object) || object.seq->write_mask ||
+	if (!native_kop_object(prog, insn, &object, false) || object.seq->write_mask ||
 	    object.seq->scratch_mask || object.seq->clobber_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
