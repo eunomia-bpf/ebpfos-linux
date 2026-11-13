@@ -13585,7 +13585,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		}
 		stack = base_type(native_regs[descriptor.base].type) == PTR_TO_STACK;
 		if ((!stack && base_type(native_regs[descriptor.base].type) != PTR_TO_BTF_ID &&
-		     base_type(native_regs[descriptor.base].type) != PTR_TO_MEM) ||
+		     base_type(native_regs[descriptor.base].type) != PTR_TO_MEM &&
+		     base_type(native_regs[descriptor.base].type) != PTR_TO_MAP_VALUE) ||
 		    type_is_alloc(native_regs[descriptor.base].type)) {
 			native_regs[descriptor.base] = original;
 			goto ordinary_helper;
