@@ -9484,8 +9484,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		if (t == BPF_READ && value_regno >= 0)
 			mark_reg_unknown(env, regs, value_regno);
 	} else if (reg->type == SCALAR_VALUE && reg->address_word &&
-		   env->prog->aux->ebpfos_component &&
-		   t == BPF_READ && value_regno >= 0) {
+		   env->prog->aux->ebpfos_component) {
 		/* A compiled definition dereferences an address it read out of
 		 * kernel memory, exactly as the native function's own load did.
 		 * The word arrived through an option-A probe-safe read, so the
@@ -9493,10 +9492,21 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		 * mode covers this access: one probe-load fixup, no range test.
 		 * A full word read this way is itself an address; a narrower
 		 * word is a value.
+		 *
+		 * An address that is a constant of the linked image cannot
+		 * fault, and Native loads it plainly, so it costs no fixup.
+		 * A store has no fault-handled form to convert to; Native
+		 * stored through the same address, so the store stays plain.
 		 */
-		env->insn_aux_data[env->insn_idx].probe_load = true;
-		mark_reg_unknown(env, regs, value_regno);
-		regs[value_regno].address_word = size == BPF_REG_SIZE;
+		if (t == BPF_WRITE) {
+			/* Nothing to mark: value_regno names the stored value. */
+		} else if (value_regno >= 0) {
+			if (!tnum_is_const(reg->var_off) ||
+			    reg->var_off.value < 0xffffffff80000000ULL)
+				env->insn_aux_data[env->insn_idx].probe_load = true;
+			mark_reg_unknown(env, regs, value_regno);
+			regs[value_regno].address_word = size == BPF_REG_SIZE;
+		}
 	} else {
 		verbose(env, "R%d invalid mem access '%s'\n", regno,
 			reg_type_str(env, reg->type));
