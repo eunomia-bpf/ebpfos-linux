@@ -3802,8 +3802,51 @@ struct native_scalar_rmw {
 	u32 base, size;
 	s32 offset;
 	s16 input;
+	u16 inputs, outputs;
+	s16 condition;
 	bool percpu, bit_index;
 };
+
+/* LLVM captures a native condition with SETcc followed by MOVZX of the same
+ * byte into its full 32-bit register. Together they define a complete scalar
+ * boolean; a lone partial-register write is not this contract.
+ */
+static int native_kop_condition_output(const struct native_kop_object *object,
+				       u32 at, u32 *physical)
+{
+#ifdef CONFIG_X86_64
+	struct insn set, extend;
+	u32 source, target;
+
+	if (insn_decode(&set, object->text + at, object->text_size - at, INSN_MODE_64) ||
+	    set.vex_prefix.nbytes || set.prefixes.nbytes || set.rex_prefix.nbytes > 1 ||
+	    set.opcode.nbytes != 2 || set.opcode.bytes[0] != 0x0f ||
+	    (set.opcode.bytes[1] & 0xf0) != 0x90 || set.modrm.nbytes != 1 ||
+	    X86_MODRM_MOD(set.modrm.value) != 3 || X86_MODRM_REG(set.modrm.value))
+		return -1;
+	source = X86_MODRM_RM(set.modrm.value) | (X86_REX_B(set.rex_prefix.value) ? 8 : 0);
+	if (source >= 4 && source < 8 && !set.rex_prefix.nbytes)
+		return -1;
+	at += set.length;
+	if (at >= object->text_size ||
+	    insn_decode(&extend, object->text + at, object->text_size - at, INSN_MODE_64) ||
+	    at + extend.length != object->text_size || extend.vex_prefix.nbytes ||
+	    extend.prefixes.nbytes || extend.rex_prefix.nbytes > 1 || extend.opnd_bytes != 4 ||
+	    extend.opcode.nbytes != 2 || extend.opcode.bytes[0] != 0x0f ||
+	    extend.opcode.bytes[1] != 0xb6 || extend.modrm.nbytes != 1 ||
+	    X86_MODRM_MOD(extend.modrm.value) != 3 ||
+	    (X86_MODRM_RM(extend.modrm.value) | (X86_REX_B(extend.rex_prefix.value) ? 8 : 0)) != source ||
+	    (source >= 4 && source < 8 && !extend.rex_prefix.nbytes))
+		return -1;
+	target = X86_MODRM_REG(extend.modrm.value) | (X86_REX_R(extend.rex_prefix.value) ? 8 : 0);
+	if (target != source)
+		return -1;
+	*physical = target;
+	return native_kop_bpf_register(target);
+#else
+	return -1;
+#endif
+}
 
 struct native_arch_kop { u16 reads, writes; u8 width; };
 
@@ -3984,15 +4027,16 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 #ifdef CONFIG_X86_64
 	struct native_kop_object object;
 	struct insn decoded;
-	u32 i, operation, physical, bytes, lock_offset = 0;
+	u32 i, operation, physical, bytes, lock_offset = 0, physical_outputs = 0;
+	u16 inputs = 0, outputs = 0;
 	bool gs = false, lock = false;
-	int base, input = -1;
+	int base, input = -1, condition = -1;
 	bool bit_index = false;
 
-	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) || object.seq->write_mask ||
-	    object.seq->scratch_mask || object.seq->clobber_mask ||
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
+	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
-	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
+	    decoded.addr_bytes != 8 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
 	    decoded.prefixes.nbytes > 2 ||
 	    decoded.modrm.nbytes != 1 ||
@@ -4009,6 +4053,13 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	}
 	operation = X86_MODRM_REG(decoded.modrm.value);
 	bytes = decoded.opnd_bytes;
+	if (decoded.length < object.text_size) {
+		condition = native_kop_condition_output(&object, decoded.length, &physical);
+		if (condition < 0)
+			return false;
+		outputs = BIT(condition);
+		physical_outputs = BIT(physical);
+	}
 	if (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f) {
 		switch (decoded.opcode.bytes[1]) {
 		case 0xba: /* Immediate BTS/BTR/BTC selects within one word. */
@@ -4021,6 +4072,26 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 				(X86_REX_R(decoded.rex_prefix.value) ? 8 : 0));
 			if (input < 0 || decoded.immediate.nbytes)
 				return false;
+			break;
+		case 0xb0: case 0xb1: /* CMPXCHG */
+			inputs |= BIT(0);
+			outputs |= BIT(0);
+			physical_outputs |= BIT(0);
+			fallthrough;
+		case 0xc0: case 0xc1: /* XADD */
+			physical = operation | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+			if (!(decoded.opcode.bytes[1] & 1)) {
+				bytes = 1;
+				if (physical >= 4 && physical < 8 && !decoded.rex_prefix.nbytes)
+					return false;
+			}
+			input = native_kop_bpf_register(physical);
+			if (input < 0 || decoded.immediate.nbytes)
+				return false;
+			if (decoded.opcode.bytes[1] >= 0xc0) {
+				outputs |= BIT(input);
+				physical_outputs |= BIT(physical);
+			}
 			break;
 		default:
 			return false;
@@ -4039,6 +4110,18 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 			return false;
 		if (decoded.opcode.value == 0x80)
 			bytes = 1;
+	} else if (decoded.opcode.value == 0x86 || decoded.opcode.value == 0x87) {
+		physical = operation | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+		if (decoded.opcode.value == 0x86) {
+			bytes = 1;
+			if (physical >= 4 && physical < 8 && !decoded.rex_prefix.nbytes)
+				return false;
+		}
+		input = native_kop_bpf_register(physical);
+		if (input < 0 || decoded.immediate.nbytes || condition >= 0)
+			return false; /* XCHG does not define condition flags. */
+		outputs |= BIT(input);
+		physical_outputs |= BIT(physical);
 	} else if ((decoded.opcode.value & 0xc6) == 0 &&
 		   (decoded.opcode.value >> 3 == 0 || decoded.opcode.value >> 3 == 1 ||
 		    decoded.opcode.value >> 3 == 4 || decoded.opcode.value >> 3 == 5 ||
@@ -4068,7 +4151,10 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		return false;
 	physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
 	base = native_kop_bpf_register(physical);
-	if (base < 0 || object.seq->read_mask != (BIT(base) | (input >= 0 ? BIT(input) : 0)))
+	if (input >= 0)
+		inputs |= BIT(input);
+	if (base < 0 || object.seq->read_mask != (BIT(base) | inputs) ||
+	    object.seq->write_mask != outputs || (object.seq->clobber_mask & ~physical_outputs))
 		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &object.sections[i];
@@ -4106,6 +4192,9 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->offset = decoded.displacement.value;
 	rmw->percpu = gs;
 	rmw->input = input;
+	rmw->inputs = inputs;
+	rmw->outputs = outputs;
+	rmw->condition = condition;
 	rmw->bit_index = bit_index;
 	return true;
 #else
@@ -13090,13 +13179,15 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
 		bool scalar;
 
-		if (rmw.input >= 0) {
-			err = check_reg_arg(env, rmw.input, SRC_OP);
+		for (i = 0; i < MAX_BPF_REG; i++) {
+			if (!(rmw.inputs & BIT(i)))
+				continue;
+			err = check_reg_arg(env, i, SRC_OP);
 			if (err)
 				return err;
-			if (native_regs[rmw.input].type != SCALAR_VALUE ||
-			    (rmw.bit_index && (native_regs[rmw.input].smin_value < 0 ||
-			     native_regs[rmw.input].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
+			if (native_regs[i].type != SCALAR_VALUE ||
+			    (rmw.bit_index && i == rmw.input && (native_regs[i].smin_value < 0 ||
+			     native_regs[i].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
 				goto ordinary_helper;
 		}
 		err = check_reg_arg(env, rmw.base, SRC_OP);
@@ -13145,7 +13236,21 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		native_regs[temporary] = saved;
 		if (rmw.percpu)
 			native_regs[rmw.base] = source;
-		return err;
+		if (err)
+			return err;
+		for (i = 0; i < MAX_BPF_REG; i++) {
+			if (!(rmw.outputs & BIT(i)))
+				continue;
+			err = check_reg_arg(env, i, DST_OP);
+			if (err)
+				return err;
+			/* Partial XCHG/XADD/CMPXCHG writes conservatively forget
+			 * the whole scalar word, including success-preserved bits.
+			 */
+			if (i == rmw.condition)
+				coerce_reg_to_size(&native_regs[i], 1);
+		}
+		return 0;
 	}
 
 	if (bpf_native_seq_insn(insn) &&
