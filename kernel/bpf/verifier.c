@@ -3795,7 +3795,63 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 
 struct native_scalar_rmw { u32 base, size; s32 offset; bool percpu; };
 
-struct native_arch_kop { u16 reads, writes; };
+struct native_arch_kop { u16 reads, writes; u8 width; };
+
+/* Balanced PUSHF/POP and PUSH/POPF use one private native stack slot,
+ * restore SP and expose only a scalar flags word or the original CPU flags
+ * effect. No BPF stack cell or pointer capability is produced by that slot.
+ */
+static bool native_seq_flags_kop(const struct bpf_prog *prog,
+				const struct bpf_insn *insn,
+				struct native_arch_kop *operation)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	u32 at = 0, physical, i;
+	int reg;
+	bool save, extended = false;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    object.text_size < 2)
+		return false;
+	save = object.text[0] == 0x9c;
+	if (save)
+		at++;
+	if (object.text[at] == 0x41) {
+		extended = true;
+		if (++at == object.text_size)
+			return false;
+	}
+	if ((object.text[at] & 0xf8) != (save ? 0x58 : 0x50))
+		return false;
+	physical = (object.text[at++] & 7) | (extended ? 8 : 0);
+	reg = native_kop_bpf_register(physical);
+	if (reg < 0)
+		return false;
+	if (!save && (at == object.text_size || object.text[at++] != 0x9d))
+		return false;
+	/* irq-save adds CLI after observing the original flags. */
+	if (save && at < object.text_size && object.text[at] == 0xfa)
+		at++;
+	if (at != object.text_size || object.seq->read_mask != (save ? 0 : BIT(reg)) ||
+	    object.seq->write_mask != (save ? BIT(reg) : 0) ||
+	    (object.seq->clobber_mask & ~(save ? BIT(physical) : 0)))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+	}
+	operation->reads = save ? 0 : BIT(reg);
+	operation->writes = save ? BIT(reg) : 0;
+	operation->width = 8;
+	return true;
+#else
+	return false;
+#endif
+}
 
 /* Fixed-register architectural instructions expose their actual inputs and
  * zero-extended 32-bit scalar outputs. CPU control/serialization effects keep
@@ -3814,6 +3870,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	    object.text[0] != 0x0f || object.text_size < 2)
 		return false;
 	operation->reads = operation->writes = physical_writes = 0;
+	operation->width = 4;
 	if (object.text_size == 2) {
 		switch (object.text[1]) {
 		case 0x30: /* WRMSR: ECX index, EDX:EAX value, preserves GPRs. */
@@ -12913,13 +12970,15 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_scalar_rmw rmw;
 	struct native_arch_kop architectural;
 
-	if (bpf_native_seq_insn(insn) && native_seq_arch_kop(env->prog, insn, &architectural)) {
+	if (bpf_native_seq_insn(insn) &&
+	    (native_seq_arch_kop(env->prog, insn, &architectural) ||
+	     native_seq_flags_kop(env->prog, insn, &architectural))) {
 		struct bpf_reg_state *native_regs = cur_regs(env);
 		u32 register_number;
 
 		for (register_number = 0; register_number < MAX_BPF_REG; register_number++)
 			if (architectural.reads & BIT(register_number)) {
-				err = __check_reg_arg(env, native_regs, register_number, SRC_OP, 4);
+				err = __check_reg_arg(env, native_regs, register_number, SRC_OP, architectural.width);
 				if (err)
 					return err;
 			}
@@ -12928,7 +12987,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 				err = check_reg_arg(env, register_number, DST_OP);
 				if (err)
 					return err;
-				coerce_reg_to_size(&native_regs[register_number], 4);
+				coerce_reg_to_size(&native_regs[register_number], architectural.width);
 			}
 		return 0;
 	}
