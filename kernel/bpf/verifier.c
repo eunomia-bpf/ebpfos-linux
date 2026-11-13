@@ -3359,7 +3359,9 @@ static bool native_kop_object(const struct bpf_prog *prog,
 			return false;
 		if ((section->sh_flags & SHF_ALLOC) &&
 		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table") &&
-		    !(alternatives && !strcmp(name, ".altinstructions")))
+		    !(alternatives && !strcmp(name, ".altinstructions")) &&
+		    !(!(section->sh_flags & SHF_WRITE) && section->sh_type == SHT_PROGBITS &&
+		      (!strcmp(name, ".rodata") || !strncmp(name, ".rodata.", 8))))
 			return false;
 		if (!(section->sh_flags & SHF_EXECINSTR))
 			continue;
@@ -3787,6 +3789,65 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 }
 
 struct native_scalar_rmw { u32 base, size; s32 offset; bool percpu; };
+
+struct native_arch_kop { u16 reads, writes; };
+
+/* Fixed-register architectural instructions expose their actual inputs and
+ * zero-extended 32-bit scalar outputs. CPU control/serialization effects keep
+ * their existing KOperation source/context obligations; no pointer capability
+ * is inferred from a hardware value. Original bytes execute unchanged.
+ */
+static bool native_seq_arch_kop(const struct bpf_prog *prog,
+				const struct bpf_insn *insn,
+				struct native_arch_kop *operation)
+{
+	struct native_kop_object object;
+	u16 physical_writes;
+	u32 i;
+
+	if (!native_kop_object(prog, insn, &object, false) || object.seq->scratch_mask ||
+	    object.text[0] != 0x0f || object.text_size < 2)
+		return false;
+	operation->reads = operation->writes = physical_writes = 0;
+	if (object.text_size == 2) {
+		switch (object.text[1]) {
+		case 0x30: /* WRMSR: ECX index, EDX:EAX value, preserves GPRs. */
+			operation->reads = BIT(0) | BIT(3) | BIT(4);
+			break;
+		case 0x32: /* RDMSR */
+			operation->reads = BIT(4);
+			fallthrough;
+		case 0x31: /* RDTSC */
+			operation->writes = BIT(0) | BIT(3);
+			physical_writes = BIT(0) | BIT(2);
+			break;
+		case 0xa2: /* CPUID */
+			operation->reads = BIT(0) | BIT(4);
+			operation->writes = BIT(0) | BIT(3) | BIT(4) | BIT(6);
+			physical_writes = BIT(0) | BIT(1) | BIT(2) | BIT(3);
+			break;
+		default:
+			return false;
+		}
+	} else if (object.text_size == 3 && object.text[1] == 0x01 && object.text[2] == 0xf9) {
+		/* RDTSCP also returns the 32-bit CPU auxiliary value in ECX. */
+		operation->writes = BIT(0) | BIT(3) | BIT(4);
+		physical_writes = BIT(0) | BIT(1) | BIT(2);
+	} else {
+		return false;
+	}
+	if (object.seq->read_mask != operation->reads || object.seq->write_mask != operation->writes ||
+	    (object.seq->clobber_mask & ~physical_writes))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+	}
+	return true;
+}
 
 /* INC/DEC and immediate AND/OR expose no GPR result. Their flags stay
  * inside native assembly; the BPF state sees a scalar field read/write.
@@ -12815,6 +12876,27 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	int i, err, func_id;
 	struct native_percpu_load native_load = {};
 	struct native_scalar_rmw rmw;
+	struct native_arch_kop architectural;
+
+	if (bpf_native_seq_insn(insn) && native_seq_arch_kop(env->prog, insn, &architectural)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		u32 register_number;
+
+		for (register_number = 0; register_number < MAX_BPF_REG; register_number++)
+			if (architectural.reads & BIT(register_number)) {
+				err = __check_reg_arg(env, native_regs, register_number, SRC_OP, 4);
+				if (err)
+					return err;
+			}
+		for (register_number = 0; register_number < MAX_BPF_REG; register_number++)
+			if (architectural.writes & BIT(register_number)) {
+				err = check_reg_arg(env, register_number, DST_OP);
+				if (err)
+					return err;
+				coerce_reg_to_size(&native_regs[register_number], 4);
+			}
+		return 0;
+	}
 
 	if (bpf_native_seq_insn(insn) && native_seq_scalar_rmw(env->prog, insn, &rmw)) {
 		struct bpf_reg_state *native_regs = cur_regs(env), saved, source, selected;
