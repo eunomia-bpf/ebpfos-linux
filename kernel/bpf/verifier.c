@@ -4001,7 +4001,7 @@ static int native_kop_condition_output(const struct native_kop_object *object,
 #endif
 }
 
-struct native_arch_kop { u16 reads, writes; u8 width; };
+struct native_arch_kop { u16 reads, writes; u8 width, read_width; };
 
 struct native_scalar_bits {
 	u16 inputs, outputs;
@@ -4152,6 +4152,7 @@ static bool native_seq_flags_kop(const struct bpf_prog *prog,
 	operation->reads = save ? 0 : BIT(reg);
 	operation->writes = save ? BIT(reg) : 0;
 	operation->width = 8;
+	operation->read_width = 8;
 	return true;
 #else
 	return false;
@@ -4176,6 +4177,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 		return false;
 	operation->reads = operation->writes = physical_writes = 0;
 	operation->width = 4;
+	operation->read_width = 4;
 	if (object.text[0] == 0x66)
 		port_at++;
 #ifdef CONFIG_X86_64
@@ -4201,6 +4203,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 		 * translation/context obligation under source option D.
 		 */
 		operation->width = 8;
+		operation->read_width = 8;
 		if (object.text[at + 1] == 0x20) {
 			operation->writes = BIT(reg);
 			physical_writes = BIT(physical);
@@ -4214,18 +4217,23 @@ other_architecture:
 	if (port_at < object.text_size &&
 	    (object.text[port_at] == 0xe6 || object.text[port_at] == 0xe7 ||
 	     object.text[port_at] == 0xee || object.text[port_at] == 0xef ||
-	     object.text[port_at] == 0xe5 || object.text[port_at] == 0xed)) {
+	     object.text[port_at] == 0xe5 || object.text[port_at] == 0xed ||
+	     object.text[port_at] == 0xe4 || object.text[port_at] == 0xec)) {
 		u8 opcode = object.text[port_at];
-		bool input = opcode == 0xe5 || opcode == 0xed;
+		bool input = opcode == 0xe4 || opcode == 0xec || opcode == 0xe5 || opcode == 0xed;
 		bool immediate = opcode < 0xe8;
+		u8 width = opcode & 1 ? (port_at ? 2 : 4) : 1;
 
-		/* OUT consumes AL/AX/EAX and an immediate or DX port. IN32
-		 * writes all of EAX and zero-extends RAX. Narrow IN preserves
-		 * upper bits and needs a separate partial-register proof.
+		/* OUT consumes AL/AX/EAX and an immediate or DX port. Narrow
+		 * IN defines only AL/AX; its remaining bits acquire no facts.
+		 * The existing native-input width tracks this until actual
+		 * byte/word normalization, never a fictitious zero extension.
 		 */
 		if (object.text_size != port_at + 1 + immediate ||
-		    (port_at && (input || opcode == 0xe6 || opcode == 0xee)))
+		    (port_at && !(opcode & 1)))
 			return false;
+		operation->width = input ? width : 4;
+		operation->read_width = max_t(u8, input ? 0 : width, immediate ? 0 : 2);
 		operation->reads = (input ? 0 : BIT(0)) | (immediate ? 0 : BIT(3));
 		operation->writes = input ? BIT(0) : 0;
 		physical_writes = input ? BIT(0) : 0;
@@ -13520,7 +13528,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 		for (register_number = 0; register_number < MAX_BPF_REG; register_number++)
 			if (architectural.reads & BIT(register_number)) {
-				err = __check_reg_arg(env, native_regs, register_number, SRC_OP, architectural.width);
+			err = __check_reg_arg(env, native_regs, register_number, SRC_OP, architectural.read_width);
 				if (err)
 					return err;
 			}
@@ -13529,7 +13537,10 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 				err = check_reg_arg(env, register_number, DST_OP);
 				if (err)
 					return err;
-				coerce_reg_to_size(&native_regs[register_number], architectural.width);
+				if (architectural.width < 4)
+					native_regs[register_number].native_input_bits = architectural.width * 8;
+				else
+					coerce_reg_to_size(&native_regs[register_number], architectural.width);
 			}
 		return 0;
 	}
