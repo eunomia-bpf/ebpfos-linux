@@ -4009,7 +4009,7 @@ struct native_scalar_rmw {
 	s32 offset;
 	s16 input;
 	u16 inputs, outputs;
-	s16 condition;
+	s16 condition, value_output;
 	bool percpu, bit_index, read_only, write_only, absolute;
 	s64 immediate;
 	struct btf *btf;
@@ -4449,7 +4449,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	u32 i, operation, physical, bytes, lock_offset = 0, physical_outputs = 0;
 	u16 inputs = 0, outputs = 0;
 	bool gs = false, lock = false, operand16 = false;
-	int base, input = -1, condition = -1;
+	int base, input = -1, condition = -1, value_output = -1;
 	bool bit_index = false, read_only = false, write_only = false, absolute = false;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
@@ -4457,7 +4457,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.addr_bytes != 8 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
-	    decoded.prefixes.nbytes > 2 ||
+	    decoded.prefixes.nbytes > 3 ||
 	    decoded.modrm.nbytes != 1 ||
 	    X86_MODRM_MOD(decoded.modrm.value) == 3)
 		return false;
@@ -4499,6 +4499,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 				return false;
 			break;
 		case 0xb0: case 0xb1: /* CMPXCHG */
+			value_output = BPF_REG_0;
 			inputs |= BIT(0);
 			outputs |= BIT(0);
 			physical_outputs |= BIT(0);
@@ -4571,6 +4572,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 			return false; /* XCHG does not define condition flags. */
 		outputs |= BIT(input);
 		physical_outputs |= BIT(physical);
+		value_output = input;
 	} else if ((decoded.opcode.value & 0xc6) == 0 &&
 		   (decoded.opcode.value >> 3 == 0 || decoded.opcode.value >> 3 == 1 ||
 		    decoded.opcode.value >> 3 == 4 || decoded.opcode.value >> 3 == 5 ||
@@ -4589,8 +4591,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		return false;
 	}
 	if (((read_only || write_only) && lock) || (write_only && condition >= 0) ||
-	    (operand16 && !write_only) ||
-	    (bytes != 1 && bytes != 4 && bytes != 8 && !(write_only && bytes == 2)))
+	    (bytes != 1 && bytes != 2 && bytes != 4 && bytes != 8))
 		return false;
 	physical = X86_MODRM_RM(decoded.modrm.value);
 	if (physical == 4) {
@@ -4667,6 +4668,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->inputs = inputs;
 	rmw->outputs = outputs;
 	rmw->condition = condition;
+	rmw->value_output = value_output;
 	rmw->bit_index = bit_index;
 	rmw->read_only = read_only;
 	rmw->write_only = write_only;
@@ -13812,6 +13814,8 @@ descriptor_done:
 	if (bpf_native_seq_insn(insn) && native_seq_scalar_rmw(env->prog, insn, &rmw)) {
 		struct bpf_reg_state *native_regs = cur_regs(env), saved, source, selected;
 		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
+		bool exchange = rmw.value_output >= 0;
+		bool typed_exchange = exchange && rmw.size == BPF_DW;
 		bool scalar;
 
 		for (i = 0; i < MAX_BPF_REG; i++) {
@@ -13820,7 +13824,7 @@ descriptor_done:
 			err = check_reg_arg(env, i, SRC_OP);
 			if (err)
 				return err;
-			if ((!rmw.write_only && native_regs[i].type != SCALAR_VALUE) ||
+			if ((!rmw.write_only && !typed_exchange && native_regs[i].type != SCALAR_VALUE) ||
 			    (rmw.bit_index && i == rmw.input && (native_regs[i].smin_value < 0 ||
 			     native_regs[i].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
 				goto ordinary_helper;
@@ -13858,12 +13862,12 @@ descriptor_done:
 		}
 		saved = native_regs[temporary];
 		if (rmw.write_only) {
-			/* Absolute GS uses R0 only as an abstract address view. If
-			 * R0 supplies the stored value, recover its original state;
-			 * never store the temporary root capability instead.
+			/* The selected current-CPU view is only an abstract address.
+			 * An overlapping value operand still carries the original
+			 * incoming capability, for indirect as well as absolute GS.
 			 */
 			if (rmw.input >= 0) {
-				native_regs[temporary] = rmw.absolute && rmw.input == rmw.base ?
+				native_regs[temporary] = rmw.percpu && rmw.input == rmw.base ?
 					source : native_regs[rmw.input];
 			} else {
 				mark_reg_unknown(env, native_regs, temporary);
@@ -13884,19 +13888,36 @@ descriptor_done:
 				native_regs[rmw.base] = source;
 			return err;
 		}
-		if (!scalar) {
+		if (!scalar && !typed_exchange) {
 			native_regs[temporary] = saved;
 			if (rmw.percpu)
 				native_regs[rmw.base] = source;
 			goto ordinary_helper;
 		}
-		/* A field's previous range is not its updated value. Supply an
-		 * unknown scalar of the written width to the ordinary store rule;
-		 * -1 would incorrectly treat the native marker's imm as the value.
+		/* Exchange writes the actual replacement. CMPXCHG's conditional
+		 * store obeys that same value contract. Its accumulator always
+		 * equals pre-memory: success already equals it; failure loads it.
+		 * Kernel fields are not tracked cells, so the conditional store
+		 * establishes no unconditional new field-value fact.
 		 */
+		if (exchange)
+			selected = native_regs[temporary];
 		if (!rmw.read_only) {
-			mark_reg_unknown(env, native_regs, temporary);
-			coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
+			if (exchange) {
+				if (rmw.input == temporary)
+					native_regs[temporary] = saved;
+				else if (rmw.percpu && rmw.input == rmw.base)
+					native_regs[temporary] = source;
+				else
+					native_regs[temporary] = native_regs[rmw.input];
+			} else {
+				/* Arithmetic supplies unknown bits of the written width,
+				 * never the old range or the native marker's immediate.
+				 */
+				mark_reg_unknown(env, native_regs, temporary);
+			}
+			if (native_regs[temporary].type == SCALAR_VALUE)
+				coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
 			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 					       BPF_WRITE, temporary, false, false, NULL);
 		}
@@ -13912,11 +13933,23 @@ native_memory_done:
 			err = check_reg_arg(env, i, DST_OP);
 			if (err)
 				return err;
-			/* Partial XCHG/XADD/CMPXCHG writes conservatively forget
-			 * the whole scalar word, including success-preserved bits.
-			 */
-			if (i == rmw.condition)
-				coerce_reg_to_size(&native_regs[i], 1);
+			if (i == rmw.condition) {
+				struct bpf_reg_state *output = &native_regs[i];
+
+				output->var_off = tnum_range(0, 1);
+				output->umin_value = output->u32_min_value = 0;
+				output->smin_value = output->s32_min_value = 0;
+				output->umax_value = output->u32_max_value = 1;
+				output->smax_value = output->s32_max_value = 1;
+				reg_bounds_sync(output);
+			} else if (exchange && i == rmw.value_output &&
+				   (rmw.size == BPF_DW || rmw.size == BPF_W)) {
+				/* Byte/halfword results retain the old scalar's high
+				 * lanes, already initialized by the scalar input rule.
+				 * Keep those as unknown full-width scalars instead.
+				 */
+				native_regs[i] = selected;
+			}
 		}
 		return 0;
 	}
