@@ -3484,16 +3484,25 @@ static bool native_kop_rel_target(const struct native_kop_object *object,
  */
 static bool native_kop_external_identity(const struct bpf_prog *prog, const char *name)
 {
-	u32 i, j, k;
+	const struct bpf_prog_aux *aux = prog->aux->main_prog_aux ?: prog->aux;
+	u32 at = 0, j, k;
 
-	for (i = 0; i < prog->len; i++) {
+	/* Preserving proof regions temporarily hide their markers. Their ELF
+	 * definitions return before the JIT resolves this call, so inspect the
+	 * retained records as well, including those hidden proof regions.
+	 */
+	while (at < aux->native_seqs_size) {
 		struct native_kop_object object;
+		struct bpf_insn marker = {
+			.code = BPF_JMP | BPF_CALL,
+			.src_reg = BPF_PSEUDO_NATIVE_SEQ,
+			.imm = at,
+		};
 
-		if (!bpf_native_seq_insn(&prog->insnsi[i]))
-			continue;
-		if (!native_kop_object(prog, &prog->insnsi[i], &object,
+		if (!native_kop_object(prog, &marker, &object,
 			NATIVE_KOP_ALTERNATIVES | NATIVE_KOP_MSR_RECOVERY | NATIVE_KOP_SMP_LOCKS))
 			return false;
+		at += object.seq->size;
 		for (j = 1; j < object.elf->e_shnum; j++) {
 			const Elf64_Shdr *table = &object.sections[j], *strings;
 			const Elf64_Sym *symbols;
@@ -3505,6 +3514,8 @@ static bool native_kop_external_identity(const struct bpf_prog *prog, const char
 			    table->sh_link >= object.elf->e_shnum)
 				return false;
 			strings = &object.sections[table->sh_link];
+			if (strings->sh_type != SHT_STRTAB)
+				return false;
 			names = (const void *)object.elf + strings->sh_offset;
 			symbols = (const void *)object.elf + table->sh_offset;
 			for (k = 1; k < table->sh_size / sizeof(*symbols); k++) {
@@ -3562,9 +3573,12 @@ static bool native_seq_preserving_thunk(const struct bpf_prog *prog,
 			return false;
 		table = &object.sections[rel->sh_link];
 		if (table->sh_type != SHT_SYMTAB || table->sh_entsize != sizeof(Elf64_Sym) ||
+		    table->sh_size % sizeof(Elf64_Sym) ||
 		    table->sh_link >= object.elf->e_shnum)
 			return false;
 		strings = &object.sections[table->sh_link];
+		if (strings->sh_type != SHT_STRTAB)
+			return false;
 		entries = (const void *)object.elf + rel->sh_offset;
 		for (j = 0; j < rel->sh_size / sizeof(*entries); j++) {
 			const Elf64_Rela *entry = &entries[j];
