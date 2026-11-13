@@ -13525,6 +13525,31 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	     native_seq_flags_kop(env->prog, insn, &architectural))) {
 		struct bpf_reg_state *native_regs = cur_regs(env);
 		u32 register_number;
+		bool partial = false;
+
+		if (architectural.width < 4) {
+			struct bpf_reg_state *old = &native_regs[BPF_REG_0];
+			bool initialized = old->type == SCALAR_VALUE && !old->native_input_bits;
+			bool normalized = false;
+
+			/* Width metadata alone is descriptive in the current relaxed
+			 * verifier. Admit an uninitialized old RAX only when its very
+			 * next operation actually discards every untouched bit. This
+			 * native-only proof does not add an ordinary-code check.
+			 */
+			if (env->insn_idx + 1 < env->prog->len) {
+				const struct bpf_insn *next = &env->prog->insnsi[env->insn_idx + 1];
+				u8 class = BPF_CLASS(next->code);
+				u64 mask = class == BPF_ALU ? (u32)next->imm : (u64)(s64)next->imm;
+
+				normalized = (class == BPF_ALU || class == BPF_ALU64) &&
+					BPF_OP(next->code) == BPF_AND && BPF_SRC(next->code) == BPF_K &&
+					next->dst_reg == BPF_REG_0 && !(mask >> (8 * architectural.width));
+			}
+			if (!initialized && !normalized)
+				goto ordinary_helper;
+			partial = !initialized;
+		}
 
 		for (register_number = 0; register_number < MAX_BPF_REG; register_number++)
 			if (architectural.reads & BIT(register_number)) {
@@ -13537,9 +13562,9 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 				err = check_reg_arg(env, register_number, DST_OP);
 				if (err)
 					return err;
-				if (architectural.width < 4)
+				if (partial)
 					native_regs[register_number].native_input_bits = architectural.width * 8;
-				else
+				else if (architectural.width >= 4)
 					coerce_reg_to_size(&native_regs[register_number], architectural.width);
 			}
 		return 0;
