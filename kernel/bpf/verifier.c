@@ -3374,22 +3374,45 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	return text;
 }
 
-static bool native_seq_ud2_kop(const struct bpf_prog *prog,
+static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 			      const struct bpf_insn *insn)
 {
+	/* Each row's returning continuation preserves the BPF GPR/stack
+	 * state. IF/AC and ordering effects remain native and obey source
+	 * context discipline (option D); they are not erased at execution.
+	 * Whole streams compose these one-opcode semantics.
+	 */
+	static const struct { u8 size, bytes[3]; } operations[] = {
+		{2, {0x0f, 0x0b}}, /* UD2: returning WARN continuation */
+		{1, {0xfa}}, {1, {0xfb}}, /* CLI, STI */
+		{2, {0xf3, 0x90}}, /* PAUSE */
+		{1, {0x90}}, {2, {0x66, 0x90}}, /* NOP */
+		{3, {0x0f, 0x01, 0xca}}, {3, {0x0f, 0x01, 0xcb}}, /* CLAC, STAC */
+		{3, {0x0f, 0xae, 0xe8}}, /* LFENCE */
+		{3, {0x0f, 0xae, 0xf0}}, /* MFENCE */
+		{3, {0x0f, 0xae, 0xf8}}, /* SFENCE */
+	};
 	struct native_kop_object object;
 	const struct bpf_native_seq *seq;
 	const Elf64_Shdr *sections;
-	u32 i;
+	u32 i, offset = 0;
 
 	if (!native_kop_object(prog, insn, &object))
 		return false;
 	seq = object.seq;
 	sections = object.sections;
 	if (seq->read_mask || seq->write_mask || seq->clobber_mask ||
-	    seq->scratch_mask || seq->bindings_count || object.text_size != 2 ||
-	    object.text[0] != 0x0f || object.text[1] != 0x0b)
+	    seq->scratch_mask || seq->bindings_count)
 		return false;
+	while (offset < object.text_size) {
+		for (i = 0; i < ARRAY_SIZE(operations); i++)
+			if (operations[i].size <= object.text_size - offset &&
+			    !memcmp(object.text + offset, operations[i].bytes, operations[i].size))
+				break;
+		if (i == ARRAY_SIZE(operations))
+			return false;
+		offset += operations[i].size;
+	}
 	/* Relocations into executable bytes could replace the matched opcode. */
 	for (i = 1; i < object.elf->e_shnum; i++)
 		if ((sections[i].sh_type == SHT_RELA || sections[i].sh_type == SHT_REL) &&
@@ -3521,7 +3544,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 
 	if (!env->prog->aux->trusted_kernel)
 		for (i = 0; i < env->prog->len; i++)
-			cap += native_seq_ud2_kop(env->prog, &env->prog->insnsi[i]);
+			cap += native_seq_preserving_kop(env->prog, &env->prog->insnsi[i]);
 
 	/* Exception metadata belongs to ordinary CALL/CFG, not a KOperation. */
 	for (i = 0; i < env->prog->len; i++) {
@@ -3579,7 +3602,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		int count;
 
 		call = &env->prog->insnsi[i];
-		if (!env->prog->aux->trusted_kernel && native_seq_ud2_kop(env->prog, call)) {
+		if (!env->prog->aux->trusted_kernel && native_seq_preserving_kop(env->prog, call)) {
 			struct bpf_insn continuation = BPF_JMP_A(0);
 
 			region = &env->kop_regions[env->kop_region_cnt++];
