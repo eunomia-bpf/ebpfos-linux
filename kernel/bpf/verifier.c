@@ -3302,7 +3302,11 @@ struct native_kop_object {
 	u32 text_size, text_index;
 };
 
-enum native_kop_metadata { NATIVE_KOP_ALTERNATIVES = 1, NATIVE_KOP_MSR_RECOVERY = 2 };
+enum native_kop_metadata {
+	NATIVE_KOP_ALTERNATIVES = 1,
+	NATIVE_KOP_MSR_RECOVERY = 2,
+	NATIVE_KOP_SMP_LOCKS = 4,
+};
 
 /* A matcher-local view only: unrecognised records retain their old route. */
 static bool native_kop_object(const struct bpf_prog *prog,
@@ -3365,6 +3369,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table") &&
 		    !(alternatives && !strcmp(name, ".altinstructions")) &&
 		    !((metadata & NATIVE_KOP_MSR_RECOVERY) && !strcmp(name, "__ex_table")) &&
+		    !((metadata & NATIVE_KOP_SMP_LOCKS) && !strcmp(name, ".smp_locks")) &&
 		    !(!(section->sh_flags & SHF_WRITE) && section->sh_type == SHT_PROGBITS &&
 		      (!strcmp(name, ".rodata") || !strncmp(name, ".rodata.", 8))))
 			return false;
@@ -3793,7 +3798,12 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 #endif
 }
 
-struct native_scalar_rmw { u32 base, size; s32 offset; bool percpu; };
+struct native_scalar_rmw {
+	u32 base, size;
+	s32 offset;
+	s16 input;
+	bool percpu, bit_index;
+};
 
 struct native_arch_kop { u16 reads, writes; u8 width; };
 
@@ -3952,40 +3962,75 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 #ifdef CONFIG_X86_64
 	struct native_kop_object object;
 	struct insn decoded;
-	u32 i, operation, physical, bytes;
+	u32 i, operation, physical, bytes, lock_offset = 0;
 	bool gs = false, lock = false;
-	int base;
+	int base, input = -1;
+	bool bit_index = false;
 
-	if (!native_kop_object(prog, insn, &object, false) || object.seq->write_mask ||
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) || object.seq->write_mask ||
 	    object.seq->scratch_mask || object.seq->clobber_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
 	    decoded.prefixes.nbytes > 2 ||
-	    decoded.opcode.nbytes != 1 || decoded.modrm.nbytes != 1 ||
+	    decoded.modrm.nbytes != 1 ||
 	    X86_MODRM_MOD(decoded.modrm.value) == 3)
 		return false;
 	for (i = 0; i < decoded.prefixes.nbytes; i++) {
 		if (decoded.prefixes.bytes[i] == 0x65 && !gs)
 			gs = true;
-		else if (decoded.prefixes.bytes[i] == 0xf0 && !lock)
+		else if (decoded.prefixes.bytes[i] == 0xf0 && !lock) {
 			lock = true;
-		else
+			lock_offset = i;
+		} else
 			return false;
 	}
 	operation = X86_MODRM_REG(decoded.modrm.value);
 	bytes = decoded.opnd_bytes;
-	if (decoded.opcode.value == 0xff || decoded.opcode.value == 0xfe) {
+	if (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f) {
+		switch (decoded.opcode.bytes[1]) {
+		case 0xba: /* Immediate BTS/BTR/BTC selects within one word. */
+			if (operation < 5 || !decoded.immediate.nbytes)
+				return false;
+			break;
+		case 0xab: case 0xb3: case 0xbb: /* Register BTS/BTR/BTC. */
+			bit_index = true;
+			input = native_kop_bpf_register(operation |
+				(X86_REX_R(decoded.rex_prefix.value) ? 8 : 0));
+			if (input < 0 || decoded.immediate.nbytes)
+				return false;
+			break;
+		default:
+			return false;
+		}
+	} else if (decoded.opcode.nbytes != 1) {
+		return false;
+	} else if (decoded.opcode.value == 0xff || decoded.opcode.value == 0xfe) {
 		if (operation > 1 || decoded.immediate.nbytes)
 			return false;
 		if (decoded.opcode.value == 0xfe)
 			bytes = 1;
 	} else if (decoded.opcode.value == 0x80 || decoded.opcode.value == 0x81 ||
 		   decoded.opcode.value == 0x83) {
-		if ((operation != 1 && operation != 4) || !decoded.immediate.nbytes)
+		if ((operation != 0 && operation != 1 && operation != 4 &&
+		     operation != 5 && operation != 6) || !decoded.immediate.nbytes)
 			return false;
 		if (decoded.opcode.value == 0x80)
 			bytes = 1;
+	} else if ((decoded.opcode.value & 0xc6) == 0 &&
+		   (decoded.opcode.value >> 3 == 0 || decoded.opcode.value >> 3 == 1 ||
+		    decoded.opcode.value >> 3 == 4 || decoded.opcode.value >> 3 == 5 ||
+		    decoded.opcode.value >> 3 == 6)) {
+		/* ADD/OR/AND/SUB/XOR register to memory, never the reverse form. */
+		physical = operation | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+		if (!(decoded.opcode.value & 1)) {
+			bytes = 1;
+			if (physical >= 4 && !decoded.rex_prefix.nbytes)
+				return false; /* AH/CH/DH/BH are partial unrelated registers. */
+		}
+		input = native_kop_bpf_register(physical);
+		if (input < 0 || decoded.immediate.nbytes)
+			return false;
 	} else {
 		return false;
 	}
@@ -4001,7 +4046,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		return false;
 	physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
 	base = native_kop_bpf_register(physical);
-	if (base < 0 || object.seq->read_mask != BIT(base))
+	if (base < 0 || object.seq->read_mask != (BIT(base) | (input >= 0 ? BIT(input) : 0)))
 		return false;
 	for (i = 1; i < object.elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &object.sections[i];
@@ -4009,11 +4054,37 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
 		    section->sh_size && section->sh_info == object.text_index)
 			return false;
+		if (section->sh_size) {
+			const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
+			const char *strings = (const void *)object.elf + names->sh_offset;
+			u32 at, target, offset, j, k;
+
+			if (strcmp(strings + section->sh_name, ".smp_locks"))
+				continue;
+			if (!lock || section->sh_type != SHT_PROGBITS || section->sh_size % 4)
+				return false;
+			for (at = 0; at < section->sh_size; at += 4)
+				if (!native_kop_rel_target(&object, i, at, &target, &offset) ||
+				    target != object.text_index || offset != lock_offset)
+					return false;
+			for (j = 1; j < object.elf->e_shnum; j++) {
+				const Elf64_Shdr *rel = &object.sections[j];
+				const Elf64_Rela *entries = (const void *)object.elf + rel->sh_offset;
+
+				if (rel->sh_type != SHT_RELA || rel->sh_info != i)
+					continue;
+				for (k = 0; k < rel->sh_size / sizeof(*entries); k++)
+					if (entries[k].r_offset % 4 || entries[k].r_offset >= section->sh_size)
+						return false;
+			}
+		}
 	}
 	rmw->base = base;
 	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : BPF_B;
 	rmw->offset = decoded.displacement.value;
 	rmw->percpu = gs;
+	rmw->input = input;
+	rmw->bit_index = bit_index;
 	return true;
 #else
 	return false;
@@ -12997,6 +13068,15 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
 		bool scalar;
 
+		if (rmw.input >= 0) {
+			err = check_reg_arg(env, rmw.input, SRC_OP);
+			if (err)
+				return err;
+			if (native_regs[rmw.input].type != SCALAR_VALUE ||
+			    (rmw.bit_index && (native_regs[rmw.input].smin_value < 0 ||
+			     native_regs[rmw.input].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
+				goto ordinary_helper;
+		}
 		err = check_reg_arg(env, rmw.base, SRC_OP);
 		if (err)
 			return err;
