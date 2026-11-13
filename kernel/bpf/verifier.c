@@ -6781,7 +6781,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
 				   enum bpf_access_type atype,
-				   int value_regno, bool probe_read)
+				   int value_regno, bool probe_read, bool *probe_scalar)
 {
 	struct bpf_reg_state *reg = regs + regno;
 	const struct btf_type *t = btf_type_by_id(reg->btf, reg->btf_id);
@@ -6938,17 +6938,20 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		ret = btf_struct_access(&env->log, reg, off, size, atype, &btf_id, &flag, &field_name);
 	}
 
-	/* Option A already makes an untrusted kernel-pointer load probe-safe.
+	/* Option A makes a kernel-pointer load probe-safe.
 	 * A source cast can read a larger record than the nominal BTF header.
 	 * When no field view covers that load, retain only scalar bits. Helpers,
 	 * writes, allocated objects, NULL and variable-offset rules stay on their
 	 * existing paths; no pointer or callable capability comes from this read.
 	 */
 	if (ret < 0 && atype == BPF_READ && value_regno >= 0 &&
-	    (probe_read || (reg->type & PTR_UNTRUSTED)) && !type_is_alloc(reg->type)) {
+	    (probe_scalar || probe_read || (reg->type & PTR_UNTRUSTED)) &&
+	    !type_is_alloc(reg->type)) {
 		ret = SCALAR_VALUE;
 		btf_id = 0;
 		flag = 0;
+		if (probe_scalar)
+			*probe_scalar = true;
 		note_probe_read_scope(env);
 		verbose(env, "relies on verifier option A: probe-safe scalar read outside a BTF field view\n");
 	}
@@ -7369,7 +7372,8 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 
 static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regno,
 			    int off, int bpf_size, enum bpf_access_type t,
-			    int value_regno, bool strict_alignment_once, bool is_ldsx)
+			    int value_regno, bool strict_alignment_once, bool is_ldsx,
+			    bool *probe_scalar)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
@@ -7595,7 +7599,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	} else if (base_type(reg->type) == PTR_TO_BTF_ID &&
 		   !type_may_be_null(reg->type)) {
 		err = check_ptr_to_btf_access(env, regs, regno, off, size, t,
-					      value_regno, probe_read);
+					      value_regno, probe_read, probe_scalar);
 	} else if (reg->type == CONST_PTR_TO_MAP) {
 		err = check_ptr_to_map_access(env, regs, regno, off, size, t,
 					      value_regno);
@@ -7649,6 +7653,7 @@ static int check_load_mem(struct bpf_verifier_env *env, struct bpf_insn *insn,
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	enum bpf_reg_type src_reg_type;
+	bool probe_scalar = false;
 	int err;
 
 	/* check src operand */
@@ -7668,7 +7673,14 @@ static int check_load_mem(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	 */
 	err = check_mem_access(env, env->insn_idx, insn->src_reg, insn->off,
 			       BPF_SIZE(insn->code), BPF_READ, insn->dst_reg,
-			       strict_alignment_once, is_ldsx);
+			       strict_alignment_once, is_ldsx,
+			       allow_trust_mismatch ? &probe_scalar : NULL);
+	/* Source option B can retain trust after an earlier load. Newly admitted
+	 * scalar reads still need the existing JIT's fault-handled load mode.
+	 * Change only instruction metadata, never the register's pointer facts.
+	 */
+	if (!err && probe_scalar)
+		src_reg_type = (src_reg_type & ~PTR_TRUSTED) | PTR_UNTRUSTED;
 	err = err ?: save_aux_ptr_type(env, src_reg_type,
 				       allow_trust_mismatch);
 	err = err ?: reg_bounds_sanity_check(env, &regs[insn->dst_reg], ctx);
@@ -7698,7 +7710,7 @@ static int check_store_reg(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	/* Check if (dst_reg + off) is writeable. */
 	err = check_mem_access(env, env->insn_idx, insn->dst_reg, insn->off,
 			       BPF_SIZE(insn->code), BPF_WRITE, insn->src_reg,
-			       strict_alignment_once, false);
+			       strict_alignment_once, false, NULL);
 	err = err ?: save_aux_ptr_type(env, dst_reg_type, false);
 
 	return err;
@@ -7772,11 +7784,11 @@ static int check_atomic_rmw(struct bpf_verifier_env *env,
 	 * case to simulate the register fill.
 	 */
 	err = check_mem_access(env, env->insn_idx, insn->dst_reg, insn->off,
-			       BPF_SIZE(insn->code), BPF_READ, -1, true, false);
+			       BPF_SIZE(insn->code), BPF_READ, -1, true, false, NULL);
 	if (!err && load_reg >= 0)
 		err = check_mem_access(env, env->insn_idx, insn->dst_reg,
 				       insn->off, BPF_SIZE(insn->code),
-				       BPF_READ, load_reg, true, false);
+				       BPF_READ, load_reg, true, false, NULL);
 	if (err)
 		return err;
 
@@ -7787,7 +7799,7 @@ static int check_atomic_rmw(struct bpf_verifier_env *env,
 	}
 	/* Check whether we can write into the same memory. */
 	err = check_mem_access(env, env->insn_idx, insn->dst_reg, insn->off,
-			       BPF_SIZE(insn->code), BPF_WRITE, -1, true, false);
+			       BPF_SIZE(insn->code), BPF_WRITE, -1, true, false, NULL);
 	if (err)
 		return err;
 	return 0;
@@ -8080,7 +8092,7 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 				zero_size_allowed, access_type, meta);
 	case PTR_TO_BTF_ID:
 		return check_ptr_to_btf_access(env, regs, regno, 0,
-					       access_size, access_type, -1, false);
+					       access_size, access_type, -1, false, NULL);
 	case PTR_TO_CTX:
 		/* Only permit reading or writing syscall context using helper calls. */
 		if (is_var_ctx_off_allowed(env->prog)) {
@@ -8605,7 +8617,7 @@ static int process_dynptr_func(struct bpf_verifier_env *env, int regno, int insn
 		/* we write BPF_DW bits (8 bytes) at a time */
 		for (i = 0; i < BPF_DYNPTR_SIZE; i += 8) {
 			err = check_mem_access(env, insn_idx, regno,
-					       i, BPF_DW, BPF_WRITE, -1, false, false);
+					       i, BPF_DW, BPF_WRITE, -1, false, false, NULL);
 			if (err)
 				return err;
 		}
@@ -8710,7 +8722,7 @@ static int process_iter_arg(struct bpf_verifier_env *env, int regno, int insn_id
 
 		for (i = 0; i < nr_slots * 8; i += BPF_REG_SIZE) {
 			err = check_mem_access(env, insn_idx, regno,
-					       i, BPF_DW, BPF_WRITE, -1, false, false);
+					       i, BPF_DW, BPF_WRITE, -1, false, false, NULL);
 			if (err)
 				return err;
 		}
@@ -11137,11 +11149,11 @@ static int native_result_buffer_state(struct bpf_verifier_env *env, int insn_idx
    temporary.reg->mem_size = bytes;
    temporary.reg->mem_stable = BPF_MEM_KERNEL_STABLE;
    err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
-                         BPF_DW, BPF_WRITE, 13, false, false);
+                         BPF_DW, BPF_WRITE, 13, false, false, NULL);
    byte += 8;
   } else {
    err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
-                         BPF_B, BPF_WRITE, -1, false, false);
+                         BPF_B, BPF_WRITE, -1, false, false, NULL);
    byte++;
   }
   if (err) return err;
@@ -12242,7 +12254,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	 */
 	for (i = 0; i < meta.access_size; i++) {
 		err = check_mem_access(env, insn_idx, meta.regno, i, BPF_B,
-				       BPF_WRITE, -1, false, false);
+				       BPF_WRITE, -1, false, false, NULL);
 		if (err)
 			return err;
 	}
@@ -13480,7 +13492,7 @@ static int process_irq_flag(struct bpf_verifier_env *env, int regno,
 			return -EINVAL;
 		}
 
-		err = check_mem_access(env, env->insn_idx, regno, 0, BPF_DW, BPF_WRITE, -1, false, false);
+		err = check_mem_access(env, env->insn_idx, regno, 0, BPF_DW, BPF_WRITE, -1, false, false, NULL);
 		if (err)
 			return err;
 
@@ -14087,11 +14099,11 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 				if (err)
 					return err;
 				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
-						       BPF_DW, BPF_WRITE, 13, false, false);
+						       BPF_DW, BPF_WRITE, 13, false, false, NULL);
 				offset += 8;
 			} else {
 				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
-						       BPF_B, BPF_WRITE, -1, false, false);
+						       BPF_B, BPF_WRITE, -1, false, false, NULL);
 				offset++;
 			}
 			if (err)
@@ -20306,7 +20318,7 @@ static int do_check_insn(struct bpf_verifier_env *env, bool *do_print_state)
 
 		err = check_mem_access(env, env->insn_idx, insn->dst_reg,
 				       insn->off, BPF_SIZE(insn->code),
-				       BPF_WRITE, -1, false, false);
+				       BPF_WRITE, -1, false, false, NULL);
 		if (err)
 			return err;
 
