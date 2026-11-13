@@ -9337,8 +9337,16 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		}
 		err = check_mem_region_access(env, regno, off, size,
 					      reg->mem_size, false);
-		if (!err && value_regno >= 0 && (t == BPF_READ || rdonly_mem))
+		if (!err && value_regno >= 0 && (t == BPF_READ || rdonly_mem)) {
 			mark_reg_unknown(env, regs, value_regno);
+			/* The same rule covers a component's own object: a full
+			 * word read out of it is an address the kernel supplied,
+			 * and the native function simply loaded through it.
+			 */
+			if (t == BPF_READ && size == BPF_REG_SIZE &&
+			    env->prog->aux->ebpfos_component)
+				regs[value_regno].address_word = true;
+		}
 	} else if (reg->type == PTR_TO_CTX) {
 		struct bpf_insn_access_aux info = {
 			.reg_type = SCALAR_VALUE,
@@ -21638,6 +21646,13 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 		dst_reg->type = SCALAR_VALUE;
 		__mark_reg_known(&regs[insn->dst_reg], imm);
+		/* A lowered function names a kernel global by its link-time
+		 * address. The native instruction loaded through that address
+		 * directly, so the word is an address for a component. Only the
+		 * negative half of the canonical space is a kernel address.
+		 */
+		if (env->prog->aux->ebpfos_component && imm >= 0xffffffff80000000ULL)
+			dst_reg->address_word = true;
 		return 0;
 	}
 
