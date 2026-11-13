@@ -3648,7 +3648,7 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 #endif
 }
 
-struct native_scalar_rmw { u32 base, size; s32 offset; };
+struct native_scalar_rmw { u32 base, size; s32 offset; bool percpu; };
 
 /* INC/DEC and immediate AND/OR expose no GPR result. Their flags stay
  * inside native assembly; the BPF state sees a scalar field read/write.
@@ -3662,6 +3662,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	struct native_kop_object object;
 	struct insn decoded;
 	u32 i, operation, physical, bytes;
+	bool gs = false, lock = false;
 	int base;
 
 	if (!native_kop_object(prog, insn, &object) || object.seq->write_mask ||
@@ -3669,10 +3670,18 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
 	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
-	    decoded.prefixes.nbytes > 1 || (decoded.prefixes.nbytes && decoded.prefixes.bytes[0] != 0xf0) ||
+	    decoded.prefixes.nbytes > 2 ||
 	    decoded.opcode.nbytes != 1 || decoded.modrm.nbytes != 1 ||
 	    X86_MODRM_MOD(decoded.modrm.value) == 3)
 		return false;
+	for (i = 0; i < decoded.prefixes.nbytes; i++) {
+		if (decoded.prefixes.bytes[i] == 0x65 && !gs)
+			gs = true;
+		else if (decoded.prefixes.bytes[i] == 0xf0 && !lock)
+			lock = true;
+		else
+			return false;
+	}
 	operation = X86_MODRM_REG(decoded.modrm.value);
 	bytes = decoded.opnd_bytes;
 	if (decoded.opcode.value == 0xff || decoded.opcode.value == 0xfe) {
@@ -3713,6 +3722,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->base = base;
 	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : BPF_B;
 	rmw->offset = decoded.displacement.value;
+	rmw->percpu = gs;
 	return true;
 #else
 	return false;
@@ -12627,6 +12637,31 @@ static const char *non_sleepable_context_description(struct bpf_verifier_env *en
 	return "non-sleepable prog";
 }
 
+/* The stock this_cpu_ptr type transition, shared by native GS reads and
+ * updates. The input is already a per-CPU capability; integers supply none.
+ */
+static bool native_kop_select_cpu(struct bpf_reg_state *selected,
+				  const struct bpf_reg_state *source)
+{
+	const struct btf_type *type;
+	u32 bytes;
+
+	if (base_type(source->type) != PTR_TO_BTF_ID ||
+	    !(source->type & MEM_PERCPU) || type_is_alloc(source->type))
+		return false;
+	*selected = *source;
+	selected->type &= ~MEM_PERCPU;
+	type = btf_type_skip_modifiers(source->btf, source->btf_id, NULL);
+	if (!btf_type_is_struct(type) &&
+	    !(btf_type_is_var(type) && btf_pointer_global(source->btf, type->type))) {
+		if (IS_ERR(btf_resolve_size(source->btf, type, &bytes)))
+			return false;
+		selected->type = PTR_TO_MEM | MEM_RDONLY | type_flag(selected->type);
+		selected->mem_size = bytes;
+	}
+	return true;
+}
+
 static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			     int *insn_idx_p)
 {
@@ -12644,30 +12679,43 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_scalar_rmw rmw;
 
 	if (bpf_native_seq_insn(insn) && native_seq_scalar_rmw(env->prog, insn, &rmw)) {
-		struct bpf_reg_state *native_regs = cur_regs(env), saved;
+		struct bpf_reg_state *native_regs = cur_regs(env), saved, source, selected;
 		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
 		bool scalar;
 
 		err = check_reg_arg(env, rmw.base, SRC_OP);
 		if (err)
 			return err;
+		if (rmw.percpu) {
+			source = native_regs[rmw.base];
+			if (!native_kop_select_cpu(&selected, &source))
+				goto ordinary_helper;
+			native_regs[rmw.base] = selected;
+		}
 		/* Kernel fields are not tracked stack cells or resource-owned
 		 * allocations. Reuse their existing typed load/store rules.
 		 */
 		if ((base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID &&
 		     base_type(native_regs[rmw.base].type) != PTR_TO_MEM) ||
-		    type_is_alloc(native_regs[rmw.base].type))
+		    type_is_alloc(native_regs[rmw.base].type)) {
+			if (rmw.percpu)
+				native_regs[rmw.base] = source;
 			goto ordinary_helper;
+		}
 		saved = native_regs[temporary];
 		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 				       BPF_READ, temporary, false, false, NULL);
 		scalar = native_regs[temporary].type == SCALAR_VALUE;
 		if (err) {
 			native_regs[temporary] = saved;
+			if (rmw.percpu)
+				native_regs[rmw.base] = source;
 			return err;
 		}
 		if (!scalar) {
 			native_regs[temporary] = saved;
+			if (rmw.percpu)
+				native_regs[rmw.base] = source;
 			goto ordinary_helper;
 		}
 		/* A field's previous range is not its updated value. Supply an
@@ -12679,6 +12727,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 				       BPF_WRITE, temporary, false, false, NULL);
 		native_regs[temporary] = saved;
+		if (rmw.percpu)
+			native_regs[rmw.base] = source;
 		return err;
 	}
 
@@ -12689,30 +12739,13 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 		if (native_load.indirect) {
 			struct bpf_reg_state *native_regs = cur_regs(env), source, selected;
-			const struct btf_type *type;
-			u32 bytes;
 
 			err = check_reg_arg(env, native_load.base, SRC_OP);
 			if (err)
 				return err;
 			source = native_regs[native_load.base];
-			if (base_type(source.type) != PTR_TO_BTF_ID ||
-			    !(source.type & MEM_PERCPU) || type_is_alloc(source.type))
+			if (!native_kop_select_cpu(&selected, &source))
 				goto ordinary_helper;
-			/* This is the stock this_cpu_ptr type transition. A GS
-			 * address operand must already be a typed per-CPU capability;
-			 * an integer-shaped source operand gains no pointer identity.
-			 */
-			selected = source;
-			selected.type &= ~MEM_PERCPU;
-			type = btf_type_skip_modifiers(source.btf, source.btf_id, NULL);
-			if (!btf_type_is_struct(type) &&
-			    !(btf_type_is_var(type) && btf_pointer_global(source.btf, type->type))) {
-				if (IS_ERR(btf_resolve_size(source.btf, type, &bytes)))
-					goto ordinary_helper;
-				selected.type = PTR_TO_MEM | MEM_RDONLY | type_flag(selected.type);
-				selected.mem_size = bytes;
-			}
 			err = check_reg_arg(env, native_load.dst, DST_OP);
 			if (err)
 				return err;
