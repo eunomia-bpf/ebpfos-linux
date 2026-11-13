@@ -12477,8 +12477,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		result->type = PTR_TO_BTF_ID;
 		result->btf = native_load.btf;
 		result->btf_id = native_load.type;
-		result->off = native_load.offset;
-		return check_mem_access(env, insn_idx, native_load.dst, 0,
+		return check_mem_access(env, insn_idx, native_load.dst, native_load.offset,
 					native_load.size, BPF_READ, native_load.dst,
 					false, false, NULL);
 	}
