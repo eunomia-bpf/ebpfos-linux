@@ -8787,8 +8787,12 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * kernel supplies; a compiled definition may dereference
 			 * it, as the native function did.
 			 */
+			/* probe_read is the entry-time trust: option B may
+			 * have promoted the register before `source` was taken,
+			 * and the origin is the kernel-supplied word either way.
+			 */
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
-			    (source.type & PTR_UNTRUSTED) &&
+			    (probe_read || (source.type & PTR_UNTRUSTED)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
