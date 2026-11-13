@@ -8570,7 +8570,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * it, as the native function did.
 			 */
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
-			    (source.type & PTR_UNTRUSTED))
+			    (source.type & PTR_UNTRUSTED) &&
+			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
 	}
@@ -8993,7 +8994,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			if (value_regno >= 0) {
 				mark_reg_unknown(env, regs, value_regno);
 				regs[value_regno].address_word =
-					size == BPF_REG_SIZE;
+					size == BPF_REG_SIZE &&
+					env->prog->aux->ebpfos_component;
 			}
 			return 0;
 		}
