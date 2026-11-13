@@ -632,8 +632,11 @@ walk_cfg:
 	 * valid instructions. Walk each remaining region with the same CFG
 	 * validator; do not merely ignore its branches or ldimm64 boundaries.
 	 * Ordinary verification continues to reject unreachable instructions.
+	 * A compiled definition keeps the source's own dead region the same way:
+	 * the native function has it, and the same CFG validator checks the
+	 * branches, join points and ldimm64 boundaries of each region.
 	 */
-	if (env->prog->aux->trusted_kernel) {
+	if (env->prog->aux->trusted_kernel || env->prog->aux->ebpfos_component) {
 		for (; orphan < insn_cnt; orphan++) {
 			if (insn_state[orphan] != EXPLORED) {
 				insn_state[orphan] = DISCOVERED;
