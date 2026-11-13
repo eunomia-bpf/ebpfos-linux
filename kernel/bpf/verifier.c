@@ -41,6 +41,9 @@
 #ifdef CONFIG_X86_64
 #include <asm/insn.h>
 #include <asm/cpufeature.h>
+#include <asm/extable.h>
+#include <asm/extable_fixup_types.h>
+#include <linux/extable.h>
 #endif
 
 #include "disasm.h"
@@ -3392,6 +3395,27 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	return text;
 }
 
+static u32 native_kop_nop_size(const u8 *bytes, u32 size)
+{
+#ifdef CONFIG_X86_64
+	struct insn decoded;
+	u32 i;
+
+	if (insn_decode(&decoded, bytes, size, INSN_MODE_64) || decoded.rex_prefix.nbytes ||
+	    decoded.vex_prefix.nbytes)
+		return 0;
+	for (i = 0; i < decoded.prefixes.nbytes; i++)
+		if (decoded.prefixes.bytes[i] != 0x66)
+			return 0;
+	if ((decoded.opcode.nbytes == 1 && decoded.opcode.bytes[0] == 0x90) ||
+	    (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f &&
+	     decoded.opcode.bytes[1] == 0x1f && decoded.modrm.nbytes == 1 &&
+	     !X86_MODRM_REG(decoded.modrm.value)))
+		return decoded.length;
+#endif
+	return 0;
+}
+
 static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u32 last)
 {
 	/* Each row's returning continuation preserves the BPF GPR/stack
@@ -3425,6 +3449,14 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 	if (first > last || last > size)
 		return false;
 	while (offset < size) {
+		u32 nop = native_kop_nop_size(bytes + offset, size - offset);
+
+		if (nop) {
+			offset += nop;
+			begin |= offset == first;
+			end |= offset == last;
+			continue;
+		}
 		for (i = 0; i < ARRAY_SIZE(operations); i++)
 			if (operations[i].size <= size - offset &&
 			    !memcmp(bytes + offset, operations[i].bytes, operations[i].size))
@@ -3543,6 +3575,63 @@ static bool native_kop_external_identity(const struct bpf_prog *prog, const char
 	return true;
 }
 
+/* A native CALL binds through one external ELF relocation. Share this
+ * identity with every opcode/body summary; JIT globals must not shadow it.
+ */
+static unsigned long native_kop_call_target(const struct bpf_prog *prog,
+                                           const struct native_kop_object *object)
+{
+#ifdef CONFIG_X86_64
+	const char *name = NULL;
+	u32 i, j, found = 0;
+
+	if (object->text_size != 5 || object->text[0] != 0xe8)
+		return 0;
+	for (i = 1; i < object->elf->e_shnum; i++) {
+		const Elf64_Shdr *rel = &object->sections[i], *table, *strings;
+		const Elf64_Rela *entries;
+
+		if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) ||
+		    !rel->sh_size || rel->sh_info != object->text_index)
+			continue;
+		if (rel->sh_type != SHT_RELA || rel->sh_size % sizeof(*entries) ||
+		    rel->sh_link >= object->elf->e_shnum)
+			return 0;
+		table = &object->sections[rel->sh_link];
+		if (table->sh_type != SHT_SYMTAB || table->sh_entsize != sizeof(Elf64_Sym) ||
+		    table->sh_size % sizeof(Elf64_Sym) ||
+		    table->sh_link >= object->elf->e_shnum)
+			return 0;
+		strings = &object->sections[table->sh_link];
+		if (strings->sh_type != SHT_STRTAB)
+			return 0;
+		entries = (const void *)object->elf + rel->sh_offset;
+		for (j = 0; j < rel->sh_size / sizeof(*entries); j++) {
+			const Elf64_Rela *entry = &entries[j];
+			const Elf64_Sym *symbol;
+			u32 type = ELF64_R_TYPE(entry->r_info);
+
+			if (++found != 1 || entry->r_offset != 1 || entry->r_addend != -4 ||
+			    (type != R_X86_64_PC32 && type != R_X86_64_PLT32) ||
+			    ELF64_R_SYM(entry->r_info) >= table->sh_size / sizeof(*symbol))
+				return 0;
+			symbol = (const void *)object->elf + table->sh_offset +
+				ELF64_R_SYM(entry->r_info) * sizeof(*symbol);
+			if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size ||
+			    !memchr((const void *)object->elf + strings->sh_offset + symbol->st_name,
+				    0, strings->sh_size - symbol->st_name))
+				return 0;
+			name = (const void *)object->elf + strings->sh_offset + symbol->st_name;
+		}
+	}
+	if (found != 1 || !native_kop_external_identity(prog, name))
+		return 0;
+	return kallsyms_lookup_name(name);
+#else
+	return 0;
+#endif
+}
+
 /* x86's THUNK calling convention wraps a normal C call with balanced saves
  * of every caller-clobbered GPR and BP; C preserves the remaining registers.
  * Match that actual resident body, not a list of thunk names. A no-argument
@@ -3560,57 +3649,19 @@ static bool native_seq_preserving_thunk(const struct bpf_prog *prog,
 	struct native_kop_object object;
 	const struct btf_type *function, *prototype, *result;
 	char buffer[KSYM_NAME_LEN], *module;
-	const char *name = NULL, *callee_name;
+	const char *callee_name;
 	unsigned long address, callee, size, offset;
 	u8 body[sizeof(save) + 4 + sizeof(restore)];
 	struct btf *btf;
-	u32 i, j, found = 0;
 	s32 id;
 
 	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
-	    object.seq->read_mask || object.seq->write_mask || object.seq->clobber_mask ||
+	    (object.seq->read_mask & ~BIT(BPF_REG_ARG_SP)) ||
+	    (object.seq->write_mask & ~BIT(BPF_REG_ARG_SP)) ||
+	    (object.seq->clobber_mask & ~BIT(4)) ||
 	    object.text_size != 5 || object.text[0] != 0xe8)
 		return false;
-	for (i = 1; i < object.elf->e_shnum; i++) {
-		const Elf64_Shdr *rel = &object.sections[i], *table, *strings;
-		const Elf64_Rela *entries;
-
-		if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) ||
-		    !rel->sh_size || rel->sh_info != object.text_index)
-			continue;
-		if (rel->sh_type != SHT_RELA || rel->sh_size % sizeof(*entries) ||
-		    rel->sh_link >= object.elf->e_shnum)
-			return false;
-		table = &object.sections[rel->sh_link];
-		if (table->sh_type != SHT_SYMTAB || table->sh_entsize != sizeof(Elf64_Sym) ||
-		    table->sh_size % sizeof(Elf64_Sym) ||
-		    table->sh_link >= object.elf->e_shnum)
-			return false;
-		strings = &object.sections[table->sh_link];
-		if (strings->sh_type != SHT_STRTAB)
-			return false;
-		entries = (const void *)object.elf + rel->sh_offset;
-		for (j = 0; j < rel->sh_size / sizeof(*entries); j++) {
-			const Elf64_Rela *entry = &entries[j];
-			const Elf64_Sym *symbol;
-			u32 type = ELF64_R_TYPE(entry->r_info);
-
-			if (++found != 1 || entry->r_offset != 1 || entry->r_addend != -4 ||
-			    (type != R_X86_64_PC32 && type != R_X86_64_PLT32) ||
-			    ELF64_R_SYM(entry->r_info) >= table->sh_size / sizeof(*symbol))
-				return false;
-			symbol = (const void *)object.elf + table->sh_offset +
-				ELF64_R_SYM(entry->r_info) * sizeof(*symbol);
-			if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size ||
-			    !memchr((const void *)object.elf + strings->sh_offset + symbol->st_name,
-				    0, strings->sh_size - symbol->st_name))
-				return false;
-			name = (const void *)object.elf + strings->sh_offset + symbol->st_name;
-		}
-	}
-	if (found != 1 || !native_kop_external_identity(prog, name))
-		return false;
-	address = kallsyms_lookup_name(name);
+	address = native_kop_call_target(prog, &object);
 	if (!core_kernel_text(address) || !core_kernel_text(address + sizeof(body) - 1) ||
 	    copy_from_kernel_nofault(body, (const void *)address, sizeof(body)) ||
 	    memcmp(body, save, sizeof(save)) ||
@@ -3634,6 +3685,103 @@ static bool native_seq_preserving_thunk(const struct bpf_prog *prog,
 		return false;
 	result = btf_type_skip_modifiers(btf, prototype->type, NULL);
 	return result && btf_type_is_void(result);
+#else
+	return false;
+#endif
+}
+
+/* Three-byte alternative slots are either the actual AC instruction or
+ * architectural NOPs. These are resident bytes, after boot alternatives.
+ */
+static bool native_kop_ac_slot(const u8 *bytes, bool enable)
+{
+	u32 at = 0, nop;
+
+	if (bytes[0] == 0x0f && bytes[1] == 0x01 && bytes[2] == (enable ? 0xcb : 0xca))
+		return true;
+	while (at < 3) {
+		nop = native_kop_nop_size(bytes + at, 3 - at);
+		if (!nop)
+			return false;
+		at += nop;
+	}
+	return true;
+}
+
+/* A fault-recovering read leaf has a custom AX-address / AX-error, DX-data
+ * interface. Prove its actual load and exception continuation, not a callee
+ * name or an invented BTF prototype. Successful and fault results are scalar;
+ * user-supplied data never acquires an object or address-word capability.
+ */
+static bool native_seq_fault_read(const struct bpf_prog *prog,
+				  const struct bpf_insn *insn, u32 *width)
+{
+#ifdef CONFIG_X86_64
+	static const u8 clamp[] = {0x48, 0x39, 0xd0, 0x48, 0x0f, 0x47, 0xc2};
+	static const u8 fail[] = {0x31, 0xd2, 0x48, 0xc7, 0xc0, 0xf2, 0xff, 0xff, 0xff, 0xc3};
+	const struct exception_table_entry *exception;
+	struct native_kop_object object;
+	unsigned long address, handler;
+	u8 body[40], recovery[3 + sizeof(fail)];
+	u32 at = 0, load;
+	bool checked;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    (object.seq->read_mask & ~BIT(BPF_REG_ARG_SP)) != BIT(0) ||
+	    (object.seq->write_mask & ~BIT(BPF_REG_ARG_SP)) != (BIT(0) | BIT(3)) ||
+	    (object.seq->clobber_mask & ~(BIT(0) | BIT(2) | BIT(4))))
+		return false;
+	address = native_kop_call_target(prog, &object);
+	if (!core_kernel_text(address) || !core_kernel_text(address + sizeof(body) - 1) ||
+	    copy_from_kernel_nofault(body, (const void *)address, sizeof(body)))
+		return false;
+	checked = body[0] == 0x48 && body[1] == 0xba; /* MOVABS bound, DX */
+	if (checked) {
+		if (memcmp(body + 10, clamp, sizeof(clamp)))
+			return false;
+		at = 10 + sizeof(clamp);
+	}
+	if (!native_kop_ac_slot(body + at, true))
+		return false;
+	at += 3;
+	if (!checked) {
+		/* The unchecked form has a speculation-barrier alternative. */
+		if (memcmp(body + at, "\x0f\xae\xe8", 3) &&
+		    !native_kop_ac_slot(body + at, false))
+			return false;
+		/* A CLAC is not a speculation-barrier alternative. */
+		if (!memcmp(body + at, "\x0f\x01\xca", 3))
+			return false;
+		at += 3;
+	}
+	load = at;
+	if (!memcmp(body + at, "\x0f\xb6\x10", 3)) {
+		*width = 1;
+		at += 3;
+	} else if (!memcmp(body + at, "\x0f\xb7\x10", 3)) {
+		*width = 2;
+		at += 3;
+	} else if (!memcmp(body + at, "\x8b\x10", 2)) {
+		*width = 4;
+		at += 2;
+	} else if (!memcmp(body + at, "\x48\x8b\x10", 3)) {
+		*width = 8;
+		at += 3;
+	} else {
+		return false;
+	}
+	if (memcmp(body + at, "\x31\xc0", 2) ||
+	    !native_kop_ac_slot(body + at + 2, false) || body[at + 5] != 0xc3)
+		return false;
+	exception = search_kernel_exception_table(address + load);
+	if (!exception || exception->data != EX_TYPE_UACCESS)
+		return false;
+	handler = (unsigned long)&exception->fixup + exception->fixup;
+	if (!core_kernel_text(handler) || !core_kernel_text(handler + sizeof(recovery) - 1) ||
+	    copy_from_kernel_nofault(recovery, (const void *)handler, sizeof(recovery)) ||
+	    !native_kop_ac_slot(recovery, false) || memcmp(recovery + 3, fail, sizeof(fail)))
+		return false;
+	return true;
 #else
 	return false;
 #endif
@@ -13737,6 +13885,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_arch_kop architectural;
 	struct native_scalar_bits bits;
 	struct native_descriptor_kop descriptor;
+	u32 fault_read_width;
 
 	if (bpf_native_seq_insn(insn) && native_seq_descriptor(env->prog, insn, &descriptor)) {
 		struct bpf_reg_state *native_regs = cur_regs(env);
@@ -13806,6 +13955,29 @@ descriptor_done:
 	if (bpf_native_seq_insn(insn) && native_seq_preserving_thunk(env->prog, insn)) {
 		u32 owner = cur_func(env)->subprogno;
 
+		env->subprog_info[owner].has_native_call = true;
+		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		return 0;
+	}
+	if (bpf_native_seq_insn(insn) && native_seq_fault_read(env->prog, insn, &fault_read_width)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		u32 owner = cur_func(env)->subprogno;
+
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		if (err)
+			return err;
+		/* AX is zero or a full-width negative error. Do not infer a
+		 * fictitious 32-bit zero extension from the C output constraint.
+		 */
+		err = check_reg_arg(env, BPF_REG_0, DST_OP);
+		err = err ?: check_reg_arg(env, BPF_REG_3, DST_OP);
+		if (err)
+			return err;
+		if (fault_read_width < BPF_REG_SIZE)
+			coerce_reg_to_size(&native_regs[BPF_REG_3], fault_read_width);
 		env->subprog_info[owner].has_native_call = true;
 		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
 			owner, bpf_verifier_subprog_name(env, owner));
@@ -13913,7 +14085,7 @@ descriptor_done:
 					return err;
 				if (partial)
 					native_regs[register_number].native_input_bits = architectural.width * 8;
-				else if (architectural.width >= 4)
+				else if (architectural.width >= 4 && architectural.width < BPF_REG_SIZE)
 					coerce_reg_to_size(&native_regs[register_number], architectural.width);
 			}
 		return 0;
@@ -13981,7 +14153,7 @@ descriptor_done:
 				mark_reg_unknown(env, native_regs, temporary);
 				__mark_reg_known(&native_regs[temporary], rmw.immediate);
 			}
-			if (native_regs[temporary].type == SCALAR_VALUE)
+			if (native_regs[temporary].type == SCALAR_VALUE && rmw.size != BPF_DW)
 				coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
 			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 					       BPF_WRITE, temporary, false, false, NULL);
@@ -14024,7 +14196,7 @@ descriptor_done:
 				 */
 				mark_reg_unknown(env, native_regs, temporary);
 			}
-			if (native_regs[temporary].type == SCALAR_VALUE)
+			if (native_regs[temporary].type == SCALAR_VALUE && rmw.size != BPF_DW)
 				coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
 			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 					       BPF_WRITE, temporary, false, false, NULL);
