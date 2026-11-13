@@ -3874,14 +3874,34 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 {
 	struct native_kop_object object;
 	u16 physical_writes;
-	u32 i, recovery = 0;
+	u32 i, recovery = 0, port_at = 0;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_MSR_RECOVERY) || object.seq->scratch_mask ||
-	    object.text[0] != 0x0f || object.text_size < 2)
+	    !object.text_size)
 		return false;
 	operation->reads = operation->writes = physical_writes = 0;
 	operation->width = 4;
-	if (object.text_size == 2) {
+	if (object.text[0] == 0x66)
+		port_at++;
+	if (port_at < object.text_size &&
+	    (object.text[port_at] == 0xe6 || object.text[port_at] == 0xe7 ||
+	     object.text[port_at] == 0xee || object.text[port_at] == 0xef ||
+	     object.text[port_at] == 0xe5 || object.text[port_at] == 0xed)) {
+		u8 opcode = object.text[port_at];
+		bool input = opcode == 0xe5 || opcode == 0xed;
+		bool immediate = opcode < 0xe8;
+
+		/* OUT consumes AL/AX/EAX and an immediate or DX port. IN32
+		 * writes all of EAX and zero-extends RAX. Narrow IN preserves
+		 * upper bits and needs a separate partial-register proof.
+		 */
+		if (object.text_size != port_at + 1 + immediate ||
+		    (port_at && (input || opcode == 0xe6 || opcode == 0xee)))
+			return false;
+		operation->reads = (input ? 0 : BIT(0)) | (immediate ? 0 : BIT(3));
+		operation->writes = input ? BIT(0) : 0;
+		physical_writes = input ? BIT(0) : 0;
+	} else if (object.text_size == 2 && object.text[0] == 0x0f) {
 		switch (object.text[1]) {
 		case 0x30: /* WRMSR: ECX index, EDX:EAX value, preserves GPRs. */
 			operation->reads = BIT(0) | BIT(3) | BIT(4);
@@ -3901,7 +3921,8 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 		default:
 			return false;
 		}
-	} else if (object.text_size == 3 && object.text[1] == 0x01 && object.text[2] == 0xf9) {
+	} else if (object.text_size == 3 && object.text[0] == 0x0f &&
+		   object.text[1] == 0x01 && object.text[2] == 0xf9) {
 		/* RDTSCP also returns the 32-bit CPU auxiliary value in ECX. */
 		operation->writes = BIT(0) | BIT(3) | BIT(4);
 		physical_writes = BIT(0) | BIT(1) | BIT(2);
@@ -3929,7 +3950,8 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 			 * that write an error register need a different contract.
 			 */
 			if (recovery || section->sh_type != SHT_PROGBITS || section->sh_size != 12 ||
-			    object.text_size != 2 || (object.text[1] != 0x30 && object.text[1] != 0x32) ||
+			    object.text_size != 2 || object.text[0] != 0x0f ||
+			    (object.text[1] != 0x30 && object.text[1] != 0x32) ||
 			    get_unaligned_le32(entry + 8) != (object.text[1] == 0x32 ? 9 : 8) ||
 			    !native_kop_rel_target(&object, i, 0, &original, &start) ||
 			    !native_kop_rel_target(&object, i, 4, &continuation, &end) ||
