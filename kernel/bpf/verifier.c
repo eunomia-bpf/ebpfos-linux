@@ -3962,6 +3962,112 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 	return true;
 }
 
+struct native_string_kop {
+	bool store, fault;
+};
+
+/* REP's returning state includes partial progress after a uaccess fault.
+ * A CPU-selected CALL alternative is not the REP opcode: leave that arm on
+ * its old route until its body has a separate semantics. Module finalization
+ * and the AOT image's alternatives use the same boot feature selection.
+ */
+static bool native_seq_string_kop(const struct bpf_prog *prog,
+				  const struct bpf_insn *insn,
+				  struct native_string_kop *operation)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	u32 at = 2, i, j, alternatives = 0, exceptions = 0;
+	u32 source, begin, target, end, reads, writes, optional = BIT(BPF_REG_ARG_SP);
+	bool store;
+
+	if (!native_kop_object(prog, insn, &object,
+			      NATIVE_KOP_ALTERNATIVES | NATIVE_KOP_MSR_RECOVERY) ||
+	    object.seq->scratch_mask || object.text_size < 2 ||
+	    object.text[0] != 0xf3 ||
+	    (object.text[1] != 0xa4 && object.text[1] != 0xaa))
+		return false;
+	store = object.text[1] == 0xaa;
+	while (at < object.text_size) {
+		u32 nop = native_kop_nop_size(object.text + at, object.text_size - at);
+
+		if (!nop)
+			return false;
+		at += nop;
+	}
+	reads = BIT(BPF_REG_1) | BIT(BPF_REG_4) | BIT(store ? BPF_REG_0 : BPF_REG_2);
+	writes = BIT(BPF_REG_1) | BIT(BPF_REG_4) | (store ? 0 : BIT(BPF_REG_2));
+	if ((object.seq->read_mask & ~optional) != reads ||
+	    (object.seq->write_mask & ~(optional | BIT(BPF_REG_0))) != writes ||
+	    (object.seq->clobber_mask & ~(BIT(0) | BIT(1) | BIT(4) | BIT(6) | BIT(7))))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+		const char *name = (const void *)object.elf +
+			object.sections[object.elf->e_shstrndx].sh_offset + section->sh_name;
+		const u8 *bytes = (const void *)object.elf + section->sh_offset;
+
+		if (!section->sh_size)
+			continue;
+		if (!strcmp(name, ".altinstructions")) {
+			u32 feature;
+
+			if (alternatives++ || section->sh_type != SHT_PROGBITS ||
+			    section->sh_size != 14 || bytes[12] != object.text_size ||
+			    !native_kop_rel_target(&object, i, 0, &source, &begin) ||
+			    source != object.text_index || begin ||
+			    !native_kop_rel_target(&object, i, 4, &target, &end) ||
+			    target == object.text_index ||
+			    strcmp((const void *)object.elf +
+				object.sections[object.elf->e_shstrndx].sh_offset +
+				object.sections[target].sh_name, ".altinstr_replacement") ||
+			    bytes[13] > object.sections[target].sh_size - end)
+				return false;
+			feature = get_unaligned_le32(bytes + 8);
+			if ((feature & 0xfffe0000) || (feature & 0xffff) >= NCAPINTS * 32 ||
+			    (!!boot_cpu_has(feature & 0xffff) ^ !!(feature & BIT(16))))
+				return false;
+		} else if (!strcmp(name, "__ex_table")) {
+			if (exceptions++ || section->sh_type != SHT_PROGBITS ||
+			    section->sh_size != 12 || get_unaligned_le32(bytes + 8) != EX_TYPE_UACCESS ||
+			    !native_kop_rel_target(&object, i, 0, &source, &begin) ||
+			    source != object.text_index || begin ||
+			    !native_kop_rel_target(&object, i, 4, &target, &end) ||
+			    target != object.text_index || end != object.text_size)
+				return false;
+		} else if ((section->sh_flags & SHF_EXECINSTR) &&
+			   i != object.text_index && strcmp(name, ".altinstr_replacement")) {
+			return false;
+		}
+		if (section->sh_type != SHT_RELA && section->sh_type != SHT_REL)
+			continue;
+		/* No relocation can change the REP or its padding. Metadata's
+		 * two rel32 fields are the only relocatable active operands.
+		 */
+		if (section->sh_info == object.text_index)
+			return false;
+		if (section->sh_info >= object.elf->e_shnum)
+			return false;
+		name = (const void *)object.elf + object.sections[object.elf->e_shstrndx].sh_offset +
+			object.sections[section->sh_info].sh_name;
+		if (!strcmp(name, "__ex_table") || !strcmp(name, ".altinstructions")) {
+			const Elf64_Rela *relocations = (const void *)bytes;
+
+			if (section->sh_type != SHT_RELA || section->sh_size != 2 * sizeof(*relocations))
+				return false;
+			for (j = 0; j < 2; j++)
+				if (relocations[j].r_offset != 0 && relocations[j].r_offset != 4)
+					return false;
+		}
+	}
+	operation->store = store;
+	operation->fault = exceptions;
+	return true;
+#else
+	return false;
+#endif
+}
+
 struct native_percpu_load {
 	u32 dst, size, type, base, width, literal_size, scale;
 	s16 index;
@@ -13968,7 +14074,82 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_scalar_bits bits;
 	struct native_descriptor_kop descriptor;
 	struct native_fault_write fault_write;
+	struct native_string_kop string;
 	u32 fault_read_width;
+
+	if (bpf_native_seq_insn(insn) && native_seq_string_kop(env->prog, insn, &string)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		struct bpf_call_arg_meta range = {};
+		u64 maximum;
+		u32 owner = cur_func(env)->subprogno;
+
+		err = check_reg_arg(env, BPF_REG_4, SRC_OP);
+		if (err)
+			return err;
+		if (native_regs[BPF_REG_4].type != SCALAR_VALUE)
+			goto ordinary_helper;
+		maximum = native_regs[BPF_REG_4].umax_value;
+		if (maximum) {
+			if (maximum >= BPF_MAX_VAR_SIZ || native_regs[BPF_REG_4].smin_value < 0)
+				goto ordinary_helper;
+			/* A partial faulting copy establishes no initialization fact.
+			 * Keep tracked stack/map cells on their old route. Heap field
+			 * values are untracked, as for conditional native CMPXCHG.
+			 */
+			if ((base_type(native_regs[BPF_REG_1].type) != PTR_TO_MEM &&
+			     base_type(native_regs[BPF_REG_1].type) != PTR_TO_BTF_ID) ||
+			    type_is_alloc(native_regs[BPF_REG_1].type))
+				goto ordinary_helper;
+			err = check_helper_mem_access(env, BPF_REG_1, maximum, BPF_WRITE, true, &range);
+			if (err)
+				return err;
+			if (string.store) {
+				err = __check_reg_arg(env, native_regs, BPF_REG_0, SRC_OP, 1);
+				if (err)
+					return err;
+				if (native_regs[BPF_REG_0].type != SCALAR_VALUE)
+					goto ordinary_helper;
+			} else {
+				err = check_helper_mem_access(env, BPF_REG_2, maximum, BPF_READ, true, &range);
+				if (err)
+					return err;
+			}
+			err = mark_chain_precision(env, BPF_REG_4);
+			if (err)
+				return err;
+			/* Addresses advance by completed bytes. Discard their view
+			 * instead of handing a capability to an unknown new offset.
+			 * REP itself preserves AX and the abstract SP token, even if
+			 * an inactive CALL arm declared them clobbered.
+			 */
+			err = check_reg_arg(env, BPF_REG_1, DST_OP);
+			if (err)
+				return err;
+			if (!string.store) {
+				err = check_reg_arg(env, BPF_REG_2, DST_OP);
+				if (err)
+					return err;
+			}
+		}
+		err = check_reg_arg(env, BPF_REG_4, DST_OP);
+		if (err)
+			return err;
+		if (string.fault && maximum) {
+			struct bpf_reg_state *count = &native_regs[BPF_REG_4];
+
+			count->var_off = tnum_range(0, maximum);
+			count->umin_value = count->u32_min_value = 0;
+			count->smin_value = count->s32_min_value = 0;
+			count->umax_value = count->u32_max_value = maximum;
+			count->smax_value = count->s32_max_value = maximum;
+			reg_bounds_sync(count);
+		} else {
+			__mark_reg_known(&native_regs[BPF_REG_4], 0);
+		}
+		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		return 0;
+	}
 
 	if (bpf_native_seq_insn(insn) && native_seq_descriptor(env->prog, insn, &descriptor)) {
 		struct bpf_reg_state *native_regs = cur_regs(env);
