@@ -3427,7 +3427,18 @@ static bool native_seq_preserving_kop(const struct bpf_prog *prog,
 struct native_percpu_load {
 	u32 dst, size, offset, type;
 	struct btf *btf;
+	bool address, scalar;
 };
+
+#ifdef CONFIG_X86_64
+static int native_kop_bpf_register(u32 physical)
+{
+	static const s8 x86_to_bpf[16] = {0, 4, 3, 6, -1, -1, 2, 1,
+					5, 12, -1, -1, -1, 7, 8, 9};
+
+	return physical < ARRAY_SIZE(x86_to_bpf) ? x86_to_bpf[physical] : -1;
+}
+#endif
 
 /* Decode one GS load, then bind its displacement relocation to the same
  * image BTF area used by the existing per-CPU read KOperations. Nothing
@@ -3438,8 +3449,6 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 				   struct native_percpu_load *load)
 {
 #ifdef CONFIG_X86_64
-	static const s8 x86_to_bpf[16] = {0, 4, 3, 6, -1, -1, 2, 1,
-					5, 12, -1, -1, -1, 7, 8, 9};
 	struct native_kop_object object;
 	const Elf64_Shdr *sections, *symbols, *strings;
 	const Elf64_Rela *relocation = NULL;
@@ -3475,7 +3484,7 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 		return false;
 	physical = X86_MODRM_REG(decoded.modrm.value) |
 		   (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
-	dst = x86_to_bpf[physical];
+	dst = native_kop_bpf_register(physical);
 	if (dst < 0 || object.seq->write_mask != BIT(dst) ||
 	    (object.seq->clobber_mask & ~BIT(physical)))
 		return false;
@@ -3528,6 +3537,83 @@ static bool native_seq_percpu_load(const struct bpf_prog *prog,
 	load->offset = address - start;
 	load->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
 	load->dst = dst;
+	return true;
+#else
+	return false;
+#endif
+}
+
+/* RIP-relative LEA accesses no memory. Its result is conservatively scalar
+ * except for a complete local Linux bug-table record, whose emitted section
+ * and resident BTF together establish a live bug_entry object.
+ */
+static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *insn,
+			   struct native_percpu_load *result)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	const Elf64_Shdr *target = NULL;
+	s64 offset = 0;
+	u32 i, physical, relocations = 0;
+	int dst, id;
+
+	if (!native_kop_object(prog, insn, &object) || object.seq->read_mask ||
+	    object.seq->scratch_mask || object.seq->bindings_count != 1 ||
+	    object.text_size != 7 || (object.text[0] & ~4) != 0x48 ||
+	    object.text[1] != 0x8d || (object.text[2] & 0xc7) != 5)
+		return false;
+	physical = ((object.text[2] >> 3) & 7) | (object.text[0] & 4 ? 8 : 0);
+	dst = native_kop_bpf_register(physical);
+	if (dst < 0 || object.seq->write_mask != BIT(dst) ||
+	    (object.seq->clobber_mask & ~BIT(physical)))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i], *symbols;
+		const Elf64_Rela *relocation;
+		const Elf64_Sym *symbol;
+
+		if ((section->sh_type != SHT_RELA && section->sh_type != SHT_REL) ||
+		    !section->sh_size || section->sh_info != object.text_index)
+			continue;
+		if (++relocations != 1 || section->sh_type != SHT_RELA ||
+		    section->sh_size != sizeof(*relocation) ||
+		    section->sh_link >= object.elf->e_shnum)
+			return false;
+		relocation = (const void *)object.elf + section->sh_offset;
+		symbols = &object.sections[section->sh_link];
+		if (relocation->r_offset != 3 || ELF64_R_TYPE(relocation->r_info) != R_X86_64_PC32 ||
+		    symbols->sh_type != SHT_SYMTAB || symbols->sh_entsize != sizeof(*symbol) ||
+		    ELF64_R_SYM(relocation->r_info) >= symbols->sh_size / sizeof(*symbol))
+			return false;
+		symbol = (const void *)object.elf + symbols->sh_offset +
+			 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
+		if (symbol->st_shndx < object.elf->e_shnum && symbol->st_shndx) {
+			target = &object.sections[symbol->st_shndx];
+			offset = symbol->st_value + relocation->r_addend + 4;
+		}
+	}
+	result->dst = dst;
+	result->scalar = true;
+	if (target && offset >= 0) {
+		const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
+		const char *name = (const void *)object.elf + names->sh_offset + target->sh_name;
+		const struct btf_type *type;
+		struct btf *btf = bpf_get_btf_vmlinux();
+
+		if (strcmp(name, "__bug_table") || IS_ERR_OR_NULL(btf))
+			return true;
+		id = btf_find_by_name_kind(btf, "bug_entry", BTF_KIND_STRUCT);
+		if (id < 1)
+			return true;
+		type = btf_type_by_id(btf, id);
+		if (!type->size || offset % type->size || offset > target->sh_size ||
+		    type->size > target->sh_size - offset)
+			return true;
+		result->btf = btf;
+		result->type = id;
+		result->scalar = false;
+		result->address = true;
+	}
 	return true;
 #else
 	return false;
@@ -12455,10 +12541,11 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	int insn_idx = *insn_idx_p;
 	bool changes_data;
 	int i, err, func_id;
-	struct native_percpu_load native_load;
+	struct native_percpu_load native_load = {};
 
 	if (bpf_native_seq_insn(insn) &&
-	    native_seq_percpu_load(env->prog, insn, &native_load)) {
+	    (native_seq_percpu_load(env->prog, insn, &native_load) ||
+	     native_seq_lea(env->prog, insn, &native_load))) {
 		struct bpf_reg_state *result = &cur_regs(env)[native_load.dst];
 
 		/* This is the existing this_cpu_ptr/root/ordinary-load proof in
@@ -12466,17 +12553,21 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		 * there are no helper calls, spills or probe reads at run time.
 		 * Source/context option D supplies the current-CPU discipline.
 		 */
-		btf_get(native_load.btf);
-		err = bpf_verifier_add_used_btf(env, native_load.btf);
+		err = check_reg_arg(env, native_load.dst, DST_OP);
 		if (err)
 			return err;
-		err = check_reg_arg(env, native_load.dst, DST_OP);
+		if (native_load.scalar)
+			return 0;
+		btf_get(native_load.btf);
+		err = bpf_verifier_add_used_btf(env, native_load.btf);
 		if (err)
 			return err;
 		mark_reg_known_zero(env, cur_regs(env), native_load.dst);
 		result->type = PTR_TO_BTF_ID;
 		result->btf = native_load.btf;
 		result->btf_id = native_load.type;
+		if (native_load.address)
+			return 0;
 		return check_mem_access(env, insn_idx, native_load.dst, native_load.offset,
 					native_load.size, BPF_READ, native_load.dst,
 					false, false, NULL);
