@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/bpf.h>
 #include <linux/bpf_native_seq.h>
+#include <linux/elf.h>
 #include <linux/bpf_kernel_rule_context.h>
 #include <linux/btf.h>
 #include "btf_record_return.h"
@@ -3278,6 +3279,94 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
 	return 0;
 }
 
+/* UD2 has no explicit operands. On Linux's returning WARN path #UD saves
+ * and restores the interrupted register frame, then advances IP by two.
+ * Its continuation therefore preserves every BPF register and stack byte.
+ * A fatal BUG contributes no returning state; retaining fallthrough also
+ * for that case is a conservative overapproximation, not a termination fact.
+ *
+ * Keep the native record, including __bug_table and its relocations, for
+ * the existing JIT/linker. The proof describes only the interrupted body's
+ * continuation. Linux's exception entry, diagnostics and context discipline
+ * remain source-code obligations under verifier-scope B/D.
+ */
+static bool native_seq_ud2_kop(const struct bpf_prog *prog,
+			      const struct bpf_insn *insn)
+{
+	const struct bpf_native_seq *seq;
+	const Elf64_Ehdr *elf;
+	const Elf64_Shdr *sections, *names;
+	const char *strings;
+	bool ud2 = false;
+	u32 i;
+
+	if (!IS_ENABLED(CONFIG_X86_64) || !prog->aux->ebpfos_component ||
+	    !bpf_native_seq_insn(insn))
+		return false;
+	seq = bpf_native_seq_get(prog, insn->imm);
+	if (!seq || seq->read_mask || seq->write_mask || seq->clobber_mask ||
+	    seq->scratch_mask || seq->gotos_count || seq->bindings_count ||
+	    seq->elf_size < sizeof(*elf))
+		return false;
+	elf = (const void *)seq + seq->elf_offset;
+	if (memcmp(elf->e_ident, ELFMAG, SELFMAG) ||
+	    elf->e_ident[EI_CLASS] != ELFCLASS64 ||
+	    elf->e_ident[EI_DATA] != ELFDATA2LSB ||
+	    elf->e_machine != EM_X86_64 || elf->e_type != ET_REL ||
+	    elf->e_shentsize != sizeof(*sections) ||
+	    elf->e_shoff > seq->elf_size ||
+	    elf->e_shnum > (seq->elf_size - elf->e_shoff) / sizeof(*sections) ||
+	    elf->e_shstrndx >= elf->e_shnum)
+		return false;
+	sections = (const void *)elf + elf->e_shoff;
+	names = &sections[elf->e_shstrndx];
+	if (names->sh_offset > seq->elf_size ||
+	    names->sh_size > seq->elf_size - names->sh_offset)
+		return false;
+	strings = (const void *)elf + names->sh_offset;
+	for (i = 1; i < elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &sections[i];
+		const char *name;
+		const u8 *bytes;
+
+		if (!section->sh_size)
+			continue;
+		if (section->sh_name >= names->sh_size ||
+		    !memchr(strings + section->sh_name, 0,
+			    names->sh_size - section->sh_name))
+			return false;
+		name = strings + section->sh_name;
+		/* Patching or fault recovery can change the returning state.
+		 * Leave those sequences on their existing trusted route.
+		 */
+		if (!strcmp(name, ".altinstructions") ||
+		    !strcmp(name, "__jump_table") || !strcmp(name, "__ex_table"))
+			return false;
+		if ((section->sh_flags & SHF_ALLOC) &&
+		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table"))
+			return false;
+		if (!(section->sh_flags & SHF_EXECINSTR))
+			continue;
+		if (ud2 || strcmp(name, ".text") || section->sh_type != SHT_PROGBITS ||
+		    section->sh_size != 2 || section->sh_offset > seq->elf_size ||
+		    section->sh_size > seq->elf_size - section->sh_offset)
+			return false;
+		bytes = (const void *)elf + section->sh_offset;
+		if (bytes[0] != 0x0f || bytes[1] != 0x0b)
+			return false;
+		ud2 = true;
+	}
+	/* Relocations into executable bytes could replace the matched opcode. */
+	for (i = 1; i < elf->e_shnum; i++)
+		if ((sections[i].sh_type == SHT_RELA || sections[i].sh_type == SHT_REL) &&
+		    sections[i].sh_size) {
+			if (sections[i].sh_info >= elf->e_shnum ||
+			    (sections[sections[i].sh_info].sh_flags & SHF_EXECINSTR))
+				return false;
+		}
+	return ud2;
+}
+
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
@@ -3285,6 +3374,10 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 	u64 effects = 0;
 	u32 cap = env->kop_call_cnt;
 	int i, err;
+
+	if (!env->prog->aux->trusted_kernel)
+		for (i = 0; i < env->prog->len; i++)
+			cap += native_seq_ud2_kop(env->prog, &env->prog->insnsi[i]);
 
 	/* Exception metadata belongs to ordinary CALL/CFG, not a KOperation. */
 	for (i = 0; i < env->prog->len; i++) {
@@ -3342,6 +3435,20 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		int count;
 
 		call = &env->prog->insnsi[i];
+		if (!env->prog->aux->trusted_kernel && native_seq_ud2_kop(env->prog, call)) {
+			struct bpf_insn continuation = BPF_JMP_A(0);
+
+			region = &env->kop_regions[env->kop_region_cnt++];
+			region->start = i;
+			region->proof_len = region->orig_len = 1;
+			region->orig[0] = *call;
+			region->orig_idx[0] = env->insn_aux_data[i].orig_idx;
+			new_prog = bpf_patch_insn_data(env, i, &continuation, 1);
+			if (!new_prog)
+				return -ENOMEM;
+			env->prog = new_prog;
+			continue;
+		}
 		if (!bpf_pseudo_kop_call(call))
 			continue;
 		sidecar = call - 1;
