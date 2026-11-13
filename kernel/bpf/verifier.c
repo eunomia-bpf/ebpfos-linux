@@ -12626,7 +12626,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		/* Kernel fields are not tracked stack cells or resource-owned
 		 * allocations. Reuse their existing typed load/store rules.
 		 */
-		if (base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID ||
+		if ((base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID &&
+		     base_type(native_regs[rmw.base].type) != PTR_TO_MEM) ||
 		    type_is_alloc(native_regs[rmw.base].type))
 			goto ordinary_helper;
 		saved = native_regs[temporary];
