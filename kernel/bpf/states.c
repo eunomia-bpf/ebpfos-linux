@@ -1359,7 +1359,8 @@ int bpf_is_state_visited(struct bpf_verifier_env *env, int insn_idx)
 			 * invariant comparison and SCC read/precision propagation;
 			 * the current work and resource limits still apply.
 			 */
-			if (env->subprog_info[cur->frame[cur->curframe]->subprogno].protocol_bounded &&
+			if ((env->subprog_info[cur->frame[cur->curframe]->subprogno].protocol_bounded ||
+			     env->prog->aux->ebpfos_component) &&
 			    env->insn_aux_data[insn_idx].scc &&
 			    sl->state.may_goto_depth == cur->may_goto_depth &&
 			    sl->state.callback_unroll_depth == cur->callback_unroll_depth &&
