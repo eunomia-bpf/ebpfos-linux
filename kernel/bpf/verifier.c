@@ -212,6 +212,12 @@ struct bpf_verifier_stack_elem {
 
 #define BPF_COMPLEXITY_LIMIT_JMP_SEQ	65536
 #define BPF_COMPLEXITY_LIMIT_STATES	64
+/* A compiled definition keeps the source's wide switch and jump-table
+ * dispatch, whose depth the 16-bit jump sequence bound cuts off; the native
+ * function verifies nothing. The bound only sizes the verifier's own work
+ * stack, so a component may use the 32-bit one.
+ */
+#define BPF_COMPONENT_LIMIT_JMP_SEQ	(1 << 20)
 
 #define BPF_GLOBAL_PERCPU_MA_MAX_SIZE  512
 
@@ -1772,7 +1778,9 @@ static struct bpf_verifier_state *push_stack(struct bpf_verifier_env *env,
 	if (err)
 		return ERR_PTR(-ENOMEM);
 	elem->st.speculative |= speculative;
-	if (env->stack_size > BPF_COMPLEXITY_LIMIT_JMP_SEQ) {
+	if (env->stack_size > (env->prog->aux->ebpfos_component ?
+			       BPF_COMPONENT_LIMIT_JMP_SEQ :
+			       BPF_COMPLEXITY_LIMIT_JMP_SEQ)) {
 		verbose(env, "The sequence of %d jumps is too complex.\n",
 			env->stack_size);
 		return ERR_PTR(-E2BIG);
@@ -22720,7 +22728,9 @@ static int do_check(struct bpf_verifier_env *env)
 		insn = &insns[env->insn_idx];
 		insn_aux = &env->insn_aux_data[env->insn_idx];
 
-		if (++env->insn_processed > BPF_COMPLEXITY_LIMIT_INSNS) {
+		if (++env->insn_processed >
+		    (env->prog->aux->ebpfos_component ? BPF_COMPONENT_LIMIT_INSNS :
+							BPF_COMPLEXITY_LIMIT_INSNS)) {
 			verbose(env,
 				"BPF program is too large. Processed %d insn\n",
 				env->insn_processed);

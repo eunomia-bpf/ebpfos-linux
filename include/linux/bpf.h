@@ -2514,6 +2514,11 @@ struct bpf_array {
 int bpf_array_get_next_key(struct bpf_map *map, void *key, void *next_key);
 
 #define BPF_COMPLEXITY_LIMIT_INSNS      32000000
+/* A compiled definition keeps the source's fully inlined body, which the
+ * stock bound cuts off; the native function has no verification at all. Only
+ * the verifier's own work count grows.
+ */
+#define BPF_COMPONENT_LIMIT_INSNS       128000000
 #define MAX_TAIL_CALL_CNT 33
 
 /* Maximum number of loops for bpf_loop and bpf_iter_num.
