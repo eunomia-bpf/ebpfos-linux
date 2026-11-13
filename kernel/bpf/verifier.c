@@ -9417,7 +9417,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			return -EACCES;
 		}
 
-		if (t == BPF_WRITE && rdonly_mem) {
+		if (t == BPF_WRITE && rdonly_mem &&
+		    !env->prog->aux->ebpfos_component) {
 			verbose(env, "R%d cannot write into %s\n",
 				regno, reg_type_str(env, reg->type));
 			return -EACCES;
@@ -9432,8 +9433,12 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		/*
 		 * Accesses to untrusted PTR_TO_MEM are done through probe
 		 * instructions, hence no need to check bounds in that case.
+		 * A compiled definition that stores into such memory keeps the
+		 * native store's plain form: the same untrusted word gave it
+		 * no extent, so there is nothing to bound.
 		 */
-		if (rdonly_untrusted && t == BPF_READ) {
+		if (rdonly_untrusted && (t == BPF_READ ||
+		    (t == BPF_WRITE && env->prog->aux->ebpfos_component))) {
 			note_probe_read_scope(env);
 			/* The kernel supplies this word and the JIT already reads it
 			 * with a fault-handled load. A compiled definition may
