@@ -3620,6 +3620,77 @@ static bool native_seq_lea(const struct bpf_prog *prog, const struct bpf_insn *i
 #endif
 }
 
+struct native_scalar_rmw { u32 base, size; s32 offset; };
+
+/* INC/DEC and immediate AND/OR expose no GPR result. Their flags stay
+ * inside native assembly; the BPF state sees a scalar field read/write.
+ * LOCK remains in the original bytes, preserving the source atomicity.
+ */
+static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
+				  const struct bpf_insn *insn,
+				  struct native_scalar_rmw *rmw)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	struct insn decoded;
+	u32 i, operation, physical, bytes;
+	int base;
+
+	if (!native_kop_object(prog, insn, &object) || object.seq->write_mask ||
+	    object.seq->scratch_mask || object.seq->clobber_mask ||
+	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
+	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
+	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
+	    decoded.prefixes.nbytes > 1 || (decoded.prefixes.nbytes && decoded.prefixes.bytes[0] != 0xf0) ||
+	    decoded.opcode.nbytes != 1 || decoded.modrm.nbytes != 1 ||
+	    X86_MODRM_MOD(decoded.modrm.value) == 3)
+		return false;
+	operation = X86_MODRM_REG(decoded.modrm.value);
+	bytes = decoded.opnd_bytes;
+	if (decoded.opcode.value == 0xff || decoded.opcode.value == 0xfe) {
+		if (operation > 1 || decoded.immediate.nbytes)
+			return false;
+		if (decoded.opcode.value == 0xfe)
+			bytes = 1;
+	} else if (decoded.opcode.value == 0x80 || decoded.opcode.value == 0x81 ||
+		   decoded.opcode.value == 0x83) {
+		if ((operation != 1 && operation != 4) || !decoded.immediate.nbytes)
+			return false;
+		if (decoded.opcode.value == 0x80)
+			bytes = 1;
+	} else {
+		return false;
+	}
+	if (bytes != 1 && bytes != 4 && bytes != 8)
+		return false;
+	physical = X86_MODRM_RM(decoded.modrm.value);
+	if (physical == 4) {
+		if (X86_SIB_INDEX(decoded.sib.value) != 4 || X86_REX_X(decoded.rex_prefix.value))
+			return false;
+		physical = X86_SIB_BASE(decoded.sib.value);
+	}
+	if (physical == 5 && !X86_MODRM_MOD(decoded.modrm.value))
+		return false;
+	physical |= X86_REX_B(decoded.rex_prefix.value) ? 8 : 0;
+	base = native_kop_bpf_register(physical);
+	if (base < 0 || object.seq->read_mask != BIT(base))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+	}
+	rmw->base = base;
+	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : BPF_B;
+	rmw->offset = decoded.displacement.value;
+	return true;
+#else
+	return false;
+#endif
+}
+
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 {
 	struct bpf_insn *proof = NULL;
@@ -12542,6 +12613,33 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	bool changes_data;
 	int i, err, func_id;
 	struct native_percpu_load native_load = {};
+	struct native_scalar_rmw rmw;
+
+	if (bpf_native_seq_insn(insn) && native_seq_scalar_rmw(env->prog, insn, &rmw)) {
+		struct bpf_reg_state *native_regs = cur_regs(env), saved;
+		bool scalar;
+
+		err = check_reg_arg(env, rmw.base, SRC_OP);
+		if (err)
+			return err;
+		/* Kernel fields are not tracked stack cells or resource-owned
+		 * allocations. Reuse their existing typed load/store rules.
+		 */
+		if (base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID ||
+		    type_is_alloc(native_regs[rmw.base].type))
+			goto ordinary_helper;
+		saved = native_regs[BPF_REG_0];
+		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
+				       BPF_READ, BPF_REG_0, false, false, NULL);
+		scalar = native_regs[BPF_REG_0].type == SCALAR_VALUE;
+		native_regs[BPF_REG_0] = saved;
+		if (err)
+			return err;
+		if (!scalar)
+			goto ordinary_helper;
+		return check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
+					BPF_WRITE, -1, false, false, NULL);
+	}
 
 	if (bpf_native_seq_insn(insn) &&
 	    (native_seq_percpu_load(env->prog, insn, &native_load) ||
@@ -12573,6 +12671,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 					false, false, NULL);
 	}
 
+ordinary_helper:
 	/* find function prototype */
 	func_id = insn->imm;
 	err = bpf_get_helper_proto(env, insn->imm, &fn);
