@@ -3989,7 +3989,8 @@ struct native_scalar_rmw {
 	s16 input;
 	u16 inputs, outputs;
 	s16 condition;
-	bool percpu, bit_index, read_only, absolute;
+	bool percpu, bit_index, read_only, write_only, absolute;
+	s64 immediate;
 	struct btf *btf;
 	u32 type;
 };
@@ -4412,9 +4413,10 @@ architectural_metadata:
 	return true;
 }
 
-/* INC/DEC and immediate AND/OR expose no GPR result. Their flags stay
- * inside native assembly; the BPF state sees a scalar field read/write.
- * LOCK remains in the original bytes, preserving the source atomicity.
+/* Memory operations reuse ordinary typed accesses: RMW reads/writes a
+ * scalar field, while MOV stores its actual input without reading the old
+ * value. Flags stay inside native assembly. LOCK remains in the original
+ * RMW bytes, preserving the source atomicity.
  */
 static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 				  const struct bpf_insn *insn,
@@ -4425,9 +4427,9 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	struct insn decoded;
 	u32 i, operation, physical, bytes, lock_offset = 0, physical_outputs = 0;
 	u16 inputs = 0, outputs = 0;
-	bool gs = false, lock = false;
+	bool gs = false, lock = false, operand16 = false;
 	int base, input = -1, condition = -1;
-	bool bit_index = false, read_only = false, absolute = false;
+	bool bit_index = false, read_only = false, write_only = false, absolute = false;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
 	    object.seq->scratch_mask ||
@@ -4444,6 +4446,8 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		else if (decoded.prefixes.bytes[i] == 0xf0 && !lock) {
 			lock = true;
 			lock_offset = i;
+		} else if (decoded.prefixes.bytes[i] == 0x66 && !operand16) {
+			operand16 = true;
 		} else
 			return false;
 	}
@@ -4498,6 +4502,30 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		}
 	} else if (decoded.opcode.nbytes != 1) {
 		return false;
+	} else if (decoded.opcode.value == 0x88 || decoded.opcode.value == 0x89) {
+		/* MOV stores the actual source, including a full-width pointer
+		 * capability. It neither reads the old field nor defines flags.
+		 */
+		write_only = true;
+		physical = operation | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+		if (decoded.opcode.value == 0x88) {
+			bytes = 1;
+			if (physical >= 4 && physical < 8 && !decoded.rex_prefix.nbytes)
+				return false;
+		}
+		input = native_kop_bpf_register(physical);
+		if (input < 0 || decoded.immediate.nbytes)
+			return false;
+	} else if (decoded.opcode.value == 0xc6 || decoded.opcode.value == 0xc7) {
+		write_only = true;
+		if (operation || !decoded.immediate.nbytes)
+			return false;
+		if (decoded.opcode.value == 0xc6)
+			bytes = 1;
+		/* C7's 32-bit immediate is sign-extended for a 64-bit store;
+		 * smaller widths are truncated by the ordinary store rule.
+		 */
+		rmw->immediate = (s32)decoded.immediate.value;
 	} else if (decoded.opcode.value == 0xff || decoded.opcode.value == 0xfe) {
 		if (operation > 1 || decoded.immediate.nbytes)
 			return false;
@@ -4539,7 +4567,9 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	} else {
 		return false;
 	}
-	if ((read_only && lock) || (bytes != 1 && bytes != 4 && bytes != 8))
+	if (((read_only || write_only) && lock) || (write_only && condition >= 0) ||
+	    (operand16 && !write_only) ||
+	    (bytes != 1 && bytes != 4 && bytes != 8 && !(write_only && bytes == 2)))
 		return false;
 	physical = X86_MODRM_RM(decoded.modrm.value);
 	if (physical == 4) {
@@ -4609,7 +4639,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		}
 	}
 	rmw->base = base;
-	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : BPF_B;
+	rmw->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
 	rmw->percpu = gs;
 	rmw->absolute = absolute;
 	rmw->input = input;
@@ -4618,6 +4648,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->condition = condition;
 	rmw->bit_index = bit_index;
 	rmw->read_only = read_only;
+	rmw->write_only = write_only;
 	return true;
 #else
 	return false;
@@ -13768,7 +13799,7 @@ descriptor_done:
 			err = check_reg_arg(env, i, SRC_OP);
 			if (err)
 				return err;
-			if (native_regs[i].type != SCALAR_VALUE ||
+			if ((!rmw.write_only && native_regs[i].type != SCALAR_VALUE) ||
 			    (rmw.bit_index && i == rmw.input && (native_regs[i].smin_value < 0 ||
 			     native_regs[i].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
 				goto ordinary_helper;
@@ -13791,17 +13822,38 @@ descriptor_done:
 				native_regs[rmw.base] = selected;
 			}
 		}
-		/* Kernel fields are not tracked stack cells or resource-owned
-		 * allocations. Reuse their existing typed load/store rules.
+		/* RMW needs a scalar kernel field. A MOV can also initialize a
+		 * tracked stack cell or write an ordinary map value. Every route
+		 * reuses the existing access and stored-value rules.
 		 */
 		if ((base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID &&
-		     base_type(native_regs[rmw.base].type) != PTR_TO_MEM) ||
+		     base_type(native_regs[rmw.base].type) != PTR_TO_MEM &&
+		     !(rmw.write_only && (native_regs[rmw.base].type == PTR_TO_STACK ||
+					 native_regs[rmw.base].type == PTR_TO_MAP_VALUE))) ||
 		    type_is_alloc(native_regs[rmw.base].type)) {
 			if (rmw.percpu)
 				native_regs[rmw.base] = source;
 			goto ordinary_helper;
 		}
 		saved = native_regs[temporary];
+		if (rmw.write_only) {
+			/* Absolute GS uses R0 only as an abstract address view. If
+			 * R0 supplies the stored value, recover its original state;
+			 * never store the temporary root capability instead.
+			 */
+			if (rmw.input >= 0) {
+				native_regs[temporary] = rmw.absolute && rmw.input == rmw.base ?
+					source : native_regs[rmw.input];
+			} else {
+				mark_reg_unknown(env, native_regs, temporary);
+				__mark_reg_known(&native_regs[temporary], rmw.immediate);
+			}
+			if (native_regs[temporary].type == SCALAR_VALUE)
+				coerce_reg_to_size(&native_regs[temporary], bpf_size_to_bytes(rmw.size));
+			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
+					       BPF_WRITE, temporary, false, false, NULL);
+			goto native_memory_done;
+		}
 		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 				       BPF_READ, temporary, false, false, NULL);
 		scalar = native_regs[temporary].type == SCALAR_VALUE;
@@ -13827,6 +13879,7 @@ descriptor_done:
 			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 					       BPF_WRITE, temporary, false, false, NULL);
 		}
+native_memory_done:
 		native_regs[temporary] = saved;
 		if (rmw.percpu)
 			native_regs[rmw.base] = source;
