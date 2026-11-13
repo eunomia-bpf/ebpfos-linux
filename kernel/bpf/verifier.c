@@ -4035,7 +4035,7 @@ static bool native_kop_string_call(const struct bpf_prog *prog,
 	u32 size = store ? sizeof(fill) : sizeof(copy);
 	u32 count = store ? ARRAY_SIZE(fill_faults) : ARRAY_SIZE(copy_faults), i;
 	unsigned long address = native_kop_call_at(prog, object, section, offset);
-	u8 body[sizeof(fill) + sizeof(copy_movsq)];
+	u8 body[sizeof(copy) - 3 + sizeof(copy_movsq)];
 
 	if (!core_kernel_text(address) || !core_kernel_text(address + size - 1) ||
 	    copy_from_kernel_nofault(body, (const void *)address, size))
