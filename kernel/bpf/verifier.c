@@ -37,6 +37,9 @@
 #include <linux/ebpfos.h>
 #include <crypto/sha2.h>
 #include <asm/sections.h>
+#ifdef CONFIG_X86_64
+#include <asm/insn.h>
+#endif
 
 #include "disasm.h"
 #include "../ebpfos/function_native.h"
@@ -3290,23 +3293,31 @@ static int validate_call_exception_annotation(struct bpf_verifier_env *env,
  * continuation. Linux's exception entry, diagnostics and context discipline
  * remain source-code obligations under verifier-scope B/D.
  */
-static bool native_seq_ud2_kop(const struct bpf_prog *prog,
-			      const struct bpf_insn *insn)
+struct native_kop_object {
+	const struct bpf_native_seq *seq;
+	const Elf64_Ehdr *elf;
+	const Elf64_Shdr *sections;
+	const u8 *text;
+	u32 text_size, text_index;
+};
+
+/* A matcher-local view only: unrecognised records retain their old route. */
+static bool native_kop_object(const struct bpf_prog *prog,
+			      const struct bpf_insn *insn,
+			      struct native_kop_object *object)
 {
 	const struct bpf_native_seq *seq;
 	const Elf64_Ehdr *elf;
 	const Elf64_Shdr *sections, *names;
 	const char *strings;
-	bool ud2 = false;
+	bool text = false;
 	u32 i;
 
 	if (!IS_ENABLED(CONFIG_X86_64) || !prog->aux->ebpfos_component ||
 	    !bpf_native_seq_insn(insn))
 		return false;
 	seq = bpf_native_seq_get(prog, insn->imm);
-	if (!seq || seq->read_mask || seq->write_mask || seq->clobber_mask ||
-	    seq->scratch_mask || seq->gotos_count || seq->bindings_count ||
-	    seq->elf_size < sizeof(*elf))
+	if (!seq || seq->gotos_count || seq->elf_size < sizeof(*elf))
 		return false;
 	elf = (const void *)seq + seq->elf_offset;
 	if (memcmp(elf->e_ident, ELFMAG, SELFMAG) ||
@@ -3327,7 +3338,6 @@ static bool native_seq_ud2_kop(const struct bpf_prog *prog,
 	for (i = 1; i < elf->e_shnum; i++) {
 		const Elf64_Shdr *section = &sections[i];
 		const char *name;
-		const u8 *bytes;
 
 		if (!section->sh_size)
 			continue;
@@ -3336,6 +3346,10 @@ static bool native_seq_ud2_kop(const struct bpf_prog *prog,
 			    names->sh_size - section->sh_name))
 			return false;
 		name = strings + section->sh_name;
+		if (section->sh_type != SHT_NOBITS &&
+		    (section->sh_offset > seq->elf_size ||
+		     section->sh_size > seq->elf_size - section->sh_offset))
+			return false;
 		/* Patching or fault recovery can change the returning state.
 		 * Leave those sequences on their existing trusted route.
 		 */
@@ -3347,24 +3361,154 @@ static bool native_seq_ud2_kop(const struct bpf_prog *prog,
 			return false;
 		if (!(section->sh_flags & SHF_EXECINSTR))
 			continue;
-		if (ud2 || strcmp(name, ".text") || section->sh_type != SHT_PROGBITS ||
-		    section->sh_size != 2 || section->sh_offset > seq->elf_size ||
-		    section->sh_size > seq->elf_size - section->sh_offset)
+		if (text || strcmp(name, ".text") || section->sh_type != SHT_PROGBITS)
 			return false;
-		bytes = (const void *)elf + section->sh_offset;
-		if (bytes[0] != 0x0f || bytes[1] != 0x0b)
-			return false;
-		ud2 = true;
+		object->text = (const void *)elf + section->sh_offset;
+		object->text_size = section->sh_size;
+		object->text_index = i;
+		text = true;
 	}
+	object->seq = seq;
+	object->elf = elf;
+	object->sections = sections;
+	return text;
+}
+
+static bool native_seq_ud2_kop(const struct bpf_prog *prog,
+			      const struct bpf_insn *insn)
+{
+	struct native_kop_object object;
+	const struct bpf_native_seq *seq;
+	const Elf64_Shdr *sections;
+	u32 i;
+
+	if (!native_kop_object(prog, insn, &object))
+		return false;
+	seq = object.seq;
+	sections = object.sections;
+	if (seq->read_mask || seq->write_mask || seq->clobber_mask ||
+	    seq->scratch_mask || seq->bindings_count || object.text_size != 2 ||
+	    object.text[0] != 0x0f || object.text[1] != 0x0b)
+		return false;
 	/* Relocations into executable bytes could replace the matched opcode. */
-	for (i = 1; i < elf->e_shnum; i++)
+	for (i = 1; i < object.elf->e_shnum; i++)
 		if ((sections[i].sh_type == SHT_RELA || sections[i].sh_type == SHT_REL) &&
 		    sections[i].sh_size) {
-			if (sections[i].sh_info >= elf->e_shnum ||
+			if (sections[i].sh_info >= object.elf->e_shnum ||
 			    (sections[sections[i].sh_info].sh_flags & SHF_EXECINSTR))
 				return false;
 		}
-	return ud2;
+	return true;
+}
+
+struct native_percpu_load {
+	u32 dst, size, offset, type;
+	struct btf *btf;
+};
+
+/* Decode one GS load, then bind its displacement relocation to the same
+ * image BTF area used by the existing per-CPU read KOperations. Nothing
+ * is inferred from a scalar input or from the source assembly spelling.
+ */
+static bool native_seq_percpu_load(const struct bpf_prog *prog,
+				   const struct bpf_insn *insn,
+				   struct native_percpu_load *load)
+{
+#ifdef CONFIG_X86_64
+	static const s8 x86_to_bpf[16] = {0, 4, 3, 6, -1, -1, 2, 1,
+					5, 12, -1, -1, -1, 7, 8, 9};
+	struct native_kop_object object;
+	const Elf64_Shdr *sections, *symbols, *strings;
+	const Elf64_Rela *relocation = NULL;
+	const Elf64_Sym *symbol;
+	const struct btf_type *variable, *type;
+	const char *name;
+	struct insn decoded;
+	unsigned long address, start = (unsigned long)__per_cpu_start;
+	u32 i, physical, bytes, width;
+	int id, dst;
+
+	if (!native_kop_object(prog, insn, &object) ||
+	    object.seq->read_mask || object.seq->scratch_mask ||
+	    object.seq->bindings_count != 1 ||
+	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
+	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
+	    decoded.prefixes.nbytes != 1 || decoded.prefixes.bytes[0] != 0x65 ||
+	    decoded.vex_prefix.nbytes || decoded.rex_prefix.nbytes > 1 ||
+	    X86_REX_X(decoded.rex_prefix.value) || X86_REX_B(decoded.rex_prefix.value) ||
+	    decoded.modrm.nbytes != 1 || X86_MODRM_MOD(decoded.modrm.value) ||
+	    X86_MODRM_RM(decoded.modrm.value) != 4 || decoded.sib.value != 0x25 ||
+	    decoded.displacement.nbytes != 4 || decoded.immediate.nbytes)
+		return false;
+	width = decoded.opnd_bytes;
+	if (width != 4 && width != 8)
+		return false;
+	if (decoded.opcode.nbytes == 1 && decoded.opcode.bytes[0] == 0x8b)
+		bytes = width;
+	else if (decoded.opcode.nbytes == 2 && decoded.opcode.bytes[0] == 0x0f &&
+		 (decoded.opcode.bytes[1] == 0xb6 || decoded.opcode.bytes[1] == 0xb7))
+		bytes = decoded.opcode.bytes[1] == 0xb6 ? 1 : 2;
+	else
+		return false;
+	physical = X86_MODRM_REG(decoded.modrm.value) |
+		   (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
+	dst = x86_to_bpf[physical];
+	if (dst < 0 || object.seq->write_mask != BIT(dst) ||
+	    (object.seq->clobber_mask & ~BIT(physical)))
+		return false;
+	sections = object.sections;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &sections[i];
+
+		if ((section->sh_type != SHT_RELA && section->sh_type != SHT_REL) ||
+		    !section->sh_size || section->sh_info != object.text_index)
+			continue;
+		if (relocation || section->sh_type != SHT_RELA ||
+		    section->sh_size != sizeof(*relocation) ||
+		    section->sh_link >= object.elf->e_shnum)
+			return false;
+		relocation = (const void *)object.elf + section->sh_offset;
+		symbols = &sections[section->sh_link];
+	}
+	if (!relocation || relocation->r_offset != object.text_size - 4 ||
+	    (ELF64_R_TYPE(relocation->r_info) != R_X86_64_32S &&
+	     ELF64_R_TYPE(relocation->r_info) != R_X86_64_32) ||
+	    symbols->sh_type != SHT_SYMTAB || symbols->sh_entsize != sizeof(*symbol) ||
+	    ELF64_R_SYM(relocation->r_info) >= symbols->sh_size / sizeof(*symbol) ||
+	    symbols->sh_link >= object.elf->e_shnum)
+		return false;
+	symbol = (const void *)object.elf + symbols->sh_offset +
+		 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
+	strings = &sections[symbols->sh_link];
+	if (symbol->st_shndx != SHN_UNDEF || symbol->st_name >= strings->sh_size)
+		return false;
+	name = (const void *)object.elf + strings->sh_offset + symbol->st_name;
+	if (!memchr(name, 0, strings->sh_size - symbol->st_name))
+		return false;
+	address = kallsyms_lookup_name(name);
+	if (!address || address < start || address >= (unsigned long)__per_cpu_end)
+		return false;
+	address += relocation->r_addend;
+	if (address < start || address > (unsigned long)__per_cpu_end - bytes)
+		return false;
+	load->btf = bpf_get_btf_vmlinux();
+	if (IS_ERR_OR_NULL(load->btf))
+		return false;
+	id = btf_find_by_name_kind(load->btf, "__percpu_area", BTF_KIND_VAR);
+	if (id < 1)
+		return false;
+	variable = btf_type_by_id(load->btf, id);
+	type = btf_type_skip_modifiers(load->btf, variable->type, &load->type);
+	if (!type || !btf_type_is_struct(type) ||
+	    address - start > type->size || bytes > type->size - (address - start))
+		return false;
+	load->offset = address - start;
+	load->size = bytes == 8 ? BPF_DW : bytes == 4 ? BPF_W : bytes == 2 ? BPF_H : BPF_B;
+	load->dst = dst;
+	return true;
+#else
+	return false;
+#endif
 }
 
 static int lower_kop_proof_regions(struct bpf_verifier_env *env)
@@ -12288,6 +12432,32 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	int insn_idx = *insn_idx_p;
 	bool changes_data;
 	int i, err, func_id;
+	struct native_percpu_load native_load;
+
+	if (bpf_native_seq_insn(insn) &&
+	    native_seq_percpu_load(env->prog, insn, &native_load)) {
+		struct bpf_reg_state *result = &cur_regs(env)[native_load.dst];
+
+		/* This is the existing this_cpu_ptr/root/ordinary-load proof in
+		 * abstract state. The JIT retains the original single GS load;
+		 * there are no helper calls, spills or probe reads at run time.
+		 * Source/context option D supplies the current-CPU discipline.
+		 */
+		err = bpf_verifier_add_used_btf(env, btf_get(native_load.btf));
+		if (err)
+			return err;
+		err = check_reg_arg(env, native_load.dst, DST_OP);
+		if (err)
+			return err;
+		mark_reg_known_zero(env, cur_regs(env), native_load.dst);
+		result->type = PTR_TO_BTF_ID;
+		result->btf = native_load.btf;
+		result->btf_id = native_load.type;
+		result->off = native_load.offset;
+		return check_mem_access(env, insn_idx, native_load.dst, 0,
+					native_load.size, BPF_READ, native_load.dst,
+					false, false, NULL);
+	}
 
 	/* find function prototype */
 	func_id = insn->imm;
