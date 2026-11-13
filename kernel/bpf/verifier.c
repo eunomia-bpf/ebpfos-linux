@@ -3708,6 +3708,28 @@ static bool native_kop_ac_slot(const u8 *bytes, bool enable)
 	return true;
 }
 
+static bool native_kop_uaccess_recovery(unsigned long instruction,
+				       const u8 *tail, u32 size)
+{
+#ifdef CONFIG_X86_64
+	const struct exception_table_entry *exception;
+	unsigned long handler;
+	u8 recovery[16];
+
+	if (size > sizeof(recovery) - 3)
+		return false;
+	exception = search_kernel_exception_table(instruction);
+	if (!exception || exception->data != EX_TYPE_UACCESS)
+		return false;
+	handler = (unsigned long)&exception->fixup + exception->fixup;
+	return core_kernel_text(handler) && core_kernel_text(handler + size + 2) &&
+		!copy_from_kernel_nofault(recovery, (const void *)handler, size + 3) &&
+		native_kop_ac_slot(recovery, false) && !memcmp(recovery + 3, tail, size);
+#else
+	return false;
+#endif
+}
+
 /* A fault-recovering read leaf has a custom AX-address / AX-error, DX-data
  * interface. Prove its actual load and exception continuation, not a callee
  * name or an invented BTF prototype. Successful and fault results are scalar;
@@ -3719,10 +3741,9 @@ static bool native_seq_fault_read(const struct bpf_prog *prog,
 #ifdef CONFIG_X86_64
 	static const u8 clamp[] = {0x48, 0x39, 0xd0, 0x48, 0x0f, 0x47, 0xc2};
 	static const u8 fail[] = {0x31, 0xd2, 0x48, 0xc7, 0xc0, 0xf2, 0xff, 0xff, 0xff, 0xc3};
-	const struct exception_table_entry *exception;
 	struct native_kop_object object;
-	unsigned long address, handler;
-	u8 body[40], recovery[3 + sizeof(fail)];
+	unsigned long address;
+	u8 body[40];
 	u32 at = 0, load;
 	bool checked;
 
@@ -3773,15 +3794,64 @@ static bool native_seq_fault_read(const struct bpf_prog *prog,
 	if (memcmp(body + at, "\x31\xc0", 2) ||
 	    !native_kop_ac_slot(body + at + 2, false) || body[at + 5] != 0xc3)
 		return false;
-	exception = search_kernel_exception_table(address + load);
-	if (!exception || exception->data != EX_TYPE_UACCESS)
+	return native_kop_uaccess_recovery(address + load, fail, sizeof(fail));
+#else
+	return false;
+#endif
+}
+
+struct native_fault_write {
+	u32 width;
+	bool checked;
+};
+
+static bool native_seq_fault_write(const struct bpf_prog *prog,
+				   const struct bpf_insn *insn,
+				   struct native_fault_write *operation)
+{
+#ifdef CONFIG_X86_64
+	static const u8 clamp[] = {0x48, 0x89, 0xcb, 0x48, 0xc1, 0xfb, 0x3f, 0x48, 0x09, 0xd9};
+	static const u8 fail[] = {0xb9, 0xf2, 0xff, 0xff, 0xff, 0xc3};
+	struct native_kop_object object;
+	unsigned long address;
+	u8 body[32];
+	u32 at = 0, store;
+
+	if (!native_kop_object(prog, insn, &object, 0) || object.seq->scratch_mask ||
+	    (object.seq->read_mask & ~BIT(BPF_REG_ARG_SP)) != (BIT(0) | BIT(4)) ||
+	    (object.seq->write_mask & ~BIT(BPF_REG_ARG_SP)) != (BIT(4) | BIT(6)) ||
+	    (object.seq->clobber_mask & ~(BIT(1) | BIT(3) | BIT(4))))
 		return false;
-	handler = (unsigned long)&exception->fixup + exception->fixup;
-	if (!core_kernel_text(handler) || !core_kernel_text(handler + sizeof(recovery) - 1) ||
-	    copy_from_kernel_nofault(recovery, (const void *)handler, sizeof(recovery)) ||
-	    !native_kop_ac_slot(recovery, false) || memcmp(recovery + 3, fail, sizeof(fail)))
+	address = native_kop_call_target(prog, &object);
+	if (!core_kernel_text(address) || !core_kernel_text(address + sizeof(body) - 1) ||
+	    copy_from_kernel_nofault(body, (const void *)address, sizeof(body)))
 		return false;
-	return true;
+	operation->checked = !memcmp(body, clamp, sizeof(clamp));
+	if (operation->checked)
+		at = sizeof(clamp);
+	if (!native_kop_ac_slot(body + at, true))
+		return false;
+	at += 3;
+	store = at;
+	if (!memcmp(body + at, "\x88\x01", 2)) {
+		operation->width = 1;
+		at += 2;
+	} else if (!memcmp(body + at, "\x66\x89\x01", 3)) {
+		operation->width = 2;
+		at += 3;
+	} else if (!memcmp(body + at, "\x89\x01", 2)) {
+		operation->width = 4;
+		at += 2;
+	} else if (!memcmp(body + at, "\x48\x89\x01", 3)) {
+		operation->width = 8;
+		at += 3;
+	} else {
+		return false;
+	}
+	if (memcmp(body + at, "\x31\xc9", 2) ||
+	    !native_kop_ac_slot(body + at + 2, false) || body[at + 5] != 0xc3)
+		return false;
+	return native_kop_uaccess_recovery(address + store, fail, sizeof(fail));
 #else
 	return false;
 #endif
@@ -13885,6 +13955,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	struct native_arch_kop architectural;
 	struct native_scalar_bits bits;
 	struct native_descriptor_kop descriptor;
+	struct native_fault_write fault_write;
 	u32 fault_read_width;
 
 	if (bpf_native_seq_insn(insn) && native_seq_descriptor(env->prog, insn, &descriptor)) {
@@ -13978,6 +14049,56 @@ descriptor_done:
 			return err;
 		if (fault_read_width < BPF_REG_SIZE)
 			coerce_reg_to_size(&native_regs[BPF_REG_3], fault_read_width);
+		env->subprog_info[owner].has_native_call = true;
+		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		verbose(env, "func#%u relies on verifier option D; name='%s'\n",
+			owner, bpf_verifier_subprog_name(env, owner));
+		return 0;
+	}
+
+	if (bpf_native_seq_insn(insn) && native_seq_fault_write(env->prog, insn, &fault_write)) {
+		struct bpf_reg_state *native_regs = cur_regs(env);
+		u32 owner = cur_func(env)->subprogno;
+
+		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
+		err = err ?: check_reg_arg(env, BPF_REG_4, SRC_OP);
+		if (err)
+			return err;
+		if (!fault_write.checked) {
+			/* A faulting conditional store cannot initialize a tracked
+			 * stack/map cell. Kernel fields have no tracked value fact,
+			 * just as on the conditional CMPXCHG store path.
+			 */
+			if ((base_type(native_regs[BPF_REG_4].type) != PTR_TO_BTF_ID &&
+			     base_type(native_regs[BPF_REG_4].type) != PTR_TO_MEM) ||
+			    type_is_alloc(native_regs[BPF_REG_4].type))
+				goto ordinary_helper;
+			err = check_mem_access(env, insn_idx, BPF_REG_4, 0,
+					       fault_write.width == 8 ? BPF_DW :
+					       fault_write.width == 4 ? BPF_W :
+					       fault_write.width == 2 ? BPF_H : BPF_B,
+					       BPF_WRITE, BPF_REG_0, false, false, NULL);
+			if (err)
+				return err;
+		} else {
+			/* SAR63/OR maps every upper-half kernel address to -1.
+			 * Successful writes remain in the user half; they establish
+			 * no kernel object or stack fact. Implicit user aliases and
+			 * context effects retain the source C/D premises.
+			 */
+			err = check_reg_arg(env, BPF_REG_6, DST_OP);
+			if (err)
+				return err;
+		}
+		err = check_reg_arg(env, BPF_REG_4, DST_OP);
+		if (err)
+			return err;
+		/* Both success and exception paths write ECX. Nocheck does
+		 * not actually write BX despite its declared clobber: preserve
+		 * its incoming state, including NOT_INIT.
+		 */
+		coerce_reg_to_size(&native_regs[BPF_REG_4], 4);
 		env->subprog_info[owner].has_native_call = true;
 		verbose(env, "func#%u relies on verifier option C; name='%s'\n",
 			owner, bpf_verifier_subprog_name(env, owner));
