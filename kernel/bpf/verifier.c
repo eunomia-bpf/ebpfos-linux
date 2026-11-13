@@ -3408,6 +3408,7 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 		{3, {0x0f, 0xae, 0xe8}}, /* LFENCE */
 		{3, {0x0f, 0xae, 0xf0}}, /* MFENCE */
 		{3, {0x0f, 0xae, 0xf8}}, /* SFENCE */
+		{2, {0x0f, 0x09}}, /* WBINVD writes back before invalidating caches. */
 	};
 	u32 i, offset = 0;
 	bool begin = !first, end = !last;
@@ -4177,6 +4178,37 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	operation->width = 4;
 	if (object.text[0] == 0x66)
 		port_at++;
+	if (object.text_size >= 3 &&
+	    (object.text[0] == 0x0f || (object.text[0] & 0xf0) == 0x40)) {
+		u32 at = object.text[0] == 0x0f ? 0 : 1;
+		u8 rex = at ? object.text[0] : 0, modrm;
+		u32 control, physical;
+		int reg;
+
+		if (object.text_size != at + 3 || object.text[at] != 0x0f ||
+		    (object.text[at + 1] != 0x20 && object.text[at + 1] != 0x22))
+			goto other_architecture;
+		modrm = object.text[at + 2];
+		control = ((modrm >> 3) & 7) | (rex & 4 ? 8 : 0);
+		physical = (modrm & 7) | (rex & 1 ? 8 : 0);
+		reg = native_kop_bpf_register(physical);
+		if ((modrm & 0xc0) != 0xc0 || reg < 0 ||
+		    (control != 0 && control != 2 && control != 3 && control != 4 && control != 8))
+			return false;
+		/* A control-register read supplies hardware bits, never a
+		 * verifier pointer capability. Writes retain their native CPU
+		 * translation/context obligation under source option D.
+		 */
+		operation->width = 8;
+		if (object.text[at + 1] == 0x20) {
+			operation->writes = BIT(reg);
+			physical_writes = BIT(physical);
+		} else {
+			operation->reads = BIT(reg);
+		}
+		goto architectural_metadata;
+	}
+other_architecture:
 	if (port_at < object.text_size &&
 	    (object.text[port_at] == 0xe6 || object.text[port_at] == 0xe7 ||
 	     object.text[port_at] == 0xee || object.text[port_at] == 0xef ||
@@ -4223,6 +4255,7 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	} else {
 		return false;
 	}
+architectural_metadata:
 	if (object.seq->read_mask != operation->reads || object.seq->write_mask != operation->writes ||
 	    (object.seq->clobber_mask & ~physical_writes))
 		return false;
