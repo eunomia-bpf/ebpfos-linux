@@ -5,4 +5,20 @@ obj-y += views.o
 # Bare C-to-BPF entry linking currently uses x86-64 register ABI and no CFI
 # signature prefix. Never bypass another configuration's CFI entry contract.
 obj-$(CONFIG_EBPFOS_ENTRY_LINK) += function_entries.o code_quiescence.o operations.o kernel_rule.o rule_tasks.o rule_context.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += koperation.o pointer_tag.o fault_loads.o fault_rep.o fault_stores.o sfence.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += fault_movzx.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += buffer_stos.o buffer_mov.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += fault_prefetch.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += rdmsr.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += wrmsr.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_stores.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_arithmetic.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_xadd.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += percpu_cmpxchg.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += locked_bits.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += locked_xchg.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += user_access_window.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += irq_restore_if.o
+obj-$(CONFIG_EBPFOS_KOPERATION) += invalid_opcode.o
+
 obj-$(CONFIG_EBPFOS_PTVIEW) += ptview.o

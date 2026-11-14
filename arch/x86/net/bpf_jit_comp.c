@@ -637,6 +637,77 @@ static int emit_aot_branch(u8 **pprog, void *func, void *ip, u8 opcode,
 	return 0;
 }
 
+static int emit_kop_desc_call(u8 **pprog,
+			      const struct bpf_prog *bpf_prog,
+			      const struct bpf_insn *insn, bool emit,
+			      const u8 *final_ip, u8 *image, u8 *rw_image,
+			      unsigned int *excnt, struct jit_context *ctx,
+			      const u8 *recovery_ip)
+{
+	const struct bpf_kop *kop;
+	u8 scratch[BPF_MAX_INSN_SIZE];
+	u8 *prog = *pprog;
+	u32 off = 0;
+	u64 payload;
+	int ret;
+
+	ret = bpf_jit_get_kop_payload(bpf_prog, insn, &kop, &payload);
+	if (ret)
+		return ret;
+
+	ret = kop->emit_x86(scratch, &off, emit, payload, bpf_prog,
+			      final_ip);
+	if (ret < 0)
+		return ret;
+	if (image && bpf_prog->aux->extable) {
+		unsigned int index;
+
+		for (index = 0; index < kop->num_exentries; index++) {
+			struct bpf_kop_exception entry;
+			struct exception_table_entry *ex, *rw_ex;
+			s64 insn_delta, fixup_delta;
+
+			ret = kop->exception_entry(payload, index, &entry);
+			if (ret)
+				return ret;
+			ex = &bpf_prog->aux->extable[(*excnt)++];
+			insn_delta = final_ip + entry.insn_offset - (u8 *)&ex->insn;
+			fixup_delta = (recovery_ip ?: final_ip + entry.fixup_offset) -
+				      (u8 *)&ex->fixup;
+			rw_ex = (void *)rw_image + ((void *)ex - (void *)image);
+			rw_ex->insn = insn_delta;
+			rw_ex->fixup = fixup_delta;
+			rw_ex->data = entry.data;
+		}
+	}
+	if (emit)
+		memcpy(prog, scratch, off);
+	if (ctx->aot && ctx->aot->final) {
+		for (unsigned int i = 0; i < kop->num_x86_relocs; i++) {
+			struct bpf_kop_reloc reloc;
+			u32 type;
+
+			ret = kop->x86_reloc(payload, i, &reloc);
+			if (ret)
+				return ret;
+			if (reloc.size == 8)
+				type = R_X86_64_64;
+			else if (reloc.size == 4)
+				type = reloc.is_signed ? R_X86_64_32S : R_X86_64_32;
+			else
+				return -EOPNOTSUPP;
+			ret = aot_record(ctx->aot, final_ip - ctx->aot->image + reloc.offset,
+					 type, reloc.symbol, reloc.addend, false);
+			if (ret)
+				return ret;
+			memset(*pprog + reloc.offset, 0, reloc.size);
+		}
+	}
+
+	*pprog = prog + off;
+	return 0;
+}
+
 static int emit_rsb_call(u8 **pprog, void *func, void *ip)
 {
 	OPTIMIZER_HIDE_VAR(func);
@@ -1753,6 +1824,11 @@ static void detect_insn_reg_usage(const struct bpf_insn *insn, int insn_cnt,
 	int i;
 
 	for (i = 1; i <= insn_cnt; i++, insn++) {
+		/* Sidecar operand bits encode a payload, not register uses. The
+		 * instantiated proof is scanned separately by detect_reg_usage().
+		 */
+		if (bpf_kop_is_sidecar_insn(insn))
+			continue;
 		if (insn->dst_reg == BPF_REG_6 || insn->src_reg == BPF_REG_6)
 			regs_used[0] = true;
 		if (insn->dst_reg == BPF_REG_7 || insn->src_reg == BPF_REG_7)
@@ -1767,20 +1843,56 @@ static void detect_insn_reg_usage(const struct bpf_insn *insn, int insn_cnt,
 static int detect_reg_usage(const struct bpf_prog *bpf_prog, bool *regs_used)
 {
 	const struct bpf_insn *insn = bpf_prog->insnsi;
+	int insn_cnt = bpf_prog->len;
 	int i;
 
-	detect_insn_reg_usage(insn, bpf_prog->len, regs_used);
-	for (i = 0; i < bpf_prog->len; i++) {
-		struct bpf_native_seq *seq;
-		u32 reg;
+	detect_insn_reg_usage(insn, insn_cnt, regs_used);
 
-		if (!bpf_native_seq_insn(&insn[i]))
+	for (i = 0; i < insn_cnt; i++) {
+		const struct bpf_kop *kop;
+		const struct bpf_insn *call;
+		struct bpf_insn *proof_buf;
+		u64 payload;
+		int cnt;
+		int err;
+
+		if (bpf_native_seq_insn(&insn[i])) {
+			struct bpf_native_seq *seq = bpf_native_seq_get(bpf_prog, insn[i].imm);
+			u32 reg;
+
+			for (reg = BPF_REG_6; reg <= BPF_REG_9; reg++)
+				if ((seq->read_mask | seq->write_mask) & BIT(reg))
+					regs_used[reg - BPF_REG_6] = true;
+		}
+		if (!bpf_kop_is_sidecar_insn(&insn[i]))
 			continue;
-		seq = bpf_native_seq_get(bpf_prog, insn[i].imm);
-		for (reg = BPF_REG_6; reg <= BPF_REG_9; reg++)
-			if ((seq->read_mask | seq->write_mask) & BIT(reg))
-				regs_used[reg - BPF_REG_6] = true;
+		if (i + 1 >= insn_cnt)
+			continue;
+
+		call = &insn[i + 1];
+		if (call->code != (BPF_JMP | BPF_CALL) ||
+		    call->src_reg != BPF_PSEUDO_KOP_CALL)
+			continue;
+
+		err = bpf_jit_get_kop_payload(bpf_prog, call, &kop, &payload);
+		if (err)
+			return err;
+
+		proof_buf = kvcalloc(kop->max_insn_cnt, sizeof(*proof_buf),
+				     GFP_KERNEL);
+		if (!proof_buf)
+			return -ENOMEM;
+
+		cnt = kop->instantiate_insn(payload, proof_buf);
+		if (cnt <= 0) {
+			kvfree(proof_buf);
+			return cnt ? -EFAULT : -EINVAL;
+		}
+
+		detect_insn_reg_usage(proof_buf, cnt, regs_used);
+		kvfree(proof_buf);
 	}
+
 	return 0;
 }
 
@@ -2206,6 +2318,8 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 
 		case BPF_ALU64 | BPF_MOV | BPF_K:
 		case BPF_ALU | BPF_MOV | BPF_K:
+			if (bpf_kop_is_sidecar_insn(insn))
+				break;
 			if (ctx->aot) {
 				u32 index;
 				bool symbolic = false;
@@ -2825,6 +2939,24 @@ populate_extable:
 				break;
 			}
 			func = (u8 *) __bpf_call_base + imm32;
+			if (src_reg == BPF_PSEUDO_KOP_CALL) {
+				const u8 *recovery_ip = NULL;
+
+				err = bpf_jit_get_call_exception(bpf_prog, insn, &recovery, NULL);
+				if (err != -ENOENT) {
+					if (err)
+						return err;
+					if (image)
+						recovery_ip = image + addrs[recovery];
+				}
+				err = emit_kop_desc_call(&prog, bpf_prog,
+							 insn, !!rw_image,
+							 image ? ip : NULL,
+							 image, rw_image, &excnt, ctx, recovery_ip);
+				if (err)
+					return err;
+				break;
+			}
 			err = bpf_jit_get_call_exception(bpf_prog, insn,
 						 &recovery, &exception_data);
 			if (err != -ENOENT) {
@@ -3182,7 +3314,9 @@ emit_jmp:
 		/* Ordinary CALL and store opcodes share their original exception
 		 * continuation. This metadata emits no machine instruction.
 		 */
-		if (image && bpf_prog->aux->extable) {
+		if (image && bpf_prog->aux->extable &&
+		    !(insn->code == (BPF_JMP | BPF_CALL) &&
+		      insn->src_reg == BPF_PSEUDO_KOP_CALL)) {
 			u32 recovery, exception_data;
 
 			err = bpf_jit_get_call_exception(bpf_prog, insn,
@@ -3355,7 +3489,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		oldlen = len;
 		cond_resched();
 	}
-	
+
 	image = kvzalloc(ALIGN(len, 4) + aux->num_exentries * sizeof(*aux->extable), GFP_KERNEL);
 	if (!image)
 		goto out;

@@ -84,7 +84,38 @@ bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 	desc = bsearch(&key, tab->descs, tab->nr_descs,
 		       sizeof(tab->descs[0]), kfunc_desc_cmp_by_imm_off);
 
-	return desc ? &desc->func_model : NULL;
+	return desc && !desc->kop ? &desc->func_model : NULL;
+}
+
+int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
+			    const struct bpf_insn *insn,
+			    const struct bpf_kop **kop, u64 *payload)
+{
+	const struct bpf_kfunc_desc *desc;
+	ptrdiff_t insn_index = insn - prog->insnsi;
+	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
+	u32 i;
+
+	desc = NULL;
+	for (i = 0; i < tab->nr_descs; i++) {
+		if (tab->descs[i].func_id == insn->imm &&
+		    tab->descs[i].offset == insn->off && tab->descs[i].kop) {
+			desc = &tab->descs[i];
+			break;
+		}
+	}
+	if (kop)
+		*kop = desc->kop;
+	if (payload)
+		*payload = bpf_kop_sidecar_payload(insn - 1);
+	return 0;
+}
+
+int bpf_validate_kop_proof_seq(struct bpf_verifier_env *env,
+			       const struct bpf_kop *kop,
+			       u64 payload, const struct bpf_insn *insns, u32 count)
+{
+	return 0;
 }
 
 /* A branch offset remains ordinary bytecode so all existing patch/remove
@@ -104,23 +135,52 @@ int bpf_jit_get_call_exception(const struct bpf_prog *prog,
   * Classify the encoding before reading its neighbouring instruction. */
  if (index < 0 || index >= prog->len)
   return -ENOENT;
- if (!index)
-  return -ENOENT;
- store = (BPF_CLASS(call->code) == BPF_ST ||
-          BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
- if (!bpf_pseudo_call(call) && !store)
-  return -ENOENT;
- branch = call - 1;
- if (branch->code != (BPF_JMP | BPF_JCOND) ||
-     branch->src_reg != BPF_MAY_GOTO || branch->dst_reg ||
-     (branch->imm != 3 && (!store || branch->imm != 1)))
-  return -ENOENT;
- target = index + branch->off;
+ if (bpf_pseudo_kop_call(call)) {
+  const struct bpf_kop *kop;
+  struct bpf_kop_exception entry;
+  u64 payload;
+  int error;
+
+  if (index + 1 >= prog->len)
+   return -ENOENT;
+  branch = call + 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO || branch->dst_reg != 1)
+   return -ENOENT;
+  error = bpf_jit_get_kop_payload(prog, call, &kop, &payload);
+  if (error)
+   return error;
+  if (!kop->exception_entry || !kop->num_exentries)
+   return -ENOENT;
+  error = kop->exception_entry(payload, 0, &entry);
+  if (error)
+   return error;
+  target = index + 2 + branch->off;
+ } else {
+  if (!index)
+   return -ENOENT;
+  store = (BPF_CLASS(call->code) == BPF_ST ||
+           BPF_CLASS(call->code) == BPF_STX) && BPF_MODE(call->code) == BPF_MEM;
+  if (!bpf_pseudo_call(call) && !store)
+   return -ENOENT;
+  branch = call - 1;
+  if (branch->code != (BPF_JMP | BPF_JCOND) ||
+      branch->src_reg != BPF_MAY_GOTO || branch->dst_reg ||
+      (branch->imm != 3 && (!store || branch->imm != 1)))
+   return -ENOENT;
+  target = index + branch->off;
+ }
  if (recovery)
   *recovery = target;
  if (data)
   *data = branch->imm;
  return 0;
+}
+
+int bpf_validate_kop_single_entry(struct bpf_verifier_env *env,
+				  const struct bpf_insn *insns, u32 count)
+{
+	return 0;
 }
 
 static int set_kfunc_desc_imm(struct bpf_verifier_env *env, struct bpf_kfunc_desc *desc)
@@ -155,6 +215,10 @@ static int sort_kfunc_descs_by_imm_off(struct bpf_verifier_env *env)
 		struct bpf_kfunc_desc *desc = &tab->descs[i];
 		int err;
 
+		if (desc->kop) {
+			desc->imm = desc->func_id;
+			continue;
+		}
 		err = set_kfunc_desc_imm(env, desc);
 		if (err)
 			return err;
@@ -1238,6 +1302,15 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 			if (BPF_CLASS(insn->code) == BPF_STX &&
 			    BPF_MODE(insn->code) == BPF_PROBE_ATOMIC)
 				num_exentries++;
+			if (bpf_pseudo_kop_call(insn)) {
+				const struct bpf_kop *kop;
+				u64 payload;
+
+				err = bpf_jit_get_kop_payload(func[i], insn, &kop, &payload);
+				if (err)
+					goto out_free;
+				num_exentries += kop->num_exentries;
+			}
 			if (bpf_pseudo_call(insn) ||
 			    ((BPF_CLASS(insn->code) == BPF_ST || BPF_CLASS(insn->code) == BPF_STX) &&
 			     BPF_MODE(insn->code) == BPF_MEM)) {
@@ -1484,7 +1557,7 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 	struct bpf_prog *prog = env->prog;
 	struct bpf_insn *insn = prog->insnsi;
 	struct bpf_kfunc_desc_tab *tab = prog->aux->kfunc_tab;
-	bool has_kfunc_call = false;
+	bool has_kfunc_call = false, has_kop_call = false;
 	int i, depth;
 #endif
 	int err = 0;
@@ -1498,8 +1571,14 @@ int bpf_fixup_call_args(struct bpf_verifier_env *env)
 			return err;
 	}
 #ifndef CONFIG_BPF_JIT_ALWAYS_ON
-	if (tab)
-		has_kfunc_call = tab->nr_descs;
+	if (tab) {
+		for (i = 0; i < tab->nr_descs; i++) {
+			if (tab->descs[i].kop)
+				has_kop_call = true;
+			else
+				has_kfunc_call = true;
+		}
+	}
 	if (has_kfunc_call) {
 		verbose(env, "calling kernel functions are not allowed in non-JITed programs\n");
 		return -EINVAL;
@@ -1608,7 +1687,7 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 		 * exception continuation is consumed by the native CALL emitter;
 		 * it must not acquire timed-loop counter code or stack slots.
 		 */
-		if (env->insn_aux_data[i + delta].call_fault_branch) {
+		if (env->insn_aux_data[i + delta].kop_call_fault_branch) {
 			ret = bpf_jit_get_call_exception(env->prog,
 					insn->dst_reg ? insn - 1 : insn + 1, NULL, NULL);
 			if (ret)
@@ -1618,6 +1697,51 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 				env->prog->aux->num_exentries++;
 			goto next_insn;
 		}
+		if (bpf_kop_is_sidecar_insn(insn)) {
+			const struct bpf_insn *call = insn + 1;
+			const struct bpf_kop *kop;
+			struct bpf_insn *proof;
+			u64 payload;
+
+			ret = bpf_jit_get_kop_payload(env->prog, call, &kop, &payload);
+			if (ret)
+				return ret;
+			if (prog->jit_requested && bpf_kop_has_native_emit(kop)) {
+				env->prog->aux->num_exentries += kop->num_exentries;
+				goto next_insn;
+			}
+
+			proof = kvcalloc(kop->max_insn_cnt, sizeof(*proof),
+					 GFP_KERNEL_ACCOUNT);
+			if (!proof)
+				return -ENOMEM;
+			cnt = kop->instantiate_insn(payload, proof);
+			if (cnt <= 0) {
+				ret = cnt ?: -EINVAL;
+				goto out_free_kop_proof;
+			}
+			ret = bpf_validate_kop_proof_seq(env, kop, payload, proof, cnt);
+			if (ret)
+				goto out_free_kop_proof;
+			ret = bpf_verifier_remove_insns(env, i + delta + 1, 1);
+			if (ret)
+				goto out_free_kop_proof;
+			new_prog = bpf_patch_insn_data(env, i + delta, proof, cnt);
+			kvfree(proof);
+			if (!new_prog)
+				return -ENOMEM;
+			delta += cnt - 2;
+			env->prog = new_prog;
+			prog = new_prog;
+			insn = new_prog->insnsi + i + delta;
+			i++;
+			goto next_insn;
+
+out_free_kop_proof:
+			kvfree(proof);
+			return ret;
+		}
+
 		if (insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) && insn->imm) {
 			if ((insn->off == BPF_ADDR_SPACE_CAST && insn->imm == 1) ||
 			    (((struct bpf_map *)env->prog->aux->arena)->map_flags & BPF_F_NO_USER_CONV)) {
@@ -1926,6 +2050,8 @@ int bpf_do_misc_fixups(struct bpf_verifier_env *env)
 		if (insn->code != (BPF_JMP | BPF_CALL))
 			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_CALL)
+			goto next_insn;
+		if (insn->src_reg == BPF_PSEUDO_KOP_CALL)
 			goto next_insn;
 		if (insn->src_reg == BPF_PSEUDO_NATIVE_SEQ)
 			goto next_insn;
