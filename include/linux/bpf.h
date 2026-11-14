@@ -1049,88 +1049,6 @@ struct bpf_func_proto {
 	bool (*allowed)(const struct bpf_prog *prog);
 };
 
-/* Section-relative Linux exception records within one native emission. */
-struct bpf_kop_exception {
-	u16 insn_offset;
-	u16 fixup_offset;
-	u32 data;
-};
-
-struct bpf_kop_reloc {
-	u16 offset;
-	u8 size;
-	bool is_signed;
-	const char *symbol;
-	s64 addend;
-};
-
-struct bpf_kop {
-	struct module *owner; /* NULL for built-in/vmlinux descriptors */
-	/* Retained in the native data layout. CALL exception metadata is
-	 * carried by the ordinary MAY_GOTO/CALL pair.
-	 */
-	bool call_exception_annotation;
-	u16 max_insn_cnt;
-	u16 max_emit_bytes;
-	u16 num_exentries;
-	int (*exception_entry)(u64 payload, unsigned int index,
-			       struct bpf_kop_exception *entry);
-	/*
-	 * A no-return operation with this flag emits one iteration effect and
-	 * reaches an immediately following, verifier-hidden native backedge.
-	 * The verifier validates that continuation before replacing the pair by
-	 * its proof and still treats the operation itself as terminal.
-	 */
-	bool noreturn_native_backedge;
-	/* Fixed capability and effect metadata for this operation. */
-	u64 capability_mask;
-	u64 effect_mask;
-	/* One exact typed effect call allowed inside this descriptor's proof. */
-	u32 proof_kfunc_id;
-	/* Select one exact typed proof service for a declarative payload instance. */
-	u32 (*proof_kfunc_id_for_payload)(u64 payload);
-	int (*instantiate_insn)(u64 payload, struct bpf_insn *insn_buf);
-
-	int (*emit_x86)(u8 *image, u32 *off, bool emit,
-			u64 payload, const struct bpf_prog *prog,
-			const u8 *final_ip);
-	/* Link-time symbolic operands of the same native instruction recipe. */
-	u16 num_x86_relocs;
-	int (*x86_reloc)(u64 payload, unsigned int index,
-			 struct bpf_kop_reloc *reloc);
-	int (*emit_arm64)(u32 *image, int *idx, bool emit,
-			  u64 payload, const struct bpf_prog *prog,
-			  const u32 *final_ip);
-};
-
-static inline bool bpf_kop_has_native_emit(const struct bpf_kop *kop)
-{
-	if (!kop)
-		return false;
-#ifdef CONFIG_X86
-	if (kop->emit_x86)
-		return true;
-#endif
-#ifdef CONFIG_ARM64
-	if (kop->emit_arm64)
-		return true;
-#endif
-	return false;
-}
-
-static inline bool bpf_kop_is_sidecar_insn(const struct bpf_insn *insn)
-{
-	return insn->code == (BPF_ALU64 | BPF_MOV | BPF_K) &&
-	       insn->src_reg == BPF_PSEUDO_KOP_SIDECAR;
-}
-
-static inline u64 bpf_kop_sidecar_payload(const struct bpf_insn *insn)
-{
-	return (u64)(insn->dst_reg & 0xf) |
-	       ((u64)(u16)insn->off << 4) |
-	       ((u64)(u32)insn->imm << 20);
-}
-
 /* bpf_context is intentionally undefined structure. Pointer to bpf_context is
  * the first argument to eBPF programs.
  * For socket filters: 'struct bpf_context *' == 'struct sk_buff *'
@@ -1939,13 +1857,6 @@ struct bpf_prog_aux {
 	u32 ebpfos_load_insn_cnt;
 	struct bpf_ebpfos_field_access *ebpfos_field_accesses;
 	u32 ebpfos_field_access_cnt;
-	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
-	bool ebpfos_kop_requirements_valid;
-	/* A terminal KOperation may be JIT-compiled but not test-run unadmitted. */
-	bool kop_terminal_effect;
-	u32 ebpfos_kop_count;
-	u64 ebpfos_kop_capability_mask;
-	u64 ebpfos_kop_effect_mask;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;
@@ -3313,16 +3224,9 @@ const struct bpf_func_proto *bpf_base_func_proto(enum bpf_func_id func_id,
 void bpf_task_storage_free(struct task_struct *task);
 void bpf_cgrp_storage_free(struct cgroup *cgroup);
 bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog);
-bool bpf_prog_has_kop_call(const struct bpf_prog *prog);
-int bpf_prog_kop_requirements(const struct bpf_prog *prog,
-			      u64 *capability_mask, u64 *effect_mask);
 const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn);
-int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
-			    const struct bpf_insn *insn,
-			    const struct bpf_kop **kop,
-			    u64 *payload);
 int bpf_jit_get_call_exception(const struct bpf_prog *prog,
 			       const struct bpf_insn *call,
 			       u32 *recovery, u32 *data);
@@ -3610,32 +3514,11 @@ static inline bool bpf_prog_has_kfunc_call(const struct bpf_prog *prog)
 	return false;
 }
 
-static inline bool bpf_prog_has_kop_call(const struct bpf_prog *prog)
-{
-	return false;
-}
-
-static inline int
-bpf_prog_kop_requirements(const struct bpf_prog *prog,
-			  u64 *capability_mask, u64 *effect_mask)
-{
-	return -EOPNOTSUPP;
-}
-
 static inline const struct btf_func_model *
 bpf_jit_find_kfunc_model(const struct bpf_prog *prog,
 			 const struct bpf_insn *insn)
 {
 	return NULL;
-}
-
-static inline int
-bpf_jit_get_kop_payload(const struct bpf_prog *prog,
-			const struct bpf_insn *insn,
-			const struct bpf_kop **kop,
-			u64 *payload)
-{
-	return -EOPNOTSUPP;
 }
 
 static inline int

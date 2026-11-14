@@ -2,7 +2,6 @@
 #ifndef EBPFOS_FUNCTION_CONTRACT_H
 #define EBPFOS_FUNCTION_CONTRACT_H
 #include "function_scalar_span.h"
-#include "native_result_abi.h"
 #include "../bpf/btf_record_return.h"
 #include <linux/module.h>
 #include <linux/bpf_native_abi.h>

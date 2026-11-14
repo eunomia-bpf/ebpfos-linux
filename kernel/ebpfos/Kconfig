@@ -13,15 +13,7 @@ config EBPFOS
 
 config EBPFOS_BUILD
 	bool
-	default y if EBPFOS || EBPFOS_KOPERATION
-
-config EBPFOS_KOPERATION
-	bool "eBPFOS terminal-effect KOperation"
-	depends on X86_64 && BPF_SYSCALL && BPF_JIT
 	default y if EBPFOS
-	help
-	  Build the generic verifier-checked terminal-effect call. The verifier
-	  validates the terminal backedge before the x86 JIT emits its effect.
 
 config EBPFOS_ENTRY_LINK
  bool "Typed multi-target BPF entry links"
