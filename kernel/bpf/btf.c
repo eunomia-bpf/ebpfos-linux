@@ -10151,11 +10151,11 @@ again:
 			goto again;
 	}
 
-	/* Trusted kernel code has already opted out of the hook's proof.
-	 * Its JIT still needs the registered instruction descriptor. Keep the
-	 * normal hook/filter lookup above for every verified program.
+	/* A compiled kernel definition carries its original instructions, not
+	 * a BPF attachment API. Its proof and trusted export both need the
+	 * registered operation descriptor across attachment hooks.
 	 */
-	if (prog->aux->trusted_kernel)
+	if (prog->aux->trusted_kernel || prog->aux->ebpfos_component)
 		for (hook = 0; hook < BTF_KFUNC_HOOK_MAX; hook++) {
 			kop = btf_kfunc_kop_set_contains(btf, hook, kfunc_btf_id);
 			if (kop)
