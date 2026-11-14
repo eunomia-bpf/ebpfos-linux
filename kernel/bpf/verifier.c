@@ -3227,6 +3227,11 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
         if (!bpf_pseudo_kop_call(call))
             continue;
         desc = find_kfunc_desc(prog, call->imm, call->off);
+        /* A KOperation call whose (imm, off) is not in the table has no
+         * requirements recorded; dereferencing it loaded NULL+0x28 and
+         * panicked the guest. bpf_get_kfunc_addr refuses the same miss. */
+        if (!desc || !desc->kop)
+            return -EFAULT;
         capabilities |= desc->kop->capability_mask;
         effects |= desc->kop->effect_mask;
     }

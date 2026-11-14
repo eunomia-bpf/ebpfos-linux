@@ -97,6 +97,8 @@ int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
 	u32 i;
 
 	desc = NULL;
+	if (!tab)
+		return -ENOENT;
 	for (i = 0; i < tab->nr_descs; i++) {
 		if (tab->descs[i].func_id == insn->imm &&
 		    tab->descs[i].offset == insn->off && tab->descs[i].kop) {
@@ -104,6 +106,10 @@ int bpf_jit_get_kop_payload(const struct bpf_prog *prog,
 			break;
 		}
 	}
+	/* A KOperation call with no descriptor has no payload; reading
+	 * desc->kop through NULL faulted the guest at NULL+0x28. */
+	if (!desc)
+		return -ENOENT;
 	if (kop)
 		*kop = desc->kop;
 	if (payload)
