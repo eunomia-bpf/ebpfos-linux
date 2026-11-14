@@ -2684,7 +2684,8 @@ populate_extable:
 
 				ex->data = EX_TYPE_BPF;
 
-				if (dst_reg > BPF_REG_9) {
+				if (dst_reg > BPF_REG_9 &&
+				    !(bpf_prog->aux->native_frame && dst_reg == BPF_REG_ARG6)) {
 					pr_err("verifier error\n");
 					return -EFAULT;
 				}
