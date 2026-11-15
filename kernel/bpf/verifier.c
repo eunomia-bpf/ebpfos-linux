@@ -3315,6 +3315,7 @@ enum native_kop_metadata {
 	NATIVE_KOP_ALTERNATIVES = 1,
 	NATIVE_KOP_MSR_RECOVERY = 2,
 	NATIVE_KOP_SMP_LOCKS = 4,
+	NATIVE_KOP_IDENTITY = 8,
 };
 
 /* A matcher-local view only: unrecognised records retain their old route. */
@@ -3323,6 +3324,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 			      struct native_kop_object *object, u32 metadata)
 {
 	bool alternatives = metadata & NATIVE_KOP_ALTERNATIVES;
+	bool identity = metadata & NATIVE_KOP_IDENTITY;
 	const struct bpf_native_seq *seq;
 	const Elf64_Ehdr *elf;
 	const Elf64_Shdr *sections, *names;
@@ -3334,7 +3336,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	    !bpf_native_seq_insn(insn))
 		return false;
 	seq = bpf_native_seq_get(prog, insn->imm);
-	if (!seq || seq->gotos_count || seq->elf_size < sizeof(*elf))
+	if (!seq || (!identity && seq->gotos_count) || seq->elf_size < sizeof(*elf))
 		return false;
 	elf = (const void *)seq + seq->elf_offset;
 	if (memcmp(elf->e_ident, ELFMAG, SELFMAG) ||
@@ -3367,6 +3369,12 @@ static bool native_kop_object(const struct bpf_prog *prog,
 		    (section->sh_offset > seq->elf_size ||
 		     section->sh_size > seq->elf_size - section->sh_offset))
 			return false;
+		/* Symbol definitions matter even in a different fragment whose
+		 * control flow or instruction effects this matcher cannot prove.
+		 * Inspect its ELF without granting any instruction semantics.
+		 */
+		if (identity)
+			continue;
 		/* Patching or fault recovery can change the returning state.
 		 * Leave those sequences on their existing trusted route.
 		 */
@@ -3397,7 +3405,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	object->seq = seq;
 	object->elf = elf;
 	object->sections = sections;
-	return text;
+	return identity || text;
 }
 
 static u32 native_kop_nop_size(const u8 *bytes, u32 size)
@@ -3546,8 +3554,7 @@ static bool native_kop_external_identity(const struct bpf_prog *prog, const char
 			.imm = at,
 		};
 
-		if (!native_kop_object(prog, &marker, &object,
-			NATIVE_KOP_ALTERNATIVES | NATIVE_KOP_MSR_RECOVERY | NATIVE_KOP_SMP_LOCKS))
+		if (!native_kop_object(prog, &marker, &object, NATIVE_KOP_IDENTITY))
 			return false;
 		at += object.seq->size;
 		for (j = 1; j < object.elf->e_shnum; j++) {
@@ -4639,7 +4646,7 @@ static int native_kop_condition_output(const struct native_kop_object *object,
 #endif
 }
 
-struct native_arch_kop { u16 reads, writes; u8 width, read_width; };
+struct native_arch_kop { u16 reads, writes; u8 width, read_width; s8 error; };
 
 struct native_scalar_bits {
 	u16 inputs, outputs;
@@ -4901,6 +4908,91 @@ static bool native_seq_timestamp_kop(const struct bpf_prog *prog,
 	return true;
 }
 
+/* Linux's safe MSR stream clears an error register after the opcode. A fault
+ * skips that XOR and the native handler writes full-width -EIO there. RDMSR
+ * also clears AX/DX on fault. Keep both paths, including signed error bits.
+ */
+static bool native_seq_msr_safe_kop(const struct bpf_prog *prog,
+				    const struct bpf_insn *insn,
+				    struct native_arch_kop *operation)
+{
+#ifdef CONFIG_X86_64
+	struct native_kop_object object;
+	struct insn clear;
+	u32 i, physical, source, original, start, continuation, end;
+	u16 physical_writes, reads, writes;
+	bool read, recovery = false;
+	int error;
+
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_MSR_RECOVERY) ||
+	    object.seq->scratch_mask || object.text_size < 4 || object.text[0] != 0x0f ||
+	    (object.text[1] != 0x30 && object.text[1] != 0x32) ||
+	    insn_decode(&clear, object.text + 2, object.text_size - 2, INSN_MODE_64) ||
+	    clear.length + 2 != object.text_size || clear.prefixes.nbytes ||
+	    clear.vex_prefix.nbytes || clear.rex_prefix.nbytes > 1 || clear.opnd_bytes != 4 ||
+	    clear.opcode.nbytes != 1 || clear.opcode.bytes[0] != 0x31 ||
+	    clear.modrm.nbytes != 1 || X86_MODRM_MOD(clear.modrm.value) != 3)
+		return false;
+	physical = X86_MODRM_REG(clear.modrm.value) | (X86_REX_R(clear.rex_prefix.value) ? 8 : 0);
+	source = X86_MODRM_RM(clear.modrm.value) | (X86_REX_B(clear.rex_prefix.value) ? 8 : 0);
+	error = native_kop_bpf_register(physical);
+	if (source != physical || error < 0)
+		return false;
+	read = object.text[1] == 0x32;
+	reads = BIT(4) | (read ? 0 : BIT(0) | BIT(3));
+	writes = BIT(error) | (read ? BIT(0) | BIT(3) : 0);
+	physical_writes = BIT(physical) | (read ? BIT(0) | BIT(2) : 0);
+	if (object.seq->read_mask != reads || object.seq->write_mask != writes ||
+	    (object.seq->clobber_mask & ~physical_writes))
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+		const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
+		const char *strings = (const void *)object.elf + names->sh_offset;
+		const u8 *bytes = (const void *)object.elf + section->sh_offset;
+		u32 j;
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+		if (!section->sh_size || strcmp(strings + section->sh_name, "__ex_table"))
+			continue;
+		if (recovery || section->sh_type != SHT_PROGBITS || section->sh_size != 12 ||
+		    get_unaligned_le32(bytes + 8) !=
+			((read ? EX_TYPE_RDMSR_SAFE : EX_TYPE_WRMSR_SAFE) | EX_DATA_REG(physical)) ||
+		    !native_kop_rel_target(&object, i, 0, &original, &start) ||
+		    !native_kop_rel_target(&object, i, 4, &continuation, &end) ||
+		    original != object.text_index || continuation != original || start ||
+		    end != object.text_size)
+			return false;
+		for (j = 1; j < object.elf->e_shnum; j++) {
+			const Elf64_Shdr *rel = &object.sections[j];
+			const Elf64_Rela *entries = (const void *)object.elf + rel->sh_offset;
+			u32 k;
+
+			if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) || rel->sh_info != i)
+				continue;
+			if (rel->sh_type != SHT_RELA || rel->sh_size != 2 * sizeof(*entries))
+				return false;
+			for (k = 0; k < 2; k++)
+				if (entries[k].r_offset != 0 && entries[k].r_offset != 4)
+					return false;
+		}
+		recovery = true;
+	}
+	if (!recovery)
+		return false;
+	operation->reads = reads;
+	operation->writes = writes;
+	operation->width = 8;
+	operation->read_width = 4;
+	operation->error = error;
+	return true;
+#else
+	return false;
+#endif
+}
+
 /* Fixed-register architectural instructions expose their actual inputs and
  * zero-extended 32-bit scalar outputs. CPU control/serialization effects keep
  * their existing KOperation source/context obligations; no pointer capability
@@ -4914,7 +5006,8 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	u16 physical_writes;
 	u32 i, recovery = 0, port_at = 0;
 
-	if (native_seq_timestamp_kop(prog, insn, operation))
+	if (native_seq_timestamp_kop(prog, insn, operation) ||
+	    native_seq_msr_safe_kop(prog, insn, operation))
 		return true;
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_MSR_RECOVERY) || object.seq->scratch_mask ||
 	    !object.text_size)
@@ -14311,7 +14404,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	int i, err, func_id;
 	struct native_percpu_load native_load = {};
 	struct native_scalar_rmw rmw;
-	struct native_arch_kop architectural;
+	struct native_arch_kop architectural = { .error = -1 };
 	struct native_scalar_bits bits;
 	struct native_descriptor_kop descriptor;
 	struct native_fault_write fault_write;
@@ -14662,6 +14755,17 @@ descriptor_done:
 					native_regs[register_number].native_input_bits = architectural.width * 8;
 				else if (architectural.width >= 4 && architectural.width < BPF_REG_SIZE)
 					coerce_reg_to_size(&native_regs[register_number], architectural.width);
+				if (register_number == architectural.error) {
+					struct bpf_reg_state *output = &native_regs[register_number];
+
+					output->var_off = tnum_union(tnum_const(0), tnum_const((u64)-EIO));
+					output->smin_value = output->s32_min_value = -EIO;
+					output->smax_value = output->s32_max_value = 0;
+					output->umin_value = output->u32_min_value = 0;
+					output->umax_value = (u64)-EIO;
+					output->u32_max_value = (u32)-EIO;
+					reg_bounds_sync(output);
+				}
 			}
 		return 0;
 	}
