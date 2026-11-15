@@ -9,6 +9,7 @@
 #include <linux/filter.h>
 #include <linux/if_vlan.h>
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/module.h>
@@ -1173,7 +1174,8 @@ static void emit_mov_imm64(u8 **pprog, u32 dst_reg,
 }
 
 static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
-			 struct jit_context *ctx, u8 *ip, u32 insn)
+			 struct jit_context *ctx, u8 *ip, u32 insn,
+			 const struct bpf_insn *load)
 {
 	struct bpf_aot_context *aot = ctx->aot;
 	const struct bpf_aot_reloc *operand = NULL;
@@ -1246,6 +1248,32 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 	if (type == R_X86_64_64 &&
 	    (aot->position_independent ||
 	     (aot->kernel_code_model && !weak && !operand))) {
+		if (load && !weak && !operand) {
+			bool sign = BPF_MODE(load->code) == BPF_MEMSX;
+			u8 size = BPF_SIZE(load->code);
+			u8 rex = (sign || size == BPF_DW ? 0x48 : 0x40) |
+				 (is_ereg(dst_reg) ? 4 : 0);
+
+			/* The load overwrites its address register. Preserve the
+			 * original width/extension, symbol addend and memory offset;
+			 * the ELF linker still resolves the final displacement.
+			 */
+			if (rex != 0x40)
+				EMIT1(rex);
+			if (size == BPF_B || size == BPF_H)
+				EMIT2(0x0f, (sign ? 0xbe : 0xb6) + (size == BPF_H));
+			else
+				EMIT1(sign ? 0x63 : 0x8b);
+			EMIT1(add_2reg(0x05, BPF_REG_0, dst_reg));
+			err = aot_record(aot, ip - aot->image + (prog - *pprog),
+					 R_X86_64_PC32, name, addend + load->off - 4, false);
+			if (err)
+				return err;
+			EMIT(0, 4);
+			aot->folded_load = insn + 2;
+			*pprog = prog;
+			return 0;
+		}
 		/* Keep source PIC or Kernel-code-model addressing. The latter
 		 * locates code and ordinary globals in the negative 2 GiB.
 		 * A weak PIC reference uses a GOT load
@@ -2332,7 +2360,7 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 					if (ctx->aot->operands[index].insn == i - 1)
 						symbolic = true;
 				if (symbolic) {
-					err = emit_aot_imm64(&prog, dst_reg, (s64)imm32, ctx, ip, i - 1);
+					err = emit_aot_imm64(&prog, dst_reg, (s64)imm32, ctx, ip, i - 1, NULL);
 					if (err)
 						return err;
 					break;
@@ -2342,15 +2370,27 @@ static int __do_jit(struct bpf_verifier_env *env, struct bpf_prog *bpf_prog, int
 				       dst_reg, imm32);
 			break;
 
-		case BPF_LD | BPF_IMM | BPF_DW:
+		case BPF_LD | BPF_IMM | BPF_DW: {
+			const struct bpf_insn *load = NULL;
+
+			if (ctx->aot && ctx->aot->entries_ready &&
+			    !ctx->aot->computed_entry && i + 1 < insn_cnt &&
+			    !test_bit(i + 1, ctx->aot->entries) &&
+			    BPF_CLASS(insn[2].code) == BPF_LDX &&
+			    (BPF_MODE(insn[2].code) == BPF_MEM ||
+			     BPF_MODE(insn[2].code) == BPF_MEMSX) &&
+			    insn[2].src_reg == insn->dst_reg &&
+			    insn[2].dst_reg == insn->dst_reg)
+				load = &insn[2];
 			err = emit_aot_imm64(&prog, dst_reg,
 				((u64)(u32)insn[1].imm << 32) | (u32)insn[0].imm,
-				ctx, ip, i - 1);
+				ctx, ip, i - 1, load);
 			if (err)
 				return err;
 			insn++;
 			i++;
 			break;
+		}
 
 			/* dst %= src, dst /= src, dst %= imm32, dst /= imm32 */
 		case BPF_ALU | BPF_MOD | BPF_X:
@@ -2716,6 +2756,8 @@ populate_extable:
 		case BPF_LDX | BPF_PROBE_MEMSX | BPF_B:
 		case BPF_LDX | BPF_PROBE_MEMSX | BPF_H:
 		case BPF_LDX | BPF_PROBE_MEMSX | BPF_W:
+			if (ctx->aot && ctx->aot->folded_load == i - 1)
+				break;
 			insn_off = insn->off;
 
 			if (BPF_MODE(insn->code) == BPF_PROBE_MEM ||
@@ -3001,11 +3043,17 @@ populate_extable:
 			/* A validated exception branch describes a possible native
 			 * CALL fault; it emits neither a condition nor a loop counter.
 			 */
+		{
+			u32 recovery;
+
 			err = bpf_jit_get_call_exception(bpf_prog,
-				insn->dst_reg ? insn - 1 : insn + 1, NULL, NULL);
+				insn->dst_reg ? insn - 1 : insn + 1, &recovery, NULL);
 			if (err)
 				return err;
+			if (ctx->aot && ctx->aot->entries && !ctx->aot->entries_ready)
+				set_bit(recovery, ctx->aot->entries);
 			break;
+		}
 
 		case BPF_JMP | BPF_TAIL_CALL:
 			if (imm32)
@@ -3106,6 +3154,8 @@ populate_extable:
 				EMIT2_off32(0x81, add_1reg(0xF8, dst_reg), imm32);
 
 emit_cond_jmp:		/* Convert BPF opcode to x86 */
+			if (ctx->aot && ctx->aot->entries && !ctx->aot->entries_ready)
+				set_bit(i + insn->off, ctx->aot->entries);
 			switch (BPF_OP(insn->code)) {
 			case BPF_JEQ:
 				jmp_cond = X86_JE;
@@ -3186,10 +3236,15 @@ emit_cond_jmp:		/* Convert BPF opcode to x86 */
 			break;
 
 		case BPF_JMP | BPF_JA | BPF_X:
+			if (ctx->aot)
+				ctx->aot->computed_entry = true;
 			emit_indirect_jump_ctx(&prog, insn->dst_reg, ip, ctx);
 			break;
 		case BPF_JMP | BPF_JA:
 		case BPF_JMP32 | BPF_JA:
+			if (ctx->aot && ctx->aot->entries && !ctx->aot->entries_ready)
+				set_bit(i + (BPF_CLASS(insn->code) == BPF_JMP ?
+					     insn->off : insn->imm), ctx->aot->entries);
 			if (BPF_CLASS(insn->code) == BPF_JMP) {
 				if (insn->off == -1)
 					/* -1 jmp instructions will always jump
@@ -3396,6 +3451,25 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *prog, int *addr
 	err = native_image_prepare(prog);
 	if (err)
 		return err;
+	if (ctx->aot) {
+		struct bpf_aot_context *aot = ctx->aot;
+		struct bpf_native_image *native = prog->aux->native_image;
+
+		aot->folded_load = U32_MAX;
+		if (aot->entries && !aot->entries_ready && native) {
+			/* Reuse parsed assembly goto records, including recovery
+			 * labels; there is no second ELF or instruction decoder.
+			 */
+			for (u32 i = 0; i < native->count; i++) {
+				const struct native_sequence *seq = &native->sequences[i];
+				const struct bpf_native_goto *gotos = (const void *)seq->record +
+					seq->record->gotos_offset;
+
+				for (u32 j = 0; j < seq->record->gotos_count; j++)
+					set_bit(seq->insn + 1 + gotos[j].delta, aot->entries);
+			}
+		}
+	}
 	if (prog->aux->native_image)
 		size = max(size, prog->aux->native_image->max_emit);
 	temp = kvmalloc(size + BPF_INSN_SAFETY, GFP_KERNEL);
@@ -3403,6 +3477,8 @@ static int do_jit(struct bpf_verifier_env *env, struct bpf_prog *prog, int *addr
 		return -ENOMEM;
 	err = __do_jit(env, prog, addrs, image, rw_image, oldlen, ctx, padding,
 		       temp, size + BPF_INSN_SAFETY);
+	if (ctx->aot && ctx->aot->entries)
+		ctx->aot->entries_ready = true;
 	kvfree(temp);
 	return err;
 }
@@ -3475,6 +3551,10 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 	if (!prog || !aux || !addrs)
 		goto out;
 	prog->aux = aux;
+	/* Allocation failure simply retains the existing two instructions. */
+	aot.entries = bitmap_zalloc(source->len, GFP_KERNEL);
+	if (aot.entries)
+		set_bit(0, aot.entries);
 	if (source->aux->size_poke_tab) {
 		aux->poke_tab = kmemdup(source->aux->poke_tab,
 			array_size(source->aux->size_poke_tab, sizeof(*aux->poke_tab)), GFP_KERNEL);
@@ -3531,6 +3611,7 @@ out:
 	kvfree(aot.records);
 	kvfree(aot.native_data);
 	kfree(aot.operands);
+	bitmap_free(aot.entries);
 	return err;
 }
 

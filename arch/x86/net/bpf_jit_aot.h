@@ -32,6 +32,10 @@ struct bpf_aot_context {
 	bool patchable_jumps;
 	bool position_independent;
 	bool kernel_code_model;
+	/* Collected by the ordinary first sizing pass, never verifier facts. */
+	unsigned long *entries;
+	bool entries_ready, computed_entry;
+	u32 folded_load;
 	const char *section;
 	int error;
 };
