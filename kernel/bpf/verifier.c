@@ -4797,6 +4797,110 @@ static bool native_seq_flags_kop(const struct bpf_prog *prog,
 #endif
 }
 
+/* Timestamp streams have the same scalar effects with padding and fences.
+ * Alternative arms can additionally overwrite CX (RDTSCP), or preserve its
+ * incoming full-width value (RDTSC). Keep the union unknown at full width.
+ */
+static u16 native_kop_timestamp_bytes(const u8 *bytes, u32 size)
+{
+	u16 writes = 0;
+	u32 at = 0, count = 0;
+
+	while (at < size) {
+		u32 nop = native_kop_nop_size(bytes + at, size - at);
+
+		if (nop) {
+			at += nop;
+		} else if (size - at >= 3 && bytes[at] == 0x0f &&
+			   bytes[at + 1] == 0xae &&
+			   (bytes[at + 2] == 0xe8 || bytes[at + 2] == 0xf0 ||
+			    bytes[at + 2] == 0xf8)) {
+			at += 3;
+		} else if (size - at >= 2 && bytes[at] == 0x0f && bytes[at + 1] == 0x31) {
+			writes |= BIT(0) | BIT(2);
+			at += 2;
+			count++;
+		} else if (size - at >= 3 && bytes[at] == 0x0f &&
+			   bytes[at + 1] == 0x01 && bytes[at + 2] == 0xf9) {
+			writes |= BIT(0) | BIT(1) | BIT(2);
+			at += 3;
+			count++;
+		} else {
+			return 0;
+		}
+	}
+	return count == 1 ? writes : 0;
+}
+
+static bool native_seq_timestamp_kop(const struct bpf_prog *prog,
+				     const struct bpf_insn *insn,
+				     struct native_arch_kop *operation)
+{
+	struct native_kop_object object;
+	u16 physical, writes;
+	u32 i;
+
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_ALTERNATIVES) ||
+	    object.seq->read_mask || object.seq->scratch_mask || object.text_size <= 3)
+		return false;
+	physical = native_kop_timestamp_bytes(object.text, object.text_size);
+	if (!physical)
+		return false;
+	for (i = 1; i < object.elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object.sections[i];
+		const Elf64_Shdr *names = &object.sections[object.elf->e_shstrndx];
+		const char *strings = (const void *)object.elf + names->sh_offset;
+		const u8 *bytes = (const void *)object.elf + section->sh_offset;
+		u32 at;
+
+		if ((section->sh_type == SHT_RELA || section->sh_type == SHT_REL) &&
+		    section->sh_size && section->sh_info == object.text_index)
+			return false;
+		if (!section->sh_size || strcmp(strings + section->sh_name, ".altinstructions"))
+			continue;
+		if (section->sh_type != SHT_PROGBITS || section->sh_size % 14)
+			return false;
+		for (at = 0; at < section->sh_size; at += 14) {
+			const Elf64_Shdr *replacement;
+			u32 source, begin, target, offset, length = bytes[at + 13];
+			u16 arm;
+
+			/* Full-stream alternatives may select either timestamp form.
+			 * Partial replacements and direct-call transformations stay
+			 * on their existing route until their effects are modelled.
+			 */
+			if ((get_unaligned_le32(bytes + at + 8) & 0xfffe0000) ||
+			    bytes[at + 12] != object.text_size || length > object.text_size ||
+			    !native_kop_rel_target(&object, i, at, &source, &begin) ||
+			    source != object.text_index || begin ||
+			    !native_kop_rel_target(&object, i, at + 4, &target, &offset))
+				return false;
+			replacement = &object.sections[target];
+			if (target == object.text_index || replacement->sh_type != SHT_PROGBITS ||
+			    !(replacement->sh_flags & SHF_EXECINSTR) ||
+			    length > replacement->sh_size - offset)
+				return false;
+			arm = native_kop_timestamp_bytes((const void *)object.elf +
+						 replacement->sh_offset + offset, length);
+			if (!arm)
+				return false;
+			physical |= arm;
+		}
+	}
+	writes = BIT(0) | BIT(3) | ((physical & BIT(1)) ? BIT(4) : 0);
+	/* CX may be declared clobbered even when no active arm writes it.
+	 * Forgetting it at full width also includes that preserved value.
+	 */
+	if ((object.seq->write_mask & writes) != writes ||
+	    (object.seq->write_mask & ~(BIT(0) | BIT(3) | BIT(4))) ||
+	    (object.seq->clobber_mask & ~(physical | BIT(1))))
+		return false;
+	operation->reads = 0;
+	operation->writes = object.seq->write_mask;
+	operation->width = operation->read_width = 8;
+	return true;
+}
+
 /* Fixed-register architectural instructions expose their actual inputs and
  * zero-extended 32-bit scalar outputs. CPU control/serialization effects keep
  * their existing KOperation source/context obligations; no pointer capability
@@ -4810,6 +4914,8 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	u16 physical_writes;
 	u32 i, recovery = 0, port_at = 0;
 
+	if (native_seq_timestamp_kop(prog, insn, operation))
+		return true;
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_MSR_RECOVERY) || object.seq->scratch_mask ||
 	    !object.text_size)
 		return false;
