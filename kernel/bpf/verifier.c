@@ -14479,6 +14479,37 @@ static bool native_kop_select_cpu(struct bpf_reg_state *selected,
 	return true;
 }
 
+/* Memory BT/BTS/BTR/BTC treat a register index as a signed bit-string offset,
+ * not merely the bit number modulo a word. Compute only its abstract address;
+ * the original native opcode still performs the indexed atomic access.
+ */
+static void native_kop_bit_address(struct bpf_reg_state *address,
+				   const struct bpf_reg_state *index, u32 bytes)
+{
+	struct bpf_reg_state delta = *index;
+	u32 shift = bytes == 8 ? 6 : bytes == 4 ? 5 : 4;
+
+	/* Avoid losing a known narrow signed interval when it straddles zero. */
+	if (bytes < 8 &&
+	    (delta.smin_value < (bytes == 2 ? S16_MIN : S32_MIN) ||
+	     delta.smax_value > (bytes == 2 ? S16_MAX : S32_MAX)))
+		coerce_reg_to_size_sx(&delta, bytes);
+	delta.var_off = tnum_lshift(tnum_arshift(delta.var_off, shift, 64), shift - 3);
+	delta.smin_value = (delta.smin_value >> shift) * bytes;
+	delta.smax_value = (delta.smax_value >> shift) * bytes;
+	if (delta.smin_value >= 0 || delta.smax_value < 0) {
+		delta.umin_value = delta.smin_value;
+		delta.umax_value = delta.smax_value;
+	} else {
+		delta.umin_value = 0;
+		delta.umax_value = U64_MAX;
+	}
+	scalar_min_max_add(address, &delta);
+	address->var_off = tnum_add(address->var_off, delta.var_off);
+	__mark_reg32_unbounded(address);
+	reg_bounds_sync(address);
+}
+
 static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			     int *insn_idx_p)
 {
@@ -14873,9 +14904,7 @@ descriptor_done:
 			err = check_reg_arg(env, i, SRC_OP);
 			if (err)
 				return err;
-			if ((!rmw.write_only && !typed_exchange && native_regs[i].type != SCALAR_VALUE) ||
-			    (rmw.bit_index && i == rmw.input && (native_regs[i].smin_value < 0 ||
-			     native_regs[i].umax_value >= 8 * bpf_size_to_bytes(rmw.size))))
+			if (!rmw.write_only && !typed_exchange && native_regs[i].type != SCALAR_VALUE)
 				goto ordinary_helper;
 		}
 		if (!rmw.absolute) {
@@ -14883,8 +14912,13 @@ descriptor_done:
 			if (err)
 				return err;
 		}
+		if (rmw.bit_index) {
+			err = mark_chain_precision(env, rmw.input);
+			if (err)
+				return err;
+		}
+		source = native_regs[rmw.base];
 		if (rmw.percpu) {
-			source = native_regs[rmw.base];
 			if (rmw.absolute) {
 				mark_reg_known_zero(env, native_regs, rmw.base);
 				native_regs[rmw.base].type = PTR_TO_BTF_ID;
@@ -14896,16 +14930,21 @@ descriptor_done:
 				native_regs[rmw.base] = selected;
 			}
 		}
-		/* RMW needs a scalar kernel field. A MOV can also initialize a
-		 * tracked stack cell or write an ordinary map value. Every route
-		 * reuses the existing access and stored-value rules.
+		if (rmw.bit_index)
+			native_kop_bit_address(&native_regs[rmw.base], &native_regs[rmw.input],
+					       bpf_size_to_bytes(rmw.size));
+		/* Scalar RMW can also update initialized tracked stack/map cells.
+		 * Typed conditional pointer exchange retains its existing route:
+		 * it must not assert that a conditional replacement always occurs.
+		 * Existing accesses decide both initialization and write authority.
 		 */
 		if ((base_type(native_regs[rmw.base].type) != PTR_TO_BTF_ID &&
 		     base_type(native_regs[rmw.base].type) != PTR_TO_MEM &&
-		     !(rmw.write_only && (native_regs[rmw.base].type == PTR_TO_STACK ||
+		     !((rmw.write_only || !typed_exchange) &&
+		       (native_regs[rmw.base].type == PTR_TO_STACK ||
 					 native_regs[rmw.base].type == PTR_TO_MAP_VALUE))) ||
 		    type_is_alloc(native_regs[rmw.base].type)) {
-			if (rmw.percpu)
+			if (rmw.percpu || rmw.bit_index)
 				native_regs[rmw.base] = source;
 			goto ordinary_helper;
 		}
@@ -14933,13 +14972,13 @@ descriptor_done:
 		scalar = native_regs[temporary].type == SCALAR_VALUE;
 		if (err) {
 			native_regs[temporary] = saved;
-			if (rmw.percpu)
+			if (rmw.percpu || rmw.bit_index)
 				native_regs[rmw.base] = source;
 			return err;
 		}
 		if (!scalar && !typed_exchange) {
 			native_regs[temporary] = saved;
-			if (rmw.percpu)
+			if (rmw.percpu || rmw.bit_index)
 				native_regs[rmw.base] = source;
 			goto ordinary_helper;
 		}
@@ -14972,7 +15011,7 @@ descriptor_done:
 		}
 native_memory_done:
 		native_regs[temporary] = saved;
-		if (rmw.percpu)
+		if (rmw.percpu || rmw.bit_index)
 			native_regs[rmw.base] = source;
 		if (err)
 			return err;
