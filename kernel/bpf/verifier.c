@@ -9109,6 +9109,10 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	u32 btf_id = 0;
 	bool pointer_field = false;
 	bool owned_scalar = false;
+	/* A full word this read supplied from kernel memory, including the
+	 * option-A read outside a BTF field view, is an address.
+	 */
+	bool unviewed_word = false;
 	struct bpf_reg_state source = *reg;
 	int access_off = off;
 	bool array_access = false;
@@ -9270,6 +9274,11 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		flag = 0;
 		if (probe_scalar)
 			*probe_scalar = true;
+		/* A full word read this way is as much an address as a
+		 * field-view read of the same size; a narrower one is a value.
+		 * The source size, not the retained bits, decides.
+		 */
+		unviewed_word = size == BPF_REG_SIZE;
 		note_probe_read_scope(env);
 		verbose(env, "relies on verifier option A: probe-safe scalar read outside a BTF field view\n");
 	}
@@ -9399,7 +9408,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * and the origin is the kernel-supplied word either way.
 			 */
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
-			    (probe_read || (source.type & PTR_UNTRUSTED)) &&
+			    (probe_read || unviewed_word ||
+			     (source.type & PTR_UNTRUSTED)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
