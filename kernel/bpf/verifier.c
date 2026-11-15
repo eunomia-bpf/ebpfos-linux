@@ -19647,6 +19647,17 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	case BPF_AND:
 	case BPF_OR:
 	case BPF_XOR:
+		/* A compiled definition tags and untags an address with a low
+		 * constant (`owner |= MUTEX_FLAG_PICKUP`); the result is a word
+		 * derived from that address, which the native function stores
+		 * and later loads through. A known constant keeps the word an
+		 * address; any other scalar makes it a value, as before.
+		 */
+		if (env->prog->aux->ebpfos_component && known) {
+			__mark_reg_unknown(env, dst_reg);
+			dst_reg->address_word = true;
+			break;
+		}
 		/* bitwise ops on pointers are troublesome, prohibit. */
 		verbose(env, "R%d bitwise operator %s on pointer prohibited\n",
 			dst, bpf_alu_string[opcode >> 4]);
