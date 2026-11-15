@@ -4620,7 +4620,7 @@ struct native_scalar_rmw {
 	s16 input;
 	u16 inputs, outputs;
 	s16 condition, value_output;
-	bool percpu, bit_index, read_only, write_only, absolute, compare;
+	bool percpu, bit_index, read_only, write_only, absolute, compare, fault;
 	s64 immediate;
 	struct btf *btf;
 	u32 type;
@@ -5241,6 +5241,57 @@ architectural_metadata:
  * value. Flags stay inside native assembly. LOCK remains in the original
  * RMW bytes, preserving the source atomicity.
  */
+static bool native_kop_rmw_recovery(const struct native_kop_object *object,
+				    int *error, u32 *error_physical)
+{
+#ifdef CONFIG_X86_64
+	u32 i, recovery = 0;
+
+	*error = -1;
+	for (i = 1; i < object->elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object->sections[i];
+		const char *name = (const void *)object->elf +
+			object->sections[object->elf->e_shstrndx].sh_offset + section->sh_name;
+		const u8 *data = (const void *)object->elf + section->sh_offset;
+		u32 source, begin, target, end, encoded, j, physical;
+
+		if (!section->sh_size || strcmp(name, "__ex_table"))
+			continue;
+		if (recovery++ || section->sh_type != SHT_PROGBITS || section->sh_size != 12 ||
+		    !native_kop_rel_target(object, i, 0, &source, &begin) ||
+		    !native_kop_rel_target(object, i, 4, &target, &end) ||
+		    source != object->text_index || begin || target != source ||
+		    end != object->text_size)
+			return false;
+		encoded = get_unaligned_le32(data + 8);
+		if ((encoded & EX_DATA_TYPE_MASK) != EX_TYPE_IMM_REG ||
+		    (encoded & EX_DATA_FLAG_MASK))
+			return false;
+		physical = (encoded & EX_DATA_REG_MASK) >> EX_DATA_REG_SHIFT;
+		*error = native_kop_bpf_register(physical);
+		*error_physical = physical;
+		if (*error < 0)
+			return false;
+		for (j = 1; j < object->elf->e_shnum; j++) {
+			const Elf64_Shdr *rel = &object->sections[j];
+			const Elf64_Rela *entries = (const void *)object->elf + rel->sh_offset;
+			u32 k;
+
+			if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) || rel->sh_info != i)
+				continue;
+			if (rel->sh_type != SHT_RELA || rel->sh_size != 2 * sizeof(*entries))
+				return false;
+			for (k = 0; k < 2; k++)
+				if (entries[k].r_offset != 0 && entries[k].r_offset != 4)
+					return false;
+		}
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
 static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 				  const struct bpf_insn *insn,
 				  struct native_scalar_rmw *rmw)
@@ -5249,13 +5300,15 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	struct native_kop_object object;
 	struct insn decoded;
 	u32 i, operation, physical, bytes, lock_offset = 0, physical_outputs = 0;
+	u32 error_physical = 0;
 	u16 inputs = 0, outputs = 0;
 	bool gs = false, lock = false, operand16 = false;
-	int base, input = -1, condition = -1, value_output = -1;
+	int base, input = -1, condition = -1, value_output = -1, error;
 	bool bit_index = false, read_only = false, write_only = false, absolute = false;
 	bool compare = false;
 
-	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
+	if (!native_kop_object(prog, insn, &object,
+			      NATIVE_KOP_SMP_LOCKS | NATIVE_KOP_MSR_RECOVERY) ||
 	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.addr_bytes != 8 ||
@@ -5429,6 +5482,21 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 		if (base < 0)
 			return false;
 		rmw->offset = decoded.displacement.value;
+	}
+	if (!native_kop_rmw_recovery(&object, &error, &error_physical))
+		return false;
+	rmw->fault = error >= 0;
+	if (rmw->fault) {
+		/* IMM_REG resumes immediately after this one instruction. A
+		 * fault preserves its pre-instruction GPRs except for the full
+		 * signed immediate written by the handler. The normal path may
+		 * preserve that error operand, so it must be initialized too.
+		 */
+		if (decoded.length != object.text_size || write_only)
+			return false;
+		inputs |= BIT(error);
+		outputs |= BIT(error);
+		physical_outputs |= BIT(error_physical);
 	}
 	if (object.seq->read_mask != ((absolute ? 0 : BIT(base)) | inputs) ||
 	    object.seq->write_mask != outputs || (object.seq->clobber_mask & ~physical_outputs))
@@ -14930,7 +14998,7 @@ descriptor_done:
 		struct bpf_reg_state *native_regs = cur_regs(env), saved, source, selected;
 		u32 temporary = rmw.base == BPF_REG_0 ? BPF_REG_1 : BPF_REG_0;
 		bool exchange = rmw.value_output >= 0;
-		bool typed_exchange = exchange && rmw.size == BPF_DW;
+		bool typed_exchange = exchange && rmw.size == BPF_DW && !rmw.fault;
 		bool scalar;
 
 		for (i = 0; i < MAX_BPF_REG; i++) {
@@ -15034,7 +15102,7 @@ descriptor_done:
 		if (exchange)
 			selected = native_regs[temporary];
 		if (!rmw.read_only) {
-			if (exchange) {
+			if (exchange && !rmw.fault) {
 				if (rmw.input == temporary)
 					native_regs[temporary] = saved;
 				else if (rmw.percpu && rmw.input == rmw.base)
@@ -15042,8 +15110,9 @@ descriptor_done:
 				else
 					native_regs[temporary] = native_regs[rmw.input];
 			} else {
-				/* Arithmetic supplies unknown bits of the written width,
-				 * never the old range or the native marker's immediate.
+				/* Arithmetic supplies unknown bits of the written width.
+				 * Fault recovery also includes unchanged scalar memory,
+				 * rather than asserting the conditional store occurred.
 				 */
 				mark_reg_unknown(env, native_regs, temporary);
 			}
@@ -15073,7 +15142,7 @@ native_memory_done:
 				output->umax_value = output->u32_max_value = 1;
 				output->smax_value = output->s32_max_value = 1;
 				reg_bounds_sync(output);
-			} else if (exchange && i == rmw.value_output &&
+			} else if (!rmw.fault && exchange && i == rmw.value_output &&
 				   (rmw.size == BPF_DW || (rmw.size == BPF_W && !rmw.compare))) {
 				/* Narrow writes can retain the old scalar's upper lanes.
 				 * In particular, CMPXCHG32 leaves RAX unchanged on
