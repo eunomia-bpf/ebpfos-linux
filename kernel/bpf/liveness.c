@@ -260,6 +260,15 @@ bpf_insn_successors(struct bpf_verifier_env *env, u32 idx)
 
 	if (opcode_info->can_jump)
 		succ->items[succ->cnt++] = idx + bpf_jmp_offset(insn) + 1;
+	if (bpf_native_seq_insn(insn)) {
+		const struct bpf_native_seq *seq = bpf_native_seq_get(prog, insn->imm);
+
+		if (seq && seq->gotos_count == 1) {
+			const struct bpf_native_goto *branch = (const void *)seq + seq->gotos_offset;
+
+			succ->items[succ->cnt++] = idx + 1 + branch->delta;
+		}
+	}
 
 	return succ;
 }
@@ -2284,6 +2293,9 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 				 */
 				def = seq ? seq->write_mask : 0;
 				use = seq ? seq->read_mask | BIT(BPF_REG_ARG_SP) : 0xffff;
+				/* A fault branch can preserve every output's old value. */
+				if (seq && seq->gotos_count)
+					use |= seq->write_mask;
 				break;
 			}
 			def = ALL_CALLER_SAVED_REGS;

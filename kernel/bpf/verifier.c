@@ -3316,6 +3316,7 @@ enum native_kop_metadata {
 	NATIVE_KOP_MSR_RECOVERY = 2,
 	NATIVE_KOP_SMP_LOCKS = 4,
 	NATIVE_KOP_IDENTITY = 8,
+	NATIVE_KOP_FAULT_LOAD = 16,
 };
 
 /* A matcher-local view only: unrecognised records retain their old route. */
@@ -3336,7 +3337,9 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	    !bpf_native_seq_insn(insn))
 		return false;
 	seq = bpf_native_seq_get(prog, insn->imm);
-	if (!seq || (!identity && seq->gotos_count) || seq->elf_size < sizeof(*elf))
+	if (!seq || (!identity && seq->gotos_count &&
+		     (!(metadata & NATIVE_KOP_FAULT_LOAD) || seq->gotos_count != 1)) ||
+	    seq->elf_size < sizeof(*elf))
 		return false;
 	elf = (const void *)seq + seq->elf_offset;
 	if (memcmp(elf->e_ident, ELFMAG, SELFMAG) ||
@@ -3380,12 +3383,14 @@ static bool native_kop_object(const struct bpf_prog *prog,
 		 */
 		if ((!alternatives && !strcmp(name, ".altinstructions")) ||
 		    !strcmp(name, "__jump_table") ||
-		    (!(metadata & NATIVE_KOP_MSR_RECOVERY) && !strcmp(name, "__ex_table")))
+		    (!(metadata & (NATIVE_KOP_MSR_RECOVERY | NATIVE_KOP_FAULT_LOAD)) &&
+		     !strcmp(name, "__ex_table")))
 			return false;
 		if ((section->sh_flags & SHF_ALLOC) &&
 		    !(section->sh_flags & SHF_EXECINSTR) && strcmp(name, "__bug_table") &&
 		    !(alternatives && !strcmp(name, ".altinstructions")) &&
-		    !((metadata & NATIVE_KOP_MSR_RECOVERY) && !strcmp(name, "__ex_table")) &&
+		    !((metadata & (NATIVE_KOP_MSR_RECOVERY | NATIVE_KOP_FAULT_LOAD)) &&
+		      !strcmp(name, "__ex_table")) &&
 		    !((metadata & NATIVE_KOP_SMP_LOCKS) && !strcmp(name, ".smp_locks")) &&
 		    !(!(section->sh_flags & SHF_WRITE) && section->sh_type == SHT_PROGBITS &&
 		      (!strcmp(name, ".rodata") || !strncmp(name, ".rodata.", 8))))
@@ -3486,8 +3491,9 @@ static bool native_kop_preserving_bytes(const u8 *bytes, u32 size, u32 first, u3
 /* Resolve a metadata PC-relative field into this native record only.
  * S+A is its section-relative target; Linux adds the relocated field address.
  */
-static bool native_kop_rel_target(const struct native_kop_object *object,
-				  u32 table, u32 field, u32 *target, u32 *offset)
+static bool native_kop_rel_endpoint(const struct native_kop_object *object,
+				    u32 table, u32 field, u32 *target, u32 *offset,
+				    s32 *goto_delta)
 {
 #ifdef CONFIG_X86_64
 	u32 i, j, found = 0;
@@ -3518,6 +3524,29 @@ static bool native_kop_rel_target(const struct native_kop_object *object,
 				return false;
 			symbol = (const void *)object->elf + symbols->sh_offset +
 				 ELF64_R_SYM(relocation->r_info) * sizeof(*symbol);
+			if (!symbol->st_shndx && goto_delta && object->seq->gotos_count == 1) {
+				const Elf64_Shdr *names;
+				const struct bpf_native_goto *branch =
+					(const void *)object->seq + object->seq->gotos_offset;
+				const char *name;
+				u32 ordinal;
+
+				if (symbols->sh_link >= object->elf->e_shnum ||
+				    symbol->st_value || relocation->r_addend)
+					return false;
+				names = &object->sections[symbols->sh_link];
+				if (names->sh_type != SHT_STRTAB || symbol->st_name >= names->sh_size)
+					return false;
+				name = (const void *)object->elf + names->sh_offset + symbol->st_name;
+				if (!memchr(name, 0, names->sh_size - symbol->st_name) ||
+				    strncmp(name, "__bpf_native_goto_", 18) ||
+				    kstrtou32(name + 18, 10, &ordinal) || branch->ordinal != ordinal)
+					return false;
+				*target = SHN_UNDEF;
+				*offset = 0;
+				*goto_delta = branch->delta;
+				continue;
+			}
 			if (!symbol->st_shndx || symbol->st_shndx >= object->elf->e_shnum)
 				return false;
 			position = symbol->st_value + relocation->r_addend;
@@ -3531,6 +3560,12 @@ static bool native_kop_rel_target(const struct native_kop_object *object,
 #else
 	return false;
 #endif
+}
+
+static bool native_kop_rel_target(const struct native_kop_object *object,
+				  u32 table, u32 field, u32 *target, u32 *offset)
+{
+	return native_kop_rel_endpoint(object, table, field, target, offset, NULL);
 }
 
 /* The JIT gives any record-owned global definition precedence over kallsyms.
@@ -4187,10 +4222,58 @@ static bool native_seq_string_kop(const struct bpf_prog *prog,
 struct native_percpu_load {
 	u32 dst, size, type, base, width, literal_size, scale;
 	s16 index;
-	s32 offset;
+	s32 offset, fault_delta;
 	struct btf *btf;
-	bool address, scalar, indirect, percpu, literal;
+	bool address, scalar, indirect, percpu, literal, fault, zeropad;
 };
+
+/* A single load can either complete or follow its actual Linux exception
+ * metadata. UACCESS preserves the pre-load GPRs on its external goto;
+ * ZEROPAD writes a scalar and continues after the instruction.
+ */
+static bool native_kop_load_recovery(const struct native_kop_object *object,
+				     struct native_percpu_load *load)
+{
+	const Elf64_Shdr *names = &object->sections[object->elf->e_shstrndx];
+	const char *strings = (const void *)object->elf + names->sh_offset;
+	u32 i, found = 0;
+
+	for (i = 1; i < object->elf->e_shnum; i++) {
+		const Elf64_Shdr *section = &object->sections[i];
+		const u8 *data = (const void *)object->elf + section->sh_offset;
+		u32 source, begin, target, end, type;
+
+		if (!section->sh_size || strcmp(strings + section->sh_name, "__ex_table"))
+			continue;
+		if (++found != 1 || section->sh_type != SHT_PROGBITS || section->sh_size != 12 ||
+		    !native_kop_rel_target(object, i, 0, &source, &begin) ||
+		    source != object->text_index || begin ||
+		    !native_kop_rel_endpoint(object, i, 4, &target, &end, &load->fault_delta))
+			return false;
+		type = get_unaligned_le32(data + 8);
+		if (type == 3 && target == SHN_UNDEF && object->seq->gotos_count == 1)
+			load->fault = true;
+		else if (type == 20 && !object->seq->gotos_count &&
+			 target == object->text_index && end == object->text_size &&
+			 load->width == 8)
+			load->zeropad = true;
+		else
+			return false;
+		for (u32 j = 1; j < object->elf->e_shnum; j++) {
+			const Elf64_Shdr *rel = &object->sections[j];
+			const Elf64_Rela *entries = (const void *)object->elf + rel->sh_offset;
+
+			if ((rel->sh_type != SHT_RELA && rel->sh_type != SHT_REL) ||
+			    !rel->sh_size || rel->sh_info != i)
+				continue;
+			if (rel->sh_type != SHT_RELA || rel->sh_size != 2 * sizeof(*entries) ||
+			    !((entries[0].r_offset == 0 && entries[1].r_offset == 4) ||
+			      (entries[0].r_offset == 4 && entries[1].r_offset == 0)))
+				return false;
+		}
+	}
+	return found || !object->seq->gotos_count;
+}
 
 #ifdef CONFIG_X86_64
 static int native_kop_bpf_register(u32 physical)
@@ -4292,7 +4375,7 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 	int dst, base_reg;
 	bool gs = false, operand16 = false;
 
-	if (!native_kop_object(prog, insn, &object, false) ||
+	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_FAULT_LOAD) ||
 	    object.seq->scratch_mask ||
 	    insn_decode(&decoded, object.text, object.text_size, INSN_MODE_64) ||
 	    decoded.length != object.text_size || decoded.addr_bytes != 8 ||
@@ -4332,6 +4415,9 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 		return false;
 	load->width = width;
 	load->percpu = gs;
+	if (!native_kop_load_recovery(&object, load) ||
+	    (gs && (load->fault || load->zeropad)))
+		return false;
 	sections = object.sections;
 	base = X86_MODRM_RM(decoded.modrm.value);
 	if (base == 4) {
@@ -4347,7 +4433,8 @@ static bool native_seq_memory_load(const struct bpf_prog *prog,
 		base_reg = native_kop_bpf_register(base);
 		if (base_reg < 0 ||
 		    (object.seq->read_mask != BIT(base_reg) &&
-		     !(width < 4 && object.seq->read_mask == (BIT(base_reg) | BIT(dst)))) ||
+		     !((width < 4 || load->fault) &&
+		       object.seq->read_mask == (BIT(base_reg) | BIT(dst)))) ||
 		    object.seq->bindings_count < 2 || object.seq->bindings_count > 3)
 			return false;
 		for (i = 1; i < object.elf->e_shnum; i++)
@@ -14920,6 +15007,35 @@ native_memory_done:
 		bool partial = native_load.width && native_load.width < 4;
 		bool initialized = result->type == SCALAR_VALUE && !result->native_input_bits;
 
+		if (native_load.fault) {
+			struct bpf_verifier_state *branch;
+			struct bpf_subprog_info *owner = bpf_find_containing_subprog(env, insn_idx);
+			s64 target = (s64)insn_idx + 1 + native_load.fault_delta;
+
+			/* This branch is the exception continuation encoded in the
+			 * native record, not an eventual-exit witness for a loop.
+			 * A failed MOV has not written its destination register.
+			 */
+			if (!owner || target < owner->start ||
+			    target >= (owner + 1)->start)
+				goto ordinary_helper;
+			err = check_reg_arg(env, native_load.base, SRC_OP);
+			if (err)
+				return err;
+			mark_reg_scratched(env, native_load.dst);
+			branch = push_stack(env, target, insn_idx, false);
+			if (IS_ERR(branch))
+				return PTR_ERR(branch);
+			err = check_reg_arg(env, native_load.dst, DST_OP);
+			if (err)
+				return err;
+			if (!partial)
+				coerce_reg_to_size(result, bpf_size_to_bytes(native_load.size));
+			else if (!initialized)
+				result->native_input_bits = native_load.width * 8;
+			return 0;
+		}
+
 		if (native_load.literal) {
 			if (!native_load.address && native_load.index >= 0) {
 				struct bpf_reg_state *index = &cur_regs(env)[native_load.index];
@@ -15019,6 +15135,8 @@ native_memory_done:
 				       native_load.size, BPF_READ, native_load.dst,
 				       false, false, NULL);
 native_load_done:
+		if (!err && native_load.zeropad)
+			mark_reg_unknown(env, cur_regs(env), native_load.dst);
 		if (!err && partial) {
 			/* An ordinary byte/half load zero-extends abstractly, while
 			 * native MOV preserves upper lanes. Forget those false zeros.

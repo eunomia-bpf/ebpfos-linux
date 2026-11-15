@@ -455,6 +455,20 @@ static int visit_insn(int t, struct bpf_verifier_env *env)
 		return DONE_EXPLORING;
 
 	case BPF_CALL:
+		if (bpf_native_seq_insn(insn)) {
+			const struct bpf_native_seq *seq = bpf_native_seq_get(env->prog, insn->imm);
+
+			if (seq && seq->gotos_count == 1) {
+				const struct bpf_native_goto *branch =
+					(const void *)seq + seq->gotos_offset;
+
+				mark_prune_point(env, t);
+				ret = push_insn(t, t + 1, FALLTHROUGH, env);
+				if (ret)
+					return ret;
+				return push_insn(t, t + 1 + branch->delta, BRANCH, env);
+			}
+		}
 		if (bpf_is_async_callback_calling_insn(insn))
 			/* Mark this call insn as a prune point to trigger
 			 * is_state_visited() check before call itself is
