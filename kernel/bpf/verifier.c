@@ -5127,6 +5127,34 @@ static bool native_seq_arch_kop(const struct bpf_prog *prog,
 	if (object.text[0] == 0x66)
 		port_at++;
 #ifdef CONFIG_X86_64
+	if (object.text[0] == 0xf3) {
+		struct insn base;
+		u32 selector, physical;
+		int reg;
+
+		if (insn_decode(&base, object.text, object.text_size, INSN_MODE_64) ||
+		    base.length != object.text_size || base.vex_prefix.nbytes ||
+		    base.prefixes.nbytes != 1 || base.prefixes.bytes[0] != 0xf3 ||
+		    base.rex_prefix.nbytes > 1 || base.opcode.nbytes != 2 ||
+		    base.opcode.bytes[0] != 0x0f || base.opcode.bytes[1] != 0xae ||
+		    base.modrm.nbytes != 1 || X86_MODRM_MOD(base.modrm.value) != 3 ||
+		    (base.opnd_bytes != 4 && base.opnd_bytes != 8))
+			return false;
+		selector = X86_MODRM_REG(base.modrm.value);
+		physical = X86_MODRM_RM(base.modrm.value) |
+			(X86_REX_B(base.rex_prefix.value) ? 8 : 0);
+		reg = native_kop_bpf_register(physical);
+		if (selector > 3 || reg < 0)
+			return false;
+		/* FS/GS base reads supply scalar bits, not a pointer capability.
+		 * Writes preserve GPRs and keep the source's CPU-context premise.
+		 */
+		operation->width = operation->read_width = base.opnd_bytes;
+		operation->reads = selector & 2 ? BIT(reg) : 0;
+		operation->writes = selector & 2 ? 0 : BIT(reg);
+		physical_writes = selector & 2 ? 0 : BIT(physical);
+		goto architectural_metadata;
+	}
 	if (object.text_size >= 3 &&
 	    (object.text[0] == 0x0f || (object.text[0] & 0xf0) == 0x40)) {
 		u32 at = object.text[0] == 0x0f ? 0 : 1;
