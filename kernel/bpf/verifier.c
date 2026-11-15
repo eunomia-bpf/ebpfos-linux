@@ -26523,6 +26523,20 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 	verbose(env, "trusted kernel tier: safety proof skipped\n");
 	return 0;
 }
+/* A compiled kernel definition is a fixed instruction sequence: the source's own
+ * machine code reached the verifier body for body, and the image carries those
+ * bytes. A verifier fact therefore may not rewrite them, whether the load asks
+ * for the safety proof or not. The trusted tier states the same rule by skipping
+ * the proof; a verify-only load of the same definition would otherwise run the
+ * prune, bpf_loop, dead-branch, dead-code, nop and subreg passes over it, so the
+ * census would measure a different program from the one published.
+ */
+static bool keeps_compiled_insns(const struct bpf_verifier_env *env)
+{
+	return env->prog->aux->trusted_kernel || env->prog->aux->native_frame ||
+	       env->prog->aux->ebpfos_component;
+}
+
 
 int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u32 uattr_size)
 {
@@ -26686,7 +26700,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	if (ret < 0)
 		goto skip_full_check;
 
-	ret = env->prog->aux->native_frame ? 0 : bpf_prune_dead_branches(env);
+	ret = keeps_compiled_insns(env) ? 0 : bpf_prune_dead_branches(env);
 	if (ret < 0)
 		goto skip_full_check;
 
@@ -26722,7 +26736,7 @@ skip_full_check:
 	/* might decrease stack depth, keep it before passes that
 	 * allocate additional slots.
 	 */
-	if (ret == 0 && !env->prog->aux->trusted_kernel && !env->prog->aux->native_frame)
+	if (ret == 0 && !keeps_compiled_insns(env))
 		ret = bpf_remove_fastcall_spills_fills(env);
 
 	if (ret == 0)
@@ -26730,18 +26744,18 @@ skip_full_check:
 			prepare_trusted_call_stack(env) : check_max_stack_depth(env);
 
 	/* instruction rewrites happen after this point */
-	if (ret == 0 && !env->prog->aux->trusted_kernel && !env->prog->aux->native_frame)
+	if (ret == 0 && !keeps_compiled_insns(env))
 		ret = bpf_optimize_bpf_loop(env);
 
 	/* No safety proof supplied dead-branch facts for trusted code. */
-	if (is_priv && !env->prog->aux->trusted_kernel && !env->prog->aux->native_frame) {
+	if (is_priv && !keeps_compiled_insns(env)) {
 		if (ret == 0)
 			bpf_opt_hard_wire_dead_code_branches(env);
 		if (ret == 0)
 			ret = bpf_opt_remove_dead_code(env);
 		if (ret == 0)
 			ret = bpf_opt_remove_nops(env);
-	} else if (!env->prog->aux->trusted_kernel && !env->prog->aux->native_frame) {
+	} else if (!keeps_compiled_insns(env)) {
 		if (ret == 0)
 			sanitize_dead_code(env);
 	}
@@ -26756,7 +26770,7 @@ skip_full_check:
 	/* do 32-bit optimization after insn patching has done so those patched
 	 * insns could be handled correctly.
 	 */
-	if (ret == 0 && !env->prog->aux->trusted_kernel && !env->prog->aux->native_frame &&
+	if (ret == 0 && !keeps_compiled_insns(env) &&
 	    !bpf_prog_is_offloaded(env->prog->aux)) {
 		ret = bpf_opt_subreg_zext_lo32_rnd_hi32(env, attr);
 		env->prog->aux->verifier_zext = bpf_jit_needs_zext() ? !ret
