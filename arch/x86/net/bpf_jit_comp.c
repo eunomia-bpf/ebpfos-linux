@@ -1243,8 +1243,12 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 		addend = operand->addend;
 		type = operand->type;
 	}
-	if (type == R_X86_64_64 && aot->position_independent) {
-		/* Keep source PIC addressing. A weak reference uses a GOT load
+	if (type == R_X86_64_64 &&
+	    (aot->position_independent ||
+	     (aot->kernel_code_model && !weak && !operand))) {
+		/* Keep source PIC or Kernel-code-model addressing. The latter
+		 * locates code and ordinary globals in the negative 2 GiB.
+		 * A weak PIC reference uses a GOT load
 		 * so an undefined symbol stays zero when the image moves.
 		 * Ordinary symbols retain RIP-relative lea. Literal integers and
 		 * native-assembly relocations keep their existing encoders.
@@ -3430,12 +3434,15 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 			source->aux->func_info[source->aux->func_idx].type_id);
 		const char *pic = function ? btf_find_decl_tag_value(source->aux->btf,
 			function, -1, "aot:pic") : ERR_PTR(-ENOENT);
+		const char *kernel_model = function ? btf_find_decl_tag_value(source->aux->btf,
+			function, -1, "aot:kernel-code-model") : ERR_PTR(-ENOENT);
 		const char *register_entry = function ? btf_find_decl_tag_value(source->aux->btf,
 			function, -1, "aot:native-register-entry") : ERR_PTR(-ENOENT);
 		const char *section = function ? btf_find_decl_tag_value(source->aux->btf,
 			function, -1, "aot:section:") : ERR_PTR(-ENOENT);
 
 		aot.position_independent = !IS_ERR(pic) && !*pic;
+		aot.kernel_code_model = !IS_ERR(kernel_model) && !*kernel_model;
 		aot.section = IS_ERR(section) ? NULL : section;
 		/* The normal BPF argument/result registers implement the C view.
 		 * They cannot stand in for an original assembly register entry.

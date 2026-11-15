@@ -31,6 +31,7 @@ struct bpf_aot_context {
 	bool final;
 	bool patchable_jumps;
 	bool position_independent;
+	bool kernel_code_model;
 	const char *section;
 	int error;
 };
