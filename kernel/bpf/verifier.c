@@ -4748,7 +4748,7 @@ struct native_scalar_bits {
 	u16 inputs, outputs;
 	u8 width, destination;
 	s8 scan_source, condition;
-	bool zero_defined;
+	bool zero_defined, arbitrary;
 };
 
 /* Register BT masks its index within the operand. Memory BT instead uses
@@ -4787,8 +4787,21 @@ static bool native_seq_scalar_bits(const struct bpf_prog *prog,
 	bits->destination = U8_MAX;
 	bits->width = decoded.opnd_bytes;
 	bits->zero_defined = false;
+	bits->arbitrary = false;
 	opcode = decoded.opcode.bytes[1];
-	if (opcode == 0xbc || opcode == 0xbd) {
+	if (!repeat && opcode == 0xc7 && !decoded.immediate.nbytes &&
+	    (X86_MODRM_REG(decoded.modrm.value) == 6 ||
+	     X86_MODRM_REG(decoded.modrm.value) == 7)) {
+		/* RDRAND/RDSEED define the operand even when CF reports failure.
+		 * The data has no bit-count bound; a dword clears its upper lane.
+		 * An optional normalized condition suffix is handled below.
+		 */
+		bits->inputs = 0;
+		bits->outputs = BIT(source);
+		bits->destination = source;
+		bits->arbitrary = true;
+		physical_outputs = BIT(physical);
+	} else if (opcode == 0xbc || opcode == 0xbd) {
 		if (decoded.immediate.nbytes)
 			return false;
 		physical = X86_MODRM_REG(decoded.modrm.value) | (X86_REX_R(decoded.rex_prefix.value) ? 8 : 0);
@@ -14952,6 +14965,10 @@ descriptor_done:
 			err = check_reg_arg(env, i, DST_OP);
 			if (err)
 				return err;
+			if (bits.arbitrary && i != bits.condition) {
+				coerce_reg_to_size(&native_regs[i], bits.width);
+				continue;
+			}
 			if (i == bits.condition || (i == bits.destination && bounded)) {
 				struct bpf_reg_state *output = &native_regs[i];
 				u32 limit = i == bits.condition ? 1 : maximum;
