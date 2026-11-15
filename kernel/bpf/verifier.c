@@ -14520,7 +14520,7 @@ static bool native_kop_scalar_stack(struct bpf_verifier_env *env, u32 base,
 {
 	struct bpf_reg_state *reg = &cur_regs(env)[base];
 	struct bpf_func_state *frame = bpf_func(env, reg);
-	s64 first, last, fixed = (s64)reg->off + offset;
+	s64 first, last, fixed = offset;
 
 	first = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smin_value;
 	last = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smax_value;
