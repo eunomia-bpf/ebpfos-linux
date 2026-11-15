@@ -17183,6 +17183,13 @@ static int native_prototype_pointer_result(struct bpf_verifier_env *env,
 	pointee = btf_type_skip_modifiers(btf, type->type, &id);
 	if (btf_type_is_void(pointee)) {
 		mark_reg_unknown(env, regs, regno);
+		/* A callee that returns `void *` hands back an address,
+		 * whatever object it points at; the native caller stored
+		 * and loaded through it as the source says. A typed pointee
+		 * already carries its own pointer type.
+		 */
+		if (env->prog->aux->ebpfos_component)
+			regs[regno].address_word = true;
 		return 0;
 	}
 	flags |= kfunc_pointer_flags(btf, type);
