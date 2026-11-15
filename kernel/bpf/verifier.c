@@ -14510,6 +14510,41 @@ static void native_kop_bit_address(struct bpf_reg_state *address,
 	reg_bounds_sync(address);
 }
 
+/* The scalar native RMW effect cannot initialize unread stack bytes or turn
+ * a conditional bit update of pointer storage into a new pointer fact.
+ * Privileged ordinary stack reads may deliberately allow both; this local
+ * instruction model applies only to already initialized scalar byte ranges.
+ */
+static bool native_kop_scalar_stack(struct bpf_verifier_env *env, u32 base,
+				    s32 offset, u32 bytes)
+{
+	struct bpf_reg_state *reg = &cur_regs(env)[base];
+	struct bpf_func_state *frame = bpf_func(env, reg);
+	s64 first, last, fixed = (s64)reg->off + offset;
+
+	first = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smin_value;
+	last = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smax_value;
+	if (check_add_overflow(first, fixed, &first) ||
+	    check_add_overflow(last, fixed, &last) ||
+	    check_add_overflow(last, (s64)bytes, &last) ||
+	    first < -(s64)frame->allocated_stack || last > 0)
+		return false;
+	for (s64 at = first; at < last; at++) {
+		u32 byte = -at - 1;
+		const struct bpf_stack_state *slot = &frame->stack[byte / BPF_REG_SIZE];
+		u8 type = slot->slot_type[byte % BPF_REG_SIZE];
+
+		if (type == STACK_MISC || type == STACK_ZERO)
+			continue;
+		if (type != STACK_SPILL || slot->spilled_ptr.type != SCALAR_VALUE ||
+		    (slot->spilled_ptr.native_input_bits &&
+		     (BPF_REG_SIZE - 1 - byte % BPF_REG_SIZE) * 8 >=
+				slot->spilled_ptr.native_input_bits))
+			return false;
+	}
+	return true;
+}
+
 static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			     int *insn_idx_p)
 {
@@ -14966,6 +15001,14 @@ descriptor_done:
 			err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 					       BPF_WRITE, temporary, false, false, NULL);
 			goto native_memory_done;
+		}
+		if (native_regs[rmw.base].type == PTR_TO_STACK &&
+		    !native_kop_scalar_stack(env, rmw.base, rmw.offset,
+					 bpf_size_to_bytes(rmw.size))) {
+			native_regs[temporary] = saved;
+			if (rmw.bit_index)
+				native_regs[rmw.base] = source;
+			goto ordinary_helper;
 		}
 		err = check_mem_access(env, insn_idx, rmw.base, rmw.offset, rmw.size,
 				       BPF_READ, temporary, false, false, NULL);
