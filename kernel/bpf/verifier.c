@@ -5166,6 +5166,7 @@ other_architecture:
 		case 0x30: /* WRMSR: ECX index, EDX:EAX value, preserves GPRs. */
 			operation->reads = BIT(0) | BIT(3) | BIT(4);
 			break;
+		case 0x33: /* RDPMC: ECX selector, zero-extended EDX:EAX. */
 		case 0x32: /* RDMSR */
 			operation->reads = BIT(4);
 			fallthrough;
@@ -5180,6 +5181,20 @@ other_architecture:
 			break;
 		default:
 			return false;
+		}
+	} else if (object.text_size == 3 && object.text[0] == 0x0f &&
+		   object.text[1] == 0x01 &&
+		   (object.text[2] == 0xd0 || object.text[2] == 0xd1)) {
+		/* XGETBV/XSETBV use ECX and EDX:EAX, with the same scalar
+		 * width contract as MSR accesses. XCR selection and enabled CPU
+		 * state retain the source's context obligations under option D.
+		 */
+		operation->reads = BIT(4);
+		if (object.text[2] == 0xd1) {
+			operation->reads |= BIT(0) | BIT(3);
+		} else {
+			operation->writes = BIT(0) | BIT(3);
+			physical_writes = BIT(0) | BIT(2);
 		}
 	} else if (object.text_size == 3 && object.text[0] == 0x0f &&
 		   object.text[1] == 0x01 && object.text[2] == 0xf9) {
