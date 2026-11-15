@@ -647,7 +647,7 @@ void ebpfos_operations_owner_put(struct ebpfos_operations_owner *owner)
 { if (owner) call_rcu(&owner->rcu, operations_owner_rcu); }
 EXPORT_SYMBOL_GPL(ebpfos_operations_owner_put);
 
-#ifndef CONFIG_EBPFOS_AUTOBIND
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
 #include <linux/btf_ids.h>
 BTF_ID_LIST_SINGLE(operations_file_btf_id, struct, file_operations)
 int ebpfos_file_view_open(struct file *file)

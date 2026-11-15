@@ -874,7 +874,7 @@ struct inode {
 #endif
 
 	void			*i_private; /* fs or device private pointer */
-#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64) && !defined(CONFIG_EBPFOS_AUTOBIND)
+#if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
 	struct ebpfos_operations_owner *ebpfos_operations;
 #endif
 } __randomize_layout;
@@ -1300,7 +1300,7 @@ struct file {
 		freeptr_t		f_freeptr;
 	};
 	file_ref_t			f_ref;
-#if defined(CONFIG_EBPFOS_ENTRY_LINK) && !defined(CONFIG_EBPFOS_AUTOBIND)
+#ifdef CONFIG_EBPFOS_ENTRY_LINK
 	struct ebpfos_operations *ebpfos_operations;
 #endif
 	/* --- cacheline 3 boundary (192 bytes) --- */
