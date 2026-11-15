@@ -4620,7 +4620,7 @@ struct native_scalar_rmw {
 	s16 input;
 	u16 inputs, outputs;
 	s16 condition, value_output;
-	bool percpu, bit_index, read_only, write_only, absolute;
+	bool percpu, bit_index, read_only, write_only, absolute, compare;
 	s64 immediate;
 	struct btf *btf;
 	u32 type;
@@ -5253,6 +5253,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	bool gs = false, lock = false, operand16 = false;
 	int base, input = -1, condition = -1, value_output = -1;
 	bool bit_index = false, read_only = false, write_only = false, absolute = false;
+	bool compare = false;
 
 	if (!native_kop_object(prog, insn, &object, NATIVE_KOP_SMP_LOCKS) ||
 	    object.seq->scratch_mask ||
@@ -5301,6 +5302,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 				return false;
 			break;
 		case 0xb0: case 0xb1: /* CMPXCHG */
+			compare = true;
 			value_output = BPF_REG_0;
 			inputs |= BIT(0);
 			outputs |= BIT(0);
@@ -5474,6 +5476,7 @@ static bool native_seq_scalar_rmw(const struct bpf_prog *prog,
 	rmw->bit_index = bit_index;
 	rmw->read_only = read_only;
 	rmw->write_only = write_only;
+	rmw->compare = compare;
 	return true;
 #else
 	return false;
@@ -14989,10 +14992,12 @@ native_memory_done:
 				output->smax_value = output->s32_max_value = 1;
 				reg_bounds_sync(output);
 			} else if (exchange && i == rmw.value_output &&
-				   (rmw.size == BPF_DW || rmw.size == BPF_W)) {
-				/* Byte/halfword results retain the old scalar's high
-				 * lanes, already initialized by the scalar input rule.
-				 * Keep those as unknown full-width scalars instead.
+				   (rmw.size == BPF_DW || (rmw.size == BPF_W && !rmw.compare))) {
+				/* Narrow writes can retain the old scalar's upper lanes.
+				 * In particular, CMPXCHG32 leaves RAX unchanged on
+				 * equality, while mismatch writes EAX and clears its high
+				 * half. Full-width unknown includes both outcomes; reading
+				 * a dword from memory alone would assert false upper zeros.
 				 */
 				native_regs[i] = selected;
 			}
