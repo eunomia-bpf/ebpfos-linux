@@ -2,6 +2,7 @@
 /* Copyright (c) 2026 Meta Platforms, Inc. and affiliates. */
 
 #include <linux/bpf_verifier.h>
+#include <linux/bpf_native_seq.h>
 
 /*
  * Forward dataflow analysis to determine constant register values at every
@@ -186,6 +187,16 @@ static void const_reg_xfer(struct bpf_verifier_env *env, struct const_arg_info *
 	case BPF_JMP:
 		if (BPF_OP(insn->code) != BPF_CALL)
 			break;
+		/* Native instructions can define allocated callee-saved GPRs.
+		 * The ordinary helper ABI's R0-R5 kill would retain stale
+		 * constants there. Forget this prepass's facts conservatively;
+		 * the native opcode transfer supplies its actual verifier facts.
+		 */
+		if (bpf_native_seq_insn(insn)) {
+			for (r = 0; r < MAX_BPF_REG; r++)
+				ci_out[r] = unknown;
+			break;
+		}
 process_call:
 		for (r = BPF_REG_0; r <= BPF_REG_5; r++)
 			ci_out[r] = unknown;
