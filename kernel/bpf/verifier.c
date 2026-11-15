@@ -22242,10 +22242,21 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 			/* Optional addresses can bind at the final link. Verify both
 			 * paths without granting a pointer or callable type. */
-			if (!IS_ERR(weak) && !*weak)
+			if (!IS_ERR(weak) && !*weak) {
 				mark_reg_unknown(env, regs, insn->dst_reg);
-			else
-				__mark_reg_known(dst_reg, ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm);
+			} else {
+				u64 addr = ((u64)(u32)insn[1].imm << 32) | (u32)insn->imm;
+
+				__mark_reg_known(dst_reg, addr);
+				/* A compiled definition names a kernel global by its
+				 * link-time address through this source-BTF form, the
+				 * same way a plain ldimm64 names one; the native
+				 * instruction loaded through the address directly.
+				 */
+				if (env->prog->aux->ebpfos_component &&
+				    addr >= 0xffffffff80000000ULL)
+					dst_reg->address_word = true;
+			}
 			break;
 		}
 		default:
