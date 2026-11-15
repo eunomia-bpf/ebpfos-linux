@@ -18903,6 +18903,12 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		} else if (btf_type_is_void(ptr_type)) {
 			/* kfunc returning 'void *' is equivalent to returning scalar */
 			mark_reg_unknown(env, regs, BPF_REG_0);
+			/* The pointer type says an address was returned even when
+			 * the pointee is untyped; a component's compiled caller
+			 * stores or loads through it as the source does.
+			 */
+			if (env->prog->aux->ebpfos_component)
+				regs[BPF_REG_0].address_word = true;
 		} else if (!__btf_type_is_struct(ptr_type)) {
 			if (!meta.r0_size) {
 				__u32 sz;
