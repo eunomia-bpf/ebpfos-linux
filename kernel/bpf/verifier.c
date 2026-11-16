@@ -6871,6 +6871,13 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
  * are going to be written to). The idea is that we don't want the verifier to
  * reject future reads that access slots written to through variable offsets.
  */
+static bool source_native_stack(struct bpf_verifier_env *env,
+				const struct bpf_reg_state *reg)
+{
+	return env->allow_ptr_leaks && env->prog->aux->ebpfos_component &&
+	       env->subprog_info[bpf_func(env, reg)->subprogno].native_frame;
+}
+
 static int check_stack_write_var_off(struct bpf_verifier_env *env,
 				     /* func where register points to */
 				     struct bpf_func_state *state,
@@ -6892,6 +6899,14 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 	ptr_reg = &cur->regs[ptr_regno];
 	min_off = ptr_reg->smin_value + off;
 	max_off = ptr_reg->smax_value + off + size;
+	/* A compiled native frame retains the source's array bounds. Numeric
+	 * bounds lost across a native call are not new facts about the index:
+	 * conservatively forget every potentially aliased tracked stack slot.
+	 */
+	if (source_native_stack(env, ptr_reg)) {
+		min_off = -state->allocated_stack;
+		max_off = 0;
+	}
 	if (value_regno >= 0)
 		value_reg = &cur->regs[value_regno];
 	if ((value_reg && bpf_register_is_null(value_reg)) ||
@@ -7218,6 +7233,12 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 	struct bpf_func_state *ptr_state = bpf_func(env, reg);
 	int err;
 	int min_off, max_off;
+
+	if (source_native_stack(env, reg)) {
+		mark_reg_stack_read(env, ptr_state, -ptr_state->allocated_stack,
+				    0, dst_regno);
+		return 0;
+	}
 
 	/* Note that we pass a NULL meta, so raw access will not be permitted.
 	 */
@@ -9581,6 +9602,20 @@ static int check_stack_access_within_bounds(
 		min_off = (s64)reg->var_off.value + off;
 		max_off = min_off + access_size;
 	} else {
+		if (source_native_stack(env, reg)) {
+			const struct bpf_subprog_info *sub =
+				&env->subprog_info[state->subprogno];
+			u32 tracked = sub->native_local_stack +
+				round_up(sub->native_arg_out, 8) +
+				round_up(sub->native_arg_in, 8);
+
+			if (sub->native_abi.result_buffer)
+				tracked += round_up(sub->native_abi.args[0].size, 8);
+			verbose(env, "func#%u relies on native source stack bounds; variable access discards slot facts\n",
+				state->subprogno);
+			return grow_stack_state(env, state,
+						max_t(u32, tracked, state->allocated_stack));
+		}
 		if (reg->smax_value >= BPF_MAX_VAR_OFF ||
 		    reg->smin_value <= -BPF_MAX_VAR_OFF) {
 			verbose(env, "invalid unbounded variable-offset%s stack R%d\n",
@@ -9969,6 +10004,10 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		else
 			err = check_stack_write(env, regno, off, size,
 						value_regno, insn_idx);
+		if (!err && t == BPF_READ && value_regno >= 0 &&
+		    size == BPF_REG_SIZE && source_native_stack(env, reg) &&
+		    regs[value_regno].type == SCALAR_VALUE)
+			regs[value_regno].address_word = true;
 	} else if (reg_is_pkt_pointer(reg)) {
 		if (t == BPF_WRITE && !may_access_direct_pkt_data(env, NULL, t)) {
 			verbose(env, "cannot write into packet\n");
