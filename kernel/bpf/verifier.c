@@ -6878,6 +6878,17 @@ static bool source_native_stack(struct bpf_verifier_env *env,
 	       env->subprog_info[bpf_func(env, reg)->subprogno].native_frame;
 }
 
+static bool source_unbounded_stack(struct bpf_verifier_env *env,
+				   const struct bpf_reg_state *reg)
+{
+	/* Keep the original precise slot handling for already bounded indices.
+	 * Only the old unbounded-offset refusal takes the source relaxation.
+	 */
+	return source_native_stack(env, reg) &&
+	       (reg->smax_value >= BPF_MAX_VAR_OFF ||
+		reg->smin_value <= -BPF_MAX_VAR_OFF);
+}
+
 static int check_stack_write_var_off(struct bpf_verifier_env *env,
 				     /* func where register points to */
 				     struct bpf_func_state *state,
@@ -6903,7 +6914,7 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 	 * bounds lost across a native call are not new facts about the index:
 	 * conservatively forget every potentially aliased tracked stack slot.
 	 */
-	if (source_native_stack(env, ptr_reg)) {
+	if (source_unbounded_stack(env, ptr_reg)) {
 		min_off = -state->allocated_stack;
 		max_off = 0;
 	}
@@ -7234,7 +7245,7 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 	int err;
 	int min_off, max_off;
 
-	if (source_native_stack(env, reg)) {
+	if (source_unbounded_stack(env, reg)) {
 		mark_reg_stack_read(env, ptr_state, -ptr_state->allocated_stack,
 				    0, dst_regno);
 		return 0;
@@ -9602,7 +9613,7 @@ static int check_stack_access_within_bounds(
 		min_off = (s64)reg->var_off.value + off;
 		max_off = min_off + access_size;
 	} else {
-		if (source_native_stack(env, reg)) {
+		if (source_unbounded_stack(env, reg)) {
 			const struct bpf_subprog_info *sub =
 				&env->subprog_info[state->subprogno];
 			u32 tracked = sub->native_local_stack +
