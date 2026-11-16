@@ -17,10 +17,10 @@
 
 __bpf_kfunc_start_defs();
 #define STORE_DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_store##width(void *template) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) u64 bpf_ebpfos_kop_percpu_store##width(void *template) { return 0; }
 PERCPU_STORE_ROWS(STORE_DECL)
 #define AREA_STORE_DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_store##width(void *template) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) u64 bpf_ebpfos_kop_percpu_area_store##width(void *template) { return 0; }
 PERCPU_STORE_ROWS(AREA_STORE_DECL)
 #undef AREA_STORE_DECL
 #undef STORE_DECL
@@ -109,10 +109,10 @@ PERCPU_STORE_ROWS(AREA_STORE_DEFINE)
  */
 __bpf_kfunc_start_defs();
 #define REGSTORE_DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_regstore##width(void *template, u64 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) u64 bpf_ebpfos_kop_percpu_regstore##width(void *template, u64 value) { return 0; }
 PERCPU_STORE_ROWS(REGSTORE_DECL)
 #define AREA_REGSTORE_DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_regstore##width(void *template, u64 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) u64 bpf_ebpfos_kop_percpu_area_regstore##width(void *template, u64 value) { return 0; }
 PERCPU_STORE_ROWS(AREA_REGSTORE_DECL)
 #undef AREA_REGSTORE_DECL
 #undef REGSTORE_DECL

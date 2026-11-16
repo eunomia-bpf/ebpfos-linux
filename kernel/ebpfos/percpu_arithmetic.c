@@ -44,11 +44,12 @@
  X(xor, 64, BPF_DW, BPF_XOR, 0, 0x31)
 
 __bpf_kfunc_start_defs();
+/* r3 and r6 are explicit native/proof scratch outputs; r1/r2/r4/r5 stay. */
 #define DECL(op, width, size, alu, unary, opcode) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_##op##width(void *template, u64 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:54"))) u64 bpf_ebpfos_kop_percpu_##op##width(void *template, u64 value) { return 0; }
 ARITHMETIC_ROWS(DECL)
 #define AREA_DECL(op, width, size, alu, unary, opcode) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_##op##width(void *template, u64 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:54"))) u64 bpf_ebpfos_kop_percpu_area_##op##width(void *template, u64 value) { return 0; }
 ARITHMETIC_ROWS(AREA_DECL)
 #undef AREA_DECL
 #undef DECL

@@ -78,15 +78,19 @@ __bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) __attribute__(
 #include "koperation_idtr.h"
 #include "koperation_fsbase_read.h"
 #include "koperation_selector_read.h"
-__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_tzcnt64(u64 value)
+/* Invocation contracts include explicit proof scratch writes: TZCNT uses
+ * r2/r3 in its proof; loads change only the result. These are source-declared
+ * contracts consumed before compilation, never verifier-derived rewrites.
+ */
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:50"))) __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u64 bpf_ebpfos_kop_tzcnt64(u64 value)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_load32(u32 *ptr)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos_kop_load32(u32 *ptr)
 {
 	return 0; /* Only the verified proof or its bound JIT emission executes. */
 }
-__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) struct task_struct *bpf_ebpfos_kop_current_task(void)
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:62"))) __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) struct task_struct *bpf_ebpfos_kop_current_task(void)
 {
 	return NULL; /* Only the verified proof or its bound JIT emission executes. */
 }

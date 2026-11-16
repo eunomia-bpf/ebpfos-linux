@@ -14,9 +14,10 @@
 #ifdef CONFIG_X86_64
 #define XADD_ROWS(X) X(8, BPF_B) X(16, BPF_H) X(32, BPF_W) X(64, BPF_DW)
 __bpf_kfunc_start_defs();
+/* r3/r6 are explicit scratch outputs; preserve r1/r2/r4/r5. */
 #define DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_xadd##width(void *template, u64 value) { return 0; } \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_xadd##width(void *template, u64 value) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:54"))) u64 bpf_ebpfos_kop_percpu_xadd##width(void *template, u64 value) { return 0; } \
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:54"))) u64 bpf_ebpfos_kop_percpu_area_xadd##width(void *template, u64 value) { return 0; }
 XADD_ROWS(DECL)
 #undef DECL
 __bpf_kfunc_end_defs();

@@ -14,8 +14,11 @@
 #ifdef CONFIG_X86_64
 #define COMPARE_ROWS(X) X(8, BPF_B) X(16, BPF_H) X(32, BPF_W) X(64, BPF_DW)
 __bpf_kfunc_start_defs();
+/* The complete invocation writes r0/r3/r4/r5/r6/r7; only r1/r2 are
+ * preserved among the compiler's argument/scratch registers r1..r5.
+ */
 #define DECL(width, size) \
-__bpf_kfunc u64 bpf_ebpfos_kop_percpu_area_cmpxchg##width(void *template, u64 desired, u64 expected) { return 0; }
+__bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_preserved_regs:6"))) u64 bpf_ebpfos_kop_percpu_area_cmpxchg##width(void *template, u64 desired, u64 expected) { return 0; }
 COMPARE_ROWS(DECL)
 #undef DECL
 __bpf_kfunc_end_defs();
