@@ -5674,11 +5674,13 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 
 	for (i = env->prog->len - 1; i >= 0; i--) {
 		struct bpf_kfunc_desc *desc;
+		const struct bpf_kop *kop;
 		struct bpf_kop_region *region;
 		struct bpf_prog *new_prog;
 		struct bpf_insn *call;
 		const struct bpf_insn *sidecar;
 		bool native_backedge;
+		u32 kfunc_flags;
 		u32 native_backedge_target = 0;
 		u64 payload;
 		int count;
@@ -5709,7 +5711,14 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		}
 
 		desc = find_kfunc_desc(env->prog, call->imm, call->off);
-		native_backedge = desc->kop->noreturn_native_backedge;
+		if (!desc || !desc->kop)
+			return -EFAULT;
+		/* Adding proof services grows and sorts the descriptor table.
+		 * Retain the immutable KOperation contract, not an entry in it.
+		 */
+		kop = desc->kop;
+		kfunc_flags = desc->flags;
+		native_backedge = kop->noreturn_native_backedge;
 		if (native_backedge) {
 			const struct bpf_insn *backedge;
 			s64 target;
@@ -5756,19 +5765,19 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 			native_backedge_target = target;
 		}
 		payload = bpf_kop_sidecar_payload(sidecar);
-		proof = kvcalloc(desc->kop->max_insn_cnt, sizeof(*proof),
+		proof = kvcalloc(kop->max_insn_cnt, sizeof(*proof),
 				 GFP_KERNEL_ACCOUNT);
 		if (!proof)
 			return -ENOMEM;
-		count = desc->kop->instantiate_insn(payload, proof);
+		count = kop->instantiate_insn(payload, proof);
 		if (count <= 0) {
 			err = count ?: -EINVAL;
 			goto err_free_proof;
 		}
-		err = bpf_validate_kop_proof_seq(env, desc->kop, payload, proof, count);
+		err = bpf_validate_kop_proof_seq(env, kop, payload, proof, count);
 		if (err)
 			goto err_free_proof;
-		if (desc->kop->proof_kfunc_id || desc->kop->proof_kfunc_id_for_payload) {
+		if (kop->proof_kfunc_id || kop->proof_kfunc_id_for_payload) {
 			u32 j;
 
 			for (j = 0; j < count; j++) {
@@ -5781,7 +5790,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 					goto err_free_proof;
 			}
 		}
-		if (desc->flags & KF_NORETURN) {
+		if (kfunc_flags & KF_NORETURN) {
 			const struct bpf_insn *terminal = &proof[count - 1];
 			u8 class = BPF_CLASS(terminal->code);
 
@@ -5793,7 +5802,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		region->start = i - 1;
 		region->proof_len = count;
 		region->orig_len = native_backedge ? 3 : 2;
-		region->is_noreturn = desc->flags & KF_NORETURN;
+		region->is_noreturn = kfunc_flags & KF_NORETURN;
 		region->has_native_backedge = native_backedge;
 		region->native_backedge_target = native_backedge_target;
 		region->orig[0] = *sidecar;
@@ -5830,7 +5839,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 			if (bpf_helper_call(&new_prog->insnsi[region->start + j]) ||
 			    bpf_pseudo_kfunc_call(&new_prog->insnsi[region->start + j]))
 				env->insn_aux_data[region->start + j].kop_helper_preserve_mask =
-					desc->kop->proof_helper_preserve_mask;
+					kop->proof_helper_preserve_mask;
 		if (region->is_noreturn) {
 			env->insn_aux_data[region->start + count - 1].is_noreturn = true;
 			env->prog->aux->kop_terminal_effect = true;
