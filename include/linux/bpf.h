@@ -1089,6 +1089,11 @@ struct bpf_kop {
 	u32 proof_kfunc_id;
 	/* Select one exact typed proof service for a declarative payload instance. */
 	u32 (*proof_kfunc_id_for_payload)(u64 payload);
+	/* Registers preserved by helper calls used only in this proof. The
+	 * native recipe supplies this contract; ordinary helper calls keep
+	 * their normal clobbers. This mask never changes emitted instructions.
+	 */
+	u16 proof_helper_preserve_mask;
 	int (*instantiate_insn)(u64 payload, struct bpf_insn *insn_buf);
 
 	int (*emit_x86)(u8 *image, u32 *off, bool emit,

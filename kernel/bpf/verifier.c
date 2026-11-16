@@ -5823,6 +5823,10 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		if (!new_prog)
 			return -ENOMEM;
 		env->prog = new_prog;
+		for (u32 j = 0; j < count; j++)
+			if (bpf_helper_call(&new_prog->insnsi[region->start + j]))
+				env->insn_aux_data[region->start + j].kop_helper_preserve_mask =
+					desc->kop->proof_helper_preserve_mask;
 		if (region->is_noreturn) {
 			env->insn_aux_data[region->start + count - 1].is_noreturn = true;
 			env->prog->aux->kop_terminal_effect = true;
@@ -15645,6 +15649,9 @@ ordinary_helper:
 
 	/* reset caller saved regs */
 	for (i = 0; i < CALLER_SAVED_REGS; i++) {
+		if (env->insn_aux_data[insn_idx].kop_helper_preserve_mask &
+		    BIT(caller_saved[i]))
+			continue;
 		bpf_mark_reg_not_init(env, &regs[caller_saved[i]]);
 		check_reg_arg(env, caller_saved[i], DST_OP_NO_MARK);
 	}

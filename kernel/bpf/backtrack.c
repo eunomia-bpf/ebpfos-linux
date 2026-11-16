@@ -484,7 +484,8 @@ static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
 			bt_clear_reg(bt, BPF_REG_0);
 			if (env->insn_aux_data[idx].returns_two_regs)
 				bt_clear_reg(bt, BPF_REG_3);
-			if (bt_reg_mask(bt) & BPF_REGMASK_ARGS) {
+			if (bt_reg_mask(bt) & BPF_REGMASK_ARGS &
+			    ~env->insn_aux_data[idx].kop_helper_preserve_mask) {
 				/* if backtracking was looking for registers R1-R5
 				 * they should have been found already.
 				 */

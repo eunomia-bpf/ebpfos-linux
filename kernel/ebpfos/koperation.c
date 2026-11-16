@@ -947,6 +947,11 @@ static int ebpfos_kop_current_task_reloc(u64 payload, unsigned int index,
 }
 
 static struct bpf_kop ebpfos_kop_current_task = {
+	/* The GS load changes RAX only. Its typed helper is a proof service,
+	 * not a native call, so live argument registers retain their values.
+	 */
+	.proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) |
+				      BIT(BPF_REG_ARG6),
 	.num_x86_relocs = 1,
 	.x86_reloc = ebpfos_kop_current_task_reloc,
 	.max_insn_cnt = 1,

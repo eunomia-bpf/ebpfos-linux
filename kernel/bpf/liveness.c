@@ -1181,7 +1181,8 @@ static void arg_track_xfer(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		 * native clobbers; no memory value is restored from this hint.
 		 */
 		for (r = 0; r < MAX_BPF_REG; r++)
-			if (r == BPF_REG_0 || bpf_is_arg_reg(r))
+			if ((r == BPF_REG_0 || bpf_is_arg_reg(r)) &&
+			    !(env->insn_aux_data[insn_idx].kop_helper_preserve_mask & BIT(r)))
 				at_out[r] = none;
 		/* Retain possible return aliases for liveness. The normal body
 		 * verifier independently proves every returned value and lifetime.
@@ -2299,6 +2300,7 @@ static void compute_insn_live_regs(struct bpf_verifier_env *env,
 				break;
 			}
 			def = ALL_CALLER_SAVED_REGS;
+			def &= ~env->insn_aux_data[insn - env->prog->insnsi].kop_helper_preserve_mask;
 			use |= BIT(BPF_REG_ARG_SP);
 			use = def & ~BIT(BPF_REG_0);
 			if (bpf_get_call_summary(env, insn, &cs)) {
