@@ -10004,6 +10004,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		}
 
 	} else if (reg->type == PTR_TO_STACK) {
+		bool native_stack = source_native_stack(env, reg);
+
 		/* Basic bounds checks. */
 		err = check_stack_access_within_bounds(env, regno, off, size, t);
 		if (err)
@@ -10016,7 +10018,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			err = check_stack_write(env, regno, off, size,
 						value_regno, insn_idx);
 		if (!err && t == BPF_READ && value_regno >= 0 &&
-		    size == BPF_REG_SIZE && source_native_stack(env, reg) &&
+		    size == BPF_REG_SIZE && native_stack &&
 		    regs[value_regno].type == SCALAR_VALUE)
 			regs[value_regno].address_word = true;
 	} else if (reg_is_pkt_pointer(reg)) {
