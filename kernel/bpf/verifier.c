@@ -8196,6 +8196,14 @@ static int check_ptr_alignment(struct bpf_verifier_env *env,
 	bool strict = env->strict_alignment || strict_alignment_once;
 	const char *pointer_desc = "";
 
+	/* The existing component path already permits this source address.
+	 * x86 native word accesses, including locked atomics, need no numeric
+	 * alignment promise. Keep stack/spill and other pointer models intact.
+	 */
+	if (IS_ENABLED(CONFIG_X86_64) && env->prog->aux->ebpfos_component &&
+	    reg->type == SCALAR_VALUE && reg->address_word)
+		strict = false;
+
 	switch (reg->type) {
 	case PTR_TO_PACKET:
 	case PTR_TO_PACKET_META:
