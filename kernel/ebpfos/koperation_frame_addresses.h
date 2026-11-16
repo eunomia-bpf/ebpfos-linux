@@ -45,6 +45,8 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
  *offset += sizeof(native); return sizeof(native); \
 } \
 static struct bpf_kop ebpfos_kop_##name = { .max_insn_cnt = 1, .max_emit_bytes = 8, \
+ /* The bound frame read writes RAX only; its proof call leaves native R9 live. */ \
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
  .instantiate_insn = ebpfos_kop_##name##_instantiate, .emit_x86 = ebpfos_kop_##name##_emit_x86, }; \
 static const struct bpf_kop * const ebpfos_kprog_##name##_descs[] = { &ebpfos_kop_##name }; \
 static const struct btf_kfunc_id_set ebpfos_kprog_##name##_set = { \

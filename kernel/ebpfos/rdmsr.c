@@ -81,6 +81,8 @@ static int rdmsr_emit(u8 *image, u32 *offset, bool emit, u64 payload,
  *offset += sizeof(rdmsr_native); return sizeof(rdmsr_native);
 }
 static struct bpf_kop rdmsr_kop = { .max_insn_cnt = 1,
+ /* Both native completion and the MSR fixup retain the sixth argument R9. */
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6),
  .max_emit_bytes = sizeof(rdmsr_native), .num_exentries = 1,
  .exception_entry = rdmsr_exception, .instantiate_insn = rdmsr_proof,
  .emit_x86 = rdmsr_emit,
@@ -118,6 +120,7 @@ static int rdmsr_unchecked_emit(u8 *image, u32 *offset, bool emit, u64 payload,
  *offset += sizeof(rdmsr_unchecked_native); return sizeof(rdmsr_unchecked_native);
 }
 static struct bpf_kop rdmsr_unchecked_kop = { .max_insn_cnt = 1,
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6),
  .max_emit_bytes = sizeof(rdmsr_unchecked_native), .num_exentries = 1,
  .exception_entry = rdmsr_unchecked_exception, .instantiate_insn = rdmsr_unchecked_proof,
  .emit_x86 = rdmsr_unchecked_emit,
