@@ -12868,8 +12868,14 @@ static void clear_caller_saved_regs(struct bpf_verifier_env *env,
 {
 	int i;
 
-	/* after the call registers r0 - r5 were scratched */
+	/* A temporary proof call keeps its descriptor's native register effects
+	 * even when it uses the native-prototype path. Ordinary calls have no
+	 * such mask and still scratch every caller-saved register.
+	 */
 	for (i = 0; i < CALLER_SAVED_REGS; i++) {
+		if (env->insn_aux_data[env->insn_idx].kop_helper_preserve_mask &
+		    BIT(caller_saved[i]))
+			continue;
 		bpf_mark_reg_not_init(env, &regs[caller_saved[i]]);
 		__check_reg_arg(env, regs, caller_saved[i], DST_OP_NO_MARK, 0);
 	}

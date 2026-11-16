@@ -96,6 +96,8 @@ static int fault_mov##width##_emit(u8 *image, u32 *offset, bool emit, \
  *offset += size; return size; \
 } \
 static struct bpf_kop fault_mov##width##_kop = { \
+ /* Native loads and their exception fixups leave the sixth argument R9 live. */ \
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 3, .max_emit_bytes = sizeof(fault_mov##width##_native), \
  .num_exentries = 1, .exception_entry = fault_mov##width##_exception, \
  .instantiate_insn = fault_mov##width##_proof, .emit_x86 = fault_mov##width##_emit, \

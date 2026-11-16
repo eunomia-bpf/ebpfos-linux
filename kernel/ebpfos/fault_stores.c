@@ -64,6 +64,7 @@ static int family##width##_emit(u8 *image, u32 *offset, bool emit, u64 payload, 
  *offset += sizeof(family##width##_native); return sizeof(family##width##_native); \
 } \
 static struct bpf_kop family##width##_kop = { .max_insn_cnt = 1, .max_emit_bytes = sizeof(family##width##_native), \
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
  .num_exentries = 1, .exception_entry = family##width##_exception, .instantiate_insn = family##width##_proof, \
  .emit_x86 = family##width##_emit,  \
  .proof_kfunc_id_for_payload = family##width##_service, }; \

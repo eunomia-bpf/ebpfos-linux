@@ -60,6 +60,7 @@ static int name##_emit(u8 *image, u32 *offset, bool emit, u64 payload, \
  *offset += sizeof(name##_native); return sizeof(name##_native); \
 } \
 static struct bpf_kop name##_kop = { .max_insn_cnt = 3, .max_emit_bytes = sizeof(name##_native), \
+ .proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
  .num_exentries = 1, .exception_entry = name##_exception, .instantiate_insn = name##_proof, \
  .emit_x86 = name##_emit,  \
  .proof_kfunc_id_for_payload = name##_service, \

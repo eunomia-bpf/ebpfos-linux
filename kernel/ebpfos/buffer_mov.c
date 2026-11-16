@@ -80,6 +80,7 @@ __bpf_kfunc_end_defs();
   *offset += sizeof(name##_native); return sizeof(name##_native); \
  } \
  static struct bpf_kop name##_kop = { \
+  .proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
   .max_insn_cnt = 1, .max_emit_bytes = sizeof(name##_native), \
   .num_exentries = exceptions, .exception_entry = name##_exception, \
   .instantiate_insn = name##_proof, .emit_x86 = name##_emit, \
