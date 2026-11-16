@@ -83,6 +83,7 @@ static int prefix##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return store_emit(i, o, emit, p, width, area); } \
 static const struct bpf_kop prefix##width##_desc = { \
+ .proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) | BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 3 + area, .max_emit_bytes = 20, \
   .instantiate_insn = prefix##width##_proof, \
  .emit_x86 = prefix##width##_emit }; \
@@ -155,6 +156,7 @@ static int prefix##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return regstore_emit(i, o, emit, p, width, area); } \
 static const struct bpf_kop prefix##width##_desc = { \
+ .proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) | BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 4 + area, .max_emit_bytes = 18, \
   .instantiate_insn = prefix##width##_proof, \
  .emit_x86 = prefix##width##_emit }; \

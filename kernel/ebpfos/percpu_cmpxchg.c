@@ -98,6 +98,7 @@ static int compare##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return compare_emit(i, o, emit, p, width); } \
 static const struct bpf_kop compare##width##_desc = { \
+ .proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) | BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 14, .max_emit_bytes = 36,  \
  .instantiate_insn = compare##width##_proof, .emit_x86 = compare##width##_emit }; \
 static const struct bpf_kop * const compare##width##_descs[] = { &compare##width##_desc }; \

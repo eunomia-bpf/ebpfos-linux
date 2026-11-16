@@ -53,6 +53,7 @@ static int ebpfos_kop_##prefix##width##_emit_x86(u8 *image, u32 *offset, bool em
  *offset += n; return n; \
 } \
 static struct bpf_kop ebpfos_kop_##prefix##width = { \
+ .proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) | BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 2 + area, .max_emit_bytes = 9, \
  .instantiate_insn = ebpfos_kop_##prefix##width##_instantiate, \
  .emit_x86 = ebpfos_kop_##prefix##width##_emit_x86 }; \

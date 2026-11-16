@@ -760,6 +760,8 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
 	return spec->native_len; \
 } \
 static struct bpf_kop ebpfos_kop_##name = { \
+	/* Fixed typed recipes leave the sixth argument (native R9) intact. */ \
+	.proof_helper_preserve_mask = BIT(BPF_REG_ARG6), \
 	.max_insn_cnt = EBPFOS_KOP_PROOF_LEN_##opcode, \
 	.max_emit_bytes = 48, \
 	.instantiate_insn = ebpfos_kop_##name##_instantiate, \

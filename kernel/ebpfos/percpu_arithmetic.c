@@ -129,6 +129,9 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 
 static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id);
 
+/* CPU selection is a proof helper, not a native call. Explicit proof writes
+ * still describe the native result/scratch registers after that selection.
+ */
 #define DEFINE(prefix, area, op, width, size, alu, unary, opcode) \
 BTF_KFUNCS_START(prefix##op##width##_ids) \
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_##prefix##op##width) \
@@ -139,6 +142,7 @@ static int prefix##op##width##_emit(u8 *i, u32 *o, bool emit, u64 p, \
  const struct bpf_prog *prog, const u8 *ip) \
 { return arithmetic_emit(i, o, emit, p, width, unary, opcode, area); } \
 static const struct bpf_kop prefix##op##width##_desc = { \
+ .proof_helper_preserve_mask = GENMASK(BPF_REG_5, BPF_REG_1) | BIT(BPF_REG_ARG6), \
  .max_insn_cnt = 10 + area, .max_emit_bytes = 24,  \
  .instantiate_insn = prefix##op##width##_proof, .emit_x86 = prefix##op##width##_emit }; \
 static const struct bpf_kop * const prefix##op##width##_descs[] = { &prefix##op##width##_desc }; \

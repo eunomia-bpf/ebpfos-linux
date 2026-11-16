@@ -5823,8 +5823,12 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 		if (!new_prog)
 			return -ENOMEM;
 		env->prog = new_prog;
+		/* Both stock helpers and typed kfuncs can be proof-only services.
+		 * Their descriptor contract ends when the original KOp is restored.
+		 */
 		for (u32 j = 0; j < count; j++)
-			if (bpf_helper_call(&new_prog->insnsi[region->start + j]))
+			if (bpf_helper_call(&new_prog->insnsi[region->start + j]) ||
+			    bpf_pseudo_kfunc_call(&new_prog->insnsi[region->start + j]))
 				env->insn_aux_data[region->start + j].kop_helper_preserve_mask =
 					desc->kop->proof_helper_preserve_mask;
 		if (region->is_noreturn) {
@@ -18919,6 +18923,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	for (i = 0; i < CALLER_SAVED_REGS; i++) {
 		u32 regno = caller_saved[i];
 
+		if (env->insn_aux_data[insn_idx].kop_helper_preserve_mask & BIT(regno))
+			continue;
 		bpf_mark_reg_not_init(env, &regs[regno]);
 		regs[regno].subreg_def = DEF_NOT_SUBREG;
 	}
