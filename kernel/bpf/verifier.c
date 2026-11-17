@@ -12405,12 +12405,18 @@ skip_type_check:
 					      false, meta);
 		break;
 	case ARG_PTR_TO_PERCPU_BTF_ID:
-		if (!reg->btf_id) {
-			verbose(env, "Helper has invalid btf_id in R%d\n", regno);
-			return -EACCES;
+		/* An untyped `void __percpu *` carries no pointee to name, so
+		 * there is no btf_id to hand to the return type; the address
+		 * is still a per-cpu address and the helper's result is the
+		 * same cell on this CPU. 55 census rows (11-17) pass one as
+		 * rdonly_percpu_untrusted_mem(sz=0), the untyped form
+		 * percpu_btf_ptr_types admits. Leave ret_btf empty for it and
+		 * let the return path give a size-0 PTR_TO_MEM.
+		 */
+		if (reg->btf_id) {
+			meta->ret_btf = reg->btf;
+			meta->ret_btf_id = reg->btf_id;
 		}
-		meta->ret_btf = reg->btf;
-		meta->ret_btf_id = reg->btf_id;
 		break;
 	case ARG_PTR_TO_SPIN_LOCK:
 		if (in_rbtree_lock_required_cb(env)) {
@@ -15923,6 +15929,15 @@ ordinary_helper:
 		const struct btf_type *t;
 
 		mark_reg_known_zero(env, regs, BPF_REG_0);
+		/* An untyped per-cpu argument named no pointee: the result is
+		 * the same cell with no size to bound, which is exactly what
+		 * the mem_size=0 form means (11145). Keep the helper's own
+		 * read-only/nullable flags.
+		 */
+		if (!meta.ret_btf) {
+			regs[BPF_REG_0].type = PTR_TO_MEM | ret_flag;
+			break;
+		}
 		t = btf_type_skip_modifiers(meta.ret_btf, meta.ret_btf_id, NULL);
 		if (btf_type_is_var(t) && btf_pointer_global(meta.ret_btf, t->type)) {
 			/* Resolving a CPU changes the address, not the cell's type.
