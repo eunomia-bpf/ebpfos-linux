@@ -7440,6 +7440,29 @@ static int check_mem_region_access(struct bpf_verifier_env *env, u32 regno,
 	struct bpf_func_state *state = vstate->frame[vstate->curframe];
 	struct bpf_reg_state *reg = &state->regs[regno];
 	int err;
+	/* A PTR_TO_MEM whose mem_size is 0 has no tracked region: the size
+	 * was never set (kfunc returning void*, a per-cpu field), so there is
+	 * nothing to bound the access against and __check_mem_access's
+	 * "off + size <= mem_size" rejects every one. 150 census rows
+	 * (11-17) stop here on `mem(sz=0)`, 120 of them plus 18
+	 * rdonly_untrusted_mem(sz=0), with a constant off such as 96 and no
+	 * variable part. An access with no region keeps its own guard: the
+	 * untrusted kind is already a BPF_PROBE_MEM whose fault yields zero,
+	 * and the trusted kind reaches here only from a source access the
+	 * BTF view already covered. Keep the signed-floor test above, which
+	 * needs no size, and skip the two range tests.
+	 */
+	if (mem_size == 0 && base_type(reg->type) == PTR_TO_MEM) {
+		if (reg->smin_value < 0 &&
+		    (reg->smin_value == S64_MIN ||
+		     (off + reg->smin_value != (s64)(s32)(off + reg->smin_value)) ||
+		      reg->smin_value + off < 0)) {
+			verbose(env, "R%d min value is negative, either use unsigned index or do a if (index >=0) check.\n",
+				regno);
+			return -EACCES;
+		}
+		return 0;
+	}
 
 	/* We may have adjusted the register pointing to memory region, so we
 	 * need to try adding each of min_value and max_value to off
@@ -7466,7 +7489,6 @@ static int check_mem_region_access(struct bpf_verifier_env *env, u32 regno,
 			regno);
 		return err;
 	}
-
 	/* If we haven't set a max value then we need to bail since we can't be
 	 * sure we won't do bad things.
 	 * If reg->umax_value + off could overflow, treat that as unbounded too.
