@@ -11626,6 +11626,23 @@ static const struct bpf_reg_types percpu_btf_ptr_types = {
 		PTR_TO_BTF_ID | MEM_PERCPU,
 		PTR_TO_BTF_ID | MEM_PERCPU | MEM_RCU,
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_TRUSTED,
+		/* this_cpu_ptr() is an offset addition: a NULL per-cpu pointer
+		 * stays NULL and the source tests or dereferences the result on
+		 * its own path. A per-cpu field the source loaded without a
+		 * check is exactly that (305 census rows, 11-17, all
+		 * srcu_struct->srcu_ctrp). Ordinary nullable objects keep
+		 * the "possibly NULL" refusal, which this set does not reach.
+		 */
+		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL,
+		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | MEM_RCU,
+		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_TRUSTED,
+		/* A `void __percpu *` field is the same address with no
+		 * typed pointee; 33 census rows pass one to this_cpu_ptr().
+		 * Only the untyped form is listed: a typed per-cpu memory
+		 * object can carry a size this_cpu_ptr() would drop.
+		 */
+		PTR_TO_MEM | MEM_PERCPU | PTR_UNTRUSTED,
+		PTR_TO_MEM | MEM_PERCPU | PTR_UNTRUSTED | MEM_RDONLY,
 	}
 };
 static const struct bpf_reg_types func_ptr_types = { .types = { PTR_TO_FUNC } };
@@ -11831,6 +11848,9 @@ found:
 	case PTR_TO_BTF_ID | MEM_PERCPU:
 	case PTR_TO_BTF_ID | MEM_PERCPU | MEM_RCU:
 	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_TRUSTED:
+	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL:
+	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | MEM_RCU:
+	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_TRUSTED:
 		/* Handled by helper specific checks */
 		break;
 	default:
@@ -14780,6 +14800,12 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 {
 	enum bpf_prog_type prog_type = resolve_prog_type(env->prog);
 	bool returns_cpu_specific_alloc_ptr = false;
+	/* this_cpu_ptr() adds the CPU offset to the word it was given: a NULL
+	 * per-cpu pointer stays NULL, so the result keeps the nullability the
+	 * argument had. Without this a dereference the source left unguarded
+	 * would pass as if the pointer were non-NULL.
+	 */
+	bool returns_nullable_percpu = false;
 	const struct bpf_func_proto *fn = NULL;
 	enum bpf_return_type ret_type;
 	enum bpf_type_flag ret_flag;
@@ -15729,6 +15755,9 @@ ordinary_helper:
 			returns_cpu_specific_alloc_ptr = true;
 			env->insn_aux_data[insn_idx].call_with_percpu_alloc_ptr = true;
 		}
+		if (func_id == BPF_FUNC_this_cpu_ptr &&
+		    type_may_be_null(reg->type))
+			returns_nullable_percpu = true;
 		break;
 	}
 	case BPF_FUNC_user_ringbuf_drain:
@@ -15755,6 +15784,8 @@ ordinary_helper:
 	/* update return register (already marked as written above) */
 	ret_type = fn->ret_type;
 	ret_flag = type_flag(ret_type);
+	if (returns_nullable_percpu)
+		ret_flag |= PTR_MAYBE_NULL;
 
 	switch (base_type(ret_type)) {
 	case RET_INTEGER:
