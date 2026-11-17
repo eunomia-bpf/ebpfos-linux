@@ -250,8 +250,13 @@ int ebpfos_rule_bind_view(struct ebpfos_rule_decision *decision)
 bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *decision)
 {
  u32 i;
- for (i = 0; decision && i < decision->count; ++i)
-  if (decision->choices[i].generation->has_tasks) return true;
+ for (i = 0; decision && i < decision->count; ++i) {
+  struct rule_choice *choice = &decision->choices[i];
+  /* An empty task selection supplies no enclosing version. Object-only
+   * policies must resolve again with the actual owner's identity. */
+  if (choice->selection && choice->selection <= choice->generation->count &&
+      choice->generation->has_tasks) return true;
+ }
  return false;
 }
 #ifdef CONFIG_EBPFOS_PLT
