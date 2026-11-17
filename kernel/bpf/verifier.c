@@ -9323,11 +9323,51 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	if (!array_access)
 		off += reg->var_off.value;
 
+	/* A negative displacement is a base choice, not an out-of-object read:
+	 * the lowering picks a base inside the object and reaches an earlier
+	 * field with a negative offset (`bdev_free_inode`: R7=ptr_inode, load
+	 * at -640). The BTF walk needs off >= 0, so it cannot describe such a
+	 * field; the walk's job here is only to give the load a type and a
+	 * value, and an untrusted pointer's load is already fault-guarded (the
+	 * stock path makes it BPF_PROBE_MEM; a component relies on the source
+	 * invariant Native relied on). Keep the walk's verdict when it has one,
+	 * otherwise accept the scalar as option A does above the struct.
+	 */
 	if (off < 0) {
-		verbose(env,
-			"R%d is ptr_%s invalid negative access: off=%d\n",
-			regno, tname, off);
-		return -EACCES;
+		if (!(reg->type & PTR_UNTRUSTED) || atype != BPF_READ ||
+		    value_regno < 0 || type_is_alloc(reg->type)) {
+			verbose(env,
+				"R%d is ptr_%s invalid negative access: off=%d\n",
+				regno, tname, off);
+			return -EACCES;
+		}
+		ret = btf_struct_access(&env->log, reg, off, size, atype,
+					&btf_id, &flag, &field_name);
+		if (ret < 0) {
+			ret = SCALAR_VALUE;
+			btf_id = 0;
+			flag = 0;
+			outside_field_view = true;
+			note_probe_read_scope(env);
+			verbose(env, "relies on verifier option A: probe-safe scalar read at a negative offset\n");
+		}
+		if (ret == PTR_TO_BTF_FUNC) {
+			flag |= PTR_MAYBE_NULL | PTR_UNTRUSTED;
+		} else if (ret == PTR_TO_BTF_ID) {
+			flag = (flag & (MEM_USER | MEM_PERCPU)) | PTR_UNTRUSTED;
+		}
+		ret = mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf,
+				      btf_id, flag);
+		if (ret < 0)
+			return ret;
+		if (regs[value_regno].type == SCALAR_VALUE) {
+			ret = check_btf_field_ranges(env, regs, regno, access_off,
+						     size, atype, value_regno,
+						     &source);
+			if (ret)
+				return ret;
+		}
+		return 0;
 	}
 
 	if (reg->type & MEM_USER) {
