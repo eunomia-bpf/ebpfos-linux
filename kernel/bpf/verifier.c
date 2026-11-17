@@ -11639,12 +11639,15 @@ static const struct bpf_reg_types percpu_btf_ptr_types = {
 		 * stays NULL and the source tests or dereferences the result on
 		 * its own path. A per-cpu field the source loaded without a
 		 * check is exactly that (305 census rows, 11-17, all
-		 * srcu_struct->srcu_ctrp). Ordinary nullable objects keep
+		 * srcu_struct->srcu_ctrp; another 42 pass a per-cpu field that
+		 * is both unchecked and nullable, `__part_stat_add`'s
+		 * `part->dkstats`). Ordinary nullable objects keep
 		 * the "possibly NULL" refusal, which this set does not reach.
 		 */
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL,
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | MEM_RCU,
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_TRUSTED,
+		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_UNTRUSTED,
 		/* A `void __percpu *` field is the same address with no
 		 * typed pointee; 33 census rows pass one to this_cpu_ptr().
 		 * Only the untyped form is listed: a typed per-cpu memory
