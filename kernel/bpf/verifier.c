@@ -19641,9 +19641,17 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 
 	/*
 	 * Accesses to untrusted PTR_TO_MEM are done through probe
-	 * instructions, hence no need to track offsets.
+	 * instructions, hence no need to track offsets. An untrusted
+	 * PTR_TO_BTF_ID has no such short-circuit today, so it reaches the
+	 * sanity test below with a scalar whose minimum is unknown - the word
+	 * the source read out of kernel memory and added to the base - and is
+	 * refused although its own loads are the same fault-handled probe
+	 * reads, where a faulting access yields zero. Track the offset for
+	 * neither: the load carries its own guard, and this arithmetic is the
+	 * source's own `p->field + index` (623 census rows, 11-17, 400 of
+	 * them per-cpu).
 	 */
-	if (base_type(ptr_reg->type) == PTR_TO_MEM && (ptr_reg->type & PTR_UNTRUSTED))
+	if (ptr_reg->type & PTR_UNTRUSTED)
 		return 0;
 
 	switch (base_type(ptr_reg->type)) {
