@@ -19779,7 +19779,17 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 		if (env->prog->aux->ebpfos_component && known) {
 			__mark_reg_unknown(env, dst_reg);
 			dst_reg->address_word = true;
-			break;
+			/* The register is a scalar address word now, so the
+			 * pointer-offset sanity checks below would read its
+			 * cleared bounds: ptr_reg aliases dst_reg in the
+			 * `pointer |= K` form, and its var_off is unknown, so
+			 * smin_value is S64_MIN and every such tag-OR was
+			 * refused with "scalar pointer offset
+			 * -9223372036854775808 is not allowed" right after this
+			 * relaxation accepted it (624 census rows, 11-17).
+			 * A scalar carries no pointer offset to check.
+			 */
+			return 0;
 		}
 		/* bitwise ops on pointers are troublesome, prohibit. */
 		verbose(env, "R%d bitwise operator %s on pointer prohibited\n",
