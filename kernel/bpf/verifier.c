@@ -15931,7 +15931,7 @@ ordinary_helper:
 		mark_reg_known_zero(env, regs, BPF_REG_0);
 		/* An untyped per-cpu argument named no pointee: the result is
 		 * the same cell with no size to bound, which is exactly what
-		 * the mem_size=0 form means (11145). Keep the helper's own
+		 * the mem_size=0 form means (6f62d6e8f). Keep the helper's own
 		 * read-only/nullable flags.
 		 */
 		if (!meta.ret_btf) {
