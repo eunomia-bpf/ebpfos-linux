@@ -216,8 +216,14 @@ struct bpf_verifier_stack_elem {
  * dispatch, whose depth the 16-bit jump sequence bound cuts off; the native
  * function verifies nothing. The bound only sizes the verifier's own work
  * stack, so a component may use the 32-bit one.
+ *
+ * 1,048,577 is a cliff, not a distribution: 111 census rows stop at exactly
+ * this bound + 1 (11-17). Each element is one bpf_verifier_state of about
+ * 168 bytes with shared frames, so four times the depth costs about 350 MB
+ * in the 6 GiB guest that already holds the pin. The recursion the source
+ * wrote still terminates; this only lets the verifier walk it.
  */
-#define BPF_COMPONENT_LIMIT_JMP_SEQ	(1 << 20)
+#define BPF_COMPONENT_LIMIT_JMP_SEQ	(1 << 22)
 #define BPF_COMPLEXITY_LIMIT_STATES	64
 
 #define BPF_GLOBAL_PERCPU_MA_MAX_SIZE  512
