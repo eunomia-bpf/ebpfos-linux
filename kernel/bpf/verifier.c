@@ -11703,14 +11703,18 @@ static const struct bpf_reg_types percpu_btf_ptr_types = {
 		PTR_TO_BTF_ID | MEM_PERCPU,
 		PTR_TO_BTF_ID | MEM_PERCPU | MEM_RCU,
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_TRUSTED,
-		/* this_cpu_ptr() is an offset addition: a NULL per-cpu pointer
-		 * stays NULL and the source tests or dereferences the result on
-		 * its own path. A per-cpu field the source loaded without a
-		 * check is exactly that (305 census rows, 11-17, all
-		 * srcu_struct->srcu_ctrp; another 42 pass a per-cpu field that
-		 * is both unchecked and nullable, `__part_stat_add`'s
-		 * `part->dkstats`). Ordinary nullable objects keep
-		 * the "possibly NULL" refusal, which this set does not reach.
+		/* this_cpu_ptr() is an address addition, and the addition is
+		 * what removes the nullability: on x86-64 arch_raw_cpu_ptr()
+		 * computes this_cpu_off + ptr with this_cpu_off =
+		 * (pcpu_base_addr - __per_cpu_start) + pcpu_unit_offsets[cpu],
+		 * so a NULL per-cpu argument becomes the current CPU's chunk
+		 * base, a mapped address. The source knows this and
+		 * dereferences the result without a null test (648 of 673
+		 * census rows, 11-17, mostly srcu_struct->srcu_ctrp; another
+		 * 42 pass a per-cpu field that is both unchecked and nullable,
+		 * `__part_stat_add`'s `part->dkstats`). Ordinary nullable
+		 * objects keep the "possibly NULL" refusal, which this set
+		 * does not reach.
 		 */
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL,
 		PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | MEM_RCU,
@@ -14886,12 +14890,6 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 {
 	enum bpf_prog_type prog_type = resolve_prog_type(env->prog);
 	bool returns_cpu_specific_alloc_ptr = false;
-	/* this_cpu_ptr() adds the CPU offset to the word it was given: a NULL
-	 * per-cpu pointer stays NULL, so the result keeps the nullability the
-	 * argument had. Without this a dereference the source left unguarded
-	 * would pass as if the pointer were non-NULL.
-	 */
-	bool returns_nullable_percpu = false;
 	const struct bpf_func_proto *fn = NULL;
 	enum bpf_return_type ret_type;
 	enum bpf_type_flag ret_flag;
@@ -15841,9 +15839,6 @@ ordinary_helper:
 			returns_cpu_specific_alloc_ptr = true;
 			env->insn_aux_data[insn_idx].call_with_percpu_alloc_ptr = true;
 		}
-		if (func_id == BPF_FUNC_this_cpu_ptr &&
-		    type_may_be_null(reg->type))
-			returns_nullable_percpu = true;
 		break;
 	}
 	case BPF_FUNC_user_ringbuf_drain:
@@ -15870,8 +15865,6 @@ ordinary_helper:
 	/* update return register (already marked as written above) */
 	ret_type = fn->ret_type;
 	ret_flag = type_flag(ret_type);
-	if (returns_nullable_percpu)
-		ret_flag |= PTR_MAYBE_NULL;
 
 	switch (base_type(ret_type)) {
 	case RET_INTEGER:
