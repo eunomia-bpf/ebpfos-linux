@@ -9210,6 +9210,11 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	struct bpf_reg_state source = *reg;
 	int access_off = off;
 	bool array_access = false;
+	/* True when option A admitted this load because no BTF field view
+	 * covered it. Only such a word is an unnamed kernel address; a word
+	 * inside a field view is that field's value.
+	 */
+	bool outside_field_view = false;
 	int ret;
 
 	/* A checked read-only result grants no write authority, including when
@@ -9366,6 +9371,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		ret = SCALAR_VALUE;
 		btf_id = 0;
 		flag = 0;
+		outside_field_view = true;
 		if (probe_scalar)
 			*probe_scalar = true;
 		note_probe_read_scope(env);
@@ -9492,12 +9498,20 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * kernel supplies; a compiled definition may dereference
 			 * it, as the native function did.
 			 */
-			/* probe_read is the entry-time trust: option B may
-			 * have promoted the register before `source` was taken,
-			 * and the origin is the kernel-supplied word either way.
+			/* Entry-time trust was not the only way such a word
+			 * arrives: option A admits a read from a trusted
+			 * pointer when no field view covers it, and `probe_read`
+			 * is itself only PTR_UNTRUSTED. Testing those two alone
+			 * left an option-A word a plain scalar, so its
+			 * dereference three instructions later was refused with
+			 * "invalid mem access 'scalar'" - 337 census rows whose
+			 * log carries the option-A line (11-17). A word read
+			 * outside every field view is an unnamed kernel address;
+			 * a word inside one is that field's value.
 			 */
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
-			    (probe_read || (source.type & PTR_UNTRUSTED)) &&
+			    (outside_field_view || probe_read ||
+			     (source.type & PTR_UNTRUSTED)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
