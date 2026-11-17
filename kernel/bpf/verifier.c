@@ -9784,7 +9784,8 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 	if (class != BPF_LDX && class != BPF_ST && class != BPF_STX)
 		return;
 	if (!env->allow_ptr_leaks || !env->prog->aux->ebpfos_component ||
-	    base_type(reg->type) != PTR_TO_BTF_ID ||
+	    (base_type(reg->type) != PTR_TO_BTF_ID &&
+	     base_type(reg->type) != PTR_TO_MEM) ||
 	    !(reg->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED)) ||
 	    reg->type & (MEM_USER | MEM_PERCPU | MEM_RCU | MEM_ALLOC | NON_OWN_REF) ||
 	    !btf || !env->prog->aux->func_info)
@@ -9814,7 +9815,15 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 					break;
 				if (coordinate == line->line_col) {
 					reg->type &= ~(PTR_MAYBE_NULL | PTR_UNTRUSTED);
-					reg->type |= PTR_TRUSTED;
+					/* PTR_TRUSTED marks a trusted BTF
+					 * pointer. A PTR_TO_MEM has no such
+					 * modifier: it is trusted by being
+					 * a memory pointer at all, and the
+					 * nullable/untrusted bits above were
+					 * its only refusal.
+					 */
+					if (base_type(reg->type) == PTR_TO_BTF_ID)
+						reg->type |= PTR_TRUSTED;
 					verbose(env, "func#%u relies on verifier option B; name='%s'\n",
 						subprog, bpf_verifier_subprog_name(env, subprog));
 					return;
