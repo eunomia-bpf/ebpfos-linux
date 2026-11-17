@@ -23642,8 +23642,17 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 				merged_type |= MEM_RDONLY;
 			*prev_type = merged_type;
 		} else {
+			/* reg_type_str() writes into one shared buffer, so a
+			 * second call in the same verbose() would print its own
+			 * text twice. Copy the first name out before asking for
+			 * the second (log.c says the same of this function).
+			 */
+			char previous[80];
+
+			strscpy(previous, reg_type_str(env, *prev_type),
+				sizeof(previous));
 			verbose(env, "same insn cannot be used with different pointers (%s vs %s)\n",
-				reg_type_str(env, type), reg_type_str(env, *prev_type));
+				reg_type_str(env, type), previous);
 			return -EINVAL;
 		}
 	}
