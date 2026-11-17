@@ -11930,7 +11930,7 @@ found:
 	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_TRUSTED:
 	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL:
 	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | MEM_RCU:
-	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_TRUSTED:
+	case PTR_TO_BTF_ID | MEM_PERCPU | PTR_MAYBE_NULL | PTR_UNTRUSTED:
 		/* Handled by helper specific checks */
 		break;
 	default:
