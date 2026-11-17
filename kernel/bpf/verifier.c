@@ -20490,12 +20490,26 @@ static void scalar32_min_max_lsh(struct bpf_reg_state *dst_reg,
 static void __scalar64_min_max_lsh(struct bpf_reg_state *dst_reg,
 				   u64 umin_val, u64 umax_val)
 {
-	/* Special case <<32 because it is a common compiler pattern to sign
-	 * extend subreg by doing <<32 s>>32. smin/smax assignments are correct
-	 * because s32 bounds don't flip sign when shifting to the left by
-	 * 32bits.
+	/* A constant left shift of a value that fits in the room above it is
+	 * exact: every v in [smin, smax] satisfies |v| <= 2^(63-u), so
+	 * v << u neither wraps nor changes sign, and the result's range is
+	 * the shifted range. `PERF_METRICS` index construction is exactly
+	 * this (r2 s>>= 6; r2 <<= 3), so its shifted minimum is a real bound;
+	 * collapsing it to S64_MIN lost it, and the next `percpu += index`
+	 * was refused with "register with unbounded min value" (341 census
+	 * rows, 11-17).
 	 */
-	if (umin_val == 32 && umax_val == 32) {
+	if (umin_val == umax_val && umin_val < 63 &&
+	    dst_reg->smin_value >= -(1LL << (63 - umin_val)) &&
+	    dst_reg->smax_value < (1LL << (63 - umin_val))) {
+		dst_reg->smin_value = (s64)((u64)dst_reg->smin_value << umin_val);
+		dst_reg->smax_value = (s64)((u64)dst_reg->smax_value << umin_val);
+	} else if (umin_val == 32 && umax_val == 32) {
+		/* Special case <<32 because it is a common compiler pattern to sign
+		 * extend subreg by doing <<32 s>>32. smin/smax assignments are correct
+		 * because s32 bounds don't flip sign when shifting to the left by
+		 * 32bits.
+		 */
 		dst_reg->smax_value = (s64)dst_reg->s32_max_value << 32;
 		dst_reg->smin_value = (s64)dst_reg->s32_min_value << 32;
 	} else {
