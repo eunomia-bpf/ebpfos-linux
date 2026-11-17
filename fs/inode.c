@@ -401,6 +401,8 @@ void __destroy_inode(struct inode *inode)
 #endif
 	this_cpu_dec(nr_inodes);
 #if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
+	/* destroy_inode already took and NULLed the record under i_lock; this
+	 * covers the filesystems that call __destroy_inode directly. */
 	ebpfos_operations_owner_put(inode->ebpfos_operations);
 	inode->ebpfos_operations = NULL;
 #endif
@@ -411,10 +413,22 @@ static void destroy_inode(struct inode *inode)
 {
 	const struct super_operations *ops = inode->i_sb->s_op;
 #if defined(CONFIG_EBPFOS) && defined(CONFIG_X86_64)
-	struct ebpfos_operations_owner *owner = inode->ebpfos_operations;
 	/* Filesystem teardown can still inspect the inode. Its callback may
-	 * free the inode itself, so retain the independent record locally. */
+	 * free the inode itself, so retain the independent record locally.
+	 *
+	 * The handoff runs under i_lock, which every reader of the field holds
+	 * across its use (d_flags_for_inode resolves the owner there), so a
+	 * reader either finishes with the owner before this NULL is stored or
+	 * reads NULL and resolves nothing. Without this lock the put below
+	 * could free the owner while a reader was still inside the resolve,
+	 * and its slab slot would be reused — the observed fault. A reader
+	 * that arrives later sees NULL and takes the original table.
+	 */
+	struct ebpfos_operations_owner *owner;
+	spin_lock(&inode->i_lock);
+	owner = inode->ebpfos_operations;
 	inode->ebpfos_operations = NULL;
+	spin_unlock(&inode->i_lock);
 #endif
 
 	BUG_ON(!list_empty(&inode->i_lru));
