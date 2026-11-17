@@ -23559,7 +23559,8 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 				merged_type |= MEM_RDONLY;
 			*prev_type = merged_type;
 		} else {
-			verbose(env, "same insn cannot be used with different pointers\n");
+			verbose(env, "same insn cannot be used with different pointers (%s vs %s)\n",
+				reg_type_str(env, type), reg_type_str(env, *prev_type));
 			return -EINVAL;
 		}
 	}
