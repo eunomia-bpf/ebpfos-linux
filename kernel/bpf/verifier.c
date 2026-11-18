@@ -9343,14 +9343,23 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	 * already tests (see the outside_field_view condition below).
 	 */
 	if (off < 0) {
-		/* source_invariant is the same admission one step earlier: the
-		 * line's own source checked this pointer, and option B recorded
-		 * that by clearing PTR_UNTRUSTED. Re-reading reg->type here
-		 * looked for the bit option B removes, so the access it had
-		 * just admitted was refused as untrusted (254 census rows).
+		/* Admission needs the access to be one this verifier already
+		 * trusts to fault-free. Three facts say so:
+		 *
+		 * - PTR_TRUSTED: the pointer itself was walked from a trusted
+		 *   parent and the field inherits trust, so the stock positive
+		 *   path dereferences it without a probe. 558 of census 950's
+		 *   678 negatives print exactly this type at the refusal
+		 *   (trusted_ptr_inode 118, trusted_ptr_list_head 126, ...).
+		 *   Testing only PTR_UNTRUSTED here refused precisely the
+		 *   pointers the verifier had already decided were safe.
+		 * - PTR_UNTRUSTED / probe_read: a fault-guarded load, unchanged.
+		 * - source_invariant: option B admitted this instruction's
+		 *   pointer from the line's own source, and records that by
+		 *   clearing PTR_UNTRUSTED (254 rows).
 		 */
 		if (!(probe_read || source_invariant ||
-		      (reg->type & PTR_UNTRUSTED)) ||
+		      (reg->type & (PTR_UNTRUSTED | PTR_TRUSTED))) ||
 		    atype != BPF_READ ||
 		    value_regno < 0 || type_is_alloc(reg->type)) {
 			verbose(env,
