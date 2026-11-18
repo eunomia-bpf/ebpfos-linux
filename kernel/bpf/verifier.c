@@ -9386,7 +9386,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 */
 			if (size == BPF_REG_SIZE &&
 			    (outside_field_view || probe_read ||
-			     (source.type & PTR_UNTRUSTED)) &&
+			     (source.type & PTR_UNTRUSTED) ||
+			     btf_int_word_field(reg->btf, reg->btf_id, off, size)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
@@ -9599,10 +9600,24 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			 * log carries the option-A line (11-17). A word read
 			 * outside every field view is an unnamed kernel address;
 			 * a word inside one is that field's value.
+			 *
+			 * One field's value is an address all the same: an
+			 * integer member of pointer width that stores one. Native
+			 * stores those in `unsigned long` (rb_node's
+			 * __rb_parent_color with its low flag bits, list and
+			 * hlist heads, page->mapping's tags), and loads through
+			 * them after masking the bits. The field's declared type
+			 * is what distinguishes it, not the function: a full
+			 * word that is exactly one such member is an address, a
+			 * word spanning two members or naming a narrower member
+			 * is a value. Measured on census 950: 555 of its 1,435
+			 * "invalid mem access 'scalar'" rows read such a word
+			 * from a trusted field.
 			 */
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
 			    (outside_field_view || probe_read ||
-			     (source.type & PTR_UNTRUSTED)) &&
+			     (source.type & PTR_UNTRUSTED) ||
+			     btf_int_word_field(reg->btf, reg->btf_id, off, size)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}

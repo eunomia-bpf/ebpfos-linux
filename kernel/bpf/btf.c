@@ -2328,6 +2328,49 @@ bool btf_type_is_scalar_region(const struct btf *btf, u32 type_id,
 {
 	return __btf_scalar_region(btf, type_id, off, size, 0);
 }
+/* True when reading `size` bytes at `off` is exactly one integer member of
+ * this type, so the word read is that field's own value rather than a byte
+ * range spanning several fields. Descends nested structs and arrays with the
+ * same member partition the walk above uses, and never looks at a bitfield:
+ * its bytes are shared with neighbours.
+ */
+static bool __btf_int_word_field(const struct btf *btf, u32 id, u32 off,
+				 u32 size, u32 depth)
+{
+	const struct btf_type *t = btf_type_skip_modifiers(btf, id, &id);
+	u32 i, bytes;
+
+	if (!t || depth >= MAX_RESOLVE_DEPTH)
+		return false;
+	if (btf_type_is_int(t))
+		return off == 0 && !IS_ERR(btf_resolve_size(btf, t, &bytes)) &&
+		       bytes == size;
+	if (!btf_type_is_struct(t))
+		return false;
+	for (i = 0; i < btf_type_vlen(t); i++) {
+		const struct btf_member *m = &btf_type_member(t)[i];
+		const struct btf_type *member;
+		u32 begin;
+
+		if (__btf_member_bitfield_size(t, m))
+			continue;
+		member = btf_type_by_id(btf, m->type);
+		if (!member || IS_ERR(btf_resolve_size(btf, member, &bytes)))
+			continue;
+		begin = __btf_member_bit_offset(t, m) / 8;
+		if (begin > off || (u64)off + size > (u64)begin + bytes)
+			continue;
+		if (__btf_int_word_field(btf, m->type, off - begin, size,
+					 depth + 1))
+			return true;
+	}
+	return false;
+}
+
+bool btf_int_word_field(const struct btf *btf, u32 type_id, u32 off, u32 size)
+{
+	return __btf_int_word_field(btf, type_id, off, size, 0);
+}
 
 /* Match the byte partition for a bounded scalar region across program and
  * kernel BTF. No pointer target contract is imported: actual pointer fields
