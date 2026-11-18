@@ -2338,13 +2338,28 @@ static bool __btf_int_word_field(const struct btf *btf, u32 id, u32 off,
 				 u32 size, u32 depth)
 {
 	const struct btf_type *t = btf_type_skip_modifiers(btf, id, &id);
-	u32 i, bytes;
+	const struct btf_array *array;
+	u32 i, bytes, elem;
 
 	if (!t || depth >= MAX_RESOLVE_DEPTH)
 		return false;
 	if (btf_type_is_int(t))
 		return off == 0 && !IS_ERR(btf_resolve_size(btf, t, &bytes)) &&
 		       bytes == size;
+	/* An element of an integer array is a member like any other: a
+	 * type-erased word is commonly spelled `__u64 opaque[4]`.
+	 */
+	if (btf_type_is_array(t)) {
+		array = btf_type_array(t);
+		if (IS_ERR(btf_resolve_size(btf, btf_type_by_id(btf, array->type),
+					    &bytes)) || !bytes)
+			return false;
+		elem = off / bytes;
+		if (elem >= array->nelems)
+			return false;
+		return __btf_int_word_field(btf, array->type, off % bytes, size,
+					    depth + 1);
+	}
 	if (!btf_type_is_struct(t))
 		return false;
 	for (i = 0; i < btf_type_vlen(t); i++) {
