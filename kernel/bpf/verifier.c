@@ -20936,6 +20936,26 @@ static int maybe_fork_scalars(struct bpf_verifier_env *env, struct bpf_insn *ins
 	return 0;
 }
 
+/* Native masks an address to clear flag bits the pointer format keeps
+ * below the alignment: `rb_parent()` is `__rb_parent_color & ~3`, and
+ * `bpf_token_get_from_fd` reaches `fd_file(f)->private_data` the same
+ * way. Such a mask keeps every bit above the flags, so the result names
+ * an address inside the object the operand named - the same argument
+ * that makes an addend an address. A mask that clears any higher bit can
+ * move the value to a different object and stays a value, and so does a
+ * mask of zero or of all ones.
+ */
+static bool mask_keeps_address(u8 opcode, u64 mask)
+{
+	u64 cleared = ~mask;
+
+	if (opcode != BPF_AND || mask == 0 || mask == ~0ULL)
+		return false;
+	/* Only the low k bits may be cleared: cleared == 2^k - 1. */
+	return (cleared & (cleared + 1)) == 0;
+}
+
+
 /* WARNING: This function does calculations on 64-bit values, but the actual
  * execution may occur on 32-bit values. Therefore, things like bitshifts
  * need extra checks in the 32-bit case.
@@ -20948,12 +20968,15 @@ static int adjust_scalar_min_max_vals(struct bpf_verifier_env *env,
 	u8 opcode = BPF_OP(insn->code);
 	s16 off = insn->off;
 	bool alu32 = (BPF_CLASS(insn->code) != BPF_ALU64);
-	/* Native adds an index to the address it loaded: the sum is still an
-	 * address into the same object, and any other operation yields a
-	 * value, not an address.
+	/* Native adds an index to the address it loaded, and masks one to
+	 * clear the flag bits its pointer format keeps below the alignment:
+	 * both name an address inside the same object, and any other
+	 * operation yields a value, not an address.
 	 */
-	bool address = dst_reg->address_word &&
-		       (opcode == BPF_ADD || opcode == BPF_SUB) && !alu32;
+	bool address = dst_reg->address_word && !alu32 &&
+		       (opcode == BPF_ADD || opcode == BPF_SUB ||
+			(tnum_is_const(src_reg.var_off) &&
+			 mask_keeps_address(opcode, src_reg.var_off.value)));
 	int ret;
 
 	if (!is_safe_to_compute_dst_reg_range(insn, &src_reg)) {
