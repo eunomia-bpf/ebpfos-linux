@@ -9395,7 +9395,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			if (size == BPF_REG_SIZE &&
 			    (outside_field_view || probe_read ||
 			     (source.type & PTR_UNTRUSTED) ||
-			     btf_int_word_field(reg->btf, reg->btf_id, off, size)) &&
+			     btf_int_word_field(source.btf, source.btf_id, off, size)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}
@@ -9625,7 +9625,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 			if (atype == BPF_READ && size == BPF_REG_SIZE &&
 			    (outside_field_view || probe_read ||
 			     (source.type & PTR_UNTRUSTED) ||
-			     btf_int_word_field(reg->btf, reg->btf_id, off, size)) &&
+			     btf_int_word_field(source.btf, source.btf_id, off, size)) &&
 			    env->prog->aux->ebpfos_component)
 				regs[value_regno].address_word = true;
 		}

@@ -2337,10 +2337,18 @@ bool btf_type_is_scalar_region(const struct btf *btf, u32 type_id,
 static bool __btf_int_word_field(const struct btf *btf, u32 id, u32 off,
 				 u32 size, u32 depth)
 {
-	const struct btf_type *t = btf_type_skip_modifiers(btf, id, &id);
 	const struct btf_array *array;
+	const struct btf_type *t;
 	u32 i, bytes, elem;
 
+	/* btf_type_by_id() walks base_btf for an id below start_id, so a NULL
+	 * btf or id 0 dereferences through it before btf_type_skip_modifiers()
+	 * can return NULL. Callers pass the register's btf, which a PTR_TO_MEM
+	 * or a just-clobbered register can leave unset.
+	 */
+	if (!btf || !id)
+		return false;
+	t = btf_type_skip_modifiers(btf, id, &id);
 	if (!t || depth >= MAX_RESOLVE_DEPTH)
 		return false;
 	if (btf_type_is_int(t))
