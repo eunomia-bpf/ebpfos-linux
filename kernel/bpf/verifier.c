@@ -23676,7 +23676,30 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 		 * src_reg == stack|map in some other branch.
 		 * Reject it.
 		 */
-		if (allow_trust_mismatch &&
+		/* A compiled definition reaches one load through two kinds of
+		 * source. `sg_free_table`'s insn 7 reads through a walked
+		 * `struct scatterlist *` on entry and, from the back edge,
+		 * through the address word that load itself returned; Native
+		 * performs one load either way, and both paths end at the same
+		 * fault-handled access, so the conflict is not a difference in
+		 * the instruction.
+		 *
+		 * A load's source is a scalar only through check_mem_access's
+		 * address-word branch (10196), the only branch that accepts one,
+		 * which is component-only. The pointer side keeps the recorded
+		 * type because fixups needs it, and both types this accepts
+		 * reach the same fault-handled conversion there; a pointer type
+		 * fixups rewrites some other way (PTR_TO_CTX) is left to the
+		 * stock rule below. Exactly one side is a scalar here, since
+		 * two equal types are not a mismatch.
+		 */
+		if (env->prog->aux->ebpfos_component &&
+		    (type == SCALAR_VALUE || *prev_type == SCALAR_VALUE) &&
+		    (is_ptr_to_mem_or_btf_id(type) ||
+		     is_ptr_to_mem_or_btf_id(*prev_type))) {
+			if (type != SCALAR_VALUE)
+				*prev_type = type;
+		} else if (allow_trust_mismatch &&
 		    is_ptr_to_mem_or_btf_id(type) &&
 		    is_ptr_to_mem_or_btf_id(*prev_type)) {
 			/*
