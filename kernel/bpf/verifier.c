@@ -9375,6 +9375,20 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 						     &source);
 			if (ret)
 				return ret;
+			/* The same rule the positive path applies below: a full
+			 * word read from kernel memory outside every field view
+			 * is an address the kernel supplies, so a compiled
+			 * definition may dereference it as Native did. This
+			 * branch returns before that code, and without this the
+			 * row it just admitted stops one instruction later at
+			 * "invalid mem access 'scalar'" - measured on
+			 * part_inflight_show, batch-000 object-0_1008.o.
+			 */
+			if (size == BPF_REG_SIZE &&
+			    (outside_field_view || probe_read ||
+			     (source.type & PTR_UNTRUSTED)) &&
+			    env->prog->aux->ebpfos_component)
+				regs[value_regno].address_word = true;
 		}
 		return 0;
 	}
