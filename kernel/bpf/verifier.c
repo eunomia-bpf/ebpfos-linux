@@ -9332,9 +9332,18 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	 * stock path makes it BPF_PROBE_MEM; a component relies on the source
 	 * invariant Native relied on). Keep the walk's verdict when it has one,
 	 * otherwise accept the scalar as option A does above the struct.
+	 *
+	 * The trust must be the one the access arrived with. Option B strips
+	 * PTR_UNTRUSTED and adds PTR_TRUSTED in use_source_invariant(), which
+	 * runs before this point, so re-reading reg->type here tests the state
+	 * *after* that rewrite: 883 of the 1,002 census rows in this family
+	 * carry the option-B line and none of them satisfied it. `probe_read`
+	 * is the same fact but captured at access time, which is what option A
+	 * already tests (see the outside_field_view condition below).
 	 */
 	if (off < 0) {
-		if (!(reg->type & PTR_UNTRUSTED) || atype != BPF_READ ||
+		if (!(probe_read || (reg->type & PTR_UNTRUSTED)) ||
+		    atype != BPF_READ ||
 		    value_regno < 0 || type_is_alloc(reg->type)) {
 			verbose(env,
 				"R%d is ptr_%s invalid negative access: off=%d\n",
