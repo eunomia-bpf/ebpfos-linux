@@ -9225,7 +9225,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
 				   enum bpf_access_type atype,
-				   int value_regno, bool probe_read, bool *probe_scalar)
+				   int value_regno, bool probe_read, bool *probe_scalar,
+				   bool source_invariant)
 {
 	struct bpf_reg_state *reg = regs + regno;
 	const struct btf_type *t = btf_type_by_id(reg->btf, reg->btf_id);
@@ -9342,7 +9343,14 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	 * already tests (see the outside_field_view condition below).
 	 */
 	if (off < 0) {
-		if (!(probe_read || (reg->type & PTR_UNTRUSTED)) ||
+		/* source_invariant is the same admission one step earlier: the
+		 * line's own source checked this pointer, and option B recorded
+		 * that by clearing PTR_UNTRUSTED. Re-reading reg->type here
+		 * looked for the bit option B removes, so the access it had
+		 * just admitted was refused as untrusted (254 census rows).
+		 */
+		if (!(probe_read || source_invariant ||
+		      (reg->type & PTR_UNTRUSTED)) ||
 		    atype != BPF_READ ||
 		    value_regno < 0 || type_is_alloc(reg->type)) {
 			verbose(env,
@@ -9879,7 +9887,7 @@ static void find_source_unchecked(struct bpf_verifier_env *env, const struct btf
  * conditional on Linux's source invariant, never a capability from a type.
  * Existing managed lifetimes, address spaces and memory bounds stay separate.
  */
-static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_state *reg)
+static bool use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_state *reg)
 {
 	const struct btf *btf = env->prog->aux->btf;
 	const struct bpf_line_info *line;
@@ -9888,27 +9896,27 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 	u8 class = BPF_CLASS(env->prog->insnsi[env->insn_idx].code);
 
 	if (class != BPF_LDX && class != BPF_ST && class != BPF_STX)
-		return;
+		return false;
 	if (!env->allow_ptr_leaks || !env->prog->aux->ebpfos_component ||
 	    (base_type(reg->type) != PTR_TO_BTF_ID &&
 	     base_type(reg->type) != PTR_TO_MEM) ||
 	    !(reg->type & (PTR_MAYBE_NULL | PTR_UNTRUSTED)) ||
 	    reg->type & (MEM_USER | MEM_PERCPU | MEM_RCU | MEM_ALLOC | NON_OWN_REF) ||
 	    !btf || !env->prog->aux->func_info)
-		return;
+		return false;
 	if (!env->source_unchecked_found)
 		find_source_unchecked(env, btf);
 	condition = env->subprog_info[subprog].source_unchecked;
 	line = bpf_find_linfo(env->prog, env->insn_idx);
 	if (IS_ERR_OR_NULL(condition) || !line)
-		return;
+		return false;
 	filename = btf_name_by_offset(btf, line->file_name_off);
 	while (*condition) {
 		const char *end = strchrnul(condition, ';');
 		const char *split = strchr(condition, '|');
 
 		if (!split || split >= end)
-			return;
+			return false;
 		if (strlen(filename) == split - condition &&
 		    !strncmp(filename, condition, split - condition)) {
 			const char *number = split + 1;
@@ -9932,13 +9940,14 @@ static void use_source_invariant(struct bpf_verifier_env *env, struct bpf_reg_st
 						reg->type |= PTR_TRUSTED;
 					verbose(env, "func#%u relies on verifier option B; name='%s'\n",
 						subprog, bpf_verifier_subprog_name(env, subprog));
-					return;
+					return true;
 				}
 				number = next + (next < end && *next == ',');
 			}
 		}
 		condition = end + !!*end;
 	}
+	return false;
 }
 
 static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regno,
@@ -9949,9 +9958,16 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
 	bool probe_read = reg->type & PTR_UNTRUSTED;
+	bool source_invariant;
 	int size, err = 0;
 
-	use_source_invariant(env, reg);
+	/* use_source_invariant() clears PTR_UNTRUSTED from the register when
+	 * the line's own source checked it. Its answer has to travel with
+	 * probe_read: the negative-offset branch used to re-read reg->type and
+	 * refused the access option B had just admitted, because the bit it
+	 * looked for was the one option B cleared (254 census rows, 11-18).
+	 */
+	source_invariant = use_source_invariant(env, reg);
 	size = bpf_size_to_bytes(bpf_size);
 	if (size < 0)
 		return size;
@@ -10200,7 +10216,8 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	} else if (base_type(reg->type) == PTR_TO_BTF_ID &&
 		   !type_may_be_null(reg->type)) {
 		err = check_ptr_to_btf_access(env, regs, regno, off, size, t,
-					      value_regno, probe_read, probe_scalar);
+					      value_regno, probe_read, probe_scalar,
+					      source_invariant);
 	} else if (reg->type == CONST_PTR_TO_MAP) {
 		err = check_ptr_to_map_access(env, regs, regno, off, size, t,
 					      value_regno);
@@ -10717,7 +10734,8 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 				zero_size_allowed, access_type, meta);
 	case PTR_TO_BTF_ID:
 		return check_ptr_to_btf_access(env, regs, regno, 0,
-					       access_size, access_type, -1, false, NULL);
+					       access_size, access_type, -1, false, NULL,
+					       false);
 	case PTR_TO_CTX:
 		/* Only permit reading or writing syscall context using helper calls. */
 		if (is_var_ctx_off_allowed(env->prog)) {
