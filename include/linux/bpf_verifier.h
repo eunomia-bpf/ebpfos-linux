@@ -712,8 +712,6 @@ struct bpf_insn_aux_data {
 	 */
 	u32 rcu_call_seen:1;
 	u32 rcu_call_unprotected:1;
-	/* A global call was visited while the caller held modeled resources. */
-	u32 native_call_resource_held:1;
 	/* A compiled definition dereferenced an address word, so this load
 	 * needs the JIT's fault-handled mode. Set while checking the load.
 	 */
@@ -852,8 +850,6 @@ struct bpf_subprog_info {
 	u8 arg_cnt:4;
 	/* Verification used the runner's implicit RCU critical section. */
 	bool requires_rcu: 1;
-	/* A visited ordinary native call, closed over local calls after checking. */
-	bool has_native_call: 1;
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
 	bool protocol_used: 1;
