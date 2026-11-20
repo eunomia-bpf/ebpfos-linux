@@ -3835,6 +3835,7 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 	int ctx_cookie_off = offsetof(struct bpf_tramp_run_ctx, bpf_cookie);
 	struct bpf_prog *p = l->link.prog;
 	u64 cookie = l->cookie;
+	bool check_return = p->expected_attach_type != BPF_TRACE_REPLACE;
 
 	/* mov rdi, cookie */
 	emit_mov_imm64(&prog, BPF_REG_1, (long) cookie >> 32, (u32) (long) cookie);
@@ -3864,10 +3865,12 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 	/* if (__bpf_prog_enter*(prog) == 0)
 	 *	goto skip_exec_of_prog;
 	 */
-	EMIT3(0x48, 0x85, 0xC0);  /* test rax,rax */
-	/* emit 2 nops that will be replaced with JE insn */
-	jmp_insn = prog;
-	emit_nops(&prog, 2);
+	if (check_return) {
+		EMIT3(0x48, 0x85, 0xC0);  /* test rax,rax */
+		/* emit 2 nops that will be replaced with JE insn */
+		jmp_insn = prog;
+		emit_nops(&prog, 2);
+	}
 
 	/* arg1: lea rdi, [rbp - stack_size] */
 	if (!is_imm8(-stack_size))
@@ -3895,8 +3898,10 @@ static int invoke_bpf_prog(const struct btf_func_model *m, u8 **pprog,
 		save_trampoline_ret(&prog, m);
 
 	/* replace 2 nops with JE insn, since jmp target is known */
-	jmp_insn[0] = X86_JE;
-	jmp_insn[1] = prog - jmp_insn - 2;
+	if (check_return) {
+		jmp_insn[0] = X86_JE;
+		jmp_insn[1] = prog - jmp_insn - 2;
+	}
 
 	/* arg1: mov rdi, progs[i] */
 	emit_mov_imm64(&prog, BPF_REG_1, (long) p >> 32, (u32) (long) p);
