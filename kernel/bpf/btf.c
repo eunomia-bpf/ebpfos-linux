@@ -8672,9 +8672,8 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			 * No module lifetime is borrowed by a permanent result.
 			 */
 			id = btf_get_ptr_to_btf_id(log, -1, btf, result, NULL);
-			if (id < 0)
-				return id;
-			sub->readonly_result_btf_id = id;
+			if (id >= 0)
+				sub->readonly_result_btf_id = id;
 		}
 	}
 	{
