@@ -485,7 +485,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   bool call_sites = false, canonical_nop = false, ftrace = false;
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
-  if (!function || !btf_type_is_func(function)) goto fail;
   address = ebpfos_native_function(btf, entry->native_function, set->source_module);
   
   ip = address;
