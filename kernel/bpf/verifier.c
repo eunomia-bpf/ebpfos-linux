@@ -3348,8 +3348,7 @@ static bool native_kop_object(const struct bpf_prog *prog,
 	bool text = false;
 	u32 i;
 
-	if (!IS_ENABLED(CONFIG_X86_64) || !prog->aux->ebpfos_component ||
-	    !bpf_native_seq_insn(insn))
+	if (!IS_ENABLED(CONFIG_X86_64) || !bpf_native_seq_insn(insn))
 		return false;
 	seq = bpf_native_seq_get(prog, insn->imm);
 	if (!seq || (!identity && seq->gotos_count &&
@@ -5967,7 +5966,7 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 		    !bpf_pseudo_kfunc_call(insn) && !bpf_pseudo_kop_call(insn))
 			continue;
 
-		if (!env->bpf_capable) {
+		if (!env->bpf_capable && !bpf_pseudo_kop_call(insn)) {
 			verbose(env, "loading/calling other bpf or kernel functions are allowed for CAP_BPF and CAP_SYS_ADMIN\n");
 			return -EPERM;
 		}
