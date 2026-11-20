@@ -40,12 +40,6 @@ static unsigned long entry_native_location(unsigned long address, bool *canonica
  return address + offset;
 }
 
-static bool entry_module_readonly(struct module *module, unsigned long begin, size_t size)
-{
- return size && begin + size >= begin &&
-  within_module_mem_type(begin, module, MOD_RODATA) &&
-  within_module_mem_type(begin + size - 1, module, MOD_RODATA);
-}
 static unsigned long entry_module_native_location(struct module *module, unsigned long address,
  bool *canonical_nop)
 {
@@ -53,28 +47,19 @@ static unsigned long entry_module_native_location(struct module *module, unsigne
  const void *const *table;
  const u8 *offsets;
  u32 count, i;
- u8 offset, endbr[4];
- static const u8 expected[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
+ u8 offset;
  table_symbol = find_kallsyms_symbol_value(module, "ebpfos_native_entry_functions");
  count_symbol = find_kallsyms_symbol_value(module, "ebpfos_native_entry_function_count");
  offsets_symbol = find_kallsyms_symbol_value(module, "ebpfos_native_entry_offsets");
- if (!entry_module_readonly(module, table_symbol, sizeof(table)) ||
-     !entry_module_readonly(module, count_symbol, sizeof(count)) ||
-     !entry_module_readonly(module, offsets_symbol, sizeof(offsets))) return 0;
+ if (!table_symbol || !count_symbol || !offsets_symbol) return 0;
  memcpy(&table, (void *)table_symbol, sizeof(table));
  memcpy(&count, (void *)count_symbol, sizeof(count));
  memcpy(&offsets, (void *)offsets_symbol, sizeof(offsets));
- if (!entry_module_readonly(module, (unsigned long)table, count * sizeof(*table)) ||
-     !entry_module_readonly(module, (unsigned long)offsets, count)) return 0;
  for (i = 0; i < count; ++i) if ((unsigned long)table[i] == address) break;
  if (i == count) return 0;
  offset = offsets[i];
  *canonical_nop = offset & ENTRY_NATIVE_CANONICAL_NOP;
  offset &= ENTRY_NATIVE_OFFSET_MASK;
- if (offset && offset != sizeof(expected)) return 0;
- if (offset && (copy_from_kernel_nofault(endbr, (void *)address, sizeof(endbr)) ||
-                memcmp(endbr, expected, sizeof(endbr)))) return 0;
- if (IS_ENABLED(CONFIG_KPROBES) && !within_kprobe_blacklist(address)) return 0;
  return address + offset;
 }
 

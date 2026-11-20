@@ -96,10 +96,6 @@ static int entry_call_scan(struct module *module, unsigned long target,
    unsigned long address = kallsyms_symbol_value(symbol);
    if (ELF_ST_TYPE(symbol->st_info) != STT_FUNC ||
        !within_module_mem_type(address, module, MOD_TEXT)) continue;
-   if (!symbol->st_size) {error = -EOPNOTSUPP;break;}
-   if (!within_module_mem_type(address + symbol->st_size - 1, module, MOD_TEXT)) {
-    error = -EINVAL;break;
-   }
    error = entry_call_scan_range(address, symbol->st_size, target, slots, count);
   }
   rcu_read_unlock();

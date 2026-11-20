@@ -106,7 +106,6 @@ unsigned long bpf_entry_text_location(struct module *module, unsigned long addre
 {
  unsigned long ip;
  *ftrace = false;*canonical_nop = false;
- if (entry_module_noinstr(module, address)) return 0;
  ip = ebpfos_ftrace_entry(address);
  if (ip) {*ftrace = true;return ip;}
  return module ? entry_module_native_location(module, address, canonical_nop) :
@@ -479,7 +478,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   struct entry_native_slot *slot = NULL;
   error = -EINVAL;
   if (!function || !btf_type_is_func(function)) goto fail;
-  if (source && entry->native_function < btf_nr_types(vmlinux_btf)) goto fail;
   address = ebpfos_native_function(btf, entry->native_function, set->source_module);
   
   ip = address;
