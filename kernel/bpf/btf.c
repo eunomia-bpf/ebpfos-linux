@@ -9087,7 +9087,7 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
 {
  const struct btf_type *p = btf_type_skip_modifiers(btf, id, NULL), *t;
  enum bpf_type_flag flags = 0;
- u32 size;
+ u32 size = 0;
  int kernel_id;
  memset(arg, 0, sizeof(*arg));
  btf_pointer_flags(btf, p->type, &flags, NULL);
@@ -9103,7 +9103,7 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
   arg->arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | flags;
   arg->btf_id = kernel_id;
  } else {
-  if (IS_ERR(btf_resolve_size(btf, t, &size)) || !size) return -EOPNOTSUPP;
+  btf_resolve_size(btf, t, &size);
   arg->arg_type = ARG_PTR_TO_MEM | flags;
   arg->mem_size = size;
  }
