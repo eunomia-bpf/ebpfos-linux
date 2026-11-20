@@ -92,4 +92,3 @@ out:
 	free(fields);
 	return NULL;
 }
-

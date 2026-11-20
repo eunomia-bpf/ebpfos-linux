@@ -24629,35 +24629,8 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 	return 0;
 }
 
-/* Plain integer cells and frozen untyped arrays carry no pointer, lifetime
- * or field-range fact.
- * They keep stock map-value semantics and can be shared by independently
- * checked component entries and retained generations. Provider records keep
- * their existing exclusive-owner rule.
- */
-static bool plain_data_map(const struct bpf_map *map)
-{
- const struct btf_type *type;
- const struct btf_var_secinfo *cell;
- if (map->map_type != BPF_MAP_TYPE_ARRAY || map->record)
-  return false;
- if (!map->btf)
-  return bpf_map_is_rdonly(map);
- type = btf_type_by_id(map->btf, map->btf_value_type_id);
- if (type && BTF_INFO_KIND(type->info) == BTF_KIND_DATASEC) {
-  if (btf_type_vlen(type) != 1) return false;
-  cell = btf_type_var_secinfo(type);
-  if (cell->offset || cell->size != map->value_size) return false;
-  type = btf_type_by_id(map->btf, cell->type);
-  if (!type || !btf_type_is_var(type)) return false;
-  type = btf_type_skip_modifiers(map->btf, type->type, NULL);
- }
- return type && btf_type_is_int(type) && type->size == map->value_size &&
-  !btf_int_offset(type) && btf_int_bits(type) == type->size * 8;
-}
 static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 {
- bool component = env->prog->aux->ebpfos_component && !plain_data_map(map);
 	int i, err;
 
 	/* check whether we recorded this map already */

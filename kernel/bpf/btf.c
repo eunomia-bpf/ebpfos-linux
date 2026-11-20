@@ -9110,30 +9110,6 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
  return 0;
 }
 
-/* A bare native caller has no BPF call-site checker. It can enter a
- * record-pointer contract only when its BTF fields already declare non-NULL.
- * Exact native/compiled layout matching preserves qualifiers and pointee types.
- */
-bool btf_native_record_entry_contract(struct btf *btf, u32 id)
-{
- const struct btf_type *t = btf_type_skip_modifiers(btf, id, NULL);
- u32 size;
- if (!t || IS_ERR(btf_resolve_size(btf, t, &size))) return false;
- for (u32 off = 0; off < size; off += 8) {
-  struct bpf_subprog_arg_info arg;
-  struct bpf_verifier_log log = {};
-  enum bpf_type_flag flags = 0;
-  u32 pointer;
-  bool nullable;
-  if (btf_native_pointer_word(btf, id, off, &pointer)) return false;
-  if (!pointer) continue;
-  t = btf_type_skip_modifiers(btf, pointer, NULL);
-  btf_pointer_flags(btf, t->type, &flags, &nullable);
-  if (nullable || btf_native_pointer_arg(btf, pointer, &arg, &log)) return false;
- }
- return true;
-}
-
 /* Decode the same argument contract used at stock global verification.
  * This models loaded BTF only; no verifier analysis is rerun at publication.
  */

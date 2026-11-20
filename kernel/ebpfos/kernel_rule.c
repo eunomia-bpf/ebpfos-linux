@@ -436,33 +436,6 @@ static const struct bpf_link_ops kernel_rule_link_ops = {
  .release = rule_release, .dealloc = rule_dealloc, .detach = rule_detach,
  .update_prog = rule_update, .fill_link_info = rule_info, .show_fdinfo = rule_fdinfo,
 };
-static bool rule_targets_overlap(const struct rule_generation *generation)
-{
- struct kernel_rule_link *owner;
- u32 i, j;
- lockdep_assert_held(&rule_mutex);
- list_for_each_entry(owner, &rule_links, node) {
-  /* Disjoint cgroup subtrees cannot select either other's mappings.
-   * The FD scope is enforced by the cold resolver, independently of the
-   * policy program, and is retained unchanged across program updates. */
-#ifdef CONFIG_CGROUPS
-  if (generation->scope && owner->generation->scope &&
-      !cgroup_is_descendant(generation->scope, owner->generation->scope) &&
-      !cgroup_is_descendant(owner->generation->scope, generation->scope)) continue;
-#endif
-  for (i = 0; i < generation->count; ++i)
-   for (j = 0; j < owner->generation->count; ++j)
-    if (
-#ifdef CONFIG_EBPFOS_AUTOBIND
-        ebpfos_ptview_overlap(generation->versions[i].view, owner->generation->versions[j].view) ||
-        ebpfos_rule_task_operations_check(generation->versions[i].tasks, owner->generation->versions[j].operations) ||
-        ebpfos_rule_task_operations_check(owner->generation->versions[j].tasks, generation->versions[i].operations) ||
-#endif
-        bpf_operations_overlap(generation->versions[i].operations, owner->generation->versions[j].operations) ||
-        ebpfos_rule_task_overlap(generation->versions[i].tasks, owner->generation->versions[j].tasks)) return true;
- }
- return false;
-}
 int bpf_kernel_rule_link_create(const union bpf_attr *attr)
 {
  struct bpf_kernel_rule_version *versions;
