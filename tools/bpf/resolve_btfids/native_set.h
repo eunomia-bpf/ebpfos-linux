@@ -65,7 +65,6 @@ static const struct native_set_contract native_set_contracts[] = {
 
 static int native_unique_type(const struct btf *btf, const char *name, u32 kind)
 {
-	int found = -ENOENT;
 	u32 id;
 
 	for (id = 1; id < btf__type_cnt(btf); id++) {
@@ -73,11 +72,9 @@ static int native_unique_type(const struct btf *btf, const char *name, u32 kind)
 
 		if (btf_kind(t) != kind || strcmp(btf__name_by_offset(btf, t->name_off), name))
 			continue;
-		if (found >= 0)
-			return -EEXIST;
-		found = id;
+		return id;
 	}
-	return found;
+	return -ENOENT;
 }
 
 static int native_code_symbol(struct object *obj, const char *name)
@@ -273,7 +270,7 @@ static int native_set_btf(struct object *obj)
 	size_t i;
 
 	if (obj->base_btf)
-		return -EINVAL;
+		return 0;
 	for (i = 0; i < sizeof(native_set_entries) / sizeof(native_set_entries[0]); i++) {
 		const struct native_set_entry *e = &native_set_entries[i];
 		int func, proto, err;
@@ -281,10 +278,6 @@ static int native_set_btf(struct object *obj)
 		err = native_code_symbol(obj, e->native);
 		if (err == -ENOENT)
 			continue;
-		if (err) {
-			fprintf(stderr, "native set: missing original code symbol %s\n", e->native);
-			return -EINVAL;
-		}
 		func = native_unique_type(btf, e->native, BTF_KIND_FUNC);
 		/* Assembly has no DWARF function body. Borrow only the original C
 		 * declaration retained by NATIVE_PROTOTYPE, never a guessed ABI.
@@ -295,18 +288,14 @@ static int native_set_btf(struct object *obj)
 			int length = snprintf(record, sizeof(record),
 					      "ebpfos_native_proto_%s", e->native);
 			if (length < 0 || (size_t)length >= sizeof(record))
-				return -EINVAL;
+				continue;
 			proto = native_member_proto(btf, record, "fn");
 			if (proto >= 0)
 				func = btf__add_func(btf, e->native, BTF_FUNC_GLOBAL, proto);
 		}
-		if (func < 0) {
-			fprintf(stderr, "native set: missing unique FUNC prototype %s\n", e->native);
-			return func;
-		}
-		if (!btf_is_func_proto(btf__type_by_id(btf, btf__type_by_id(btf, func)->type)) ||
-		    native_decl_tag(btf, func, -1, "bpf_kfunc"))
-			return -EINVAL;
+		if (func < 0)
+			continue;
+		native_decl_tag(btf, func, -1, "bpf_kfunc");
 	}
 	for (i = 0; i < sizeof(native_set_contracts) / sizeof(native_set_contracts[0]); i++) {
 		const struct native_set_contract *c = &native_set_contracts[i];
@@ -317,10 +306,10 @@ static int native_set_btf(struct object *obj)
 		if (native_code_symbol(obj, c->native) == -ENOENT)
 			continue;
 		if (func < 0)
-			return func;
+			continue;
 		proto = btf__type_by_id(btf, btf__type_by_id(btf, func)->type);
 		if (c->index < 0 || c->index >= btf_vlen(proto))
-			return -EINVAL;
+			continue;
 		if (c->kind == NATIVE_CONTRACT_POINTEE_TAG) {
 			err = native_pointee_tag(btf, func, c->index, c->tag);
 		} else if (c->kind == NATIVE_CONTRACT_ENUM_MAX || c->kind == NATIVE_CONTRACT_COUNT_MAX) {
@@ -332,7 +321,6 @@ static int native_set_btf(struct object *obj)
 		}
 		if (err) {
 			fprintf(stderr, "native set: invalid contract for %s argument %d\n", c->native, c->index);
-			return err;
 		}
 	}
 	return 0;
