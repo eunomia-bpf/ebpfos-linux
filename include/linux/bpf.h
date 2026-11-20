@@ -1862,8 +1862,6 @@ struct bpf_prog_aux {
 	/* Cold native bindings must supply any context assumed by verification. */
 	bool requires_rcu;
 	u32 ebpfos_load_insn_cnt;
-	struct bpf_ebpfos_field_access *ebpfos_field_accesses;
-	u32 ebpfos_field_access_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
 	bool ebpfos_kop_requirements_valid;
 	/* A terminal KOperation may be JIT-compiled but not test-run unadmitted. */

@@ -2889,15 +2889,9 @@ static int bpf_prog_mark_insn_arrays_ready(struct bpf_prog *prog)
  */
 static int bpf_native_prog_load(union bpf_attr *attr)
 {
- union bpf_attr allowed = {};
  struct bpf_prog *prog;
  int err;
  
- allowed.prog_type = attr->prog_type;
- allowed.expected_attach_type = attr->expected_attach_type;
- allowed.attach_btf_obj_fd = attr->attach_btf_obj_fd;
- allowed.attach_btf_id = attr->attach_btf_id;
- memcpy(allowed.prog_name, attr->prog_name, sizeof(allowed.prog_name));
  prog = bpf_prog_alloc(bpf_prog_size(0), GFP_USER);
  if (!prog) return -ENOMEM;
  prog->aux->user = get_current_user();
@@ -2936,10 +2930,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	struct btf *attach_btf = NULL;
 	struct bpf_token *token = NULL;
 	bool bpf_cap;
-	size_t field_access_bytes;
-		check_mul_overflow((size_t)attr->ebpfos_field_access_cnt,
-			       sizeof(struct bpf_ebpfos_field_access),
-			       &field_access_bytes);
 	int err;
 	char license[128];
 
@@ -2948,15 +2938,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (type == BPF_PROG_TYPE_NATIVE) {
 		return bpf_native_prog_load(attr);
 	}
-	if (attr->prog_flags & BPF_F_TRUSTED_KERNEL) {
-		/* Like loading native modules, this grants kernel execution,
-		 * not a delegated BPF token privilege or a safety guarantee.
-		 */
-		
-	} 	/* This is load metadata, copied with kvmalloc rather than into a page.
-	 * Retain the complete per-function declarations; an incomplete prefix
-	 * cannot describe a component's source write authority.
-	 */
 
 	if (attr->prog_flags & ~(BPF_F_STRICT_ALIGNMENT |
 				 BPF_F_ANY_ALIGNMENT |
@@ -3091,22 +3072,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->aux->attach_btf = attach_btf;
 	prog->aux->attach_btf_id = attr->attach_btf_id;
 	prog->aux->dst_prog = dst_prog;
-	if (attr->ebpfos_field_access_cnt) {
-		struct bpf_ebpfos_field_access *fields;
-
-		fields = kvmemdup_bpfptr(make_bpfptr(attr->ebpfos_field_accesses,
-						  uattr.is_kernel),
-					 field_access_bytes);
-		if (IS_ERR(fields)) {
-			err = PTR_ERR(fields);
-			goto free_prog;
-		}
-		for (u32 i = 0; i < attr->ebpfos_field_access_cnt; i++) {
-			
-		}
-		prog->aux->ebpfos_field_accesses = fields;
-		prog->aux->ebpfos_field_access_cnt = attr->ebpfos_field_access_cnt;
-	}
 	prog->aux->dev_bound = !!attr->prog_ifindex;
 	prog->aux->xdp_has_frags = attr->prog_flags & BPF_F_XDP_HAS_FRAGS;
 
