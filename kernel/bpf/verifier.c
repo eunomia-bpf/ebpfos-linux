@@ -24588,6 +24588,7 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 		case BPF_MAP_TYPE_ARENA:
 		case BPF_MAP_TYPE_INSN_ARRAY:
 		case BPF_MAP_TYPE_PROG_ARRAY:
+		case BPF_MAP_TYPE_OPERATIONS:
 			break;
 		default:
 			verbose(env,
