@@ -13807,9 +13807,6 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			sub->native_abi.args[0].size, BPF_WRITE);
 	}
 	env->insn_aux_data[*insn_idx].returns_two_regs = bpf_subprog_returns_two_regs(env, subprog);
-	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
-	if (!state->active_rcu_locks && !state->active_locks)
-		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
 	/* An independent byte-memory summary clobbers reachable stack values.
 	 * Select body verification when reachable stack storage holds pointer
 	 * spills that the summary would erase. BTF only selects operands.

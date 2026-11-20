@@ -707,11 +707,6 @@ struct bpf_insn_aux_data {
 	u32 indirect_target:1; /* if it is an indirect jump target */
 	/* Validated exception branch; copied with its instruction by patch/remove. */
 	u32 kop_call_fault_branch:1;
-	/* Native-entry bookkeeping only: all visits must supply explicit RCU.
-	 * These bits never change a verifier state or a verification decision.
-	 */
-	u32 rcu_call_seen:1;
-	u32 rcu_call_unprotected:1;
 	/* A compiled definition dereferenced an address word, so this load
 	 * needs the JIT's fault-handled mode. Set while checking the load.
 	 */
