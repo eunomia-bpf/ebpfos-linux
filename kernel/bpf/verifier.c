@@ -18214,7 +18214,6 @@ static int check_native_function_call(struct bpf_verifier_env *env, struct btf *
                                       const struct btf_type *declaration,
                                       struct bpf_kfunc_desc *desc)
 {
-	struct bpf_verifier_state *state = env->cur_state;
 	u32 owner = cur_func(env)->subprogno;
 	int err;
 
@@ -18246,19 +18245,8 @@ static int check_callx(struct bpf_verifier_env *env, const struct bpf_insn *insn
 	const struct btf_type *prototype, *declaration;
 	int err;
 
-	/* Unlike a registered kfunc, a field prototype does not carry a
-	 * target allow-list or destructive-call permission. Keep this native
-	 * call facility restricted to the kernel administrator.
-	 */
 	prototype = native_callable_proto(target->btf, target->btf_id, &declaration);
 	if (declaration) {
-		struct bpf_kfunc_meta provider = {
-			.btf = target->btf, .id = target->btf_id, .proto = prototype,
-		};
-
-		/* An exact symbol may use the ordinary Native contract. Registered
-		 * effects still require their kfunc protocol, never a bare callx.
-		 */
 		err = check_native_function_call(env, target->btf, prototype, declaration, NULL);
 	} else {
 		err = check_native_prototype_call(env, target->btf, prototype, false, NULL, NULL);

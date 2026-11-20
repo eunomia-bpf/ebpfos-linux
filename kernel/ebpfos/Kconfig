@@ -31,7 +31,7 @@ config EBPFOS_ENTRY_LINK
  help
    Replace reserved or inactive ftrace entries and module-local callers
    through BPF program and link objects using one text transaction.
-   Native programs are source-built staged exceptions requiring CAP_SYS_ADMIN.
+   Native programs are source-built staged exceptions.
 
 config EBPFOS_PLT
  bool "Prototype task-selected direct entry stubs"

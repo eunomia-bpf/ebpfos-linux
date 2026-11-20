@@ -8446,8 +8446,6 @@ int btf_native_record_ro_size(struct btf *btf, const struct btf_type *fn,
                               u32 word, u32 *bytes, struct bpf_verifier_log *log)
 {
  const struct btf_type *proto = btf_type_by_id(btf, fn->type);
- struct bpf_subprog_arg_info pointer_arg;
- const struct btf_type *pointer_type, *element;
  const char *tag;
  char prefix[32];
  u32 pointer;
@@ -8520,7 +8518,6 @@ static bool btf_native_func_arg(const struct bpf_subprog_info *sub,
 int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 			u32 *argument, s32 *offset, bool *nullable)
 {
-	const struct btf_type *proto, *result;
 	const char *tag;
 	char trailing;
 
@@ -8535,12 +8532,7 @@ int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 			return PTR_ERR(tag);
 		if (nullable)
 			*nullable = true;
-	} else {
-		const char *other = btf_find_decl_tag_value(btf, fn, -1, "ret:arg_or_null:");
-
 	}
-	proto = btf_type_by_id(btf, fn->type);
-	result = btf_type_skip_modifiers(btf, proto->type, NULL);
 	if (sscanf(tag, "%u:%d%c", argument, offset, &trailing) != 2)
 		return -EINVAL;
 	return 0;
@@ -8624,7 +8616,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 	{
 		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_mem:");
 		const char *kernel = btf_find_decl_tag_value(btf, fn_t, -1, "ret:ro_kernel_mem:");
-		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
 
 		if (!IS_ERR(kernel)) {
 			tag = kernel;
@@ -8635,17 +8626,11 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 
 			kstrtou32(tag, 10, &bytes);
 
-			u32 pointee = result->type, size;
-
-			result = btf_type_skip_modifiers(btf, pointee, NULL);
-			btf_resolve_size(btf, result, &size);
-
 			sub->readonly_result_size = bytes;
 		}
 	}
 	{
 		const char *tag = btf_find_decl_tag_value(btf, fn_t, -1, "ret:null");
-		const struct btf_type *result = btf_type_skip_modifiers(btf, t->type, NULL);
 
 		if (!IS_ERR(tag)) {
 			sub->null_result = true;
@@ -8861,10 +8846,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				continue;
 			}
 			if (size_arg >= 0) {
-				const struct btf_type *size_t;
-
-				/* Byte buffers cannot erase typed spaces or lifetime tags. */
-				size_t = btf_type_skip_modifiers(btf, args[size_arg].type, NULL);
 				sub->args[i].arg_type = ARG_PTR_TO_MEM | PTR_MAYBE_NULL;
 				if (tags & ARG_TAG_NONNULL)
 					sub->args[i].arg_type &= ~PTR_MAYBE_NULL;
@@ -8874,13 +8855,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				sub->args[i].mem_size_arg = size_arg + 1;
 				continue;
 			}
-			/* A fixed read-only object uses the same bounded-memory
-			 * contract as a byte-count pair. Do not combine it with a
-			 * different pointer role or erase an address-space qualifier.
-			 */
-			/* An independent global has no caller RCU scope to inherit.
-			 * Do not manufacture a live RCU reference from its prototype.
-			 */
 		}
 
 		if ((tags & ARG_TAG_CTX) || btf_is_prog_ctx_type(log, btf, t, prog_type, i)) {
@@ -8914,10 +8888,6 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 			kern_type_id = btf_global_arg_type(env, log, i, btf, t, &sub->args[i]);
 			if (kern_type_id < 0)
 				return kern_type_id;
-			if (has_btf_offset) {
-				ref_t = btf_type_by_id(sub->args[i].btf, kern_type_id);
-			}
-
 			sub->args[i].arg_type = ARG_PTR_TO_BTF_ID | PTR_TRUSTED | pointer_flags;
 			if (tags & ARG_TAG_NULLABLE)
 				sub->args[i].arg_type |= PTR_MAYBE_NULL;
@@ -10170,12 +10140,6 @@ static int __register_btf_kfunc_id_set(enum btf_kfunc_hook hook,
 					     kset->set->pairs[i].flags);
 		if (ret)
 			goto err_out;
-
-		if (kset->kop_descs) {
-			const struct bpf_kop *kop = kset->kop_descs[i];
-
-
-		}
 	}
 
 	ret = btf_populate_kfunc_set(btf, hook, kset);
