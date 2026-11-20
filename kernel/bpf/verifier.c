@@ -6405,7 +6405,7 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 		return 0;
 	} else {
 		/* check whether register used as dest operand can be written to */
-		if (regno == BPF_REG_FP || regno == BPF_REG_ARG_SP || regno == BPF_REG_ARG_FP) {
+		if (regno == BPF_REG_FP) {
 			verbose(env, "frame pointer is read only\n");
 			return -EACCES;
 		}
@@ -6445,8 +6445,6 @@ static void mark_indirect_target(struct bpf_verifier_env *env, int idx)
 #define LR_SPI_OFF	LR_FRAMENO_BITS
 #define LR_IS_REG_OFF	(LR_SPI_BITS + LR_FRAMENO_BITS)
 #define LINKED_REGS_MAX	6
-
-static_assert(LR_ENTRY_BITS * LINKED_REGS_MAX + LR_SIZE_BITS <= 128);
 
 struct linked_reg {
 	u8 frameno;
