@@ -13388,6 +13388,28 @@ static void clobber_stack_argument(struct bpf_verifier_env *env,
 	}
 }
 
+/* Store a declared result word in model storage, without checking a call.
+ * An untracked destination contributes no pointer fact.
+ */
+static void native_result_buffer_word(struct bpf_verifier_env *env,
+				     struct bpf_reg_state *output, u32 offset,
+				     struct bpf_reg_state *word)
+{
+	struct bpf_func_state *frame;
+	s64 at;
+	int spi;
+
+	if (base_type(output->type) != PTR_TO_STACK || !tnum_is_const(output->var_off))
+		return;
+	frame = bpf_func(env, output);
+	at = (s64)output->var_off.value + offset;
+	if (at > -BPF_REG_SIZE || at < -(s64)frame->allocated_stack || at % BPF_REG_SIZE)
+		return;
+	spi = (-at - 1) / BPF_REG_SIZE;
+	save_register_state(env, frame, spi, word, BPF_REG_SIZE);
+	mark_stack_slot_scratched(env, spi);
+}
+
 static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				    const struct btf *btf,
 				    struct bpf_reg_state *regs)
@@ -13620,25 +13642,21 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 	return sub->native_frame ? check_native_scalar_tail(env, &sub->native_abi) : 0;
 }
 
-/* The callee's independently checked result contract describes exactly the
- * words written by this call. Preserve pointer spills rather than converting
- * them into unknown scalar bytes in the caller's existing result allocation.
- */
-static int native_result_buffer_state(struct bpf_verifier_env *env, int insn_idx,
-                                      int subprog)
+/* Transfer the declared result into the caller's existing model storage. */
+static void native_result_buffer_state(struct bpf_verifier_env *env, int subprog)
 {
  const struct bpf_subprog_info *sub = &env->subprog_info[subprog];
  struct btf *btf = env->prog->aux->btf;
  const struct btf_type *fn = btf_type_by_id(btf, env->prog->aux->func_info[subprog].type_id);
+ struct bpf_reg_state *output = &cur_regs(env)[BPF_REG_1];
  u32 size = sub->native_abi.args[0].size;
- int err;
 
- for (u32 byte = 0; byte < size;) {
+ clobber_stack_argument(env, output, size);
+ for (u32 byte = 0; byte < size; byte += BPF_REG_SIZE) {
   struct native_arg_scope temporary __free(native_arg) = {};
   u32 bytes = 0;
   if (sub->readonly_stack_result && !(byte % 8)) {
-   err = btf_native_record_ro_size(btf, fn, byte / 8, &bytes, &env->log);
-   if (err) return err;
+   btf_native_record_ro_size(btf, fn, byte / 8, &bytes, &env->log);
   }
   if (bytes) {
    native_value_scope(env, &temporary, 13);
@@ -13646,17 +13664,9 @@ static int native_result_buffer_state(struct bpf_verifier_env *env, int insn_idx
    temporary.reg->type = PTR_TO_MEM | MEM_RDONLY;
    temporary.reg->mem_size = bytes;
    temporary.reg->mem_stable = BPF_MEM_KERNEL_STABLE;
-   err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
-                         BPF_DW, BPF_WRITE, 13, false, false, NULL);
-   byte += 8;
-  } else {
-   err = check_mem_access(env, insn_idx, BPF_REG_1, byte,
-                         BPF_B, BPF_WRITE, -1, false, false, NULL);
-   byte++;
+   native_result_buffer_word(env, output, byte, temporary.reg);
   }
-  if (err) return err;
  }
- return 0;
 }
 
 /* Compare BTF of a function call with given bpf_reg_state.
@@ -13787,8 +13797,6 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 
 	if (sub->native_frame && sub->native_abi.result_buffer) {
 		result_buffer = caller->regs[BPF_REG_1];
-		err = check_stack_access_within_bounds(env, BPF_REG_1, 0,
-			sub->native_abi.args[0].size, BPF_WRITE);
 	}
 	env->insn_aux_data[*insn_idx].returns_two_regs = bpf_subprog_returns_two_regs(env, subprog);
 	/* An independent byte-memory summary clobbers reachable stack values.
@@ -13860,8 +13868,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 			clear_all_pkt_pointers(env);
 		if (sub->native_frame && sub->native_abi.result_buffer) {
 			/* All inputs were checked against their pre-call state. */
-			err = native_result_buffer_state(env, *insn_idx, subprog);
-			if (err) return err;
+			native_result_buffer_state(env, subprog);
 		}
 		if (sub->result_argument) {
 			struct native_arg_scope temporary __free(native_arg) = {};
@@ -17342,9 +17349,7 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 					  bool buffer)
 {
 	struct bpf_native_abi abi;
-	struct bpf_func_state *output_frame = NULL;
 	const struct btf_type *type = btf_type_skip_modifiers(btf, proto->type, NULL);
-	s64 output_offset = 0;
 	u32 physical = 0;
 	int err = bpf_native_abi_plan(btf, proto, &abi, env->prog->aux->trusted_kernel);
 
@@ -17361,8 +17366,6 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 		if (base_type(output->type) != PTR_TO_STACK ||
 		    !tnum_is_const(output->var_off))
 			return 0;
-		output_frame = bpf_func(env, output);
-		output_offset = (s64)output->var_off.value;
 	}
 	for (u32 offset = 0; offset < type->size;) {
 		struct native_arg_scope temporary __free(native_arg) = {};
@@ -17375,24 +17378,12 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 		}
 		if (buffer) {
 			if (pointer) {
-				s64 at = output_offset + offset;
-
-				/* Select an existing complete tracked slot. This does not
-				 * reject the call or impose a new source-memory bound.
-				 */
-				if (at <= -BPF_REG_SIZE &&
-				    at >= -(s64)output_frame->allocated_stack &&
-				    !(at % BPF_REG_SIZE)) {
-					int spi = (-at - 1) / BPF_REG_SIZE;
-
-					native_value_scope(env, &temporary, 13);
-					err = native_prototype_pointer_result(env, btf, pointer, 13);
-					if (err)
-						return err;
-					save_register_state(env, output_frame, spi,
-							    &cur_regs(env)[13], BPF_REG_SIZE);
-					mark_stack_slot_scratched(env, spi);
-				}
+				native_value_scope(env, &temporary, 13);
+				err = native_prototype_pointer_result(env, btf, pointer, 13);
+				if (err)
+					return err;
+				native_result_buffer_word(env, &cur_regs(env)[BPF_REG_1],
+							  offset, &cur_regs(env)[13]);
 			}
 			offset += BPF_REG_SIZE;
 		} else {
