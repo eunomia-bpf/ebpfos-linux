@@ -7229,20 +7229,6 @@ bool btf_ctx_access(int off, int size, enum bpf_access_type type,
 			return false;
 		}
 	} else {
-		/* An unread formal has no caller-side input contract. Tracing may
-		 * not recover that missing capability from its unchanged BTF type.
-		 */
-		if (tgt_prog && tgt_prog->aux->func_info_aux) {
-			for (i = 0; i < tgt_prog->aux->func_info_cnt; i++) {
-				if (tgt_prog->aux->func_info[i].type_id != prog->aux->attach_btf_id)
-					continue;
-				if (tgt_prog->aux->func_info_aux[i].unused_arg_mask & BIT_ULL(arg)) {
-					bpf_log(log, "func '%s' arg%d has no input contract\n", tname, arg);
-					return false;
-				}
-				break;
-			}
-		}
 		if (!t)
 			/* Default prog with MAX_BPF_FUNC_REG_ARGS args */
 			return true;
@@ -7497,7 +7483,7 @@ static int btf_struct_walk(struct bpf_verifier_log *log, const struct btf *btf,
 
 			t = btf_type_skip_modifiers(btf, btf_array(t)->type, NULL);
 			if (IS_ERR(btf_resolve_size(btf, t, &bytes)) || !bytes)
-				return -EINVAL;
+				return WALK_SCALAR;
 			off %= bytes;
 		}
 		return btf_pointer_walk(btf, t, next_btf_id, flag, nullable);
