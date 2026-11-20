@@ -5,17 +5,12 @@
 #include "../bpf/btf_record_return.h"
 #include <linux/module.h>
 #include <linux/bpf_native_abi.h>
-/* Cold native-call contract shared by direct entries and owned ops tables.
+/* Cold native-call binding shared by direct entries and owned ops tables.
  * Callers retain the loaded program for the full lifetime of published code.
  */
 #include "function_layout.h"
-/* Scalar-input globals acquire no pointer capability from a native address.
- * Stock global-subprogram verification proves scalar returns only. A pointer
- * spelling in BTF is not a proven pointer result for a native caller.
- */
-
 /* A compiler-selected source entry can have a different final native name.
- * This selects an export only; its ABI/context/proof checks remain below. */
+ * This selects an export by its name or alias. */
 static bool cell_export_name(const char *name, struct btf *compiled, u32 id, bool native_aliases)
 {
  const struct btf_type *function = btf_type_by_id(compiled, id);
@@ -30,16 +25,6 @@ static bool cell_export_name(const char *name, struct btf *compiled, u32 id, boo
  }
  return false;
 }
-/* Trusted source calls an implicit-argument kfunc through its complete C
- * interface. The retained prototype can express metadata as an opaque pointer.
- * Compare scalar register/stack conventions without claiming pointer safety.
- */
-
-/* Independently checked input-relative, NULL or permanent read-only results
- * may cross the native pointer-result boundary. A borrowed result retains the
- * native caller's input lifetime; it cannot expose a new program-local object.
- */
-
 static bool cell_callable_proto(struct btf *native, u32 native_type,
  const struct btf_type *native_function, const char *native_name,
  struct bpf_prog *parent, u32 id, unsigned long *address)
@@ -62,12 +47,9 @@ static bool cell_callable(struct btf *native, const struct btf_type *function,
 }
 
 
-/* A binding leases a verified function and its complete program graph. An
+/* A binding leases a loaded function and its complete program graph. An
  * object owner may publish address in an existing operations table, then
  * release the lease only after the object and all its callbacks are dead.
- * This first common form admits context-free functions: no helper, kfunc,
- * tail call or private JIT stack can require bpf_run_ctx. The stock timed
- * backedge operation uses the current function's initialized stack slots.
  */
 #include "function_binding.h"
 static inline int ebpfos_function_binding_open_pure(

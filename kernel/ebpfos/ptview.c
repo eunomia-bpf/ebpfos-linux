@@ -328,9 +328,6 @@ int ebpfos_ptview_bind(struct ebpfos_ptview *view)
  mmap_write_lock(mm);
  old = mm->context.ptview;
  if ((old ? old->view : NULL) == view) goto out;
- /* Different thread choices need different mms. The prototype refuses to
-  * mutate a shared mm, and the owner drains its queued work before rebinding. */
- 
  if (view) {
   next = kzalloc(sizeof(*next), GFP_KERNEL);
   if (!next) {error = -ENOMEM;goto out;}

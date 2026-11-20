@@ -68,7 +68,7 @@ static int entry_core_call_scan(void *opaque, const char *name, unsigned long ad
  return entry_call_scan_range(address, size, scan->target, scan->slots, scan->count);
 }
 static int entry_call_scan(struct module *module, unsigned long target,
- struct entry_native_slot *slots, unsigned int capacity, unsigned int *count)
+ struct entry_native_slot *slots, unsigned int *count)
 {
  struct mod_kallsyms *symbols;
  unsigned int i;
@@ -103,7 +103,7 @@ static int entry_module_calls(struct entry_set *set, unsigned long address,
   for (i = 0; i < owner->slot_count; ++i)
    if (owner->slots[i].original == address) ++count;
  } else {
-  error = entry_call_scan(set->source_module, address, NULL, 0, &count);
+  error = entry_call_scan(set->source_module, address, NULL, &count);
   if (error) return error;
  }
  /* Leave room for the remaining reserved-entry members as well. */
@@ -114,12 +114,10 @@ static int entry_module_calls(struct entry_set *set, unsigned long address,
   for (i = 0; i < owner->slot_count; ++i)
    if (owner->slots[i].original == address) slots[set->slot_count++] = owner->slots[i];
  } else {
-  error = entry_call_scan(set->source_module, address, slots, start + count,
-   &set->slot_count);
+  error = entry_call_scan(set->source_module, address, slots, &set->slot_count);
   if (error) return error;
  }
  for (i = start; i < set->slot_count; ++i) {
-  u8 instruction[5];
   slots[i].target[0] = slots[i].target[1] = target;
  }
  return 0;

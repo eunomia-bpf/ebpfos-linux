@@ -112,10 +112,8 @@ static const struct file_operations task_view_ops = {
  .show_fdinfo = task_view_fdinfo, .llseek = noop_llseek,
 };
 
-/* Bind actual syscall exports, never a caller-provided address or ordinal.
- * The source descriptor and loaded export supply the complete checked ABI.
- * A native bpf control entry guarantees self-selection has no old-view frame
- * beneath it. Each other task retains its own lease through sleeping calls. */
+/* Bind syscall exports by their existing table address. Each task retains
+ * its own program lease through sleeping calls. */
 static inline int task_view_slot(unsigned long address, unsigned long *used, const sys_call_ptr_t *original)
 {
  u32 nr;
@@ -143,7 +141,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
  struct task_view *view;
  struct bpf_prog **programs;
  struct file *file;
- unsigned int i, roots = 0;
+ unsigned int i;
  int error;
  
  
@@ -162,12 +160,6 @@ static struct ebpfos_task_view_request *task_view_prepare(
  for (i = 0; i < count; ++i) {
   struct bpf_prog *program = sources[i].program;
   int slot = task_view_slot(sources[i].native_address, view->selected, view->table);
-  bool syscall_entry = slot >= 0;
-  if (slot < 0 && slot != -ENOENT) {error = slot;goto fail;}
-  /* A private member can escape into an asynchronous callback. The view
-   * proves a task entry only for an actual native syscall-table root.
-   */
-  
   if (IS_ENABLED(CONFIG_EBPFOS_PLT)) slot = -ENOENT;
   if (slot < 0) {
    bool ftrace, canonical_nop;
@@ -180,7 +172,7 @@ static struct ebpfos_task_view_request *task_view_prepare(
    if (!ip)
     ip = ebpfos_view_entry(sources[i].native_address);
    entry_native_jump(ip, sources[i].address, entry->bytes);
-   entry->ip = ip;entry->ftrace = ftrace;++view->text_count;++roots;
+   entry->ip = ip;entry->ftrace = ftrace;++view->text_count;
   }
   bpf_prog_inc(program);
   view->bindings[i].program = program;
@@ -195,7 +187,6 @@ static struct ebpfos_task_view_request *task_view_prepare(
    __module_get(program->aux->mod);
    view->bindings[i].module = program->aux->mod;
   }
-  if (slot >= 0) ++roots;
  }
  /* Discover against one Native snapshot before replacing any value. */
  for (i = 0; i < count; ++i)

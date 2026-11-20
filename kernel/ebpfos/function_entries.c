@@ -63,15 +63,10 @@ static LIST_HEAD(entry_retained);
 /* All live journals, including cgroup and operations-only bindings. */
 static LIST_HEAD(entry_sharing_sets);
 
-/* Bare native ABI calls have no bpf_run_ctx. These standard helpers depend
- * only on explicit operands or the native CPU/task, not on such a frame.
- * Keep this cold eligibility check outside the call path. */
-
 #include "function_contract.h"
 
 /* Independent graphs have independent BTF ordinals. Resolve the second
- * generation by its exported symbol, then apply the same complete native
- * callable contract. Only loaded functions count; duplicate exports refuse.
+ * generation by its exported symbol among loaded functions.
  * The retained graph owns the resolved address for the journal's lifetime.
  */
 static bool entry_export(struct btf *native, u32 prototype,
@@ -470,8 +465,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    
    set->addresses[i] = target;
    if (slot) {
-    u8 instruction[5];
-    
     slot->target[j] = target;
    }
   }
