@@ -26496,13 +26496,20 @@ static int prepare_trusted_kernel(struct bpf_verifier_env *env,
 				 union bpf_attr *attr, bpfptr_t uattr)
 {
 	bpfptr_t sizes = make_bpfptr(attr->trusted_stack_sizes, uattr.is_kernel);
-	u32 depth;
 	int i;
 
 	for (i = 0; i < env->subprog_cnt; i++) {
+		u32 depth = env->subprog_info[i].stack_depth;
+
 		if (env->subprog_info[i].native_frame) {
 			depth = env->subprog_info[i].native_local_stack;
-		} 		env->subprog_info[i].stack_depth = depth;
+		} else if (attr->trusted_stack_sizes && i < attr->trusted_stack_size_cnt) {
+			u32 supplied;
+
+			if (!copy_from_bpfptr_offset(&supplied, sizes, i * sizeof(supplied), sizeof(supplied)))
+				depth = supplied;
+		}
+		env->subprog_info[i].stack_depth = depth;
 	}
 	env->prog->aux->stack_depth = max_t(u32, env->subprog_info[0].stack_depth,
 			env->subprog_info[0].native_local_stack);
