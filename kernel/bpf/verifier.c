@@ -10135,23 +10135,13 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		   env->prog->aux->ebpfos_component) {
 		/* A compiled definition dereferences an address it read out of
 		 * kernel memory, exactly as the native function's own load did.
-		 * The word arrived through an option-A probe-safe read, so the
-		 * kernel supplies the address and the same fault-handled read
-		 * mode covers this access: one probe-load fixup, no range test.
 		 * A full word read this way is itself an address; a narrower
 		 * word is a value.
-		 *
-		 * An address that is a constant of the linked image cannot
-		 * fault, and Native loads it plainly, so it costs no fixup.
-		 * A store has no fault-handled form to convert to; Native
-		 * stored through the same address, so the store stays plain.
+		 * Keep the original load/store; a verifier fact adds no probe.
 		 */
 		if (t == BPF_WRITE) {
 			/* Nothing to mark: value_regno names the stored value. */
 		} else if (value_regno >= 0) {
-			if (!tnum_is_const(reg->var_off) ||
-			    reg->var_off.value < 0xffffffff80000000ULL)
-				env->insn_aux_data[env->insn_idx].probe_load = true;
 			mark_reg_unknown(env, regs, value_regno);
 			regs[value_regno].address_word = size == BPF_REG_SIZE;
 		}
