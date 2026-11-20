@@ -25,7 +25,6 @@ struct plt_entry {
  struct list_head node;
  struct entry_native_slot slot;
  struct module *source;
- struct ftrace_text_reservation *ftrace;
  struct plt_image *image, *next;
  refcount_t refs;
  u32 *table;
@@ -210,7 +209,7 @@ static void plt_entry_put(struct plt_entry *entry)
 }
 static void plt_entry_free(struct plt_entry *entry)
 {
- list_del(&entry->node);ftrace_text_release(entry->ftrace);entry->ftrace = NULL;
+ list_del(&entry->node);
  plt_entry_put(entry);
 }
 /* Prepare every changed entry before a single existing batched transaction.
@@ -313,10 +312,6 @@ struct bpf_entry_scope *bpf_entry_scope_get(const struct ebpfos_function_binding
   copy_from_kernel_nofault(before, (void *)ip, 5);
   if (before[0] == 0xe9) {s32 displacement;memcpy(&displacement, before + 1, 4);entry->slot.original = ip + 5 + displacement;}
   
-  if (ftrace) {
-   entry->ftrace = ftrace_text_reserve(&ip, 1, false);
-   if (IS_ERR(entry->ftrace)) {error = PTR_ERR(entry->ftrace);kfree(entry);goto free_scope;}
-  }
   entry->source = bindings[i].source_module;
   if (entry->source) __module_get(entry->source);
   list_add_tail(&entry->node, &plt_entries);

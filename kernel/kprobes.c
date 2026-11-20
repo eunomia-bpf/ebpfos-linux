@@ -70,39 +70,6 @@ static bool kprobes_all_disarmed;
 static DEFINE_MUTEX(kprobe_mutex);
 static DEFINE_PER_CPU(struct kprobe *, kprobe_instance);
 
-/* Cold text ownership. The owner retains the source module, restores its
- * original instructions before release, and adds no execution-time hook. */
-struct kprobe_text_reservation {
- struct list_head list;
- unsigned int count;
- bool shared;
- struct { unsigned long begin, end; } ranges[];
-};
-static LIST_HEAD(kprobe_text_reservations);
-
-struct kprobe_text_reservation *kprobe_text_reserve(const unsigned long *ips, unsigned int count, unsigned int length, bool shared)
-{
- struct kprobe_text_reservation *owner;
- struct kprobe *probe;
- unsigned int i, bucket;
- int error = -EINVAL;
- if (!count) return NULL;
- owner = kvzalloc(struct_size(owner, ranges, count), GFP_KERNEL);
- if (!owner) return ERR_PTR(-ENOMEM);
- owner->count = count;owner->shared = shared;
- mutex_lock(&kprobe_mutex);
- list_add(&owner->list, &kprobe_text_reservations);
- mutex_unlock(&kprobe_mutex);return owner;
-
-}
-void kprobe_text_release(struct kprobe_text_reservation *owner)
-{
- if (!owner) return;
- mutex_lock(&kprobe_mutex);list_del(&owner->list);mutex_unlock(&kprobe_mutex);
- kvfree(owner);
-}
-
-
 kprobe_opcode_t * __weak kprobe_lookup_name(const char *name,
 					unsigned int __unused)
 {

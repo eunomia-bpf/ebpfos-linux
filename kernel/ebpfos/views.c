@@ -42,7 +42,6 @@ struct task_view {
  DECLARE_BITMAP(selected, NR_syscalls);
  struct bpf_operations_set *operations;
  struct entry_set *code;
- struct ftrace_text_reservation *text_owner;
  struct task_text_entry *text;
  u32 text_count;
  struct delayed_work release_work;
@@ -77,7 +76,6 @@ static void task_view_free(struct task_view *view)
   ebpfos_function_binding_put(&view->bindings[i]);
  bpf_operations_set_put(view->operations);
  bpf_entry_code_put(view->code);
- ftrace_text_release(view->text_owner);
  kvfree(view->text);
  kvfree(view);
 }
@@ -216,16 +214,6 @@ static struct ebpfos_task_view_request *task_view_prepare(
   if (view->bindings[i].syscall_slot >= 0)
    view->table[view->bindings[i].syscall_slot] = (sys_call_ptr_t)view->bindings[i].address;
  
- if (view->text_count && !IS_ENABLED(CONFIG_EBPFOS_PLT)) {
-  unsigned long *ips = kvmalloc_array(view->text_count, sizeof(*ips), GFP_KERNEL);
-  unsigned int count = 0;
-  if (!ips) {error = -ENOMEM;goto fail;}
-  for (i = 0; i < view->text_count; ++i)
-   if (view->text[i].ftrace) ips[count++] = view->text[i].ip;
-  view->text_owner = ftrace_text_reserve(ips, count, true);
-  kvfree(ips);
-  if (IS_ERR(view->text_owner)) {error = PTR_ERR(view->text_owner);view->text_owner = NULL;goto fail;}
- }
  /* Stored private callbacks can outlive the rule and its last syscall frame.
   * Transfer their independent code lease to the existing entry journal. */
  if (count) {

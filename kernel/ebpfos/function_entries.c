@@ -47,7 +47,6 @@ struct entry_set {
  struct bpf_prog **code_programs;
  u32 code_count;
  struct bpf_operations_set *tables;
- struct ftrace_text_reservation *ftrace;
  struct entry_native_slot *slots;
  unsigned int slot_count;
  bool poisoned, call_sites;
@@ -272,7 +271,6 @@ static void entry_free(struct entry_set *set)
  }
  if (set->migration) bpf_prog_put(set->migration);
  if (set->reverse) bpf_prog_put(set->reverse);
- ftrace_text_release(set->ftrace);
  module_put(set->source_module);
  if (set->source_btf) btf_put(set->source_btf);
  if (set->programs)
@@ -387,7 +385,6 @@ static int entry_source_release(struct entry_set *set)
  if (!resident) return 0;
  error = ebpfos_code_quiescent(entry_source_contains, set);
  if (error) return error;
- ftrace_text_release(set->ftrace);set->ftrace = NULL;
  module_put(set->source_module);set->source_module = NULL;
  list_for_each_entry(generation, &set->generations, generation_node) {
   module_put(generation->source_module);generation->source_module = NULL;
@@ -532,14 +529,6 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    set->call_sites = true;
   }
  }
- if (!task && !owner) {
-  unsigned long *ips = kvmalloc_array(set->slot_count, sizeof(*ips), GFP_KERNEL);
-  unsigned int count = 0;
-  if (!ips) {error = -ENOMEM;goto fail;}
-  for (i = 0; i < set->slot_count; ++i) if (set->slots[i].ftrace) ips[count++] = set->slots[i].ip;
-  set->ftrace = ftrace_text_reserve(ips, count, false);kvfree(ips);
-  if (IS_ERR(set->ftrace)) {error = PTR_ERR(set->ftrace);set->ftrace = NULL;goto fail;}
- }
  return set;
 fail:
  entry_free(set);return ERR_PTR(error);
@@ -594,7 +583,6 @@ static int entry_link_detach(struct bpf_link *link)
  mutex_lock(&entry_lock);
  error = entry_switch(entry->set, entry->set->active, 0);
  if (!error) {
-  ftrace_text_release(entry->set->ftrace);entry->set->ftrace = NULL;
   entry->detached = true;
  }
  mutex_unlock(&entry_lock);

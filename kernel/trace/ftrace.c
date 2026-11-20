@@ -1649,51 +1649,6 @@ static struct dyn_ftrace *lookup_rec(unsigned long start, unsigned long end)
 	return rec;
 }
 
-/* Read/shared or write/exclusive ownership of an existing entry NOP. Cold registration and
- * filter changes consult these owners; no tracing handler is installed. */
-struct ftrace_text_reservation {
- struct list_head list;
- struct kprobe_text_reservation *probes;
- unsigned int count;
- bool shared;
- struct dyn_ftrace **records;
-};
-static LIST_HEAD(ftrace_text_reservations);
-
-
-
-struct ftrace_text_reservation *ftrace_text_reserve(const unsigned long *ips, unsigned int count, bool shared)
-{
- struct ftrace_text_reservation *owner;
- unsigned int i;
- int error = -EBUSY;
- if (!count) return NULL;
- owner = kzalloc(sizeof(*owner), GFP_KERNEL);
- if (!owner) return ERR_PTR(-ENOMEM);
- owner->count = count;owner->shared = shared;
- /* Kprobe registration takes kprobe_mutex before ftrace_lock. Acquire the
-  * text reservation first, then release its mutex before taking ftrace_lock. */
- owner->probes = kprobe_text_reserve(ips, count, MCOUNT_INSN_SIZE, shared);
- if (IS_ERR(owner->probes)) {error = PTR_ERR(owner->probes);owner->probes = NULL;goto fail;}
- mutex_lock(&ftrace_lock);
- list_add(&owner->list, &ftrace_text_reservations);
- mutex_unlock(&ftrace_lock);return owner;
-fail:
- kprobe_text_release(owner->probes);kvfree(owner->records);kfree(owner);return ERR_PTR(error);
-}
-void ftrace_text_release(struct ftrace_text_reservation *owner)
-{
- unsigned int i;
- if (!owner) return;
- mutex_lock(&ftrace_lock);
- list_del(&owner->list);
- /* Conflicting registrations and filter changes have been refused, so no
-  * callback count needs reconstruction when the restored NOP is returned. */
-
- mutex_unlock(&ftrace_lock);
- kprobe_text_release(owner->probes);kvfree(owner->records);kfree(owner);
-}
-
 /**
  * ftrace_location_range - return the first address of a traced location
  *	if it touches the given ip range
