@@ -13526,13 +13526,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			int err;
 
 			if (bpf_register_is_null(reg) && type_may_be_null(arg->arg_type)) {
-				/* This scalar value, not just its register type, satisfies
-				 * the nullable contract. Keep it precise so a different
-				 * scalar branch cannot reuse the accepted NULL state.
-				 */
-				err = mark_chain_precision(env, regno);
-				if (err)
-					return err;
 				continue;
 			}
 
@@ -22805,33 +22798,8 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 
 	if (sub->native_frame && sub->native_abi.result_buffer)
 		return 0;
-	if (sub->result_argument) {
-		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-
-		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
-		if (err)
-			return err;
-		/* A declared nullable alternative carries no pointer capability. */
-		if (sub->result_argument_nullable && bpf_register_is_null(result))
-			return mark_chain_precision(env, BPF_REG_0);
-		return 0;
-	}
-	if (sub->readonly_result_btf_id) {
-		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-
-		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
-		if (err)
-			return err;
-		if (bpf_register_is_null(result))
-			return mark_chain_precision(env, BPF_REG_0);
-		return 0;
-	}
-	if (sub->null_result) {
-		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
-		if (err)
-			return err;
-		return mark_chain_precision(env, BPF_REG_0);
-	}
+	if (sub->result_argument || sub->readonly_result_btf_id || sub->null_result)
+		return check_reg_arg(env, BPF_REG_0, SRC_OP);
 	if (sub->readonly_result_size)
 		return 0;
 	if (subprog_returns_void(env, frame->subprogno))
@@ -22861,16 +22829,6 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 					reg_type_str(env, reg->type));
 				return -EINVAL;
 			}
-		}
-		if (bytes == 1 && btf_type_is_int(result) && (btf_int_encoding(result) & BTF_INT_BOOL)) {
-			struct bpf_reg_state value = *reg;
-
-			/* Check the declared byte, without pretending its projection
-			 * initialized any of the original register's unused bits.
-			 */
-			coerce_reg_to_size(&value, 1);
-			err = mark_chain_precision(env, regno);
-			if (err) return err;
 		}
 	}
 	return 0;
