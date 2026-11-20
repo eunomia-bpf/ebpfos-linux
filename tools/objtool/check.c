@@ -405,22 +405,6 @@ static void *cfi_hash_alloc(unsigned long size)
 static unsigned long nr_insns;
 static unsigned long nr_insns_visited;
 
-static bool is_noinstr_text_section(const char *name)
-{
-	static const char * const families[] = {
-		".noinstr.text", ".entry.text", ".cpuidle.text",
-	};
-
-	for (unsigned int i = 0; i < ARRAY_SIZE(families); i++) {
-		size_t length = strlen(families[i]);
-
-		if (!strncmp(name, families[i], length) &&
-		    (!name[length] || name[length] == '.'))
-			return true;
-	}
-	return false;
-}
-
 /*
  * Call the arch-specific instruction decoder for all the instructions and add
  * them to the global instruction list.
@@ -445,7 +429,9 @@ static int decode_instructions(struct objtool_file *file)
 		    strncmp(sec->name, ".discard.", 9))
 			sec->text = true;
 
-		if (is_noinstr_text_section(sec->name) ||
+		if (!strcmp(sec->name, ".noinstr.text") ||
+		    !strcmp(sec->name, ".entry.text") ||
+		    !strcmp(sec->name, ".cpuidle.text") ||
 		    !strncmp(sec->name, ".text..__x86.", 13))
 			sec->noinstr = true;
 
@@ -455,8 +441,7 @@ static int decode_instructions(struct objtool_file *file)
 		 * loaded late, they very much do need retpoline in their
 		 * .init.text
 		 */
-		if ((!strcmp(sec->name, ".init.text") ||
-		     !strncmp(sec->name, ".init.text.", 11)) && !opts.module)
+		if (!strcmp(sec->name, ".init.text") && !opts.module)
 			sec->init = true;
 
 		for (offset = 0; offset < sec_size(sec); offset += insn->len) {
@@ -4599,9 +4584,20 @@ static int validate_noinstr_sections(struct objtool_file *file)
 	struct section *sec;
 	int warnings = 0;
 
-	for_each_sec(file->elf, sec) {
-		if (!is_noinstr_text_section(sec->name))
-			continue;
+	sec = find_section_by_name(file->elf, ".noinstr.text");
+	if (sec) {
+		warnings += validate_section(file, sec);
+		warnings += validate_unwind_hints(file, sec);
+	}
+
+	sec = find_section_by_name(file->elf, ".entry.text");
+	if (sec) {
+		warnings += validate_section(file, sec);
+		warnings += validate_unwind_hints(file, sec);
+	}
+
+	sec = find_section_by_name(file->elf, ".cpuidle.text");
+	if (sec) {
 		warnings += validate_section(file, sec);
 		warnings += validate_unwind_hints(file, sec);
 	}
