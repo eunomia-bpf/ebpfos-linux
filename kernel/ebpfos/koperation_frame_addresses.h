@@ -39,8 +39,7 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_##upper##_NATIVE_BYTES; \
- /* emit_prologue establishes RBP even with a private BPF data stack. \
-  * Tail calls and exception callbacks reuse a frame, so are excluded. */ \
+ /* Read the actual invocation frame established by emit_prologue. */ \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \

@@ -38,32 +38,6 @@ static int ebpfos_kop_##name##_emit_x86(u8 *image, u32 *offset, bool emit, \
  u64 payload, const struct bpf_prog *prog, const u8 *final_ip) \
 { \
  static const u8 native[] = EBPFOS_KOP_##upper##_NATIVE_BYTES; \
- /* Private stacks overwrite R9 before the first BPF instruction. \
-  * FineIBT's optional BHI call also has no six-argument contract. */ \
- /* Calls can overwrite R9; require one capture before other calls. \
-  * Branches after it may loop, but cannot re-enter the capture. */ \
- { \
-  u32 capture = U32_MAX; \
-  for (u32 i = 0; i < prog->len; ++i) { \
-   const struct bpf_insn *insn = &prog->insnsi[i]; \
-   const struct bpf_kop *found; u64 found_payload; \
-   bool snapshot; \
-   if (BPF_CLASS(insn->code) != BPF_JMP || BPF_OP(insn->code) != BPF_CALL) continue; \
-   snapshot = insn->code == (BPF_JMP | BPF_CALL) && \
-       !bpf_jit_get_kop_payload(prog, insn, &found, &found_payload) && \
-       found == &ebpfos_kop_##name && found_payload == payload; \
-   if (snapshot) { \
-    capture = i; \
-   }  \
-  } \
-  for (u32 i = 0; i < prog->len; ++i) { \
-   const struct bpf_insn *insn = &prog->insnsi[i]; \
-   u8 cls = BPF_CLASS(insn->code), op = BPF_OP(insn->code); \
-   s64 displacement; \
-   if ((cls != BPF_JMP && cls != BPF_JMP32) || op == BPF_CALL || op == BPF_EXIT) continue; \
-   displacement = cls == BPF_JMP32 && op == BPF_JA ? insn->imm : insn->off; \
-  } \
- } \
  if (emit) memcpy(image + *offset, native, sizeof(native)); \
  *offset += sizeof(native); return sizeof(native); \
 } \
