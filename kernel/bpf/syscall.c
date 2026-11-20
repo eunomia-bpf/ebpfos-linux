@@ -1496,7 +1496,6 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	case BPF_MAP_TYPE_CPUMAP:
 	case BPF_MAP_TYPE_ARENA:
 	case BPF_MAP_TYPE_INSN_ARRAY:
-	case BPF_MAP_TYPE_OPERATIONS:
 		if (!bpf_token_capable(token, CAP_BPF))
 			goto put_token;
 		break;
@@ -5948,7 +5947,7 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 		return -EINVAL;
 
 	if (attr->link_create.attach_type == BPF_KERNEL_RULE)
-		return uattr.is_kernel ? -EOPNOTSUPP : bpf_kernel_rule_link_create(attr);
+		return bpf_kernel_rule_link_create(attr);
 
 
 	if (attr->link_create.attach_type == BPF_TRACE_ENTRY)
