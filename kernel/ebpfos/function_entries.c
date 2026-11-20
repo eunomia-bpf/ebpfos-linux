@@ -49,7 +49,7 @@ struct entry_set {
  struct bpf_operations_set *tables;
  struct entry_native_slot *slots;
  unsigned int slot_count;
- bool poisoned, call_sites;
+ bool call_sites;
  /* Native IDs follow the count locations, preserving each caller contract. */
  unsigned long *locations, *addresses;
  unsigned int count, active, table_count;
@@ -299,7 +299,7 @@ static void entry_retire_work(struct work_struct *work)
  struct entry_set *generation, *next;
  unsigned int slot, i;
  mutex_lock(&entry_lock);
- if (set->closing || set->poisoned) goto out;
+ if (set->closing) goto out;
  for (slot = 0; slot < 2; ++slot) {
   if (set->retired[slot] || (!slot && set->active == 1)) continue;
   entry_quiescent(set, slot);
@@ -669,15 +669,13 @@ free_targets:
 int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
 {
  struct bpf_entry_link *entry = container_of(link, struct bpf_entry_link, link);
- struct entry_set *set = entry->set, *prepared, *old;
+ struct entry_set *set = entry->set, *prepared;
  struct entry_member *members;
- struct bpf_prog **expected = NULL;
  struct bpf_prog *migration = NULL, *reverse = NULL;
  unsigned long migration_address = 0, reverse_address = 0;
- struct bpf_operations_set *expected_tables = NULL;
  u32 operations_count = attr->link_update.entry.operations_count, *operations_fds;
- u32 *programs = NULL, *old_fds = NULL, count = attr->link_update.entry.count;
- unsigned int i, slot, id = 0;
+ u32 *programs = NULL, count = attr->link_update.entry.count;
+ unsigned int i, id;
  int error = -EINVAL;
  
  if (attr->link_update.entry.migration_prog_fd) {
@@ -689,16 +687,6 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  }
  programs = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.prog_fds), count, sizeof(u32));
  if (IS_ERR(programs)) {error = PTR_ERR(programs);programs = NULL;goto out;}
- if ((attr->link_update.flags & BPF_F_REPLACE) && count) {
-  old_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.old_prog_fds), count, sizeof(u32));
-  if (IS_ERR(old_fds)) {error = PTR_ERR(old_fds);old_fds = NULL;goto out;}
-  expected = kvcalloc(count, sizeof(*expected), GFP_KERNEL);
-  if (!expected) {error = -ENOMEM;goto out;}
-  for (i = 0; i < count; ++i) {
-   expected[i] = bpf_prog_get(old_fds[i]);
-   if (IS_ERR(expected[i])) {error = PTR_ERR(expected[i]);expected[i] = NULL;goto out;}
-  }
- }
  members = kvmalloc_array(count, sizeof(*members), GFP_KERNEL);
  if (!members) {error = -ENOMEM;goto out;}
  for (i = 0; i < count; ++i)
@@ -711,29 +699,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  prepared->tables = bpf_operations_prepare(operations_fds, operations_count);
  kvfree(operations_fds);
  if (IS_ERR(prepared->tables)) {error = PTR_ERR(prepared->tables);prepared->tables = NULL;entry_free(prepared);goto out;}
- if ((attr->link_update.flags & BPF_F_REPLACE) && operations_count) {
-  operations_fds = vmemdup_array_user(u64_to_user_ptr(attr->link_update.entry.old_operations_fds), operations_count, sizeof(u32));
-  if (IS_ERR(operations_fds)) {error = PTR_ERR(operations_fds);entry_free(prepared);goto out;}
-  expected_tables = bpf_operations_prepare(operations_fds, operations_count);
-  kvfree(operations_fds);
-  if (IS_ERR(expected_tables)) {error = PTR_ERR(expected_tables);expected_tables = NULL;entry_free(prepared);goto out;}
- }
  mutex_lock(&entry_lock);
- error = -ENOLINK;
- 
- error = -EINVAL;
- 
- 
- old = entry_generation(set, set->active);
- 
- slot = entry_generation_slot(set->active);
- error = -EPERM;
- error = -EBUSY;
- /* One outstanding layout epoch. A reverse update must use the retained
-  * inverse, not another conversion with an unrelated population contract. */
- 
- error = -EOVERFLOW;
- 
  id = set->next_generation;
  prepared->generation_id = id;set->next_generation++;
  list_add_tail(&prepared->generation_node, &set->generations);
@@ -751,19 +717,16 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
    }
   }
  } else error = entry_switch(set, set->active, id);
- if (error && !set->poisoned) list_del(&prepared->generation_node);
- else prepared = NULL; /* Includes poisoned text: keep every possible target. */
+ if (error) list_del(&prepared->generation_node);
+ else prepared = NULL;
  if (!error) schedule_delayed_work(&set->retire_work, 0);
 unlock:
  mutex_unlock(&entry_lock);
  if (prepared) entry_free(prepared);
 out:
- if (expected)
-  for (i = 0; i < count; ++i) if (expected[i]) bpf_prog_put(expected[i]);
  if (migration) bpf_prog_put(migration);
  if (reverse) bpf_prog_put(reverse);
- bpf_operations_set_put(expected_tables);
- kvfree(expected);kvfree(old_fds);kvfree(programs);
+ kvfree(programs);
  return error;
 }
 
