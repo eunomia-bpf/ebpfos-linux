@@ -7,7 +7,6 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
-#include "component_context.h"
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -64,8 +63,6 @@ static int store_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int store_component_filter(const struct bpf_prog *prog, u32 id);
-
 #define STORE_DEFINE(prefix, area, width, size) \
 BTF_KFUNCS_START(prefix##width##_ids) \
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_##prefix##width) \
@@ -92,7 +89,7 @@ static const struct btf_kfunc_id_set prefix##width##_set = { \
  .set = &prefix##width##_ids, .kop_descs = prefix##width##_descs }; \
 static const struct btf_kfunc_id_set prefix##width##_component_set = { \
  .set = &prefix##width##_ids, .kop_descs = prefix##width##_descs, \
- .filter = store_component_filter };
+ };
 #define OLD_STORE_DEFINE(width, size) STORE_DEFINE(percpu_store, false, width, size)
 #define AREA_STORE_DEFINE(width, size) STORE_DEFINE(percpu_area_store, true, width, size)
 PERCPU_STORE_ROWS(OLD_STORE_DEFINE)
@@ -165,7 +162,7 @@ static const struct btf_kfunc_id_set prefix##width##_set = { \
  .set = &prefix##width##_ids, .kop_descs = prefix##width##_descs }; \
 static const struct btf_kfunc_id_set prefix##width##_component_set = { \
  .set = &prefix##width##_ids, .kop_descs = prefix##width##_descs, \
- .filter = store_component_filter };
+ };
 #define OLD_REGSTORE_DEFINE(width, size) REGSTORE_DEFINE(percpu_regstore, false, width, size)
 #define AREA_REGSTORE_DEFINE(width, size) REGSTORE_DEFINE(percpu_area_regstore, true, width, size)
 PERCPU_STORE_ROWS(OLD_REGSTORE_DEFINE)
@@ -173,24 +170,6 @@ PERCPU_STORE_ROWS(AREA_REGSTORE_DEFINE)
 #undef OLD_REGSTORE_DEFINE
 #undef AREA_REGSTORE_DEFINE
 #undef REGSTORE_DEFINE
-
-static int store_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	bool ours = false;
-#define STORE_MATCH(width, size) \
-	ours |= btf_id_set8_contains(&percpu_store##width##_ids, id) || \
-		btf_id_set8_contains(&percpu_area_store##width##_ids, id) || \
-		btf_id_set8_contains(&percpu_regstore##width##_ids, id) || \
-		btf_id_set8_contains(&percpu_area_regstore##width##_ids, id);
-	PERCPU_STORE_ROWS(STORE_MATCH)
-#undef STORE_MATCH
-	/* Use the same checked component domain as per-CPU reads/arithmetic.
-	 * Shared-hook filters must leave unrelated services alone.
-	 */
-	if (!ours)
-		return 0;
-	return !ebpfos_non_sleepable_component(prog);
-}
 
 static int __init percpu_stores_init(void)
 {

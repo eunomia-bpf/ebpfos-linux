@@ -6,7 +6,6 @@
 #include <linux/filter.h>
 #include <linux/init.h>
 #include "koperation_ud2_terminal.generated.h"
-#include "component_context.h"
 
 /* Returning BUG/WARN/CFI traps require their source tables and continuation. */
 #if defined(CONFIG_X86_64) && !defined(CONFIG_BUG) && !defined(CONFIG_CFI) && \
@@ -50,19 +49,13 @@ static struct bpf_kop ud2_kop = {
 	.max_emit_bytes = 2,
 	.instantiate_insn = ud2_proof,
 	.emit_x86 = ud2_emit,
-
 };
 static const struct bpf_kop * const ud2_descs[] = { &ud2_kop };
 static const struct btf_kfunc_id_set ud2_set = {
 	.set = &ud2_ids, .kop_descs = ud2_descs,
 };
-static int ud2_component_filter(const struct bpf_prog *prog, u32 id)
-{
- if (!btf_id_set8_contains(&ud2_ids, id)) return 0;
- return !ebpfos_non_sleepable_component(prog) || prog->type != BPF_PROG_TYPE_TRACING;
-}
 static const struct btf_kfunc_id_set ud2_component_set = {
- .set = &ud2_ids, .kop_descs = ud2_descs, .filter = ud2_component_filter,
+ .set = &ud2_ids, .kop_descs = ud2_descs,
 };
 static int __init ud2_register(void)
 {

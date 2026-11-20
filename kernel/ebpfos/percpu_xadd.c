@@ -7,7 +7,6 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
-#include "component_context.h"
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -84,8 +83,6 @@ static int xadd_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int xadd_context_filter(const struct bpf_prog *prog, u32 id);
-
 #define DEFINE(prefix, area, width, size) \
 BTF_KFUNCS_START(prefix##width##_ids) \
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_##prefix##width) \
@@ -102,7 +99,7 @@ static const struct bpf_kop prefix##width##_desc = { \
 static const struct bpf_kop * const prefix##width##_descs[] = { &prefix##width##_desc }; \
 static const struct btf_kfunc_id_set prefix##width##_set = { \
  .set = &prefix##width##_ids, .kop_descs = prefix##width##_descs, \
- .filter = xadd_context_filter };
+ };
 #define OLD_DEFINE(width, size) DEFINE(percpu_xadd, false, width, size)
 #define AREA_DEFINE(width, size) DEFINE(percpu_area_xadd, true, width, size)
 XADD_ROWS(OLD_DEFINE)
@@ -110,21 +107,6 @@ XADD_ROWS(AREA_DEFINE)
 #undef OLD_DEFINE
 #undef AREA_DEFINE
 #undef DEFINE
-
-static int xadd_context_filter(const struct bpf_prog *prog, u32 id)
-{
-	bool ours = false;
-#define MATCH(width, size) \
-	ours |= btf_id_set8_contains(&percpu_xadd##width##_ids, id) || \
-		btf_id_set8_contains(&percpu_area_xadd##width##_ids, id);
-	XADD_ROWS(MATCH)
-#undef MATCH
-	/* Common filters must leave unrelated descriptors alone. */
-	if (!ours) return 0;
-	if (!prog) return 1;
-	if (prog->type == BPF_PROG_TYPE_SYSCALL) return 0;
-	return !ebpfos_non_sleepable_component(prog);
-}
 
 static int __init xadd_register(void)
 {

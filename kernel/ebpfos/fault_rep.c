@@ -8,7 +8,6 @@
 #include <asm/asm.h>
 #include <asm/extable.h>
 #include "koperation_fault_rep.generated.h"
-#include "component_context.h"
 
 __bpf_kfunc_start_defs();
 #define REP_SERVICE(name, type, instruction, shift) \
@@ -94,7 +93,6 @@ static struct bpf_kop rep_kop = {
  .num_exentries = 1, .exception_entry = rep_exception,
  .instantiate_insn = rep_proof, .emit_x86 = rep_emit,
   .proof_kfunc_id_for_payload = rep_service,
-
 };
 static const u8 repq_native[] = EBPFOS_FAULT_REP_MOVSQ_NATIVE;
 static bool repq_valid(u64 payload)
@@ -149,26 +147,17 @@ static struct bpf_kop repq_kop = {
  .num_exentries = 1, .exception_entry = repq_exception,
  .instantiate_insn = repq_proof, .emit_x86 = repq_emit,
   .proof_kfunc_id_for_payload = repq_service,
-
 };
 static const struct bpf_kop * const rep_descs[] = { &rep_kop, &repq_kop };
 static const struct btf_kfunc_id_set rep_service_set3 = { .set = &rep_services3 };
 static const struct btf_kfunc_id_set rep_service_set14 = { .set = &rep_services14 };
 static const struct btf_kfunc_id_set rep_set = { .set = &rep_ids, .kop_descs = rep_descs };
-static int rep_component_filter(const struct bpf_prog *prog, u32 id)
-{
- if (btf_id_set8_contains(&rep_ids, id) ||
-     btf_id_set8_contains(&rep_services3, id) ||
-     btf_id_set8_contains(&rep_services14, id))
-  return !ebpfos_non_sleepable_component(prog);
- return 0;
-}
 static const struct btf_kfunc_id_set rep_component_services3 = {
- .set = &rep_services3, .filter = rep_component_filter };
+ .set = &rep_services3 };
 static const struct btf_kfunc_id_set rep_component_services14 = {
- .set = &rep_services14, .filter = rep_component_filter };
+ .set = &rep_services14 };
 static const struct btf_kfunc_id_set rep_component_set = {
- .set = &rep_ids, .filter = rep_component_filter, .kop_descs = rep_descs };
+ .set = &rep_ids, .kop_descs = rep_descs };
 static int __init rep_register(void)
 {
  const struct btf_kfunc_id_set *syscall_sets[] = {

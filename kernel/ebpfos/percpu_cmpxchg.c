@@ -7,7 +7,6 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
-#include "component_context.h"
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -90,7 +89,6 @@ static int compare_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int compare_context_filter(const struct bpf_prog *prog, u32 id);
 #define DEFINE(width, size) \
 BTF_KFUNCS_START(percpu_area_cmpxchg##width##_ids) \
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_percpu_area_cmpxchg##width) \
@@ -107,21 +105,9 @@ static const struct bpf_kop compare##width##_desc = { \
 static const struct bpf_kop * const compare##width##_descs[] = { &compare##width##_desc }; \
 static const struct btf_kfunc_id_set compare##width##_set = { \
  .set = &percpu_area_cmpxchg##width##_ids, .kop_descs = compare##width##_descs, \
- .filter = compare_context_filter };
+ };
 COMPARE_ROWS(DEFINE)
 #undef DEFINE
-
-static int compare_context_filter(const struct bpf_prog *prog, u32 id)
-{
-	bool ours = false;
-#define MATCH(width, size) ours |= !!btf_id_set8_contains(&percpu_area_cmpxchg##width##_ids, id);
-	COMPARE_ROWS(MATCH)
-#undef MATCH
-	if (!ours) return 0;
-	if (!prog) return 1;
-	if (prog->type == BPF_PROG_TYPE_SYSCALL) return 0;
-	return !ebpfos_non_sleepable_component(prog);
-}
 
 static int __init compare_register(void)
 {

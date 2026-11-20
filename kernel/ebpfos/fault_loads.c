@@ -8,7 +8,6 @@
 #include <asm/asm.h>
 #include <asm/extable.h>
 #include "koperation_fault_load.generated.h"
-#include "component_context.h"
 
 #define FAULT_MOV_ROWS(X) \
  X(8, "b", "b") X(16, "w", "w") X(32, "l", "k") X(64, "q", "q")
@@ -45,8 +44,6 @@ BTF_KFUNCS_END(zeropad_mov64_services)
 static const u8 zeropad_mov64_native[] = EBPFOS_FAULT_MOV64_ZEROPAD_NATIVE;
 
 static const struct btf_kfunc_id_set zeropad_mov64_service_set = { .set = &zeropad_mov64_services };
-
-static int fault_mov_component_filter(const struct bpf_prog *prog, u32 id);
 
 #define FAULT_MOV_DESCRIPTOR(width, suffix, part) \
 BTF_KFUNCS_START(fault_mov##width##_services) \
@@ -108,28 +105,15 @@ static const struct btf_kfunc_id_set fault_mov##width##_service_set = { .set = &
 static const struct btf_kfunc_id_set fault_mov##width##_set = { \
  .set = &fault_mov##width##_ids, .kop_descs = fault_mov##width##_descs }; \
 static const struct btf_kfunc_id_set fault_mov##width##_component_service_set = { \
- .set = &fault_mov##width##_services, .filter = fault_mov_component_filter }; \
+ .set = &fault_mov##width##_services }; \
 static const struct btf_kfunc_id_set fault_mov##width##_component_set = { \
  .set = &fault_mov##width##_ids, .kop_descs = fault_mov##width##_descs, \
- .filter = fault_mov_component_filter };
+ };
 FAULT_MOV_ROWS(FAULT_MOV_DESCRIPTOR)
 #undef FAULT_MOV_DESCRIPTOR
 
-static int fault_mov_component_filter(const struct bpf_prog *prog, u32 id)
-{
- /* Shared tracing hooks also contain unrelated services. */
- if (btf_id_set8_contains(&zeropad_mov64_services, id))
-  return !ebpfos_non_sleepable_component(prog);
-#define FAULT_MOV_COMPONENT_MATCH(width, suffix, part) \
- if (btf_id_set8_contains(&fault_mov##width##_ids, id) || \
-     btf_id_set8_contains(&fault_mov##width##_services, id)) \
-  return !ebpfos_non_sleepable_component(prog);
- FAULT_MOV_ROWS(FAULT_MOV_COMPONENT_MATCH)
-#undef FAULT_MOV_COMPONENT_MATCH
- return 0;
-}
 static const struct btf_kfunc_id_set zeropad_mov64_component_service_set = {
- .set = &zeropad_mov64_services, .filter = fault_mov_component_filter,
+ .set = &zeropad_mov64_services,
 };
 
 static int __init fault_mov_register(void)

@@ -24,8 +24,6 @@ LOCKED_BITS_ROWS(LOCKED_DECL)
 #undef LOCKED_DECL
 __bpf_kfunc_end_defs();
 
-static int locked_context_filter(const struct bpf_prog *prog, u32 id);
-
 #define LOCKED_DEFINE(op, upper, width, size, type) \
 BTF_KFUNCS_START(locked_##op##width##_ids) \
 BTF_ID_FLAGS(func, bpf_ebpfos_kop_locked_##op##width) \
@@ -63,31 +61,9 @@ static const struct bpf_kop locked_##op##width##_desc = { \
 static const struct bpf_kop * const locked_##op##width##_descs[] = { &locked_##op##width##_desc }; \
 static const struct btf_kfunc_id_set locked_##op##width##_set = { \
  .set = &locked_##op##width##_ids, .kop_descs = locked_##op##width##_descs, \
- .filter = locked_context_filter };
+ };
 LOCKED_BITS_ROWS(LOCKED_DEFINE)
 #undef LOCKED_DEFINE
-
-static int locked_context_filter(const struct bpf_prog *prog, u32 id)
-{
- bool ours = false;
-#define LOCKED_MATCH(op, upper, width, size, type) ours |= locked_##op##width##_payload(id);
- LOCKED_BITS_ROWS(LOCKED_MATCH)
-#undef LOCKED_MATCH
- /* The common hook also invokes this filter for unrelated descriptors. */
- if (!ours) return 0;
- if (!prog) return 1;
- if (prog->type == BPF_PROG_TYPE_SYSCALL) return 0;
- if (!prog->aux || !prog->aux->ebpfos_component || prog->sleepable)
-  return 1;
- /* Replacement entries inherit the original caller's context. These exact
-  * memory instructions need no CPU, interrupt or scheduling capability;
-  * their proof still checks the destination, value and writer authority.
-  * Ordinary tracing observers do not acquire component write permission.
-  */
- return prog->type != BPF_PROG_TYPE_RAW_TRACEPOINT &&
-        !(prog->type == BPF_PROG_TYPE_TRACING &&
-          prog->expected_attach_type == BPF_TRACE_REPLACE);
-}
 
 static int __init locked_bits_init(void)
 {

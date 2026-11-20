@@ -28,7 +28,6 @@
 #include "koperation_cmp_mask.generated.h"
 #include "koperation_opcode.generated.h"
 #include "fault_prefetch.h"
-#include "component_context.h"
 
 __bpf_kfunc_start_defs();
 __bpf_kfunc void bpf_ebpfos_kprog_terminal_effect(void) { }
@@ -1601,30 +1600,15 @@ static const struct bpf_kop * const ebpfos_kprog_terminal_descs[] = {
 	&ebpfos_kprog_terminal,
 };
 
-static int ebpfos_kprog_terminal_filter(const struct bpf_prog *prog,
-					u32 kfunc_id)
-{
-	if (!btf_id_set8_contains(&ebpfos_kprog_terminal_ids, kfunc_id))
-		return 0;
-	if (!prog || !prog->aux)
-		return 1;
-	if (prog->aux->ebpfos_component)
-		return 0;
-	return prog->type != BPF_PROG_TYPE_SYSCALL || !prog->sleepable;
-}
-
 static const struct btf_kfunc_id_set ebpfos_kprog_terminal_set = {
 	.set = &ebpfos_kprog_terminal_ids,
-	.filter = ebpfos_kprog_terminal_filter,
+
 	.kop_descs = ebpfos_kprog_terminal_descs,
 };
-
-static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id);
 
 #define EBPFOS_COMPONENT_KOP_SET(name) \
 	static const struct btf_kfunc_id_set name##_component_set = { \
 		.set = &name##_ids, \
-		.filter = ebpfos_kprog_component_filter, \
 		.kop_descs = name##_descs, \
 	}
 
@@ -1635,7 +1619,7 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_atomic32);
 #define EBPFOS_FRAME_ADDRESS_COMPONENT(name, upper, value) \
  EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
  static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
- .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+ .set = &ebpfos_kprog_##name##_service_ids };
 EBPFOS_FRAME_ADDRESS_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
  EBPFOS_NATIVE_ARGUMENT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
  EBPFOS_NATIVE_RESULT_ROWS(EBPFOS_FRAME_ADDRESS_COMPONENT)
@@ -1669,7 +1653,7 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_pushf64);
 #define EBPFOS_PORT_IO_COMPONENT(name) \
  EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
  static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
- .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+ .set = &ebpfos_kprog_##name##_service_ids };
 EBPFOS_X86_FIXED_EFFECT_ROWS(EBPFOS_PORT_IO_COMPONENT)
 #undef EBPFOS_PORT_IO_COMPONENT
 EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_lfence);
@@ -1681,24 +1665,21 @@ EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_rdrand64);
 #define EBPFOS_X86_COMPONENT_STATE(name) \
  EBPFOS_COMPONENT_KOP_SET(ebpfos_kprog_##name); \
  static const struct btf_kfunc_id_set ebpfos_kprog_##name##_component_service_set = { \
- .set = &ebpfos_kprog_##name##_service_ids, .filter = ebpfos_kprog_component_filter };
+ .set = &ebpfos_kprog_##name##_service_ids };
 EBPFOS_X86_COMPONENT_STATE_ROWS(EBPFOS_X86_COMPONENT_STATE)
 #undef EBPFOS_X86_COMPONENT_STATE
 
 static const struct btf_kfunc_id_set ebpfos_kprog_rdrand64_component_service_set = {
 	.set = &ebpfos_kprog_rdrand64_service_ids,
-	.filter = ebpfos_kprog_component_filter,
 };
 static const struct btf_kfunc_id_set ebpfos_kprog_lfence_component_service_set = {
 	.set = &ebpfos_kprog_lfence_service_ids,
-	.filter = ebpfos_kprog_component_filter,
 };
 #endif
 
 /* The descriptor's scalar proof calls this same read-only flags service. */
 static const struct btf_kfunc_id_set ebpfos_kprog_pushf64_component_service_set = {
 	.set = &ebpfos_kprog_pushf64_service_ids,
-	.filter = ebpfos_kprog_component_filter,
 };
 
 #define EBPFOS_LOCAL_BITS_COMPONENT_PTR(op, upper, width, span, alu, type, mask_type) \
@@ -1745,19 +1726,6 @@ static const struct btf_kfunc_id_set * const component_sets[] = {
 		&ebpfos_kprog_rdrand64_component_service_set,
 #endif
 	};
-
-static int ebpfos_kprog_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	size_t i;
-
-	/* Tracing, raw tracepoints and LSM share one stock kfunc hook. This
-	 * filter must not reject unrelated services registered in that hook.
-	 */
-	for (i = 0; i < ARRAY_SIZE(component_sets); i++)
-		if (btf_id_set8_contains(component_sets[i]->set, id))
-			return !ebpfos_non_sleepable_component(prog);
-	return 0;
-}
 
 static int __init ebpfos_kprog_register(void)
 {

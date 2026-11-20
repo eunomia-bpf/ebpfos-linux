@@ -7,7 +7,6 @@
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
-#include "component_context.h"
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -128,8 +127,6 @@ static int arithmetic_emit(u8 *image, u32 *offset, bool emit, u64 payload,
 	return n;
 }
 
-static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id);
-
 /* CPU selection is a proof helper, not a native call. Explicit proof writes
  * still describe the native result/scratch registers after that selection.
  */
@@ -151,7 +148,7 @@ static const struct btf_kfunc_id_set prefix##op##width##_set = { \
  .set = &prefix##op##width##_ids, .kop_descs = prefix##op##width##_descs }; \
 static const struct btf_kfunc_id_set prefix##op##width##_component_set = { \
  .set = &prefix##op##width##_ids, .kop_descs = prefix##op##width##_descs, \
- .filter = arithmetic_component_filter };
+ };
 #define OLD_DEFINE(op, width, size, alu, unary, opcode) DEFINE(percpu_, false, op, width, size, alu, unary, opcode)
 #define AREA_DEFINE(op, width, size, alu, unary, opcode) DEFINE(percpu_area_, true, op, width, size, alu, unary, opcode)
 ARITHMETIC_ROWS(OLD_DEFINE)
@@ -159,22 +156,6 @@ ARITHMETIC_ROWS(AREA_DEFINE)
 #undef OLD_DEFINE
 #undef AREA_DEFINE
 #undef DEFINE
-
-static int arithmetic_component_filter(const struct bpf_prog *prog, u32 id)
-{
-	bool ours = false;
-#define ARITHMETIC_MATCH(op, width, size, alu, unary, opcode) \
-	ours |= btf_id_set8_contains(&percpu_##op##width##_ids, id) || \
-		btf_id_set8_contains(&percpu_area_##op##width##_ids, id);
-	ARITHMETIC_ROWS(ARITHMETIC_MATCH)
-#undef ARITHMETIC_MATCH
-	/* This hook is shared with tracing. Restrict only these arithmetic
-	 * descriptors; unrelated services retain their own context filters.
-	 */
-	if (!ours)
-		return 0;
-	return !ebpfos_non_sleepable_component(prog);
-}
 
 static int __init arithmetic_register(void)
 {

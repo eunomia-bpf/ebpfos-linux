@@ -9,7 +9,6 @@
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
 #include <linux/init.h>
-#include "component_context.h"
 #include <linux/string.h>
 #include "koperation_locked_xchg.generated.h"
 
@@ -22,8 +21,6 @@ __bpf_kfunc __attribute__((btf_decl_tag("bpf_kop_payload_id:0"))) u32 bpf_ebpfos
 XCHG_ROWS(XCHG_DECL)
 #undef XCHG_DECL
 __bpf_kfunc_end_defs();
-
-static int xchg_context_filter(const struct bpf_prog *prog, u32 id);
 
 #define XCHG_DEFINE(width, size, type) \
 BTF_KFUNCS_START(xchg##width##_ids) \
@@ -51,24 +48,9 @@ static const struct bpf_kop xchg##width##_desc = { \
 static const struct bpf_kop * const xchg##width##_descs[] = { &xchg##width##_desc }; \
 static const struct btf_kfunc_id_set xchg##width##_set = { \
  .set = &xchg##width##_ids, .kop_descs = xchg##width##_descs, \
- .filter = xchg_context_filter };
+ };
 XCHG_ROWS(XCHG_DEFINE)
 #undef XCHG_DEFINE
-
-static int xchg_context_filter(const struct bpf_prog *prog, u32 id)
-{
-	/* COMMON filters also see unrelated kfuncs: constrain only our IDs.
-	 * One registration serves the declared contexts, without consuming a
-	 * second entry or increasing either stock per-hook capacity.
-	 */
-	if (!xchg8_payload(id) && !xchg16_payload(id))
-		return 0;
-	if (!prog)
-		return 1;
-	if (prog->type == BPF_PROG_TYPE_SYSCALL)
-		return 0;
-	return !ebpfos_non_sleepable_component(prog);
-}
 
 static int __init locked_xchg_init(void)
 {

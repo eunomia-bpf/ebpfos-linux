@@ -106,26 +106,21 @@ static struct bpf_kop window_open_kop = {
 	.num_x86_relocs = 1, .x86_reloc = window_open_reloc,
 	.max_insn_cnt = 1, .max_emit_bytes = 13,
 	.instantiate_insn = window_open_proof, .emit_x86 = window_open_emit,
-
 };
 static struct bpf_kop window_close_kop = {
 	.max_insn_cnt = 1, .max_emit_bytes = 8,
 	.instantiate_insn = window_close_proof, .emit_x86 = window_close_emit,
-
 };
 /* Each singleton owns its exact semantic descriptor; BTF sets are sorted. */
 static const struct bpf_kop * const window_open_descriptors[] = { &window_open_kop };
 static const struct bpf_kop * const window_close_descriptors[] = { &window_close_kop };
-static int window_context_filter(const struct bpf_prog *prog, u32 id);
-static const struct btf_kfunc_id_set window_open_service_set = { .set = &window_open_services, .filter = window_context_filter };
-static const struct btf_kfunc_id_set window_close_service_set = { .set = &window_close_services, .filter = window_context_filter };
+static const struct btf_kfunc_id_set window_open_service_set = { .set = &window_open_services };
+static const struct btf_kfunc_id_set window_close_service_set = { .set = &window_close_services };
 static const struct btf_kfunc_id_set window_open_set = {
 	.set = &window_open_ids, .kop_descs = window_open_descriptors,
- .filter = window_context_filter,
 };
 static const struct btf_kfunc_id_set window_close_set = {
 	.set = &window_close_ids, .kop_descs = window_close_descriptors,
- .filter = window_context_filter,
 };
 static const struct btf_kfunc_id_set * const window_sets[] = {
  &window_open_service_set,
@@ -133,11 +128,6 @@ static const struct btf_kfunc_id_set * const window_sets[] = {
  &window_open_set,
  &window_close_set,
 };
-static int window_context_filter(const struct bpf_prog *prog, u32 id)
-{
- return ebpfos_syscall_kfunc_filter(prog, id, window_sets,
-                                    ARRAY_SIZE(window_sets));
-}
 static int __init window_register(void)
 {
  /* An absent configured source alternative is not a requested opcode. */

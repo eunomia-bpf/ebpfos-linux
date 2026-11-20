@@ -11,7 +11,6 @@
 #include "syscall_kfuncs.h"
 
 #define WIDTHS(X) X(8, b, b, 1) X(16, w, w, 2) X(32, l, k, 4) X(64, q, q, 8)
-static int buffer_context_filter(const struct bpf_prog *prog, u32 id);
 __bpf_kfunc_start_defs();
 #define LOAD_SERVICE(bits, suffix, part, bytes, seed, tail) \
 __bpf_kfunc u64 bpf_ebpfos_x86_buffer_fault_load##bits##tail( \
@@ -87,8 +86,8 @@ __bpf_kfunc_end_defs();
    .proof_kfunc_id_for_payload = name##_service, \
  }; \
  static const struct bpf_kop * const name##_descs[] = { &name##_kop }; \
- static const struct btf_kfunc_id_set name##_service_set = { .set = &name##_services, .filter = buffer_context_filter }; \
- static const struct btf_kfunc_id_set name##_set = { .set = &name##_ids, .kop_descs = name##_descs, .filter = buffer_context_filter };
+ static const struct btf_kfunc_id_set name##_service_set = { .set = &name##_services }; \
+ static const struct btf_kfunc_id_set name##_set = { .set = &name##_ids, .kop_descs = name##_descs };
 #define DESCRIPTORS(bits, suffix, part, bytes) \
  DESCRIPTOR(buffer_fault_load##bits, 1, EBPFOS_buffer_fault_load##bits##_INSN, EBPFOS_buffer_fault_load##bits##_FIXUP) \
  DESCRIPTOR(buffer_fault_load##bits##_address_seed, 1, EBPFOS_buffer_fault_load##bits##_address_seed_INSN, EBPFOS_buffer_fault_load##bits##_address_seed_FIXUP) \
@@ -107,11 +106,6 @@ static const struct btf_kfunc_id_set * const buffer_sets[] = {
 #undef WIDTH_SETS
 #undef SETS
 };
-static int buffer_context_filter(const struct bpf_prog *prog, u32 id)
-{
- return ebpfos_syscall_kfunc_filter(prog, id, buffer_sets,
-                                    ARRAY_SIZE(buffer_sets));
-}
 static int __init buffer_mov_register(void)
 {
  return ebpfos_register_syscall_kfuncs(buffer_sets, ARRAY_SIZE(buffer_sets));
