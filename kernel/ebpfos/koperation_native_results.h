@@ -28,7 +28,6 @@ static bool ebpfos_result2_call(const struct bpf_prog *prog, const struct bpf_in
   bpf_kop_is_sidecar_insn(insn - 1) &&
   bpf_kop_sidecar_payload(insn - 1) == ebpfos_kprog_native_result2_ids.pairs[0].id;
 }
-#include "native_result_returns.h"
 
 static bool ebpfos_result2_payload(u64 payload)
 {
@@ -67,9 +66,7 @@ bool ebpfos_prog_native_result2(const struct bpf_prog *prog)
 {
  u32 i;
  if (!prog || !prog->jited) return false;
- /* JIT admission already checked every return block. Look at this exact
-  * subprogram, not a BTF claim or a flag inherited from its parent graph.
-  */
+ /* Inspect this subprogram's retained instruction pair. */
  for (i = 0; i < prog->len; i++) if (ebpfos_result2_call(prog, &prog->insnsi[i])) return true;
  return false;
 }
