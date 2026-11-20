@@ -9087,28 +9087,20 @@ static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
 					  "__safe_trusted_or_null");
 }
 
-/* A field permission is not a stored-value capability. Run this check before
- * any subsystem write hook, including for allocated objects whose reads use
- * the scalar ABI. Check modeled resources without inventing a lifetime model
- * for borrowed Linux objects; their lifetime follows source synchronization.
- */
-
-static int check_btf_pointer_store(struct bpf_verifier_env *env,
+/* Classify a pointer field without imposing a stored-value contract. */
+static bool btf_pointer_store_field(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *dst,
-				   struct bpf_reg_state *value,
-				   int off, int size, bool *pointer_field)
+				   int off, int size)
 {
 	enum bpf_type_flag flags = 0;
 	const char *field_name = NULL;
 	u32 pointee = 0;
-	const struct btf_type *pointee_type;
-	bool nullable = true, callable;
+	bool nullable = true;
 	int ret;
 
 	ret = btf_struct_store_access(&env->log, dst, off, size,
 				      &pointee, &flags, &nullable, &field_name);
-	*pointer_field = ret == PTR_TO_BTF_ID;
-	return 0;
+	return ret == PTR_TO_BTF_ID;
 }
 
 /* Probe reads are option A, not a proof of object lifetime. Attribute the
@@ -9123,13 +9115,6 @@ static void note_probe_read_scope(struct bpf_verifier_env *env)
 		verbose(env, "func#%u relies on verifier option A; name='%s'\n",
 			owner, bpf_verifier_subprog_name(env, owner));
 	}
-}
-
-static int check_component_field_authority(struct bpf_verifier_env *env,
-					  const struct bpf_reg_state *dst,
-					  int off, int size)
-{
-	return 0;
 }
 
 #include "btf_field_range.h"
@@ -9200,13 +9185,6 @@ static int check_owned_scalar_access(struct bpf_verifier_env *env,
 	end = off + reg->umax_value + size;
 	if (!btf_type_is_scalar_region(reg->btf, id, begin, end - begin))
 		return 0;
-	if (atype == BPF_WRITE && env->prog->aux->ebpfos_component) {
-		err = check_component_field_authority(env, reg,
-				tnum_is_const(reg->var_off) ? off + reg->var_off.value : off,
-				size);
-		if (err)
-			return err;
-	}
 	if (atype == BPF_READ && value_regno >= 0) {
 		mark_reg_unknown(env, regs, value_regno);
 		err = check_btf_field_ranges(env, regs, regno, off, size, atype, value_regno, &source);
@@ -9424,19 +9402,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	}
 
 	if (atype == BPF_WRITE) {
-		if (env->prog->aux->ebpfos_component) {
-			ret = check_component_field_authority(env, reg, off, size);
-			if (ret)
-				return ret;
-		}
-		ret = check_btf_pointer_store(env, reg,
-					    value_regno < 0 ? NULL : regs + value_regno,
-					    off, size, &pointer_field);
-		if (ret)
-			return ret;
-		/* L1 supplies authority; the generic verifier above checks values.
-		 * Allocated special fields still go through the stock checks below.
-		 */
+		pointer_field = btf_pointer_store_field(env, reg, off, size);
+		/* Allocated special fields retain the stock path below. */
 		if (env->prog->aux->ebpfos_component && !type_is_alloc(reg->type))
 			return 0;
 	}
