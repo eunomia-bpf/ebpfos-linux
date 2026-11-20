@@ -23137,12 +23137,6 @@ enforce_retval:
 	return 0;
 }
 
-static int check_stable_readonly_result(struct bpf_verifier_env *env, u32 regno,
-                                        u32 bytes_required, bool kernel_only)
-{
-	return 0;
-}
-
 static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 {
 	struct bpf_func_state *frame = cur_func(env);
@@ -23151,41 +23145,10 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 
 	const struct bpf_subprog_info *sub = &env->subprog_info[frame->subprogno];
 
-	if (sub->native_frame && sub->native_abi.result_buffer) {
-		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-		u32 size = sub->native_abi.args[0].size;
-		u32 end = sub->native_local_stack + round_up(sub->native_arg_out, 8) +
-			round_up(sub->native_arg_in, 8) + round_up(size, 8);
-
-		for (i = 0; i < size; i++) {
-			u32 byte = end - i - 1;
-			struct bpf_stack_state *slot = &frame->stack[byte / 8];
-			u8 type = slot->slot_type[byte % 8];
-
-			if (sub->readonly_stack_result && !(i % 8)) {
-				struct native_arg_scope temporary __free(native_arg) = {};
-				struct btf *btf = env->prog->aux->btf;
-				const struct btf_type *fn = btf_type_by_id(btf,
-					env->prog->aux->func_info[frame->subprogno].type_id);
-				u32 bytes;
-
-				err = btf_native_record_ro_size(btf, fn, i / 8, &bytes, &env->log);
-				if (err) return err;
-				if (bytes) {
-					native_value_scope(env, &temporary, 13);
-					*temporary.reg = slot->spilled_ptr;
-					err = check_stable_readonly_result(env, 13, bytes, true);
-					if (err) return err;
-					i += 7;continue;
-				}
-			}
-		}
+	if (sub->native_frame && sub->native_abi.result_buffer)
 		return 0;
-	}
 	if (sub->result_argument) {
 		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-		const struct bpf_reg_state *input = &frame->result_argument;
-		u64 offset = input->var_off.value + (s64)sub->result_argument_offset;
 
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
@@ -23193,40 +23156,16 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		/* A declared nullable alternative carries no pointer capability. */
 		if (sub->result_argument_nullable && bpf_register_is_null(result))
 			return mark_chain_precision(env, BPF_REG_0);
-		/* The contract transfers only an existing input capability. A type
-		 * match alone cannot establish its origin, bounds or lifetime.
-		 */
-		if (input->id && result->id == input->id &&
-		    result->type == input->type &&
-		    tnum_equals_const(result->var_off, offset) &&
-		    result->raw.raw1 == input->raw.raw1 && result->raw.raw2 == input->raw.raw2 &&
-		    result->mem_size_id == input->mem_size_id &&
-		    result->mem_stable == input->mem_stable &&
-		    result->ref_obj_id == input->ref_obj_id)
-			return 0;
 		return 0;
 	}
 	if (sub->readonly_result_btf_id) {
 		struct bpf_reg_state *result = &frame->regs[BPF_REG_0];
-		u32 id;
 
 		err = check_reg_arg(env, BPF_REG_0, SRC_OP);
 		if (err)
 			return err;
 		if (bpf_register_is_null(result))
 			return mark_chain_precision(env, BPF_REG_0);
-		/* A tag is an obligation, never a cast. Only original permanent
-		 * core symbols and checked results carry this lifetime. Pointer
-		 * field loads, arbitrary casts, arguments, maps and helper results
-		 * do not inherit it. Offsets must still denote the complete object.
-		 */
-		if ((result->type & ~(MEM_RDONLY | PTR_MAYBE_NULL)) == PTR_TO_BTF_ID &&
-		    result->mem_stable == BPF_MEM_KERNEL_STABLE &&
-		    btf_is_vmlinux(result->btf) && !result->ref_obj_id &&
-		    tnum_equals_const(result->var_off, 0) &&
-		    btf_type_skip_modifiers(result->btf, result->btf_id, &id) &&
-		    id == sub->readonly_result_btf_id)
-			return 0;
 		return 0;
 	}
 	if (sub->null_result) {
@@ -23236,8 +23175,7 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		return mark_chain_precision(env, BPF_REG_0);
 	}
 	if (sub->readonly_result_size)
-		return check_stable_readonly_result(env, BPF_REG_0, sub->readonly_result_size,
-					    sub->readonly_kernel_result);
+		return 0;
 	if (subprog_returns_void(env, frame->subprogno))
 		return 0;
 	for (i = 0; i < count; i++) {
@@ -23253,11 +23191,8 @@ static int check_global_subprog_return_code(struct bpf_verifier_env *env)
 		err = __check_reg_arg(env, frame->regs, regno, SRC_OP, bytes);
 		if (err)
 			return err;
-		if (sub->readonly_record_result_size[i]) {
-			err = check_stable_readonly_result(env, regno, sub->readonly_record_result_size[i], true);
-			if (err) return err;
+		if (sub->readonly_record_result_size[i])
 			continue;
-		}
 		if (!result && !i) {
 			if (is_pointer_value(env, BPF_REG_0)) {
 				verbose(env, "R%d leaks addr as return value\n", BPF_REG_0);
