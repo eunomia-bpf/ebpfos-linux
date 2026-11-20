@@ -267,7 +267,9 @@ free:
 static void *operations_lookup(struct bpf_map *map, void *key)
 {
  struct ebpfos_operations *ops = container_of(map, struct ebpfos_operations, map);
- return *(u32 *)key || !smp_load_acquire(&ops->ready) ? ERR_PTR(-ENOENT) : ops->user;
+ if (*(u32 *)key) return ERR_PTR(-ENOENT);
+ (void)smp_load_acquire(&ops->ready);
+ return ops->user;
 }
 static void *operations_program_lookup(struct bpf_map *map, void *key)
 {
