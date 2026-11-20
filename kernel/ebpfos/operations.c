@@ -93,29 +93,6 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
 
 /* Native BTF section offsets preserve distinct variables with the same
  * spelling. An unambiguous symbol in that section supplies its relocated base. */
-static bool operations_storage_range(struct module *module, unsigned long address, u32 size)
-{
- if (!module) {
-  unsigned long bytes, offset;
-  return address &&
-      ((address >= (unsigned long)__start_rodata && address < (unsigned long)__end_rodata &&
-         size <= (unsigned long)__end_rodata - address) ||
-        (address >= (unsigned long)_sdata && address < (unsigned long)_edata &&
-         size <= (unsigned long)_edata - address) ||
-        (address >= (unsigned long)__bss_start && address < (unsigned long)__bss_stop &&
-         size <= (unsigned long)__bss_stop - address)) &&
-      kallsyms_lookup_size_offset(address, &bytes, &offset) && !offset && bytes >= size;
- }
-#ifdef CONFIG_MODULES
- {
-  enum mod_mem_type type;
-  for (type = MOD_DATA; type <= MOD_RO_AFTER_INIT; ++type)
-   if (type != MOD_TEXT && within_module_mem_type(address, module, type) &&
-       size <= module->mem[type].size - (address - (unsigned long)module->mem[type].base)) return true;
- }
-#endif
- return false;
-}
 static unsigned long operations_storage_symbol(struct module *module, const char *name, u32 size)
 {
  unsigned long address = 0;
@@ -123,7 +100,7 @@ static unsigned long operations_storage_symbol(struct module *module, const char
 #ifdef CONFIG_MODULES
  else address = ebpfos_module_symbol(module, name, false, size);
 #endif
- return operations_storage_range(module, address, size) ? address : 0;
+ return address;
 }
 static unsigned long operations_storage(struct btf *btf, u32 variable, struct module *module, u32 size)
 {
@@ -141,12 +118,11 @@ static unsigned long operations_storage(struct btf *btf, u32 variable, struct mo
   entries = btf_type_var_secinfo(section);
   for (j = 0; j < btf_type_vlen(section); ++j) if (entries[j].type == variable) {
    u32 k, offset = entries[j].offset;
-   if (entries[j].size < size || offset > section->size || size > section->size - offset) return 0;
    if (module) {
     unsigned long base = module_section_address(module, btf_name_by_offset(btf, section->name_off));
     if (base) {
      unsigned long address = base + offset;
-     return address >= base && operations_storage_range(module, address, size) ? address : 0;
+     return address;
     }
    }
    for (k = 0; k < btf_type_vlen(section); ++k) {
@@ -157,7 +133,7 @@ static unsigned long operations_storage(struct btf *btf, u32 variable, struct mo
     address = operations_storage_symbol(module, btf_name_by_offset(btf, anchor->name_off), entries[k].size);
     if (!address || address < entries[k].offset) continue;
     base = address - entries[k].offset;address = base + offset;
-    if (address >= base && operations_storage_range(module, address, size)) return address;
+    return address;
    }
    return 0;
   }

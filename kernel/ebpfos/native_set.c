@@ -53,27 +53,8 @@ BTF_KFUNCS_START_OPTIONAL(ebpfos_native_ids)
 #undef NATIVE_POINTEE_TAG
 BTF_KFUNCS_END(ebpfos_native_ids)
 
-static int ebpfos_native_filter(const struct bpf_prog *prog, u32 id)
-{
-	if (!btf_id_set8_contains(&ebpfos_native_ids, id))
-		return 0;
-	if (!prog || !prog->aux || !prog->aux->ebpfos_component)
-		return 1;
-	if (prog->type == BPF_PROG_TYPE_SYSCALL)
-		return 0;
-	if (bpf_native_func_entry(prog))
-		return 0;
-	/* Replacement keeps the original Linux call context. Ordinary tracing
-	 * observers cannot acquire the component's native dependency boundary.
-	 * The kfunc's argument, reference and sleepability checks still apply.
-	 */
-	return prog->type != BPF_PROG_TYPE_TRACING || prog->sleepable ||
-	       prog->expected_attach_type != BPF_TRACE_REPLACE;
-}
-
 static const struct btf_kfunc_id_set ebpfos_native_set = {
 	.set = &ebpfos_native_ids,
-	.filter = ebpfos_native_filter,
 };
 
 static int __init ebpfos_native_init(void)
