@@ -13,7 +13,7 @@
 struct bpf_aot_record {
 	Elf64_Rela rela;
 	bool weak;
-	char name[BPF_AOT_SYMBOL_LEN];
+	char *name;
 };
 
 struct bpf_aot_context {
@@ -154,9 +154,18 @@ static int aot_record(struct bpf_aot_context *aot, u32 offset, u32 type,
 	record->rela.r_info = (u64)type;
 	record->rela.r_addend = addend;
 	record->weak = weak;
-	if (strscpy(record->name, name, sizeof(record->name)) < 0)
-		return aot->error = -ENAMETOOLONG;
+	record->name = kstrdup(name, GFP_KERNEL);
+	if (!record->name)
+		return aot->error = -ENOMEM;
 	return 0;
+}
+
+static void aot_records_free_names(struct bpf_aot_context *aot)
+{
+	u32 i;
+
+	for (i = 0; i < aot->nr_records; i++)
+		kfree(aot->records[i].name);
 }
 
 static int aot_record_address(struct bpf_aot_context *aot, u32 offset,

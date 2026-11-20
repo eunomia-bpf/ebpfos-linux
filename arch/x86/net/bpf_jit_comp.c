@@ -3608,6 +3608,7 @@ out:
 		kfree(aux->poke_tab);
 	kfree(aux);
 	kfree(prog);
+	aot_records_free_names(&aot);
 	kvfree(aot.records);
 	kvfree(aot.native_data);
 	kfree(aot.operands);
