@@ -8479,7 +8479,7 @@ static bool btf_global_pointer_arg_unused(struct bpf_prog *prog, int subprog,
 	struct btf *btf = prog->aux->btf;
 	u32 regno;
 
-	/* Publication reuses only the fact established by the loaded verifier. */
+	/* Unused-argument facts come from the current verifier analysis. */
 	if ((!subprog && !bpf_native_func_entry(prog)) || env->prog->type == BPF_PROG_TYPE_EXT ||
 	    sub->is_cb || sub->is_exception_cb)
 		return false;

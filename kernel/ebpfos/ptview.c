@@ -122,19 +122,10 @@ EXPORT_SYMBOL_GPL(ebpfos_ptview_symbol);
 unsigned long ebpfos_ptview_entry(unsigned long address) { return ebpfos_view_entry(address); }
 EXPORT_SYMBOL_GPL(ebpfos_ptview_entry);
 
-/* Binding data may be copied; mutable object state and Native instructions
- * must remain shared. This check runs after programs have loaded and JITed. */
+/* Pass the complete pointer update to the existing publication visitor. */
 int ebpfos_ptview_pointer_change(unsigned long address, const void *bytes,
  ebpfos_ptview_visit visit, void *data)
 {
- unsigned long at = address, end = address + sizeof(void *);
- 
- while (at < end) {
-  unsigned int level;
-  pte_t *pte = lookup_address(at, &level);
-  
-  at += min_t(unsigned long, end - at, PAGE_SIZE - offset_in_page(at));
- }
  return visit(address, bytes, sizeof(void *), data);
 }
 
