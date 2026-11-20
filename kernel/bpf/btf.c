@@ -10080,11 +10080,10 @@ u32 *btf_kfunc_flags(const struct btf *btf, u32 kfunc_btf_id, const struct bpf_p
 int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
                              const struct bpf_prog *prog)
 {
- const struct btf_type *function = btf_type_by_id(btf, func_id), *proto;
+ const struct btf_type *function = btf_type_by_id(btf, func_id);
  enum btf_kfunc_hook hook;
  u32 *flags;
- char name[KSYM_NAME_LEN];
- int id, length;
+ int id;
 
  flags = btf_kfunc_flags(btf, func_id, prog);
  /* Native C prototypes are independent of the load program's hook.
@@ -10100,13 +10099,16 @@ int btf_native_func_proto_id(const struct btf *btf, u32 func_id,
    }
   }
  if (flags && (*flags & KF_IMPLICIT_ARGS)) {
-  length = snprintf(name, sizeof(name), "%s_impl",
-                    btf_name_by_offset(btf, function->name_off));
+  char *name = kasprintf(GFP_KERNEL, "%s_impl",
+                        btf_name_by_offset(btf, function->name_off));
+
+  if (!name)
+   return -ENOMEM;
   id = btf_find_by_name_kind(btf, name, BTF_KIND_FUNC);
+  kfree(name);
   if (id <= 0) return id ?: -ENOENT;
   function = btf_type_by_id(btf, id);
  }
- proto = btf_type_by_id(btf, function->type);
  return function->type;
 }
 

@@ -3140,23 +3140,21 @@ static int bpf_add_kfunc_desc(struct bpf_verifier_env *env, u32 func_id,
 		desc->kop = kfunc.kop;
 	} else {
 		if ((s16)offset == BPF_BTF_SOURCE) {
-			char name[KSYM_NAME_LEN];
+			char *name;
 			const char *target = btf_find_decl_tag_value(kfunc.btf,
 				btf_type_by_id(kfunc.btf, kfunc.id), -1, "ksym:name:");
 			size_t length;
 
-			if (IS_ERR(target) && PTR_ERR(target) != -ENOENT) {
-				err = PTR_ERR(target);
-				goto err_remove_desc;
-			}
 			length = IS_ERR(target) ? bpf_core_essential_name_len(kfunc.name) : strlen(target);
 			if (IS_ERR(target))
 				target = kfunc.name;
-
-
-			memcpy(name, target, length);
-			name[length] = 0;
+			name = kstrndup(target, length, GFP_KERNEL);
+			if (!name) {
+				err = -ENOMEM;
+				goto err_remove_desc;
+			}
 			addr = kallsyms_lookup_name(name);
+			kfree(name);
 			/* Module calls keep their BTF/module reference path. */
 
 		} else {
@@ -23978,7 +23976,7 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 	const struct btf_type *datasec;
 	const struct btf_type *t;
 	const char *sym_name;
-	char source_name[KSYM_NAME_LEN];
+	char *source_name __free(kfree) = NULL;
 	bool percpu = false;
 	u32 type, id = insn->imm;
 	s32 datasec_id;
@@ -24001,15 +23999,14 @@ static int __check_pseudo_btf_id(struct bpf_verifier_env *env,
 		const char *target = btf_find_decl_tag_value(btf, t, -1, "ksym:name:");
 		size_t length;
 
-		if (IS_ERR(target) && PTR_ERR(target) != -ENOENT)
-			return PTR_ERR(target);
 		length = !IS_ERR(target) ? strlen(target) :
 			btf_type_is_func(t) ? bpf_core_essential_name_len(sym_name) : strlen(sym_name);
 		if (!IS_ERR(target))
 			sym_name = target;
 
-		memcpy(source_name, sym_name, length);
-		source_name[length] = 0;
+		source_name = kstrndup(sym_name, length, GFP_KERNEL);
+		if (!source_name)
+			return -ENOMEM;
 		sym_name = source_name;
 	}
 	if (btf_type_is_func(t) && !source_btf && env->prog->aux->ebpfos_component) {
