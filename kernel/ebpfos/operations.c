@@ -388,18 +388,6 @@ bool bpf_operations_set_same(const struct bpf_operations_set *a, const struct bp
  for (i = 0; i < bpf_operations_set_count(a); ++i) if (a->maps[i] != b->maps[i]) return false;
  return true;
 }
-bool bpf_operations_set_targets(const struct bpf_operations_set *a, const struct bpf_operations_set *b)
-{
- u32 i;
- if (bpf_operations_set_count(a) != bpf_operations_set_count(b)) return false;
- for (i = 0; i < bpf_operations_set_count(a); ++i) {
-  struct ebpfos_operations *x = container_of(a->maps[i], struct ebpfos_operations, map);
-  struct ebpfos_operations *y = container_of(b->maps[i], struct ebpfos_operations, map);
-  if (x->original != y->original || x->types != y->types ||
-      x->map.btf_vmlinux_value_type_id != y->map.btf_vmlinux_value_type_id) return false;
- }
- return true;
-}
 static bool operations_set_has(struct bpf_operations_set *set, struct bpf_map *map)
 {
  u32 i;
@@ -614,16 +602,3 @@ EXPORT_SYMBOL(ebpfos_file_view_open);
 void ebpfos_file_view_free(struct file *file)
 { ebpfos_operations_put(file->ebpfos_operations); }
 #endif
-
-/* A rule chooses one complete set. Independent rules must never supply two
- * versions of the same table for one operation. Alternative sets within a
- * single rule can replace that table, since only one set is returned. */
-bool bpf_operations_overlap(const struct bpf_operations_set *a, const struct bpf_operations_set *b)
-{
- u32 i, j;
- for (i = 0; a && i < a->count; ++i)
-  for (j = 0; b && j < b->count; ++j)
-   if (container_of(a->maps[i], struct ebpfos_operations, map)->original ==
-       container_of(b->maps[j], struct ebpfos_operations, map)->original) return true;
- return false;
-}
