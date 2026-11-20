@@ -13164,19 +13164,6 @@ static u32 native_named_input_bytes(const struct btf *btf, const struct bpf_nati
    btf_int_bits(type) == type->size * 8) ? 4 : 8;
 }
 
-static int check_native_scalar_extension(struct bpf_verifier_env *env,
-                                        const struct btf_type *type, u32 regno)
-{
- struct bpf_reg_state *reg = &cur_regs(env)[regno];
- bool sign;
- u32 bits = native_scalar_bits(type, &sign);
-
- if (bits < 32) {
-  return mark_chain_precision(env, regno);
- }
- return 0;
-}
-
 /* R0 is caller-clobbered and is not an argument register. Borrow its verifier
  * state for a second stack value, restoring it before leaving the checker.
  * No BPF instruction or JIT register move is inserted.
@@ -13323,26 +13310,6 @@ static const struct btf_type *native_callable_proto(struct btf *btf, u32 id,
 	return type && btf_type_is_func_proto(type) ? type : NULL;
 }
 
-/* BTF IDs identify one namespace. A Native symbol and a compiled interface
- * can carry equivalent prototypes in different namespaces. Reuse the cold
- * callable-layout and argument-protocol checks; shape grants no target effects.
- */
-
-
-/* Share the typed callback contract across Native calls and globals. NULL
- * satisfies only a nullable interface; no byte span or provider effect is
- * inferred from a function prototype.
- */
-static int check_native_callback_arg(struct bpf_verifier_env *env, struct btf *btf,
-				    u32 type_id, u32 regno, bool nullable, u32 arg)
-{
-	struct bpf_reg_state *reg = &cur_regs(env)[regno];
-
-	if (nullable && bpf_register_is_null(reg))
-		return mark_chain_precision(env, regno);
-	return 0;
-}
-
 /* A callee may write through a writable memory argument, so the caller's
  * stack bytes it can reach hold unknown values after the call. This is the
  * call's state transition, never a refusal. The access check that also
@@ -13456,7 +13423,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				continue;
 			}
 			if (location->reg < 0) {
-				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max) {
+				if (arg->arg_type != ARG_ANYTHING) {
 					ret = native_stack_arg_at(env, location, &temporary, 13,
 						native_named_input_bytes(btf, location));
 					if (ret) return ret;
@@ -13469,28 +13436,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		}
  native_argument:
 		reg = &regs[regno];
-		if (arg->callback_count_mask &&
-		    (bpf_register_is_null(reg) || type_may_be_null(reg->type))) {
-			for (u32 count_index = 0; count_index < sub->arg_cnt; count_index++) {
-				struct native_arg_scope count_scope __free(native_arg) = {};
-				struct bpf_reg_state *count;
-				int count_regno;
-				bool narrow;
-
-				if (!(arg->callback_count_mask & BIT_ULL(count_index)))
-					continue;
-				count_regno = sub->native_frame ?
-					native_call_arg_reg(env, btf, &sub->native_abi,
-							    count_index, &count_scope) :
-					bpf_arg_regno(count_index);
-				if (count_regno < 0) return count_regno;
-				count = &regs[count_regno];
-				narrow = arg->callback_count32_mask & BIT_ULL(count_index);
-				ret = mark_chain_precision(env, count_regno);
-				if (ret) return ret;
-			}
-		}
-
 		/* The declared scalar width is shared by the caller and independent
 		 * entry, including arguments with explicit value bounds.
 		 */
@@ -13521,19 +13466,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
 				return -EINVAL;
-			}
-			if (location && native_named_input_bytes(btf, location) == 4) {
-				ret = check_native_scalar_extension(env,
-					btf_type_skip_modifiers(btf, location->type_id, NULL), regno);
-				if (ret) return ret;
-			}
-			if (arg->has_scalar_max) {
-				/* Match the declared C value, as Native kfuncs do. A
-				 * low-word constraint never initializes physical upper bits.
-				 */
-				ret = mark_chain_precision(env, regno);
-				if (ret)
-					return ret;
 			}
 		} else if (arg->arg_type & PTR_UNTRUSTED) {
 
@@ -13605,10 +13537,6 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			}
 
 			if (arg->btf && btf_type_is_func_proto(btf_type_by_id(arg->btf, arg->btf_id))) {
-				err = check_native_callback_arg(env, arg->btf, arg->btf_id,
-					regno, type_may_be_null(arg->arg_type), i);
-				if (err)
-					return err;
 				continue;
 			}
 
@@ -17547,10 +17475,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (btf_type_is_scalar(t)) {
 			ret = __check_reg_arg(env, regs, regno, SRC_OP,
 				native ? native_named_input_bytes(btf, &abi.args[i + abi.result_buffer]) : 8);
-			if (native) {
-				ret = check_native_scalar_extension(env, t, regno);
-				if (ret) return ret;
-			}
 			if (reg->type != SCALAR_VALUE) {
 				verbose(env, "R%d is not a scalar\n", regno);
 				return -EINVAL;
@@ -17624,9 +17548,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		ref_t = btf_type_skip_modifiers(btf, t->type, &ref_id);
 		ref_tname = btf_name_by_offset(btf, ref_t->name_off);
 		if (meta->func_id == U32_MAX && btf_type_is_func_proto(ref_t)) {
-			ret = check_native_callback_arg(env, meta->btf, ref_id, regno, nullable, i);
-			if (ret)
-				return ret;
 			continue;
 		}
 		if (size_arg >= 0) {
