@@ -79,23 +79,11 @@ static void task_view_free(struct task_view *view)
  kvfree(view->text);
  kvfree(view);
 }
-static bool task_view_code_contains(void *opaque, unsigned long ip)
-{
- struct task_view *view = opaque;
- u32 i;
- for (i = 0; i < view->count; ++i)
-  if (ebpfos_program_contains(view->bindings[i].program, ip) ||
-      (view->bindings[i].module &&
-       within_module_mem_type(ip, view->bindings[i].module, MOD_TEXT)) ||
-      (view->bindings[i].source_module &&
-       within_module(ip, view->bindings[i].source_module))) return true;
- return false;
-}
 static inline void task_view_release_work(struct work_struct *work)
 {
  struct task_view *view = container_of(to_delayed_work(work), struct task_view, release_work);
- if (!ebpfos_code_quiescent(task_view_code_contains, view)) task_view_free(view);
- else schedule_delayed_work(&view->release_work, HZ / 10);
+ ebpfos_code_quiescent();
+ task_view_free(view);
 }
 static int task_view_release(struct inode *inode, struct file *file)
 {

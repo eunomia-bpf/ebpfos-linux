@@ -95,7 +95,6 @@ static bool entry_export(struct btf *native, u32 prototype,
 
 #include "function_entry_slots.h"
 #include "function_entry_calls.h"
-static int entry_callers_stopped(struct entry_set *set);
 
 /* Share L1's immutable AOT/native records with task-view publication. Only
  * Linux ftrace entries need a tracing reservation; recorded entries already
@@ -194,8 +193,6 @@ struct entry_tables_publication {
 static int entry_tables_publish(void *opaque)
 {
  struct entry_tables_publication *publication = opaque;
- int error = publication->set->call_sites ? entry_callers_stopped(publication->set) : 0;
- if (error) return error;
  /* The cold update holds both complete selection snapshots. No allocation
   * or last-reference release occurs while CPUs are stopped. */
  bpf_operations_global_publish(publication->tables);
@@ -284,31 +281,10 @@ static void entry_free(struct entry_set *set)
  kvfree(set->slots);kvfree(set->locations);kvfree(set->addresses);kfree(set);
 }
 #include "function_lifetime.h"
-struct entry_lifetime { struct entry_set *generation; unsigned int slot; };
-static bool entry_code_contains(void *opaque, unsigned long ip)
-{
- struct entry_lifetime *lifetime = opaque;
- struct entry_set *set = lifetime->generation;
- u64 i, count = (u64)set->count + (lifetime->slot ? 0 : set->code_count);
- for (i = 0; i < count; ++i) {
-  struct bpf_prog *program = i < set->count ? set->programs[i * 2 + lifetime->slot] :
-   set->code_programs[i - set->count];
-  struct module *module = program && program->type == BPF_PROG_TYPE_NATIVE ? program->aux->mod : NULL;
-  if ((module && within_module_mem_type(ip, module, MOD_TEXT)) ||
-      ebpfos_program_contains(program, ip)) return true;
- }
- return false;
-}
 #include "function_entry_epoch.h"
 
-static int entry_callers_stopped(struct entry_set *set)
+static void entry_quiescent(struct entry_set *set, unsigned int slot)
 {
- return ebpfos_code_stopped(entry_epoch_contains, set);
-}
-
-static int entry_quiescent(struct entry_set *set, unsigned int slot)
-{
- struct entry_lifetime lifetime = { .generation = set, .slot = slot };
  u64 i, count = (u64)set->count + (slot ? 0 : set->code_count);
  bool executable = false;
  for (i = 0; i < count; ++i) {
@@ -316,22 +292,20 @@ static int entry_quiescent(struct entry_set *set, unsigned int slot)
    set->code_programs[i - set->count];
   if (program && (program->type != BPF_PROG_TYPE_NATIVE || program->aux->mod)) executable = true;
  }
- if (!executable) {synchronize_rcu_tasks();return 0;}
- return ebpfos_code_quiescent(entry_code_contains, &lifetime);
+ if (!executable) {synchronize_rcu_tasks();return;}
+ ebpfos_code_quiescent();
 }
-static int entry_all_quiescent(struct entry_set *set)
+static void entry_all_quiescent(struct entry_set *set)
 {
  struct entry_set *generation;
- int error;
  unsigned int slot;
  for (slot = 0; slot < 2; ++slot) {
   if (set->retired[slot]) continue;
-  error = entry_quiescent(set, slot);if (error) return error;
+  entry_quiescent(set, slot);
  }
  list_for_each_entry(generation, &set->generations, generation_node) {
-  error = entry_quiescent(generation, 0);if (error) return error;
+  entry_quiescent(generation, 0);
  }
- return 0;
 }
 /* Published generations remain immutable. Reclaim only inactive code whose
  * interrupted and sleeping frames have drained, with no call-path counter. */
@@ -339,13 +313,12 @@ static void entry_retire_work(struct work_struct *work)
 {
  struct entry_set *set = container_of(to_delayed_work(work), struct entry_set, retire_work);
  struct entry_set *generation, *next;
- bool retry = false;
  unsigned int slot, i;
  mutex_lock(&entry_lock);
  if (set->closing || set->poisoned) goto out;
  for (slot = 0; slot < 2; ++slot) {
   if (set->retired[slot] || (!slot && set->active == 1)) continue;
-  if (entry_quiescent(set, slot)) {retry = true;continue;}
+  entry_quiescent(set, slot);
   for (i = 0; i < set->count; ++i) {
    bpf_prog_put(set->programs[i * 2 + slot]);
    set->programs[i * 2 + slot] = NULL;
@@ -355,11 +328,10 @@ static void entry_retire_work(struct work_struct *work)
  }
  list_for_each_entry_safe(generation, next, &set->generations, generation_node) {
   if (generation->generation_id == set->active) continue;
-  if (entry_quiescent(generation, 0)) {retry = true;continue;}
+  entry_quiescent(generation, 0);
   list_del(&generation->generation_node);
   entry_free(generation);
  }
- if (retry) schedule_delayed_work(&set->retire_work, HZ / 10);
 out:
  mutex_unlock(&entry_lock);
 }
@@ -367,29 +339,18 @@ out:
  * A private callback can retain the BPF graph after every source frame left;
  * that does not require keeping its original publication module resident.
  * Native imports and Native versions retain their own program module refs. */
-static bool entry_source_contains(void *opaque, unsigned long ip)
-{
- struct entry_set *set = opaque, *generation;
- if (set->source_module && within_module(ip, set->source_module)) return true;
- list_for_each_entry(generation, &set->generations, generation_node)
-  if (generation->source_module && within_module(ip, generation->source_module)) return true;
- return false;
-}
-static int entry_source_release(struct entry_set *set)
+static void entry_source_release(struct entry_set *set)
 {
  struct entry_set *generation;
  bool resident = set->source_module != NULL;
- int error;
  list_for_each_entry(generation, &set->generations, generation_node)
   resident |= generation->source_module != NULL;
- if (!resident) return 0;
- error = ebpfos_code_quiescent(entry_source_contains, set);
- if (error) return error;
+ if (!resident) return;
+ ebpfos_code_quiescent();
  module_put(set->source_module);set->source_module = NULL;
  list_for_each_entry(generation, &set->generations, generation_node) {
   module_put(generation->source_module);generation->source_module = NULL;
  }
- return 0;
 }
 static void entry_release_work(struct work_struct *work)
 {
@@ -397,8 +358,10 @@ static void entry_release_work(struct work_struct *work)
  int error;
  mutex_lock(&entry_lock);
  error = entry_switch(set, set->active, 0);
- if (!error) error = entry_source_release(set);
- if (!error) error = entry_all_quiescent(set);
+ if (!error) {
+  entry_source_release(set);
+  entry_all_quiescent(set);
+ }
  if (!error && set->published) list_del(&set->retained);
  if (!error) list_del_init(&set->sharing);
  mutex_unlock(&entry_lock);

@@ -22,24 +22,7 @@ static struct bpf_prog *entry_epoch_program(struct entry_set *set, u32 fd,
  if (error) {bpf_prog_put(program);return ERR_PTR(error);}
  return program;
 }
-static bool entry_epoch_contains(void *opaque, unsigned long ip)
-{
- struct entry_set *set = opaque, *generation;
- struct entry_lifetime lifetime = { .generation = set, .slot = 0 };
- /* Closed private native populations have all source users in this module.
-  * Conservatively include the whole resident module, including notrace
-  * helpers and callbacks, as well as every retained replacement graph. */
- if (within_module_mem_type(ip, set->source_module, MOD_TEXT)) return true;
- if (entry_code_contains(&lifetime, ip)) return true;
- lifetime.slot = 1;if (entry_code_contains(&lifetime, ip)) return true;
- list_for_each_entry(generation, &set->generations, generation_node) {
-  lifetime.generation = generation;lifetime.slot = 0;
-  if (entry_code_contains(&lifetime, ip)) return true;
- }
- return false;
-}
 struct entry_epoch_call {
- struct entry_set *set;
  unsigned long address;
  bool called;
  int undo_error;
@@ -47,8 +30,6 @@ struct entry_epoch_call {
 static int entry_epoch_update(void *opaque)
 {
  struct entry_epoch_call *call = opaque;
- int error = ebpfos_code_stopped(entry_epoch_contains, call->set);
- if (error) return error;
  call->called = true;
  return ((int (*)(u32))(void *)call->address)(BPF_ENTRY_EPOCH_APPLY);
 }
@@ -61,7 +42,7 @@ static void entry_epoch_undo(void *opaque)
 static int entry_epoch_apply(struct entry_set *set, unsigned int from,
  unsigned int to, unsigned long address)
 {
- struct entry_epoch_call call = { .set = set, .address = address };
+ struct entry_epoch_call call = { .address = address };
  struct text_poke_pair *pairs;
  int error;
  pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,

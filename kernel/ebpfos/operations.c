@@ -281,25 +281,11 @@ static int operations_next(struct bpf_map *map, void *key, void *next)
  
  *(u32 *)next = 0;return 0;
 }
-static bool operations_contains(void *opaque, unsigned long ip)
-{
- struct ebpfos_operations *ops = opaque;
- u32 i;
- if (ops->module && within_module_mem_type(ip, ops->module, MOD_TEXT)) return true;
- for (i = 0; i < ops->field_count; ++i) {
-  struct bpf_prog *p = ops->programs[i];
-  if (ebpfos_program_contains(p, ip) || (p && p->type == BPF_PROG_TYPE_NATIVE &&
-      p->aux->mod && within_module_mem_type(ip, p->aux->mod, MOD_TEXT))) return true;
- }
- return false;
-}
 static void operations_release(struct work_struct *work)
 {
  struct ebpfos_operations *ops = container_of(to_delayed_work(work), struct ebpfos_operations, release);
  u32 i;
- if (ops->ready && ebpfos_code_quiescent(operations_contains, ops)) {
-  schedule_delayed_work(&ops->release, HZ / 10);return;
- }
+ if (ops->ready) ebpfos_code_quiescent();
  for (i = 0; i < ops->field_count; ++i) if (ops->programs[i]) bpf_prog_put(ops->programs[i]);
  bpf_entry_code_put(ops->code);
  module_put(ops->module);btf_put(ops->types);

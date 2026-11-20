@@ -49,11 +49,6 @@ static bool entry_plt_owned(unsigned long ip)
   if (entry->slot.ip == ip) return true;
  return false;
 }
-static bool plt_contains(void *opaque, unsigned long ip)
-{
- struct plt_image *image = opaque;
- return ip >= (unsigned long)image->text && ip < (unsigned long)image->text + image->size;
-}
 static void plt_image_free(struct plt_image *image)
 {
  if (!image) return;
@@ -70,9 +65,8 @@ static void plt_image_free(struct plt_image *image)
 static void plt_retire(struct work_struct *work)
 {
  struct plt_image *image = container_of(to_delayed_work(work), struct plt_image, retire);
- if (image->header && ebpfos_code_quiescent(plt_contains, image))
-  schedule_delayed_work(&image->retire, HZ / 10);
- else {
+ if (image->header) ebpfos_code_quiescent();
+ {
   /* The frameless map lookup cannot voluntarily schedule. Involuntary
    * preemption is not a Tasks RCU quiescent state. This also covers older
    * retired stubs that loaded a newer map before its next publication. */
