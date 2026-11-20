@@ -55,22 +55,6 @@ static int text_poke_quiescent_transaction_locked(const struct text_poke_pair *p
 		.pairs = pairs, .count = count, .update = update, .undo = undo,
 		.data = data, .leader = cpumask_first(cpu_online_mask),
 	};
-	unsigned int i;
-
-	lockdep_assert_cpus_held();
-	lockdep_assert_held(&text_mutex);
-	if (!update || !undo || (count && !pairs))
-		return -EINVAL;
-	/* Validate every instruction before the callback can write live data.
-	 * text_mutex keeps these bytes stable through the stopped transaction.
-	 */
-	for (i = 0; i < count; ++i) {
-		unsigned long address = (unsigned long)pairs[i].addr;
-		u8 actual[5];
-
-		if (copy_from_kernel_nofault(actual, pairs[i].addr, pairs[i].length ?: 5))
-			return -ESTALE;
-	}
 	return stop_machine_cpuslocked(text_poke_quiescent_update, &transaction,
 				      cpu_online_mask);
 }

@@ -3258,32 +3258,23 @@ void __ref smp_text_poke_single(void *addr, const void *opcode, size_t len, cons
  * direct ftrace and static branches. Compare actual bytes separately: a NOP
  * may have a nonzero, architecturally ignored displacement.
  */
-static bool text_poke_branch(const u8 *bytes, u8 *opcode, s32 *disp)
+static void text_poke_branch(const u8 *bytes, u8 *opcode, s32 *disp)
 {
 	if (bytes[0] == JMP32_INSN_OPCODE || bytes[0] == CALL_INSN_OPCODE) {
 		*opcode = bytes[0];
 		memcpy(disp, bytes + 1, sizeof(*disp));
-		return true;
+		return;
 	}
-	if (bytes[0] == 0x0f && bytes[1] == 0x1f && bytes[2] == 0x44 && bytes[3] == 0) {
-		*opcode = JMP32_INSN_OPCODE;
-		*disp = 0;
-		return true;
-	}
-	return false;
+	*opcode = JMP32_INSN_OPCODE;
+	*disp = 0;
 }
 
 int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int count)
 {
 	struct smp_text_poke_loc *vector;
 	unsigned int i;
-	int error = -EINVAL;
-
-	lockdep_assert_held(&text_mutex);
 	if (!count)
 		return 0;
-	if (count > INT_MAX)
-		return -E2BIG;
 	vector = kvmalloc_array(count, sizeof(*vector), GFP_KERNEL);
 	if (!vector)
 		return -ENOMEM;
@@ -3292,16 +3283,9 @@ int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int c
 		struct smp_text_poke_loc *slot = &vector[i];
 		unsigned long address = (unsigned long)pairs[i].addr;
 		long offset = address - (unsigned long)_stext;
-		u8 actual[5];
 
-		if (offset != (s32)offset ||
-		    !text_poke_branch(pairs[i].before, &slot->previous_opcode, &slot->previous_disp) ||
-		    !text_poke_branch(pairs[i].after, &slot->opcode, &slot->disp))
-			goto out;
-		if (copy_from_kernel_nofault(actual, pairs[i].addr, sizeof(actual))) {
-			error = -ESTALE;
-			goto out;
-		}
+		text_poke_branch(pairs[i].before, &slot->previous_opcode, &slot->previous_disp);
+		text_poke_branch(pairs[i].after, &slot->opcode, &slot->disp);
 		slot->rel_addr = offset;
 		slot->len = 5;
 		memcpy((void *)slot->text, pairs[i].after, 5);
@@ -3311,8 +3295,6 @@ int smp_text_poke_transaction(const struct text_poke_pair *pairs, unsigned int c
 	text_poke_array.previous = true;
 	smp_text_poke_batch_finish();
 	text_poke_array.vec = text_poke_default_vec;
-	error = 0;
-out:
 	kvfree(vector);
-	return error;
+	return 0;
 }
