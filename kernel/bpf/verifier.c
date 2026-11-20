@@ -13360,8 +13360,9 @@ static void clobber_stack_argument(struct bpf_verifier_env *env,
 	if (base_type(reg->type) != PTR_TO_STACK)
 		return;
 	state = bpf_func(env, reg);
-	low = (tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smin_value) + reg->off;
-	high = (tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smax_value) + reg->off + size;
+	/* This kernel keeps the complete pointer offset in var_off/bounds. */
+	low = tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smin_value;
+	high = (tnum_is_const(reg->var_off) ? (s64)reg->var_off.value : reg->smax_value) + size;
 	/* An unknown extent reaches the top of the frame. */
 	if (!size || high > 0)
 		high = 0;
@@ -17361,7 +17362,7 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 		    !tnum_is_const(output->var_off))
 			return 0;
 		output_frame = bpf_func(env, output);
-		output_offset = output->off + (s64)output->var_off.value;
+		output_offset = (s64)output->var_off.value;
 	}
 	for (u32 offset = 0; offset < type->size;) {
 		struct native_arg_scope temporary __free(native_arg) = {};
