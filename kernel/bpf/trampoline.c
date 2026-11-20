@@ -1000,21 +1000,11 @@ int bpf_trampoline_update_link(struct bpf_tramp_link *link,
 			       struct bpf_prog *new_prog,
 			       struct bpf_prog *expected)
 {
-	struct bpf_tramp_link *other;
 	struct bpf_prog *old_prog;
-	enum bpf_tramp_prog_type kind;
-	int err = -EINVAL;
+	int err;
 
 	mutex_lock(&tr->mutex);
 	old_prog = link->link.prog;
-	
-	
-	/* A syscall BPF caller holds Tasks Trace RCU. Waiting for a sleepable
-	 * callback's Tasks Trace grace period would wait for that caller itself.
-	 * Session and extension links also have additional bindings to update.
-	 */
-
-	kind = bpf_attach_type_to_tramp(old_prog);
 	WRITE_ONCE(link->link.prog, new_prog);
 	err = bpf_trampoline_update(tr, true);
 	if (err) {

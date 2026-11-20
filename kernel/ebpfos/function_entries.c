@@ -111,8 +111,6 @@ static int entry_program_address(struct btf *btf, u32 prototype,
  bool task, unsigned long *target)
 {
  if (program->type == BPF_PROG_TYPE_NATIVE) {
-  struct btf *replacement_btf = program->aux->attach_btf;
-  const struct btf_type *replacement = btf_type_by_id(replacement_btf, program->aux->attach_btf_id);
   *target = (unsigned long)program->bpf_func;
   return 0;
  }
@@ -137,7 +135,7 @@ int bpf_entry_program_address(struct btf *btf, u32 id, struct bpf_prog *program,
 int bpf_method_program_address(struct btf *btf, u32 prototype, const char *name,
  struct bpf_prog *program, unsigned long *target)
 {
- const struct btf_type *type = btf_type_skip_modifiers(btf, prototype, &prototype), *function = NULL;
+ const struct btf_type *function = NULL;
  int id = name ? btf_find_by_name_kind(btf, name, BTF_KIND_FUNC) : 0;
  bool source_name = !name;
  if (id > 0) {
