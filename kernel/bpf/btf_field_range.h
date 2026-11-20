@@ -1,8 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Compiler-proved constructors and all writers establish field:umax:N.
- * This is a declaration contract, not a value sampled from a live object.
- * Every verified write preserves it; typed pointer/lifetime checks still run.
- */
+/* field:umax:N supplies declaration metadata, not a sampled live value. */
 /* Kernel BTF deliberately omits the user-BTF resolved-id/size caches. */
 static const struct btf_type *btf_field_range_type(const struct btf *btf,
 						 u32 *id, u32 *bytes)
@@ -38,10 +35,8 @@ static int btf_scalar_field_max(struct bpf_verifier_env *env,
 	return bytes;
 }
 
-/* Read only an exact field; a short or signed access keeps the stock range.
- * Writes spanning fields, atomics and helper destinations with unknown values
- * cannot silently break a contract. Nested by-value objects are visited too.
- */
+/* An exact field read supplies the declared range. Nested by-value objects
+ * are visited too. The former write-contract refusals are absent. */
 static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *regs,
 			    int regno, const struct btf *btf, u32 id, s64 base,
 			    s64 off, int size, enum bpf_access_type access,
@@ -96,8 +91,6 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 		if (off >= 0 && (off >= start + member_bytes || off + size <= start))
 			continue;
 		width = btf_scalar_field_max(env, btf, id, i, &maximum);
-		if (width < 0)
-			return width;
 		if (width && access == BPF_READ && value_regno >= 0 &&
 			   off == start && size == width && regs[value_regno].type == SCALAR_VALUE) {
 			struct bpf_reg_state *value = &regs[value_regno];
