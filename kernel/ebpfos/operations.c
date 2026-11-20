@@ -270,7 +270,11 @@ static void *operations_lookup(struct bpf_map *map, void *key)
  struct ebpfos_operations *ops = container_of(map, struct ebpfos_operations, map);
  return *(u32 *)key || !smp_load_acquire(&ops->ready) ? ERR_PTR(-ENOENT) : ops->user;
 }
-static void *operations_program_lookup(struct bpf_map *map, void *key) { return NULL; }
+static void *operations_program_lookup(struct bpf_map *map, void *key)
+{
+ void *value = operations_lookup(map, key);
+ return IS_ERR(value) ? NULL : value;
+}
 static long operations_delete(struct bpf_map *map, void *key)
 { return bpf_operations_update(map, key, NULL, 0); }
 static int operations_next(struct bpf_map *map, void *key, void *next)
