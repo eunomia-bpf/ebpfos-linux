@@ -29,7 +29,8 @@ struct btf *btf_percpu_layout(const struct btf *source, const char *alias)
 		__u32 raw_size;
 		const void *raw = btf__raw_data(source, &raw_size);
 
-		return btf__new_split(raw, raw_size, btf__base_btf(source));
+		/* libbpf borrows the base without changing its contents. */
+		return btf__new_split(raw, raw_size, (struct btf *)btf__base_btf(source));
 	}
 	section = btf__type_by_id(source, section_id);
 	nr = btf_vlen(section);
