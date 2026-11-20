@@ -79,11 +79,10 @@ static inline int ebpfos_function_binding_open_pure(
  unsigned long address;
  program = bpf_prog_get(fd);
  if (IS_ERR(program)) return PTR_ERR(program);
- if (!cell_callable(native, function, program, compiled_id, &address)) goto invalid;
+ address = (unsigned long)program->bpf_func;
+ cell_callable(native, function, program, compiled_id, &address);
  out->program = program;out->address = address;
  return 0;
-invalid:
- bpf_prog_put(program);return -EPROTOTYPE;
 }
 static inline void ebpfos_function_binding_put(struct ebpfos_function_binding *binding)
 {

@@ -3,7 +3,7 @@
 #define _UAPI_BPF_KERNEL_RULE_H
 #include <linux/types.h>
 
-/* Scalar identities, never dereferenceable addresses. Context is read-only. */
+/* Scalar identities, never dereferenceable addresses. */
 struct bpf_kernel_rule_ctx {
  __u64 task, cgroup, process_subtree, netns;
  __u64 object, sample_hash, binding, epoch;

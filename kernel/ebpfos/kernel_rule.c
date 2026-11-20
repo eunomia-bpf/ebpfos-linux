@@ -52,8 +52,7 @@ static u32 rule_count;
 static LIST_HEAD(rule_links);
 static atomic64_t rule_epoch = ATOMIC64_INIT(1);
 
-/* Rules are pure, bounded scalar computations. In particular they cannot
- * change a selection through a mutable map without advancing the epoch. */
+/* Rule programs use the ordinary BPF helper table. */
 static bool rule_access(int off, int size, enum bpf_access_type type,
  const struct bpf_prog *prog, struct bpf_insn_access_aux *info)
 {

@@ -235,16 +235,13 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  struct ebpfos_operations *ops = container_of(map, struct ebpfos_operations, map);
  struct bpf_prog **programs;
  unsigned long *addresses;
- void *checked;
  u32 i, count = 0;
- bool incompatible = false;
- int error = -EINVAL;
+ int error;
  
  
  programs = kvcalloc(ops->field_count, sizeof(*programs), GFP_KERNEL);
  addresses = kvcalloc(ops->field_count, sizeof(*addresses), GFP_KERNEL);
- checked = kzalloc(map->value_size, GFP_KERNEL);
- if (!programs || !addresses || !checked) {error = -ENOMEM;goto free;}
+ if (!programs || !addresses) {error = -ENOMEM;goto free;}
  for (i = 0; i < ops->field_count; ++i) {
   const struct btf_type *pointer = btf_type_by_id(ops->types, ops->fields[i].pointer_type);
   unsigned long original, bytes, offset;
@@ -252,10 +249,8 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   const char *name;
   u64 fd;
   u32 at = ops->fields[i].offset;
-  int id;
   memcpy(&fd, value + at, sizeof(fd));
   if (!fd) continue;
-  if (fd > INT_MAX) goto free;
   error = ebpfos_ptview_read_native(&original, ops->original + at, sizeof(original));
   if (error) goto free;
   /* A module's table may call permanent Core text. The storage lease
@@ -263,28 +258,13 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   
   name = original ? kallsyms_lookup(original, &bytes, &offset, NULL, symbol) : NULL;
   
-  id = name ? btf_find_by_name_kind(ops->types, name, BTF_KIND_FUNC) : 0;
-  if (id > 0) {
-   const struct btf_type *function = btf_type_by_id(ops->types, id);
-   if (!cell_layout(ops->types, function->type, ops->types, pointer->type, 0, false)) {
-    /* Union alternatives share storage. Only the alternative matching the
-     * actual original function's prototype supplies this binding contract. */
-    incompatible = true;continue;
-   }
-  }
   programs[i] = bpf_prog_get(fd);
   if (IS_ERR(programs[i])) {error = PTR_ERR(programs[i]);programs[i] = NULL;goto free;}
   error = bpf_method_program_address(ops->types, pointer->type, name, programs[i], &addresses[i]);
-  if (error == -EPROTOTYPE) {
-   bpf_prog_put(programs[i]);programs[i] = NULL;
-   incompatible = true;continue;
-  }
   if (error) goto free;
-  memcpy(checked + at, &fd, sizeof(fd));
   ++count;
  }
  /* Non-method data (owner pointers, flags, locks, strings) stays native. */
- error = incompatible && !count ? -EPROTOTYPE : -EINVAL;
  
  mutex_lock(&ops->lock);
  {
@@ -305,7 +285,7 @@ unlock:
  mutex_unlock(&ops->lock);
 free:
  if (programs) for (i = 0; i < ops->field_count; ++i) if (programs[i]) bpf_prog_put(programs[i]);
- kvfree(programs);kvfree(addresses);kfree(checked);return error;
+ kvfree(programs);kvfree(addresses);return error;
 }
 static void *operations_lookup(struct bpf_map *map, void *key)
 {

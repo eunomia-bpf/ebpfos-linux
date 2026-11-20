@@ -124,6 +124,7 @@ static int entry_program_address(struct btf *btf, u32 prototype,
   *target = (unsigned long)program->bpf_func;
   return 0;
  }
+ *target = (unsigned long)program->bpf_func;
  entry_export(btf, prototype, function, name, source_name, program, target);
  return 0;
 }
