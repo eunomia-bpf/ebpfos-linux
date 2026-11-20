@@ -3197,7 +3197,6 @@ struct bpf_reg_state;
 int btf_prepare_func_args(struct bpf_verifier_env *env, int subprog);
 int btf_argument_result(const struct btf *btf, const struct btf_type *fn,
 			u32 *argument, s32 *offset, bool *nullable);
-int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask);
 int btf_check_type_match(struct bpf_verifier_log *log, const struct bpf_prog *prog,
 			 struct btf *btf, const struct btf_type *t);
 const char *btf_find_decl_tag_value(const struct btf *btf, const struct btf_type *pt,

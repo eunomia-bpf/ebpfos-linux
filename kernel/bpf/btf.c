@@ -8398,30 +8398,23 @@ cand_cache_unlock:
 }
 
 /* Direct global arguments retain the matched BTF object, not a vmlinux ID.
- * The verifier owns its BTF/module reference. Link-time contract readback may
- * only borrow a module namespace already retained by the loaded program.
+ * The verifier owns its BTF/module reference.
  */
-static int btf_global_arg_type(struct bpf_prog *prog, struct bpf_verifier_env *env,
+static int btf_global_arg_type(struct bpf_verifier_env *env,
                               struct bpf_verifier_log *log, int index,
                               const struct btf *btf, const struct btf_type *type,
                               struct bpf_subprog_arg_info *arg)
 {
  struct btf *kernel_btf;
  int id, error = 0;
- u32 i;
 
  id = btf_get_ptr_to_btf_id(log, index, btf, type, &kernel_btf);
  if (id < 0) return id;
  if (!btf_is_module(kernel_btf)) {
   /* Built-in BTF is permanent and needs no used-module array slot. */
   btf_put(kernel_btf);
- } else if (env) {
-  error = bpf_verifier_add_used_btf(env, kernel_btf);
  } else {
-  for (i = 0; i < prog->aux->used_btf_cnt; i++)
-   if (prog->aux->used_btfs[i].btf == kernel_btf) break;
-  if (i == prog->aux->used_btf_cnt) error = -ENXIO;
-  btf_put(kernel_btf);
+  error = bpf_verifier_add_used_btf(env, kernel_btf);
  }
  if (error) return error;
  arg->btf = kernel_btf;
@@ -8921,7 +8914,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				return -EINVAL;
 			}
 
-			kern_type_id = btf_global_arg_type(prog, env, log, i, btf, t, &sub->args[i]);
+			kern_type_id = btf_global_arg_type(env, log, i, btf, t, &sub->args[i]);
 			if (kern_type_id < 0)
 				return kern_type_id;
 			if (has_btf_offset) {
@@ -8952,7 +8945,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 				continue;
 			}
 
-			kern_type_id = btf_global_arg_type(prog, env, log, i, btf, t, &sub->args[i]);
+			kern_type_id = btf_global_arg_type(env, log, i, btf, t, &sub->args[i]);
 			if (kern_type_id < 0)
 				return kern_type_id;
 
@@ -9093,46 +9086,6 @@ int btf_native_pointer_arg(struct btf *btf, u32 id, struct bpf_subprog_arg_info 
   arg->mem_size = size;
  }
  return 0;
-}
-
-/* Decode the same argument contract used at stock global verification.
- * This models loaded BTF only; no verifier analysis is rerun at publication.
- */
-int btf_func_null_args(struct bpf_prog *prog, u32 subprog, u64 *mask)
-{
-	struct bpf_subprog_info *info;
-	struct bpf_verifier_log log = {};
-	int error;
-	u32 i;
-
-	*mask = 0;
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
-	if (!info)
-		return -ENOMEM;
-	if (prog->aux->func && subprog < prog->aux->func_cnt &&
-	    prog->aux->func[subprog]->aux->native_frame) {
-		const struct btf_type *fn = btf_type_by_id(prog->aux->btf, prog->aux->func_info[subprog].type_id);
-
-		info->native_frame = true;
-		info->native_arg_in = prog->aux->func[subprog]->aux->native_arg_in;
-		error = bpf_native_abi_plan(prog->aux->btf,
-			btf_type_by_id(prog->aux->btf, fn->type), &info->native_abi,
-			prog->aux->trusted_kernel);
-		if (error)
-			goto out;
-	}
-	error = btf_prepare_func_arg_info(prog, subprog, info, &log, NULL);
-	if (error)
-		goto out;
-	for (i = 0; i < info->arg_cnt; i++)
-		if ((info->args[i].arg_type == ARG_DONTCARE &&
-		     (prog->aux->func_info_aux[subprog].unused_arg_mask & BIT_ULL(i))) ||
-		    (info->args[i].arg_type & PTR_MAYBE_NULL) ||
-		    ((info->args[i].arg_type & PTR_UNTRUSTED) && !info->args[i].nonnull))
-			*mask |= BIT_ULL(i);
-out:
-	kfree(info);
-	return error;
 }
 
 static void btf_type_show(const struct btf *btf, u32 type_id, void *obj,
