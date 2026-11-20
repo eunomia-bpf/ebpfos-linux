@@ -621,12 +621,6 @@ struct bpf_iarray {
 	u32 items[];
 };
 
-enum bpf_native_callx_contract {
- BPF_NATIVE_CALLX_UNSEEN,
- BPF_NATIVE_CALLX_PROVIDER,
- BPF_NATIVE_CALLX_UNPROVED,
-};
-
 struct bpf_insn_aux_data {
 	union {
 		enum bpf_reg_type ptr_type;	/* pointer type for load/store insns */
@@ -674,7 +668,6 @@ struct bpf_insn_aux_data {
 	/* Every visit must resolve a provider; any bare prototype is unproved.
 	 * Publication metadata only; this never grants a verifier capability.
 	 */
-	u8 native_callx_contract;
 	bool non_sleepable; /* helper/kfunc may be called from non-sleepable context */
 	bool is_iter_next; /* bpf_iter_<type>_next() kfunc call */
 	bool is_noreturn; /* instruction has no CFG successor */

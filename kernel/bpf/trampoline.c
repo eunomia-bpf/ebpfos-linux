@@ -1302,17 +1302,6 @@ u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog, struct bpf_tramp_run_c
 	return __bpf_prog_enter_recur_inner(prog, run_ctx);
 }
 
-u64 notrace __bpf_prog_enter_recur_rcu(struct bpf_prog *prog,
-				     struct bpf_tramp_run_ctx *run_ctx)
-{
-	/* The caller's RCU hold already pins the CPU on non-preemptible RCU.
-	 * Preemptible RCU still needs the same migration pin as the trampoline.
-	 */
-	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
-		migrate_disable();
-	return __bpf_prog_enter_recur_inner(prog, run_ctx);
-}
-
 static void notrace __update_prog_stats(struct bpf_prog *prog, u64 start)
 {
 	struct bpf_prog_stats *stats;
@@ -1357,14 +1346,6 @@ void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
 {
 	__bpf_prog_exit_recur_inner(prog, start, run_ctx);
 	rcu_read_unlock_migrate();
-}
-
-void notrace __bpf_prog_exit_recur_rcu(struct bpf_prog *prog, u64 start,
-				     struct bpf_tramp_run_ctx *run_ctx)
-{
-	__bpf_prog_exit_recur_inner(prog, start, run_ctx);
-	if (IS_ENABLED(CONFIG_PREEMPT_RCU))
-		migrate_enable();
 }
 
 static u64 notrace __bpf_prog_enter_lsm_cgroup(struct bpf_prog *prog,
