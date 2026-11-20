@@ -849,7 +849,6 @@ struct bpf_subprog_info {
 	bool might_sleep: 1;
 	u8 arg_cnt:4;
 	/* Verification used the runner's implicit RCU critical section. */
-	bool requires_rcu: 1;
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
 	bool protocol_used: 1;

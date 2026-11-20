@@ -1860,7 +1860,6 @@ struct bpf_prog_aux {
 	u32 native_seqs_size;
 	struct bpf_native_image *native_image;
 	/* Cold native bindings must supply any context assumed by verification. */
-	bool requires_rcu;
 	u32 ebpfos_load_insn_cnt;
 	/* Verifier-sealed KOperation identity survives kfunc_tab JIT teardown. */
 	bool ebpfos_kop_requirements_valid;

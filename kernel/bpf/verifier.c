@@ -7588,20 +7588,9 @@ static bool in_sleepable(struct bpf_verifier_env *env)
  */
 static bool in_rcu_cs(struct bpf_verifier_env *env)
 {
-	if (env->cur_state->active_rcu_locks || env->cur_state->active_locks)
-		return true;
-	/* A source component is checked for its bare native entry. Its load-only
-	 * tracing caller never executes and cannot supply a runner RCU scope.
-	 */
-	if (in_sleepable(env) || env->prog->aux->ebpfos_component)
-		return false;
-	/* A BPF runner supplies this scope; a bare native ABI entry does not.
-	 * Retain the assumption without changing the stock answer or analysis.
-	 * Queries can conservatively retain a duty even if no pointer promotion
-	 * follows. A cold binding must not silently discard that duty.
-	 */
-	env->subprog_info[cur_func(env)->subprogno].requires_rcu = true;
-	return true;
+	return env->cur_state->active_rcu_locks ||
+	       env->cur_state->active_locks ||
+	       !in_sleepable(env);
 }
 
 /* Once GCC supports btf_type_tag the following mechanism will be replaced with tag check */
