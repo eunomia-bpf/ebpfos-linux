@@ -1179,7 +1179,8 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 {
 	struct bpf_aot_context *aot = ctx->aot;
 	const struct bpf_aot_reloc *operand = NULL;
-	char name[BPF_AOT_SYMBOL_LEN];
+	const char *name;
+	char buffer[KSYM_NAME_LEN], operand_name[BPF_AOT_SYMBOL_LEN + 1];
 	s64 addend = 0;
 	u8 *prog = *pprog;
 	u32 type = R_X86_64_64, i;
@@ -1229,19 +1230,21 @@ static int emit_aot_imm64(u8 **pprog, u32 dst_reg, u64 value,
 				if (!IS_ERR(target))
 					symbol = target;
 
-					strscpy(name, symbol, sizeof(name));
+				name = symbol;
 				err = 0;
 			} else {
-				err = aot_address_name(aot, value, name, &addend);
+				err = aot_address_name(aot, value, &name, buffer, &addend);
 			}
 		} else {
-			err = aot_address_name(aot, value, name, &addend);
+			err = aot_address_name(aot, value, &name, buffer, &addend);
 		}
 		if (err)
 			return err;
 	}
 	if (operand) {
-		strscpy(name, operand->symbol, sizeof(name));
+		memcpy(operand_name, operand->symbol, sizeof(operand->symbol));
+		operand_name[sizeof(operand->symbol)] = 0;
+		name = operand_name;
 		addend = operand->addend;
 		type = operand->type;
 	}
