@@ -59,15 +59,13 @@ static ssize_t module_sect_read(struct file *file, struct kobject *kobj,
 unsigned long module_section_address(const struct module *mod, const char *name)
 {
  const struct bin_attribute *const *attr;
- unsigned long address = 0;
 
  if (!mod->sect_attrs) return 0;
  for (attr = mod->sect_attrs->grp.bin_attrs; *attr; ++attr) {
   if (strcmp((*attr)->attr.name, name)) continue;
-  if (address) return 0;
-  address = (unsigned long)(*attr)->private;
+  return (unsigned long)(*attr)->private;
  }
- return address;
+ return 0;
 }
 
 static void free_sect_attrs(struct module_sect_attrs *sect_attrs)
