@@ -2269,7 +2269,7 @@ static bool __btf_scalar_region(const struct btf *btf, u32 id, u32 off,
 	struct btf_struct_meta *meta;
 	u32 bytes, first, last, i;
 
-	if (!t || !size || depth >= MAX_RESOLVE_DEPTH ||
+	if (!t || !size ||
 	    IS_ERR(btf_resolve_size(btf, t, &bytes)) || off > bytes || size > bytes - off)
 		return false;
 	if (btf_type_is_int(t) || btf_is_any_enum(t) || BTF_INFO_KIND(t->info) == BTF_KIND_FLOAT)
@@ -2349,7 +2349,7 @@ static bool __btf_int_word_field(const struct btf *btf, u32 id, u32 off,
 	if (!btf || !id)
 		return false;
 	t = btf_type_skip_modifiers(btf, id, &id);
-	if (!t || depth >= MAX_RESOLVE_DEPTH)
+	if (!t)
 		return false;
 	if (btf_type_is_int(t))
 		return off == 0 && !IS_ERR(btf_resolve_size(btf, t, &bytes)) &&
@@ -2406,7 +2406,7 @@ static bool __btf_same_scalar_layout(const struct btf *left, u32 left_id,
 	const struct btf_type *b = btf_type_skip_modifiers(right, right_id, NULL);
 	u32 i;
 
-	if (!a || !b || depth >= MAX_RESOLVE_DEPTH || a->info != b->info)
+	if (!a || !b || a->info != b->info)
 		return false;
 	if (btf_type_is_ptr(a))
 		return true;
