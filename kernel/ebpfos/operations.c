@@ -535,7 +535,7 @@ struct ebpfos_operations_owner *ebpfos_operations_reserve(u32 type, gfp_t gfp)
 {
  struct bpf_operations_set *global;
  struct ebpfos_operations_owner *owner;
- struct ebpfos_rule_decision *decision = in_task() && current->mm ? ebpfos_task_rule_decision() : NULL;
+ struct ebpfos_rule_decision *decision = ebpfos_task_rule_decision();
  rcu_read_lock();
  global = rcu_dereference(global_operations);
  if (!decision && !ebpfos_rule_active() && !operations_type(global, type)) {

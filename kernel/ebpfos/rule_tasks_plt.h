@@ -28,7 +28,6 @@ static void task_rule_get(struct ebpfos_task_rule *binding)
 struct ebpfos_rule_decision *ebpfos_task_rule_decision(void)
 {
  struct ebpfos_task_rule *binding;
- if (!in_task() || (current->flags & PF_KTHREAD)) return NULL;
  binding = current->ebpfos_task_rule;
  return binding ? binding->decision : NULL;
 }
