@@ -488,16 +488,11 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
   address = ebpfos_native_function(btf, entry->native_function, set->source_module);
   
   ip = address;
-  if (!task && source && entry_module_noinstr(set->source_module, address)) {
-   /* No entry patch or breakpoint in noinstr text. Replace every decoded
-    * direct caller instead, with all tasks and IRQs stopped. */
-   call_sites = true;ip = address;
-  } else if (!task) {
+  if (!task) {
   ip = bpf_entry_text_location(set->source_module, address, &ftrace, &canonical_nop);
   if (!ip) {
     
-    /* An unpadded module entry uses the same closed direct-caller
-     * transaction as noinstr text. No reservation is added to its body. */
+    /* An unpadded entry uses the direct-caller transaction. */
     call_sites = true;ip = address;
   } else {
     slot = &set->slots[set->slot_count++];slot->ip = ip;
@@ -525,9 +520,7 @@ static struct entry_set *entry_prepare(const struct entry_member *entries,
    }
    
    set->addresses[i] = target;
-   if (call_sites && entry_module_noinstr(set->source_module, address)) {
-    
-   } else if (slot) {
+   if (slot) {
     u8 instruction[5];
     
     slot->target[j] = target;
