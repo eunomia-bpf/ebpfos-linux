@@ -5816,14 +5816,10 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 				if (prior->has_native_backedge &&
 				    prior->native_backedge_target > region->start) {
 					target = (s32)prior->native_backedge_target + delta;
-					if (WARN_ON_ONCE(target < 0))
-						target = 0;
 					prior->native_backedge_target = target;
 				}
 				if (prior->start > region->start) {
 					start = (s32)prior->start + delta;
-					if (WARN_ON_ONCE(start < 0))
-						start = 0;
 					prior->start = start;
 				}
 			}
