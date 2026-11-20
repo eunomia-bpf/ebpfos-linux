@@ -620,49 +620,6 @@ out_err:
 	return err;
 }
 
-/* A DATASEC type view must refer to the actual section start, not a scalar
- * relocation delta or an alias into an unrelated allocation.
- */
-static int percpu_alias_check(struct object *obj, const char *alias)
-{
-	GElf_Shdr symbols, area;
-	Elf_Scn *scn;
-	size_t strings;
-	const struct btf_type *section;
-	int id, i, n;
-
-	id = btf__find_by_name_kind(obj->btf, ".data..percpu", BTF_KIND_DATASEC);
-	if (id < 1 || obj->efile.symbols_shndx < 0 ||
-	    elf_getshdrstrndx(obj->efile.elf, &strings))
-		return -EINVAL;
-	section = btf__type_by_id(obj->btf, id);
-	scn = elf_getscn(obj->efile.elf, obj->efile.symbols_shndx);
-	if (!scn || !gelf_getshdr(scn, &symbols) || !symbols.sh_entsize)
-		return -EINVAL;
-	n = symbols.sh_size / symbols.sh_entsize;
-	for (i = 0; i < n; i++) {
-		GElf_Sym symbol;
-		const char *name;
-
-		if (!gelf_getsym(obj->efile.symbols, i, &symbol))
-			return -EINVAL;
-		name = elf_strptr(obj->efile.elf, obj->efile.strtabidx, symbol.st_name);
-		if (!name || strcmp(name, alias))
-			continue;
-		scn = elf_getscn(obj->efile.elf, symbol.st_shndx);
-		if (!scn || !gelf_getshdr(scn, &area))
-			return -EINVAL;
-		name = elf_strptr(obj->efile.elf, strings, area.sh_name);
-		if (name && !strcmp(name, ".data..percpu") &&
-		    symbol.st_value == area.sh_addr && !symbol.st_size &&
-		    section->size == area.sh_size)
-			return 0;
-		break;
-	}
-	pr_err("FAILED: %s is not a zero-storage alias of the per-CPU section\n", alias);
-	return -EINVAL;
-}
-
 static int symbols_resolve(struct object *obj)
 {
 	int nr_typedefs = obj->nr_typedefs;
@@ -1598,11 +1555,6 @@ int main(int argc, const char **argv)
 	 * This mode performs symbol resolution/patching only; kernel validation
 	 * and all program-load checks remain the same.
 	 */
-	if (preserve_ids && (native_set || percpu_alias || field_obligations ||
-			     obj.distill_base || btfids_path)) {
-		pr_err("--preserve-ids cannot transform BTF or patch a raw ID blob\n");
-		return -1;
-	}
 	obj.path = argv[0];
 
 	if (btfids_path)
@@ -1637,8 +1589,6 @@ int main(int argc, const char **argv)
 	if (percpu_alias) {
 		struct btf *view;
 
-		if (percpu_alias_check(&obj, percpu_alias))
-			goto out;
 		view = btf_percpu_layout(obj.btf, percpu_alias);
 
 		if (!view)

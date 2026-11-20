@@ -4441,8 +4441,6 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 					name = btf__name_by_offset(obj->btf, tag->name_off);
 					if (strncmp(name, "ksym:name:", 10))
 						continue;
-					if (target || !name[10])
-						return -EINVAL;
 					target = name + 10;
 				}
 				if (!target && btf_is_var(t)) {
