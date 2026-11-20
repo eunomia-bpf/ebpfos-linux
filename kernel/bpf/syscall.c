@@ -62,11 +62,6 @@
 
 #define BPF_OBJ_FLAG_MASK   (BPF_F_RDONLY | BPF_F_WRONLY)
 
-static_assert(offsetof(struct ebpfos_component_call_frame, input) == 40);
-static_assert(offsetof(struct ebpfos_component_call_frame, status) == 168);
-static_assert(offsetof(struct ebpfos_component_call_frame, output) == 176);
-static_assert(sizeof(struct ebpfos_component_call_frame) == 304);
-
 DEFINE_PER_CPU(int, bpf_prog_active);
 DEFINE_COOKIE(bpf_map_cookie);
 static DEFINE_IDR(prog_idr);
@@ -1012,7 +1007,7 @@ static fmode_t map_get_sys_perms(struct bpf_map *map, struct fd f)
 	/* Our file permissions may have been overridden by global
 	 * map permissions facing syscall side.
 	 */
-	if (READ_ONCE(map->frozen) || READ_ONCE(map->ebpfos_component_owner))
+	if (READ_ONCE(map->frozen))
 		mode &= ~FMODE_CAN_WRITE;
 	return mode;
 }
@@ -6656,22 +6651,6 @@ static bool syscall_prog_is_valid_access(int off, int size,
 					 const struct bpf_prog *prog,
 					 struct bpf_insn_access_aux *info)
 {
-	if (prog->aux->ebpfos_component) {
-		u64 end;
-
-		if (off < 0 || (size != 1 && size != 2 && size != 4 && size != 8) ||
-		    !IS_ALIGNED(off, size))
-			return false;
-		end = (u64)off + size;
-		if (off < offsetof(struct ebpfos_component_call_frame, status) &&
-		    end <= offsetof(struct ebpfos_component_call_frame, status))
-			return type == BPF_READ;
-		if (off >= offsetof(struct ebpfos_component_call_frame, status) &&
-		    end <= EBPFOS_COMPONENT_CALL_CONTEXT_SIZE)
-			return type == BPF_READ || type == BPF_WRITE;
-		return false;
-	}
-
 	if (off < 0 || off >= U16_MAX)
 		return false;
 	/* No alignment requirements for syscall ctx accesses. */
