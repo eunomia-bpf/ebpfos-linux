@@ -223,12 +223,13 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
   unsigned long original, bytes, offset;
   char symbol[KSYM_NAME_LEN];
   const char *name;
-  u64 fd;
+  u64 fd = 0;
   u32 at = ops->fields[i].offset;
-  memcpy(&fd, value + at, sizeof(fd));
-  if (!fd) continue;
+  if (value) memcpy(&fd, value + at, sizeof(fd));
   error = ebpfos_ptview_read_native(&original, ops->original + at, sizeof(original));
   if (error) goto free;
+  addresses[i] = original;
+  if (!fd) continue;
   /* A module's table may call permanent Core text. The storage lease
    * protects its own module text; another module still needs its own lease. */
   
@@ -246,16 +247,17 @@ long bpf_operations_update(struct bpf_map *map, void *key, void *value, u64 flag
  {
   struct entry_set *code = bpf_entry_code_get(programs, ops->field_count);
   if (IS_ERR(code)) {error = PTR_ERR(code);goto unlock;}
+  bpf_entry_code_retain(code, ops->code);
   ops->code = code;
   for (i = 0; i < ops->field_count; ++i) {
    u32 at = ops->fields[i].offset;
    u64 id;
-   if (!programs[i]) continue;
-   ops->programs[i] = programs[i];programs[i] = NULL;
+   swap(ops->programs[i], programs[i]);
    memcpy(ops->table + at, &addresses[i], sizeof(addresses[i]));
-   id = ops->programs[i]->aux->id;memcpy(ops->user + at, &id, sizeof(id));
+   id = ops->programs[i] ? ops->programs[i]->aux->id : 0;
+   memcpy(ops->user + at, &id, sizeof(id));
   }
-  ops->count = count;smp_store_release(&ops->ready, true);error = 0;
+  ops->count = count;smp_store_release(&ops->ready, value != NULL);error = 0;
  }
 unlock:
  mutex_unlock(&ops->lock);
@@ -269,8 +271,8 @@ static void *operations_lookup(struct bpf_map *map, void *key)
  return *(u32 *)key || !smp_load_acquire(&ops->ready) ? ERR_PTR(-ENOENT) : ops->user;
 }
 static void *operations_program_lookup(struct bpf_map *map, void *key) { return NULL; }
-static long operations_program_update(struct bpf_map *map, void *key, void *value, u64 flags) { return -EOPNOTSUPP; }
-static long operations_delete(struct bpf_map *map, void *key) { return -EOPNOTSUPP; }
+static long operations_delete(struct bpf_map *map, void *key)
+{ return bpf_operations_update(map, key, NULL, 0); }
 static int operations_next(struct bpf_map *map, void *key, void *next)
 {
  
@@ -313,7 +315,7 @@ static u64 operations_memory(const struct bpf_map *map)
 }
 const struct bpf_map_ops bpf_operations_map_ops = {
  .map_alloc_check = operations_alloc_check, .map_alloc = operations_alloc,
- .map_free = operations_free, .map_update_elem = operations_program_update,
+ .map_free = operations_free, .map_update_elem = bpf_operations_update,
  .map_lookup_elem_sys_only = operations_lookup, .map_lookup_elem = operations_program_lookup,
  .map_delete_elem = operations_delete, .map_get_next_key = operations_next,
  .map_mem_usage = operations_memory,

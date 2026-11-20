@@ -436,6 +436,14 @@ struct entry_set *bpf_entry_code_get(struct bpf_prog *const *programs, u32 count
  }
  return set;
 }
+void bpf_entry_code_retain(struct entry_set *set, struct entry_set *previous)
+{
+ if (!previous) return;
+ /* Earlier published tables can still name these programs. Keep their
+  * existing journal leases until the owning operations map is released. */
+ list_splice_tail_init(&previous->generations, &set->generations);
+ list_add_tail(&previous->generation_node, &set->generations);
+}
 void bpf_entry_code_put(struct entry_set *set)
 {
  if (!set) return;

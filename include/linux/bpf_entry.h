@@ -12,6 +12,7 @@ u32 bpf_entry_scope_id(const struct bpf_entry_scope *);
 #endif
 #ifdef CONFIG_EBPFOS_ENTRY_LINK
 struct entry_set *bpf_entry_code_get(struct bpf_prog *const *, u32);
+void bpf_entry_code_retain(struct entry_set *, struct entry_set *);
 void bpf_entry_code_put(struct entry_set *);
 unsigned long bpf_entry_text_location(struct module *, unsigned long, bool *, bool *);
 int bpf_entry_program_address(struct btf *, u32, struct bpf_prog *, bool, unsigned long *);
