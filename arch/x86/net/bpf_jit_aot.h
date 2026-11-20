@@ -44,11 +44,13 @@ static const char *aot_function_name(const struct bpf_prog *prog)
 {
 	const struct bpf_prog_aux *aux = prog->aux;
 	const struct btf_type *type;
+	const char *name = aux->ksym.name[0] ? aux->ksym.name :
+		aux->name[0] ? aux->name : "bpf_prog";
 
 	if (!aux->btf || !aux->func_info || aux->func_idx >= aux->func_info_cnt)
-		return NULL;
+		return name;
 	type = btf_type_by_id(aux->btf, aux->func_info[aux->func_idx].type_id);
-	return type && btf_type_is_func(type) ? btf_name_by_offset(aux->btf, type->name_off) : NULL;
+	return type && btf_type_is_func(type) ? btf_name_by_offset(aux->btf, type->name_off) : name;
 }
 
 /* Frozen, read-only source constants receive final-image section bindings.
@@ -56,7 +58,7 @@ static const char *aot_function_name(const struct bpf_prog *prog)
  * cannot be exported as constants. This runs only during AOT export.
  */
 static int aot_map_name(struct bpf_aot_context *aot, u64 address,
-                        char *name, s64 *addend)
+                        const char **name, s64 *addend)
 {
 	struct bpf_prog_aux *aux = aot->root->aux;
 	struct bpf_prog_aux *source = aot->source->aux;
@@ -67,25 +69,28 @@ static int aot_map_name(struct bpf_aot_context *aot, u64 address,
 		struct bpf_map *map = aux->used_maps[i];
 		const struct btf_type *type;
 		const char *section, *symbol;
-		char prefix[BPF_AOT_SYMBOL_LEN];
+		char *prefix;
 		u64 base;
 
 		if (!map->ops->map_direct_value_addr ||
 		    map->ops->map_direct_value_addr(map, &base, 0) ||
 		    address < base || address - base > map->value_size * (u64)map->max_entries)
 			continue;
-		/* The binding is named through BTF; the JIT cannot emit it without. */
+		/* Try other address namespaces when this map has no BTF binding. */
 		if (!map->btf || !source->btf || !source->func_info ||
 		    source->func_idx >= source->func_info_cnt)
-			return -EOPNOTSUPP;
+			continue;
 		type = btf_type_by_id(map->btf, map->btf_value_type_id);
 		section = btf_name_by_offset(map->btf, type->name_off);
-		snprintf(prefix, sizeof(prefix), "aot:constant-pool:%s:", section);
+		prefix = kasprintf(GFP_KERNEL, "aot:constant-pool:%s:", section);
+		if (!prefix)
+			return -ENOMEM;
 		fn = btf_type_by_id(source->btf, source->func_info[source->func_idx].type_id);
 		symbol = btf_find_decl_tag_value(source->btf, fn, -1, prefix);
+		kfree(prefix);
 		if (IS_ERR(symbol))
 			return PTR_ERR(symbol);
-		strscpy(name, symbol, BPF_AOT_SYMBOL_LEN);
+		*name = symbol;
 		*addend = address - base;
 		return 0;
 	}
@@ -93,12 +98,11 @@ static int aot_map_name(struct bpf_aot_context *aot, u64 address,
 }
 
 static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
-			    char *name, s64 *addend)
+			    const char **name, char buffer[KSYM_NAME_LEN], s64 *addend)
 {
 	struct bpf_prog *root = aot->root;
 	unsigned long size, offset;
 	const char *found;
-	char buffer[KSYM_NAME_LEN];
 	char *module;
 	u32 i;
 	int err = aot_map_name(aot, address, name, addend);
@@ -112,16 +116,14 @@ static int aot_address_name(struct bpf_aot_context *aot, unsigned long address,
 		    address >= (unsigned long)func->bpf_func + func->jited_len)
 			continue;
 		found = aot_function_name(func);
-		if (!found)
-			return -EOPNOTSUPP;
-		strscpy(name, found, BPF_AOT_SYMBOL_LEN);
+		*name = found;
 		*addend = address - (unsigned long)func->bpf_func;
 		return 0;
 	}
 	found = kallsyms_lookup(address, &size, &offset, &module, buffer);
 	if (!found)
 		return -EOPNOTSUPP;
-	strscpy(name, found, BPF_AOT_SYMBOL_LEN);
+	*name = found;
 	*addend = offset;
 	return 0;
 }
@@ -171,13 +173,14 @@ static void aot_records_free_names(struct bpf_aot_context *aot)
 static int aot_record_address(struct bpf_aot_context *aot, u32 offset,
 			      u32 type, unsigned long address, s64 bias)
 {
-	char name[BPF_AOT_SYMBOL_LEN];
+	const char *name;
+	char buffer[KSYM_NAME_LEN];
 	s64 addend;
 	int err;
 
 	if (!aot->final)
 		return 0;
-	err = aot_address_name(aot, address, name, &addend);
+	err = aot_address_name(aot, address, &name, buffer, &addend);
 	if (err)
 		return aot->error = err;
 	return aot_record(aot, offset, type, name, addend + bias, false);
