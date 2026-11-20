@@ -81,39 +81,29 @@ static int native_code_symbol(struct object *obj, const char *name)
 {
 	Elf_Data *symbols = obj->efile.symbols;
 	size_t i, count;
-	bool found = false;
 
 	if (!symbols || !symbols->d_buf)
 		return -ENOENT;
 	count = symbols->d_size / gelf_fsize(obj->efile.elf, ELF_T_SYM, 1, EV_CURRENT);
 	for (i = 0; i < count; i++) {
 		GElf_Sym sym;
-		GElf_Shdr section;
-		unsigned int kind;
 		const char *symbol_name;
-		Elf_Scn *scn;
 
 		if (!gelf_getsym(symbols, i, &sym))
 			return -EINVAL;
 		symbol_name = elf_strptr(obj->efile.elf, obj->efile.strtabidx, sym.st_name);
 		if (!symbol_name || strcmp(symbol_name, name) || sym.st_shndx == SHN_UNDEF)
 			continue;
-		kind = GELF_ST_TYPE(sym.st_info);
-		scn = elf_getscn(obj->efile.elf, sym.st_shndx);
-		if (found || !scn || !gelf_getshdr(scn, &section) ||
-		    !(section.sh_flags & SHF_EXECINSTR) ||
-		    (kind != STT_FUNC && kind != STT_NOTYPE) || !sym.st_size)
-			return -EINVAL;
-		found = true;
+		return 0;
 	}
-	return found ? 0 : -ENOENT;
+	return -ENOENT;
 }
 
 static int native_member_proto(const struct btf *btf, const char *record, const char *field)
 {
 	const struct btf_type *t;
 	const struct btf_member *m;
-	int id, proto = -ENOENT;
+	int id;
 	u32 i;
 
 	id = native_unique_type(btf, record, BTF_KIND_STRUCT);
@@ -126,8 +116,6 @@ static int native_member_proto(const struct btf *btf, const char *record, const 
 
 		if (strcmp(btf__name_by_offset(btf, m[i].name_off), field))
 			continue;
-		if (proto >= 0 || btf_member_bitfield_size(t, i))
-			return -EINVAL;
 		id = btf__resolve_type(btf, m[i].type);
 		p = btf__type_by_id(btf, id);
 		if (!p || !btf_is_ptr(p))
@@ -136,9 +124,9 @@ static int native_member_proto(const struct btf *btf, const char *record, const 
 		p = btf__type_by_id(btf, id);
 		if (!p || !btf_is_func_proto(p))
 			return -EINVAL;
-		proto = id;
+		return id;
 	}
-	return proto;
+	return -ENOENT;
 }
 
 static int native_decl_tag(struct btf *btf, int id, int index, const char *tag)
