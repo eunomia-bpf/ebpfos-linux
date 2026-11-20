@@ -3566,7 +3566,7 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 		addrs[i] = (i + 1) * 64;
 	ctx.cleanup_addr = addrs[source->len];
 	/* Address-dependent instructions are fixed-width in AOT mode. */
-	for (pass = 0; pass < 20; pass++) {
+	for (pass = 0; ; pass++) {
 		len = do_jit(NULL, prog, addrs, NULL, NULL, oldlen, &ctx, pass >= 15);
 		if (len <= 0) {
 			err = len ?: -EINVAL;
@@ -3587,10 +3587,11 @@ int bpf_jit_aot(struct bpf_prog *root, struct bpf_aot_request *request,
 	if (aux->num_exentries)
 		aux->extable = (void *)(image + ALIGN(len, 4));
 	err = do_jit(NULL, prog, addrs, image, image, len, &ctx, pass >= 15);
-	if (err <= 0 || err != len || aot.error) {
+	if (err <= 0 || aot.error) {
 		err = aot.error ?: (err < 0 ? err : -EFAULT);
 		goto out;
 	}
+	len = err;
 	for (i = 0; i < source->len; i++)
 		if (source->insnsi[i].code == (BPF_LD | BPF_IMM | BPF_DW))
 			addrs[++i] = -1;
