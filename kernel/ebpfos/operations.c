@@ -69,8 +69,9 @@ static int operations_fields(const struct btf *btf, u32 id, u64 offset, u32 size
   const struct btf_array *array = btf_array(type);
   u32 element = array->type, stride, elements;
   const struct btf_type *element_type = btf_type_skip_modifiers(btf, element, &element);
-  if (!element_type || !btf_resolve_size(btf, element_type, &stride)) return -EINVAL;
-  if (!stride) return 0;
+  if (!element_type) return 0;
+  element_type = btf_resolve_size(btf, element_type, &stride);
+  if (IS_ERR(element_type) || !stride) return 0;
   elements = array->nelems ? array->nelems : tail ? (size-offset)/stride : 0;
   
   for (i = 0; i < elements; ++i) {
@@ -152,7 +153,7 @@ static int operations_alloc_check(union bpf_attr *attr)
 static struct bpf_map *operations_alloc(union bpf_attr *attr)
 {
  struct ebpfos_operations *ops;
- const struct btf_type *variable, *record;
+ const struct btf_type *record;
  struct btf *btf = bpf_get_btf_vmlinux();
  struct module *module = NULL;
  unsigned long address;
@@ -169,10 +170,8 @@ static struct bpf_map *operations_alloc(union bpf_attr *attr)
  btf = ebpfos_binding_btf_owner(btf, attr->map_extra);
  module = btf_try_get_module(btf);
  
- variable = btf_type_by_id(btf, attr->map_extra);
  record = btf_type_skip_modifiers(btf, attr->btf_vmlinux_value_type_id, NULL);
- if (!variable || !btf_type_is_var(variable) || !record ||
-     !btf_resolve_size(btf, record, &size)) goto fail;
+ if (!record || !btf_resolve_size(btf, record, &size)) goto fail;
  allocated = cell_storage_extent(btf, attr->map_extra);
  if (allocated) {
   size = allocated;
