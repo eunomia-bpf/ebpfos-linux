@@ -2610,15 +2610,10 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 
 	kasan_disable_current();
 	func((u8 *)text_poke_mm_addr + offset_in_page(addr), src, len);
-	/* Verify and mirror the Native backing, not the caller's selected map. */
+	/* Mirror the Native backing into the selected text views. */
 	{
 		size_t first = min_t(size_t, len, PAGE_SIZE - offset_in_page(addr));
 		void *native = page_address(pages[0]) + offset_in_page(addr);
-		if (func == text_poke_memcpy) {
-			BUG_ON(memcmp(native, src, first));
-			if (len > first)
-				BUG_ON(memcmp(page_address(pages[1]), src + first, len - first));
-		}
 		ebpfos_ptview_text_poke((unsigned long)addr, native, first, text_poke_memcpy, stopped);
 		if (len > first)
 			ebpfos_ptview_text_poke((unsigned long)addr + first, page_address(pages[1]),

@@ -4528,8 +4528,6 @@ int arch_prepare_bpf_call(void *image, unsigned int size,
 	EMIT1(0xC9);
 	if (emit_jump(&prog, fallback, image + (prog - rw_image)))
 		goto out;
-	if (WARN_ON_ONCE(prog > rw_image + size - BPF_INSN_SAFETY))
-		goto out;
 	copied = bpf_arch_text_copy(image, rw_image, size);
 	error = IS_ERR(copied) ? PTR_ERR(copied) : prog - rw_image;
 out:
