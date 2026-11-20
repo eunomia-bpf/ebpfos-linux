@@ -13352,12 +13352,6 @@ static struct bpf_reg_state *native_global_arg_state(struct bpf_subprog_info *su
 	return &frame->stack[bpf_get_spi(-(s64)end + arg->stack_offset)].spilled_ptr;
 }
 
-static int native_record_pointer_check(struct bpf_verifier_env *env, struct btf *btf,
-                                       u32 type, u32 regno, bool global)
-{
- return 0;
-}
-
 static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
                              const struct bpf_native_arg *arg, bool global, bool checked_entry)
 {
@@ -13365,11 +13359,10 @@ static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
  for (u32 offset = 0; offset < arg->size; offset += 8) {
   struct native_arg_scope temporary __free(native_arg) = {};
   struct bpf_native_arg word = *arg;
-  u32 pointer, regno;
+  u32 regno;
   if (arg->reg < 0 && checked_entry && arg->word_mask &&
       !(arg->word_mask & BIT(offset / 8))) continue;
-  int err = btf_native_pointer_word(btf, arg->type_id, offset, &pointer);
-  if (err) return err;
+  int err;
   if (arg->reg >= 0) {
    if (!(arg->word_mask & BIT(offset / 8))) continue;
    regno = bpf_arg_regno(arg->reg + reg_index++);
@@ -13378,8 +13371,6 @@ static int native_record_arg(struct bpf_verifier_env *env, struct btf *btf,
    word.stack_offset += offset;word.size = min(8u, arg->size - offset);
    err = native_stack_arg(env, &word, &temporary);regno = 13;
   }
-  if (err) return err;
-  if (pointer) err = native_record_pointer_check(env, btf, pointer, regno, global);
   if (err) return err;
  }
  return 0;
@@ -13438,25 +13429,8 @@ static int init_native_record_arg(struct bpf_verifier_env *env, struct bpf_subpr
 static int native_scalar_record_arg(struct bpf_verifier_env *env, struct btf *btf,
 				    const struct bpf_native_arg *arg, bool checked_entry)
 {
-	struct bpf_reg_state *regs = cur_regs(env);
-	int err;
-
 	if (arg->reg >= 0)
 		return native_record_arg(env, btf, arg, false, checked_entry);
-	struct bpf_subprog_info *sub = &env->subprog_info[cur_func(env)->subprogno];
-	struct bpf_reg_state *sp = &regs[BPF_REG_ARG_SP];
-	struct bpf_func_state *frame = bpf_func(env, sp);
-	s64 off;
-
-	err = check_stack_access_within_bounds(env, BPF_REG_ARG_SP, arg->stack_offset, arg->size, BPF_READ);
-	off = (s64)sp->var_off.value + arg->stack_offset;
-	for (u32 byte = 0; byte < arg->size; byte++) {
-		if (checked_entry && arg->word_mask && !(arg->word_mask & BIT(byte / 8))) continue;
-		u32 slot_byte = -off - byte - 1;
-		struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
-		u8 type = slot->slot_type[slot_byte % 8];
-
-	}
 	return 0;
 }
 
