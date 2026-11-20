@@ -29,16 +29,17 @@ static inline bool entry_native_external_range(unsigned long address,
  return target < address || target - address >= size;
 }
 
-static inline bool entry_native_jump(unsigned long ip, unsigned long target,
+/* Core, module, ftrace and BPF executable allocations share x86-64's kernel
+ * text window. Encode its rel32 field as the stock text patcher does.
+ * Allocated stubs choose an absolute form separately for other geometries.
+ */
+static inline void entry_native_jump(unsigned long ip, unsigned long target,
  unsigned char instruction[5])
 {
  unsigned long distance = target - (ip + 5);
  unsigned int i;
- if (sizeof(unsigned long) != 8 || distance != (unsigned long)(long)(int)distance)
-  return false;
  instruction[0] = 0xe9;
  for (i = 0; i < 4; ++i) instruction[i + 1] = distance >> (i * 8);
- return true;
 }
 
 /* Allocated stubs can use an absolute destination when a rel32 does not fit.
@@ -49,7 +50,11 @@ static inline unsigned int entry_native_branch(unsigned long ip,
  unsigned long target, unsigned char instruction[15])
 {
  unsigned int i;
- if (entry_native_jump(ip, target, instruction)) return 5;
+ unsigned long distance = target - (ip + 5);
+ if (distance == (unsigned long)(long)(int)distance) {
+  entry_native_jump(ip, target, instruction);
+  return 5;
+ }
  instruction[0] = 0x3e;instruction[1] = 0xff;instruction[2] = 0x25;
  for (i = 3; i < 7; ++i) instruction[i] = 0;
  for (i = 0; i < 8; ++i) instruction[7 + i] = target >> (i * 8);
@@ -63,14 +68,14 @@ static inline bool entry_native_instruction(const struct entry_native_slot *slot
  if (slot->displacement_size) {
   unsigned long distance = (generation ? slot->target[generation - 1] : slot->original) -
    (slot->ip + slot->displacement_size);
-  if (distance != (slot->displacement_size == 1 ?
-      (unsigned long)(long)(signed char)distance : (unsigned long)(long)(int)distance))
+  if (slot->displacement_size == 1 &&
+      distance != (unsigned long)(long)(signed char)distance)
    return false;
   for (i = 0; i < slot->displacement_size; ++i) instruction[i] = distance >> (i * 8);
   return true;
  }
  if (generation || slot->original) {
-  if (!entry_native_jump(slot->ip, generation ? slot->target[generation - 1] : slot->original, instruction)) return false;
+  entry_native_jump(slot->ip, generation ? slot->target[generation - 1] : slot->original, instruction);
   if (slot->call) instruction[0] = 0xe8;
   return true;
  }
