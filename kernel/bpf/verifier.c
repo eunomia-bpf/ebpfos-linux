@@ -13561,33 +13561,12 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 				continue;
 			}
 			if (location->reg < 0) {
-				struct bpf_subprog_info *caller = &env->subprog_info[cur_func(env)->subprogno];
-				u32 bytes = native_named_input_bytes(btf, location) == 4 ? 4 : max(location->size, 8u);
-
 				if (arg->arg_type != ARG_ANYTHING || arg->has_scalar_max) {
 					ret = native_stack_arg_at(env, location, &temporary, 13,
 						native_named_input_bytes(btf, location));
 					if (ret) return ret;
 					regno = 13;
 					goto native_argument;
-				}
-				/* Scalar records grant no pointer capability. Check every input
-				 * byte before letting an independent function read the area.
-				 */
-				struct bpf_func_state *frame = bpf_func(env, &regs[BPF_REG_ARG_SP]);
-				s64 off = (s64)regs[BPF_REG_ARG_SP].var_off.value + location->stack_offset;
-
-				ret = check_stack_access_within_bounds(env, BPF_REG_ARG_SP,
-					location->stack_offset, bytes, BPF_READ);
-				/* No argument value or range is imported from these scalar
-				 * bytes, so this is an initialization/type check, not an
-				 * artificial BPF load with one history entry per word.
-				 */
-				for (u32 byte = 0; byte < bytes; byte++) {
-					u32 slot_byte = -off - byte - 1;
-					struct bpf_stack_state *slot = &frame->stack[slot_byte / 8];
-					u8 type = slot->slot_type[slot_byte % 8];
-
 				}
 				continue;
 			}
@@ -13641,23 +13620,8 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 		if (arg->user_address) {
 			/* Address bits are never a dereferenceable global input. */
 		} else if (arg->mem_size_reg) {
-			struct native_arg_scope count_scope __free(native_arg) = {};
-			int count_regno = sub->native_frame ?
-				native_call_arg_reg(env, btf, &sub->native_abi, arg->mem_size_arg - 1, &count_scope) :
-				arg->mem_size_reg;
-			struct bpf_reg_state *count;
-			struct bpf_call_arg_meta meta = {};
-
-			if (count_regno < 0) return count_regno;
-			count = &regs[count_regno];
-
-
-			/* A byte contract cannot erase BTF field write authority. */
-			ret = check_buffer_size_reg(env, count, count_regno,
-						    regno, BPF_READ, true, &meta, true);
-			if (!ret && !(arg->arg_type & MEM_RDONLY))
-				ret = check_buffer_size_reg(env, count, count_regno,
-							    regno, BPF_WRITE, true, &meta, true);
+			if (!(arg->arg_type & MEM_RDONLY))
+				clobber_stack_argument(env, reg, 0);
 		} else if (arg->arg_type == ARG_ANYTHING) {
 			if (reg->type != SCALAR_VALUE) {
 				bpf_log(log, "R%d is not a scalar\n", regno);
@@ -13702,8 +13666,7 @@ static int btf_check_func_arg_match(struct bpf_verifier_env *env, int subprog,
 			ret = check_func_arg_reg_off(env, reg, regno, ARG_DONTCARE);
 			if (ret < 0)
 				return ret;
-			if (!(arg->arg_type & PTR_MAYBE_NULL) &&
-			    (bpf_register_is_null(reg) || (reg->type & PTR_MAYBE_NULL))) {
+			if (!(arg->arg_type & PTR_MAYBE_NULL) && (reg->type & PTR_MAYBE_NULL)) {
 				bpf_log(log, "arg#%d is expected to be non-NULL\n", i);
 				return -EINVAL;
 			}
@@ -17439,20 +17402,6 @@ static int kfunc_arg_size_index(const struct bpf_kfunc_call_arg_meta *meta,
 	return index;
 }
 
-static int check_kfunc_scalar_max(struct bpf_verifier_env *env,
-				 const struct bpf_kfunc_call_arg_meta *meta,
-				 const struct btf_type *t, u32 arg, u32 regno)
-{
-	return 0;
-}
-
-static int check_kfunc_scalar_alignment(struct bpf_verifier_env *env,
-				       const struct bpf_kfunc_call_arg_meta *meta,
-				       const struct btf_type *t, u32 arg, u32 regno)
-{
-	return 0;
-}
-
 static enum bpf_type_flag kfunc_pointer_flags(const struct btf *btf,
 					    const struct btf_type *ptr)
 {
@@ -17575,17 +17524,6 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 	}
 	if (!buffer && abi.result_words == 2)
 		cur_aux(env)->returns_two_regs = true;
-	return 0;
-}
-
-/* Only a fault-protected native consumer may declare an address input.
- * This checks representation and address space; it never makes the value
- * dereferenceable or changes the register's trust, lifetime or null facts.
- */
-static int check_kfunc_address_arg(struct bpf_verifier_env *env,
-				  const struct bpf_reg_state *reg, u32 arg,
-				  enum bpf_type_flag flags)
-{
 	return 0;
 }
 
@@ -17723,12 +17661,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		address = kfunc_mem_arg_tag(meta, i, "arg:address");
 
 		nullable |= is_kfunc_arg_nullable(btf, &args[i]);
-		ret = check_kfunc_scalar_max(env, meta, t, i, regno);
-		if (ret)
-			return ret;
-		ret = check_kfunc_scalar_alignment(env, meta, t, i, regno);
-		if (ret)
-			return ret;
 
 		if (btf_type_is_scalar(t)) {
 			ret = __check_reg_arg(env, regs, regno, SRC_OP,
@@ -17789,9 +17721,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			return -EINVAL;
 		}
 		if (address) {
-			ret = check_kfunc_address_arg(env, reg, i, kfunc_pointer_flags(btf, t));
-			if (ret)
-				return ret;
 			continue;
 		}
 
@@ -17819,28 +17748,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			continue;
 		}
 		if (size_arg >= 0) {
-			const struct btf_type *size_t = btf_type_skip_modifiers(btf,
-							args[size_arg].type, NULL);
-			struct native_arg_scope count_scope __free(native_arg) = {};
-			int count_regno = native ? native_call_arg_reg(env, btf, &abi, size_arg, &count_scope) :
-				bpf_arg_regno(size_arg);
-			struct bpf_reg_state *count;
-
-			if (count_regno < 0) return count_regno;
-			count = &regs[count_regno];
-			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
-			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
-
-
-			/* Signed C counts retain their declared ABI. The shared size
-			 * checker requires a nonnegative signed range before using the
-			 * unsigned maximum for span checks, and marks precision. NULL
-			 * does not skip those scalar checks either.
-			 */
-			ret = check_kfunc_mem_size_reg(env, count, count_regno,
-						    regno, read_only);
-			if (ret)
-				return ret;
 			continue;
 		}
 
@@ -18151,15 +18058,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			const struct btf_param *size_arg = &args[i + 1];
 
 			int read_only = kfunc_mem_arg_tag(meta, i, "arg:readonly");
-			int nonnull_size = kfunc_mem_arg_tag(meta, i, "arg:nonnull-size");
-
-			if (read_only < 0 || nonnull_size < 0)
-				return read_only < 0 ? read_only : nonnull_size;
-			/* Nullable size contracts can require a valid pointer whenever
-			 * the requested span is nonempty. An opaque global pair already
-			 * carries that checked precondition; the size check below also
-			 * requires its unchanged count and base.
-			 */
 			if (!bpf_register_is_null(buff_reg) || !is_kfunc_arg_nullable(meta->btf, buff_arg)) {
 				ret = check_kfunc_mem_size_reg(env, size_reg, count_regno,
 							    regno, read_only);
