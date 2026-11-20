@@ -83,12 +83,6 @@ static void plt_retire(struct work_struct *work)
 }
 static void plt_holes(void *area, unsigned int size) { memset(area, 0xcc, size); }
 static void plt_u32(u8 **p, u32 value) { memcpy(*p, &value, 4);*p += 4; }
-static bool plt_rel(u8 **p, u8 *base, unsigned long ip, unsigned long target)
-{
- long distance = target - (ip + (*p - base) + 4);
- if (distance != (s32)distance) return false;
- plt_u32(p, distance);return true;
-}
 static const struct ebpfos_function_binding *plt_binding(struct bpf_entry_scope *scope,
  unsigned long address)
 {
@@ -104,26 +98,23 @@ static int plt_case_order(const void *a, const void *b)
 }
 #define PLT_BYTES(...) do { const u8 bytes[] = {__VA_ARGS__};memcpy(p, bytes, sizeof(bytes));p += sizeof(bytes); } while (0)
 /* The immutable map supplies a live physical case ID or native0. Leaves
- * therefore jump directly; sparse global scope IDs never enter this tree. */
-static bool plt_tree(u8 **cursor, u8 *base, unsigned long ip,
+ * select their encoding without refusing a distant destination. */
+static void plt_tree(u8 **cursor, u8 *base, unsigned long ip,
  const struct plt_case *cases, u32 count)
 {
  u8 *p = *cursor;
- bool fits;
  if (count == 1) {
-  u8 *branch;
-  PLT_BYTES(0xe9);branch = p;
-  fits = plt_rel(&p, base, ip, cases[0].address);p = branch + 4;
+  p += entry_native_branch(ip + (p - base), cases[0].address, p);
  } else {
   u32 left = count - count / 2;
   u8 *branch, *fixup;
   PLT_BYTES(0x41,0x81,0xfa);plt_u32(&p, cases[left - 1].id);
   PLT_BYTES(0x0f,0x86);branch = p;p += 4;
-  fits = plt_tree(&p, base, ip, cases + left, count - left);
+  plt_tree(&p, base, ip, cases + left, count - left);
   fixup = branch;plt_u32(&fixup, p - (branch + 4));
-  fits = plt_tree(&p, base, ip, cases, left) && fits;
+  plt_tree(&p, base, ip, cases, left);
  }
- *cursor = p;return fits;
+ *cursor = p;
 }
 /* Preserve Linux's six argument registers, rax (including vararg AL), stack
  * arguments and ENDBR. Only ordinary C entry scratch registers are clobbered.
@@ -141,7 +132,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  list_for_each_entry(scope, &plt_scopes, node)
   if (plt_binding(scope, entry->slot.target[1])) ++count;
  if (!count) return NULL;
- capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 18U * (count + 1);
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 28U * (count + 1);
  image = kzalloc(sizeof(*image) + ((size_t)count + 1) * sizeof(image->cases[0]) +
   ((size_t)plt_next_id + 1) * sizeof(u32), GFP_KERNEL);
  buffer = kmalloc(capacity, GFP_KERNEL);
@@ -185,7 +176,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
   image->allocation = entry->image->allocation;
   kfree(buffer);kvfree(programs);return image;
  }
- capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 18U * image->count;
+ capacity = (IS_ENABLED(CONFIG_PREEMPT_RT) ? 80U : 63U) + 28U * image->count;
  image->header = bpf_jit_binary_pack_alloc(capacity, (u8 **)&image->text, 8,
   &image->writable, &writable_text, plt_holes, false);
  if (!image->header) {kfree(buffer);kvfree(programs);schedule_delayed_work(&image->retire, 0);return ERR_PTR(-ENOMEM);}
@@ -199,7 +190,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  PLT_BYTES(0x49,0xbb);{u64 address = (unsigned long)&entry->table;memcpy(p, &address, 8);p += 8;}
  PLT_BYTES(0x4d,0x8b,0x1b); /* mov (r11),r11 */
  PLT_BYTES(0x47,0x8b,0x14,0x93); /* mov (r11,r10,4),r10d */
- if (!plt_tree(&p, buffer, ip, image->cases, image->count)) goto range;
+ plt_tree(&p, buffer, ip, image->cases, image->count);
  #undef PLT_BYTES
  image->size = p - buffer;
  image->code = bpf_entry_code_get(programs, count);
@@ -210,8 +201,6 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  kfree(buffer);kvfree(programs);
  if (error) {image->header = NULL;schedule_delayed_work(&image->retire, 0);return ERR_PTR(error);}
  return image;
-range:
- kfree(buffer);kvfree(programs);schedule_delayed_work(&image->retire, 0);return ERR_PTR(-ERANGE);
 }
 static void plt_entry_put(struct plt_entry *entry)
 {

@@ -41,6 +41,21 @@ static inline bool entry_native_jump(unsigned long ip, unsigned long target,
  return true;
 }
 
+/* Allocated stubs can use an absolute destination when a rel32 does not fit.
+ * The literal follows the RIP-relative jump, so neither registers nor flags
+ * change. NOTRACK keeps the direct branch's landing-pad semantics.
+ */
+static inline unsigned int entry_native_branch(unsigned long ip,
+ unsigned long target, unsigned char instruction[15])
+{
+ unsigned int i;
+ if (entry_native_jump(ip, target, instruction)) return 5;
+ instruction[0] = 0x3e;instruction[1] = 0xff;instruction[2] = 0x25;
+ for (i = 3; i < 7; ++i) instruction[i] = 0;
+ for (i = 0; i < 8; ++i) instruction[7 + i] = target >> (i * 8);
+ return 15;
+}
+
 static inline bool entry_native_instruction(const struct entry_native_slot *slot,
  unsigned int generation, unsigned char instruction[5])
 {
