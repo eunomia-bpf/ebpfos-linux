@@ -370,8 +370,6 @@ struct bpf_retval_range {
  */
 struct bpf_func_state {
 	struct bpf_reg_state regs[MAX_BPF_REG];
-	/* Immutable entry witness for an argument-derived result. */
-	struct bpf_reg_state result_argument;
 	/* index of call instruction that called into this func */
 	int callsite;
 	/* stack frame number of this function state from pov of

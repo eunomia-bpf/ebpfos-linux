@@ -25240,15 +25240,6 @@ static int do_check_common(struct bpf_verifier_env *env, int subprog)
 			}
 			pointer->mem_size_id = count->id;
 		}
-		if (sub->result_argument) {
-			struct bpf_reg_state *input = native_global_arg_state(sub, state->frame[0],
-								    sub->result_argument - 1);
-
-
-			if (!input->id)
-				input->id = ++env->id_gen;
-			state->frame[0]->result_argument = *input;
-		}
 	} else {
 		/* if main BPF program has associated BTF info, validate that
 		 * it's matching expected signature, and otherwise mark BTF
