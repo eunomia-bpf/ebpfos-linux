@@ -99,7 +99,7 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
  if (btf_type_is_array(t)) {
   const struct btf_array *a = btf_array(t);
   const struct btf_type *e = btf_type_skip_modifiers(btf, a->type, NULL);
-  if (IS_ERR(btf_resolve_size(btf, e, &size)) || !size) return -EINVAL;
+  if (IS_ERR(btf_resolve_size(btf, e, &size)) || !size) return 0;
   for (u32 i = 0; i < a->nelems && i * size <= offset + 7; i++) {
    if (i * size + size <= offset) continue;
    int err = native_pointer_word(btf, a->type, offset - i * size, pointer, depth + 1);
@@ -114,7 +114,7 @@ static int native_pointer_word(struct btf *btf, u32 id, u32 offset, u32 *pointer
   const struct btf_type *child = btf_type_skip_modifiers(btf, m->type, NULL);
   if (btf_native_scalar_storage(btf, m->type, depth + 1)) continue;
   if (btf_member_bitfield_size(t, i)) continue;
-  if (IS_ERR(btf_resolve_size(btf, child, &size))) return -EINVAL;
+  if (IS_ERR(btf_resolve_size(btf, child, &size))) continue;
   if (bit >= (offset + 8) * 8 || bit + size * 8 <= offset * 8) continue;
   u32 before = *pointer;
   int err = native_pointer_word(btf, m->type, offset - bit / 8, pointer, depth + 1);
