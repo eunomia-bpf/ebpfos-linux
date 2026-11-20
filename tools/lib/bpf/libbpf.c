@@ -10159,10 +10159,6 @@ int bpf_program__set_ebpfos_field_accesses(struct bpf_program *prog,
 				const struct bpf_ebpfos_field_access *fields,
 				__u32 count)
 {
-	if (prog->obj->state >= OBJ_LOADED)
-		return libbpf_err(-EBUSY);
-	if (!!fields != !!count)
-		return libbpf_err(-EINVAL);
 	prog->ebpfos_field_accesses = fields;
 	prog->ebpfos_field_access_cnt = count;
 	return 0;
