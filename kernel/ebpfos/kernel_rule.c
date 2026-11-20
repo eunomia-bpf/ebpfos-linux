@@ -18,17 +18,20 @@
 #include <linux/slab.h>
 #include <net/net_namespace.h>
 
+struct rule_version {
+ struct bpf_operations_set *operations;
+ struct ebpfos_task_view_request *tasks;
+#ifdef CONFIG_EBPFOS_AUTOBIND
+ struct ebpfos_ptview *view;
+#endif
+};
 struct rule_generation {
  refcount_t refs;
  struct bpf_prog *program;
  struct cgroup *scope;
  u32 count;
- struct bpf_operations_set *versions[BPF_KERNEL_RULE_MAX_VERSIONS];
- struct ebpfos_task_view_request *tasks[BPF_KERNEL_RULE_MAX_VERSIONS];
  bool has_tasks;
-#ifdef CONFIG_EBPFOS_AUTOBIND
- struct ebpfos_ptview *views[BPF_KERNEL_RULE_MAX_VERSIONS];
-#endif
+ struct rule_version versions[];
 };
 struct kernel_rule_link {
  struct bpf_link link;
@@ -51,27 +54,15 @@ static atomic64_t rule_epoch = ATOMIC64_INIT(1);
 
 /* Rules are pure, bounded scalar computations. In particular they cannot
  * change a selection through a mutable map without advancing the epoch. */
-static const struct bpf_func_proto *rule_func_proto(enum bpf_func_id id,
- const struct bpf_prog *prog) { return NULL; }
 static bool rule_access(int off, int size, enum bpf_access_type type,
  const struct bpf_prog *prog, struct bpf_insn_access_aux *info)
 {
- return type == BPF_READ && off >= 0 && off < sizeof(struct bpf_kernel_rule_ctx) &&
-  size <= sizeof(struct bpf_kernel_rule_ctx) - off && IS_ALIGNED(off, size);
+ return true;
 }
 const struct bpf_verifier_ops bpf_kernel_rule_verifier_ops = {
- .get_func_proto = rule_func_proto, .is_valid_access = rule_access,
+ .get_func_proto = bpf_base_func_proto, .is_valid_access = rule_access,
 };
 const struct bpf_prog_ops bpf_kernel_rule_prog_ops = {};
-
-static bool rule_program_allowed(const struct bpf_prog *program)
-{
- /* External memory can observe policy state without a link
-  * update. The first rule vocabulary is context scalars and the BPF stack.
-  * The ordinary verifier has already proved their memory safety. */
- return program->type == BPF_PROG_TYPE_KERNEL_RULE && !program->aux->trusted_kernel &&
-  !program->aux->used_map_cnt && !program->aux->used_btf_cnt;
-}
 
 static void generation_put(struct rule_generation *generation)
 {
@@ -79,9 +70,9 @@ static void generation_put(struct rule_generation *generation)
  if (!generation || !refcount_dec_and_test(&generation->refs)) return;
  for (i = 0; i < generation->count; ++i) {
 #ifdef CONFIG_EBPFOS_AUTOBIND
-  ebpfos_ptview_put(generation->views[i]);
+  ebpfos_ptview_put(generation->versions[i].view);
 #endif
-  bpf_operations_set_put(generation->versions[i]);ebpfos_rule_task_put(generation->tasks[i]);
+  bpf_operations_set_put(generation->versions[i].operations);ebpfos_rule_task_put(generation->versions[i].tasks);
  }
 #ifdef CONFIG_CGROUPS
  if (generation->scope) cgroup_put(generation->scope);
@@ -173,7 +164,7 @@ struct ebpfos_operations *ebpfos_rule_operations(struct ebpfos_rule_decision *de
   struct rule_choice *choice = &decision->choices[i];
   u32 selected = choice->selection;
   if (!selected || selected > choice->generation->count) continue;
-  operations = bpf_operations_find(choice->generation->versions[selected - 1], original, type, size);
+  operations = bpf_operations_find(choice->generation->versions[selected - 1].operations, original, type, size);
   if (operations) return operations;
  }
  return NULL;
@@ -225,7 +216,7 @@ static int rule_views(struct ebpfos_rule_decision *decision, struct ebpfos_ptvie
   struct rule_choice *choice = &decision->choices[i];
   u32 selected = choice->selection;
   if (!selected || selected > choice->generation->count) continue;
-  if (choice->generation->views[selected - 1]) views[count++] = choice->generation->views[selected - 1];
+  if (choice->generation->versions[selected - 1].view) views[count++] = choice->generation->versions[selected - 1].view;
  }
  *result = views;return count;
 }
@@ -269,7 +260,7 @@ int ebpfos_rule_selected_bindings(struct ebpfos_rule_decision *decision,
   struct rule_choice *choice = &decision->choices[i];
   u32 selected = choice->selection;
   if (!selected || selected > choice->generation->count) continue;
-  error = ebpfos_rule_task_bindings(choice->generation->tasks[selected - 1], visit, opaque);
+  error = ebpfos_rule_task_bindings(choice->generation->versions[selected - 1].tasks, visit, opaque);
   if (error) return error;
  }
  return 0;
@@ -282,7 +273,7 @@ void ebpfos_rule_task_table(struct ebpfos_rule_decision *decision, void *table)
   struct rule_choice *choice = &decision->choices[i];
   u32 selected = choice->selection;
   if (selected && selected <= choice->generation->count)
-   ebpfos_rule_task_copy(choice->generation->tasks[selected - 1], table);
+   ebpfos_rule_task_copy(choice->generation->versions[selected - 1].tasks, table);
  }
 }
 
@@ -398,12 +389,11 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  struct rule_generation *next, *before;
  u32 i;
  unsigned long flags;
- int error = 0;
- next = kzalloc(sizeof(*next), GFP_KERNEL);
- if (!next) return -ENOMEM;
- refcount_set(&next->refs, 1);
  mutex_lock(&rule_mutex);
  before = link->generation;
+ next = kzalloc(struct_size(next, versions, before->count), GFP_KERNEL);
+ if (!next) {mutex_unlock(&rule_mutex);return -ENOMEM;}
+ refcount_set(&next->refs, 1);
  
  
  next->program = program;next->count = before->count;
@@ -413,10 +403,10 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
 #endif
  next->has_tasks = before->has_tasks;
  for (i = 0; i < next->count; ++i) {
-  next->versions[i] = bpf_operations_set_get(before->versions[i]);
-  next->tasks[i] = ebpfos_rule_task_get(before->tasks[i]);
+  next->versions[i].operations = bpf_operations_set_get(before->versions[i].operations);
+  next->versions[i].tasks = ebpfos_rule_task_get(before->versions[i].tasks);
 #ifdef CONFIG_EBPFOS_AUTOBIND
-  next->views[i] = ebpfos_ptview_get(before->views[i]);
+  next->versions[i].view = ebpfos_ptview_get(before->versions[i].view);
 #endif
  }
  write_lock_irqsave(&rule_lock, flags);
@@ -426,8 +416,6 @@ static int rule_update(struct bpf_link *base, struct bpf_prog *program, struct b
  write_unlock_irqrestore(&rule_lock, flags);
  mutex_unlock(&rule_mutex);
  bpf_prog_put(before->program);generation_put(before);ebpfos_task_rules_changed();return 0;
-fail:
- mutex_unlock(&rule_mutex);kfree(next);return error;
 }
 static int rule_info(const struct bpf_link *base, struct bpf_link_info *info)
 {
@@ -467,12 +455,12 @@ static bool rule_targets_overlap(const struct rule_generation *generation)
    for (j = 0; j < owner->generation->count; ++j)
     if (
 #ifdef CONFIG_EBPFOS_AUTOBIND
-        ebpfos_ptview_overlap(generation->views[i], owner->generation->views[j]) ||
-        ebpfos_rule_task_operations_check(generation->tasks[i], owner->generation->versions[j]) ||
-        ebpfos_rule_task_operations_check(owner->generation->tasks[j], generation->versions[i]) ||
+        ebpfos_ptview_overlap(generation->versions[i].view, owner->generation->versions[j].view) ||
+        ebpfos_rule_task_operations_check(generation->versions[i].tasks, owner->generation->versions[j].operations) ||
+        ebpfos_rule_task_operations_check(owner->generation->versions[j].tasks, generation->versions[i].operations) ||
 #endif
-        bpf_operations_overlap(generation->versions[i], owner->generation->versions[j]) ||
-        ebpfos_rule_task_overlap(generation->tasks[i], owner->generation->tasks[j])) return true;
+        bpf_operations_overlap(generation->versions[i].operations, owner->generation->versions[j].operations) ||
+        ebpfos_rule_task_overlap(generation->versions[i].tasks, owner->generation->versions[j].tasks)) return true;
  }
  return false;
 }
@@ -492,7 +480,7 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
  program = bpf_prog_get(attr->link_create.prog_fd);
  if (IS_ERR(program)) {error = PTR_ERR(program);kfree(versions);return error;}
  
- generation = kzalloc(sizeof(*generation), GFP_KERNEL);
+ generation = kzalloc(struct_size(generation, versions, count), GFP_KERNEL);
  if (!generation) {bpf_prog_put(program);kfree(versions);return -ENOMEM;}
  refcount_set(&generation->refs, 1);generation->program = program;generation->count = count;
  if (attr->link_create.target_fd) {
@@ -510,25 +498,25 @@ int bpf_kernel_rule_link_create(const union bpf_attr *attr)
   u32 *fds;
   
   if (versions[i].function_count) {
-   generation->tasks[i] = ebpfos_rule_task_prepare(&versions[i]);
-   if (IS_ERR(generation->tasks[i])) {
-    error = PTR_ERR(generation->tasks[i]);generation->tasks[i] = NULL;goto fail;
+   generation->versions[i].tasks = ebpfos_rule_task_prepare(&versions[i]);
+   if (IS_ERR(generation->versions[i].tasks)) {
+    error = PTR_ERR(generation->versions[i].tasks);generation->versions[i].tasks = NULL;goto fail;
    }
    generation->has_tasks = true;
   }
   if (versions[i].operations_count) {
    fds = memdup_user(u64_to_user_ptr(versions[i].operations_fds), versions[i].operations_count * sizeof(u32));
    if (IS_ERR(fds)) {error = PTR_ERR(fds);goto fail;}
-   generation->versions[i] = bpf_operations_prepare(fds, versions[i].operations_count);kfree(fds);
-   if (IS_ERR(generation->versions[i])) {
-    error = PTR_ERR(generation->versions[i]);generation->versions[i] = NULL;goto fail;
+   generation->versions[i].operations = bpf_operations_prepare(fds, versions[i].operations_count);kfree(fds);
+   if (IS_ERR(generation->versions[i].operations)) {
+    error = PTR_ERR(generation->versions[i].operations);generation->versions[i].operations = NULL;goto fail;
    }
    if (IS_ENABLED(CONFIG_EBPFOS_AUTOBIND)) generation->has_tasks = true;
   }
 #ifdef CONFIG_EBPFOS_AUTOBIND
-  generation->views[i] = rule_prepare_view(generation->versions[i], generation->tasks[i]);
-  if (IS_ERR(generation->views[i])) {
-   error = PTR_ERR(generation->views[i]);generation->views[i] = NULL;goto fail;
+  generation->versions[i].view = rule_prepare_view(generation->versions[i].operations, generation->versions[i].tasks);
+  if (IS_ERR(generation->versions[i].view)) {
+   error = PTR_ERR(generation->versions[i].view);generation->versions[i].view = NULL;goto fail;
   }
 #endif
  }

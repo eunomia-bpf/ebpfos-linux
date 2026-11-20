@@ -18,7 +18,6 @@ struct bpf_kernel_rule_ctx {
  * sets may replace the same table. BPF_LINK_CREATE target_fd may name a
  * cgroup-v2 subtree; zero is global. Separate rules may share bindings only
  * when their enforced cgroup subtrees are disjoint. */
-#define BPF_KERNEL_RULE_MAX_VERSIONS 32
 struct bpf_kernel_rule_function {
  __u32 btf_obj_fd; /* Zero denotes vmlinux; otherwise the target's BTF FD. */
  __u32 btf_id;
