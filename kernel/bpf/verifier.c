@@ -7902,13 +7902,6 @@ static u32 syscall_ctx_access_size(const struct bpf_prog *prog)
 
 
 
-static int check_ebpfos_component_ctx_range(struct bpf_verifier_env *env,
-					    u32 regno, int off, int size,
-					    enum bpf_access_type type)
-{
-	return 0;
-}
-
 /* check access to 'struct bpf_context' fields.  Supports fixed offsets only */
 static int __check_ctx_access(struct bpf_verifier_env *env, int insn_idx, int off, int size,
 			      enum bpf_access_type t, struct bpf_insn_access_aux *info)
@@ -7966,12 +7959,6 @@ static int check_ctx_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	/* Only syscall components use the eBPFOS call frame. Other program
 	 * families retain their original type-specific context permissions.
 	 */
-	if (var_off_ok && env->prog->aux->ebpfos_component) {
-		err = check_ebpfos_component_ctx_range(env, regno, off,
-						       access_size, t);
-		if (err)
-			return err;
-	}
 	off += reg->umax_value;
 
 	err = __check_ctx_access(env, insn_idx, off, access_size, t, info);
@@ -10661,14 +10648,6 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 							  ctx_size, zero_size_allowed);
 			if (err)
 				return err;
-			if (env->prog->aux->ebpfos_component) {
-				err = check_ebpfos_component_ctx_range(env, regno, 0,
-								       access_size,
-								       access_type);
-				if (err)
-					return err;
-
-			}
 			if (env->prog->aux->max_ctx_offset < reg->umax_value + access_size)
 				env->prog->aux->max_ctx_offset = reg->umax_value + access_size;
 			return 0;
