@@ -772,8 +772,6 @@ int bpf_link_create(int prog_fd, int target_fd,
 		attr.link_create.entry.prog_fds = ptr_to_u64(OPTS_GET(opts, entry.prog_fds, NULL));
 		attr.link_create.entry.operations_count = OPTS_GET(opts, entry.operations_count, 0);
 		attr.link_create.entry.operations_fds = ptr_to_u64(OPTS_GET(opts, entry.operations_fds, NULL));
-		if (!OPTS_ZEROED(opts, entry))
-			return libbpf_err(-EINVAL);
 		break;
 	case BPF_TRACE_ITER:
 		attr.link_create.iter_info = ptr_to_u64(OPTS_GET(opts, iter_info, (void *)0));
