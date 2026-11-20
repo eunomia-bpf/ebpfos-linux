@@ -281,15 +281,13 @@ static int native_set_btf(struct object *obj)
 		func = native_unique_type(btf, e->native, BTF_KIND_FUNC);
 		/* Assembly has no DWARF function body. Borrow only the original C
 		 * declaration retained by NATIVE_PROTOTYPE, never a guessed ABI.
-		 * An ambiguous existing FUNC is still an error.
 		 */
 		if (func == -ENOENT) {
-			char record[256];
-			int length = snprintf(record, sizeof(record),
-					      "ebpfos_native_proto_%s", e->native);
-			if (length < 0 || (size_t)length >= sizeof(record))
+			char *record;
+			if (asprintf(&record, "ebpfos_native_proto_%s", e->native) < 0)
 				continue;
 			proto = native_member_proto(btf, record, "fn");
+			free(record);
 			if (proto >= 0)
 				func = btf__add_func(btf, e->native, BTF_FUNC_GLOBAL, proto);
 		}
