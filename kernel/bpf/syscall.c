@@ -3167,27 +3167,6 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (err < 0)
 		goto free_used_maps;
 
-#ifdef CONFIG_EBPFOS_ENTRY_LINK
-	/* Legacy replacement loads may already name their native target. A
-	 * sleepable function program is checked under its own entry contract;
-	 * its caller context is established by task publication, not this load.
-	 * All publication paths retain the complete callable/context check.
-	 */
-	if (prog->aux->ebpfos_component && type == BPF_PROG_TYPE_TRACING &&
-	    prog->expected_attach_type == BPF_TRACE_REPLACE &&
-	    !(prog->sleepable && bpf_native_func_entry(prog)) &&
-	    prog->aux->attach_btf && prog->aux->attach_btf_id &&
-	    btf_type_is_func(btf_type_by_id(prog->aux->attach_btf,
-					   prog->aux->attach_btf_id))) {
-		unsigned long address;
-
-		err = bpf_entry_program_address(prog->aux->attach_btf,
-			prog->aux->attach_btf_id, prog, false, &address);
-		if (err)
-			goto free_used_maps;
-	}
-#endif
-
 	err = bpf_prog_mark_insn_arrays_ready(prog);
 	if (err < 0)
 		goto free_used_maps;
