@@ -12,10 +12,7 @@ static u32 btf_scalar_context_size(const struct bpf_prog *prog,
 	char key[64];
 	u32 bytes;
 
-	if (!aux->ebpfos_component || !capable(CAP_SYS_ADMIN) ||
-	    !aux->btf || !aux->func_info || !aux->func_info_cnt ||
-	    (prog->expected_attach_type != BPF_TRACE_FENTRY &&
-	     prog->expected_attach_type != BPF_TRACE_REPLACE))
+	if (!aux->btf || !aux->func_info || !aux->func_info_cnt)
 		return 0;
 	/* Qualifiers on either the address or its object remain significant.
 	 * In particular, const and type tags never become writable memory.
