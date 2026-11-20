@@ -665,9 +665,6 @@ struct bpf_insn_aux_data {
 	bool zext_dst; /* this insn zero extends dst reg */
 	bool needs_zext; /* alu op needs to clear upper bits */
 	bool returns_two_regs; /* native INTEGER result in R0 and R3 */
-	/* Every visit must resolve a provider; any bare prototype is unproved.
-	 * Publication metadata only; this never grants a verifier capability.
-	 */
 	bool non_sleepable; /* helper/kfunc may be called from non-sleepable context */
 	bool is_iter_next; /* bpf_iter_<type>_next() kfunc call */
 	bool is_noreturn; /* instruction has no CFG successor */

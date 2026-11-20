@@ -605,8 +605,8 @@ int ebpfos_file_view_open(struct file *file)
  if (IS_ERR(ops)) return PTR_ERR(ops);
  file->ebpfos_operations = ops;
  if (ops) file->f_op = ops->table;
- /* An open callback may replace its table before delegating. The old map's
-  * existing stack-checked retirement retains any still-running callback. */
+ /* An open callback may replace its table before delegating. Release the old
+  * map through its existing retirement grace periods. */
  ebpfos_operations_put(old);
  return 0;
 }
