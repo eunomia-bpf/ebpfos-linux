@@ -210,7 +210,6 @@ static bool is_btf_id(const char *name)
 	return name && !strncmp(name, BTF_ID_PREFIX, sizeof(BTF_ID_PREFIX) - 1);
 }
 
-#include "storage_vars.h"
 
 static struct btf_id *btf_id__find(struct rb_root *root, const char *name)
 {
@@ -1575,8 +1574,6 @@ int main(int argc, const char **argv)
 			goto out;
 
 	if (load_btf(&obj))
-		goto out;
-	if (!preserve_ids && normalize_storage_vars(&obj))
 		goto out;
 	if (native_set && native_set_btf(&obj))
 		goto out;
