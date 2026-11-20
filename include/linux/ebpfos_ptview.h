@@ -30,7 +30,6 @@ int ebpfos_ptview_bind(struct ebpfos_ptview *);
 void ebpfos_ptview_mm_retain(struct mm_struct *, void (*)(void *), void *);
 struct ebpfos_ptview *ebpfos_ptview_get(struct ebpfos_ptview *);
 struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **, unsigned int);
-bool ebpfos_ptview_overlap(struct ebpfos_ptview *, struct ebpfos_ptview *);
 void ebpfos_ptview_mm_free(struct mm_struct *);
 bool ebpfos_ptview_mm(const struct mm_struct *);
 unsigned long ebpfos_ptview_symbol(const char *);

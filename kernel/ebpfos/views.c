@@ -281,41 +281,6 @@ int ebpfos_rule_task_bindings(struct ebpfos_task_view_request *request,
 }
 #endif
 
-bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *a,
- struct ebpfos_task_view_request *b)
-{
- struct task_view *x, *y;
- if (!a || !b) return false;
- x = a->next->private_data;y = b->next->private_data;
- {
-  u32 i, j;
-  for (i = 0; i < x->count; ++i) for (j = 0; j < y->count; ++j)
-   if (x->bindings[i].native_address == y->bindings[j].native_address) return true;
- }
- return bitmap_intersects(x->selected, y->selected, NR_syscalls);
-}
-/* The same syscall slot can be named by a function root or by a BTF table
- * field. Both forms keep the Native control entry and one owner per slot. */
-static int task_view_data_change(unsigned long address, const void *bytes, size_t size, void *opaque)
-{
- struct task_view *view = opaque;
- unsigned long first = (unsigned long)sys_call_table, end = address + size;
- u32 nr;
- (void)bytes;
- 
- if (end <= first || address >= first + NR_syscalls * sizeof(*sys_call_table)) return 0;
- for (nr = 0; nr < NR_syscalls; ++nr) {
-  unsigned long slot = first + nr * sizeof(*sys_call_table);
-  
- }
- return 0;
-}
-int ebpfos_rule_task_operations_check(struct ebpfos_task_view_request *request,
- const struct bpf_operations_set *operations)
-{
- return bpf_operations_visit_changes(operations, task_view_data_change,
-  request ? request->next->private_data : NULL);
-}
 void ebpfos_rule_task_copy(struct ebpfos_task_view_request *request, void *table)
 {
  struct task_view *view;

@@ -243,15 +243,6 @@ struct ebpfos_ptview *ebpfos_ptview_compose(struct ebpfos_ptview **views, unsign
  if (sequence != READ_ONCE(text_stop_sequence)) refresh_text_view(result);
  mutex_unlock(&text_mutex);return result;
 }
-bool ebpfos_ptview_overlap(struct ebpfos_ptview *a, struct ebpfos_ptview *b)
-{
- unsigned int i, j;
- for (i = 0; a && i < a->count; ++i) for (j = 0; b && j < b->count; ++j)
-  if (a->pages[i].address == b->pages[j].address &&
-      bitmap_intersects(a->pages[i].changed, b->pages[j].changed, PAGE_SIZE)) return true;
- return false;
-}
-
 static void free_mapping(struct ptview_mm *binding)
 {
  struct ptview_table *table, *next;

@@ -33,8 +33,6 @@ struct ebpfos_rule_decision *ebpfos_task_rule_decision(void);
 struct ebpfos_task_view_request *ebpfos_rule_task_prepare(const struct bpf_kernel_rule_version *);
 void ebpfos_rule_task_put(struct ebpfos_task_view_request *);
 struct ebpfos_task_view_request *ebpfos_rule_task_get(struct ebpfos_task_view_request *);
-bool ebpfos_rule_task_overlap(struct ebpfos_task_view_request *, struct ebpfos_task_view_request *);
-int ebpfos_rule_task_operations_check(struct ebpfos_task_view_request *, const struct bpf_operations_set *);
 int ebpfos_rule_task_visit_changes(struct ebpfos_task_view_request *, ebpfos_ptview_visit, void *);
 void ebpfos_rule_task_copy(struct ebpfos_task_view_request *, void *);
 bool ebpfos_rule_task_choices(struct ebpfos_rule_decision *);
