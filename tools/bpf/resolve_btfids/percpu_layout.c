@@ -60,19 +60,19 @@ struct btf *btf_percpu_layout(const struct btf *source, const char *alias)
 	for (i = 1; i < count; i++) {
 		if (i != section_id) {
 			err = btf__add_type(result, source, btf__type_by_id(source, i));
-			if (err != i)
+			if (err < 0)
 				goto out;
 			continue;
 		}
 		err = btf__add_datasec(result, ".data..percpu", size);
-		if (err != i)
+		if (err < 0)
 			goto out;
 		err = btf__add_datasec_var_info(result, alias_id, 0, size);
 		if (err)
 			goto out;
 	}
 	err = btf__add_struct(result, "__percpu_layout", size);
-	if (err != root_id)
+	if (err < 0)
 		goto out;
 	for (i = 0; i < nr; i++) {
 		variable = btf__type_by_id(source, fields[i].type);
@@ -82,7 +82,7 @@ struct btf *btf_percpu_layout(const struct btf *source, const char *alias)
 			goto out;
 	}
 	err = btf__add_var(result, alias, BTF_VAR_GLOBAL_ALLOCATED, root_id);
-	if (err != alias_id)
+	if (err < 0)
 		goto out;
 	free(fields);
 	return result;
