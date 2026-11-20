@@ -441,7 +441,8 @@ static int decode_instructions(struct objtool_file *file)
 		 * loaded late, they very much do need retpoline in their
 		 * .init.text
 		 */
-		if (!strcmp(sec->name, ".init.text") && !opts.module)
+		if ((!strcmp(sec->name, ".init.text") ||
+		     !strncmp(sec->name, ".init.text.", 11)) && !opts.module)
 			sec->init = true;
 
 		for (offset = 0; offset < sec_size(sec); offset += insn->len) {
