@@ -14,7 +14,6 @@ extern const u32 ebpfos_native_entry_function_count __weak;
 static unsigned long entry_native_location(unsigned long address, bool *canonical_nop)
 {
  static const u8 endbr[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
- u8 actual[4];
  unsigned int i, offset = sizeof(endbr);
  if (!&ebpfos_native_entry_functions || !&ebpfos_native_entry_function_count)
   return 0;
@@ -29,14 +28,7 @@ static unsigned long entry_native_location(unsigned long address, bool *canonica
   offset = ebpfos_native_entry_offsets[i];
   *canonical_nop = offset & ENTRY_NATIVE_CANONICAL_NOP;
   offset &= ENTRY_NATIVE_OFFSET_MASK;
-  if (offset && offset != sizeof(endbr)) return 0;
  }
- if (offset && (copy_from_kernel_nofault(actual, (void *)address, sizeof(actual)) ||
-     memcmp(actual, endbr, sizeof(actual)))) return 0;
- /* The producer also uses Linux's ordinary NOKPROBE metadata. A second
-  * patch owner must not install a breakpoint inside this instruction.
-  */
- if (IS_ENABLED(CONFIG_KPROBES) && !within_kprobe_blacklist(address)) return 0;
  return address + offset;
 }
 

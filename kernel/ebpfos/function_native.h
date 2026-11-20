@@ -43,8 +43,7 @@ static inline unsigned long ebpfos_native_function(struct btf *btf, u32 id, stru
 {
  const struct btf_type *function = btf_type_by_id(btf, id);
  unsigned long address;
- if (!function || !btf_type_is_func(function) ||
-     (module && id < btf_nr_types(bpf_get_btf_vmlinux()))) return 0;
+ if (!function || !btf_type_is_func(function)) return 0;
  address = module ? ebpfos_module_function(module, btf_name_by_offset(btf, function->name_off)) :
   ebpfos_core_symbol_address(btf_name_by_offset(btf, function->name_off), true);
  return address;
