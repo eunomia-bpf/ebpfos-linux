@@ -33,11 +33,6 @@ struct bpf_native_image {
 	bool finalized;
 };
 
-static bool native_range(u64 offset, u64 size, u64 total)
-{
-	return offset <= total && size <= total - offset;
-}
-
 static const void *native_section_data(const struct native_sequence *seq, u32 section)
 {
 	return (const void *)seq->elf + seq->sections[section].sh_offset;
