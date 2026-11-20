@@ -172,21 +172,12 @@ static struct entry_set *entry_generation(struct entry_set *set, unsigned int id
 static unsigned int entry_generation_slot(unsigned int id)
 { return 0; }
 
-#ifdef CONFIG_EBPFOS_PLT
-static bool entry_plt_owned(unsigned long ip);
-#endif
-static int entry_ownership(struct entry_set *set)
-{
- return 0;
-}
-
 /* Publish the table default and every direct entry in the same stopped
  * interval. Existing same-layout calls/objects retain their old code/maps.
  * As with owned-state epochs, source contracts exclude NMI and transaction
  * users: stopping task/IRQ creators does not stop NMI execution.
  */
 struct entry_tables_publication {
- struct entry_set *set;
  struct bpf_operations_global_update *tables;
  bool published;
 };
@@ -208,7 +199,7 @@ static void entry_tables_undo(void *opaque)
 static int entry_tables_apply(struct entry_set *set, unsigned int from, unsigned int to,
  struct bpf_operations_global_update *tables)
 {
- struct entry_tables_publication publication = { .set = set, .tables = tables };
+ struct entry_tables_publication publication = { .tables = tables };
  struct text_poke_pair *pairs;
  int error;
  pairs = entry_native_pairs(from ? entry_generation(set, from)->slots : set->slots,
@@ -228,9 +219,8 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
  struct bpf_operations_set *old_tables = from ? entry_generation(set, from)->tables : NULL;
  struct bpf_operations_set *next_tables = to ? entry_generation(set, to)->tables : NULL;
  struct bpf_operations_global_update tables;
- int error = entry_ownership(set);
- if (!error && !to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse_address);
- if (error) return error;
+ int error;
+ if (!to && set->reverse) return entry_epoch_apply(set, from, to, set->reverse_address);
  error = bpf_operations_global_prepare(&tables, next_tables, old_tables);
  if (error) return error;
  if (set->call_sites || (set->count && set->table_count)) {
@@ -240,8 +230,7 @@ static int entry_apply(struct entry_set *set, unsigned int from, unsigned int to
   to ? entry_generation(set, to)->slots : set->slots, set->slot_count,
   from ? entry_generation_slot(from) + 1 : 0, to ? entry_generation_slot(to) + 1 : 0);
  if (error) goto done;
- /* A successful patch may already have entered either generation. Keep
-  * both program graphs through stack-checked retirement. */
+ /* Keep both program graphs through the existing retirement grace periods. */
  if (to && !set->published) {
   set->published = true;
   list_add_tail(&set->retained, &entry_retained);
@@ -307,8 +296,8 @@ static void entry_all_quiescent(struct entry_set *set)
   entry_quiescent(generation, 0);
  }
 }
-/* Published generations remain immutable. Reclaim only inactive code whose
- * interrupted and sleeping frames have drained, with no call-path counter. */
+/* Published generations remain immutable. Retire inactive code after the
+ * existing grace periods, with no call-path counter or extra scan gate. */
 static void entry_retire_work(struct work_struct *work)
 {
  struct entry_set *set = container_of(to_delayed_work(work), struct entry_set, retire_work);
@@ -756,8 +745,7 @@ int bpf_entry_link_update(struct bpf_link *link, const union bpf_attr *attr)
  prepared->generation_id = id;set->next_generation++;
  list_add_tail(&prepared->generation_node, &set->generations);
  if (migration) {
-  error = entry_ownership(set);
-  if (!error) error = entry_epoch_apply(set, set->active, id, migration_address);
+  error = entry_epoch_apply(set, set->active, id, migration_address);
   if (!error) {
    set->active = id;
    if (set->reverse) {

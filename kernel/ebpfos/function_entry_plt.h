@@ -66,13 +66,11 @@ static void plt_retire(struct work_struct *work)
 {
  struct plt_image *image = container_of(to_delayed_work(work), struct plt_image, retire);
  if (image->header) ebpfos_code_quiescent();
- {
-  /* The frameless map lookup cannot voluntarily schedule. Involuntary
-   * preemption is not a Tasks RCU quiescent state. This also covers older
-   * retired stubs that loaded a newer map before its next publication. */
-  synchronize_rcu_tasks();
-  plt_image_free(image);
- }
+ /* The frameless map lookup cannot voluntarily schedule. Involuntary
+  * preemption is not a Tasks RCU quiescent state. This also covers older
+  * retired stubs that loaded a newer map before its next publication. */
+ synchronize_rcu_tasks();
+ plt_image_free(image);
 }
 static void plt_holes(void *area, unsigned int size) { memset(area, 0xcc, size); }
 static void plt_u32(u8 **p, u32 value) { memcpy(*p, &value, 4);*p += 4; }
