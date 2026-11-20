@@ -848,7 +848,6 @@ struct bpf_subprog_info {
 	bool changes_pkt_data: 1;
 	bool might_sleep: 1;
 	u8 arg_cnt:4;
-	/* Verification used the runner's implicit RCU critical section. */
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
 	bool protocol_used: 1;
