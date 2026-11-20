@@ -150,7 +150,6 @@ put_map:
 
 static void bpf_iter_detach_map(struct bpf_iter_aux_info *aux)
 {
-	bpf_ebpfos_map_external_put(aux->map);
 	bpf_map_put_with_uref(aux->map);
 }
 

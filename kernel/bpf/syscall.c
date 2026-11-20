@@ -896,14 +896,6 @@ static void bpf_map_free(struct bpf_map *map)
 	struct btf_record *rec = map->record;
 	struct btf *btf = map->btf;
 
-	WARN_ON_ONCE(map->ebpfos_component_owner);
-	WARN_ON_ONCE(map->ebpfos_prog_users);
-	WARN_ON_ONCE(map->ebpfos_external_writers);
-	WARN_ON_ONCE(map->ebpfos_user_mmaps);
-	WARN_ON_ONCE(map->ebpfos_external_gp_refs);
-	WARN_ON_ONCE(map->ebpfos_external_next_refs);
-	WARN_ON_ONCE(map->ebpfos_external_gp_queued);
-
 	/* implementation dependent freeing. Disabling migration to simplify
 	 * the free of values or special fields allocated from bpf memory
 	 * allocator.
@@ -1080,9 +1072,6 @@ static void bpf_map_mmap_open(struct vm_area_struct *vma)
 {
 	struct bpf_map *map = vma->vm_file->private_data;
 
-	/* A VMA clone retains the same exclusion as the original mapping. */
-	if (WARN_ON_ONCE(!bpf_ebpfos_map_mmap_get(map)))
-		return;
 	if (vma->vm_flags & VM_MAYWRITE)
 		bpf_map_write_active_inc(map);
 }
@@ -1094,7 +1083,6 @@ static void bpf_map_mmap_close(struct vm_area_struct *vma)
 
 	if (vma->vm_flags & VM_MAYWRITE)
 		bpf_map_write_active_dec(map);
-	bpf_ebpfos_map_mmap_put(map);
 }
 
 static const struct vm_operations_struct bpf_map_default_vmops = {
@@ -1105,7 +1093,6 @@ static const struct vm_operations_struct bpf_map_default_vmops = {
 static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct bpf_map *map = filp->private_data;
-	bool mapped;
 	int err = 0;
 
 	if (!map->ops->map_mmap || !IS_ERR_OR_NULL(map->record))
@@ -1115,8 +1102,6 @@ static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 		return -EINVAL;
 
 	mutex_lock(&map->freeze_mutex);
-	mapped = bpf_ebpfos_map_mmap_get(map);
-	
 
 	if (vma->vm_flags & VM_WRITE) {
 		if (map->frozen) {
@@ -1136,8 +1121,6 @@ static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 	}
 out:
 	mutex_unlock(&map->freeze_mutex);
-	if (err && mapped)
-		bpf_ebpfos_map_mmap_put(map);
 	if (err)
 		return err;
 
@@ -1159,7 +1142,6 @@ out:
 	if (err) {
 		if (vma->vm_flags & VM_WRITE)
 			bpf_map_write_active_dec(map);
-		bpf_ebpfos_map_mmap_put(map);
 	}
 
 	return err;
@@ -1552,13 +1534,6 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	atomic64_set(&map->usercnt, 1);
 	mutex_init(&map->freeze_mutex);
 	spin_lock_init(&map->owner_lock);
-	map->ebpfos_component_owner = NULL;
-	map->ebpfos_prog_users = 0;
-	map->ebpfos_external_writers = 0;
-	map->ebpfos_user_mmaps = 0;
-	map->ebpfos_external_gp_refs = 0;
-	map->ebpfos_external_next_refs = 0;
-	map->ebpfos_external_gp_queued = false;
 
 	if (attr->btf_key_type_id || attr->btf_value_type_id ||
 	    /* Even the map's value is a kernel's struct,
