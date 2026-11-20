@@ -17455,7 +17455,6 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		if (abi.result_buffer) {
 			struct bpf_reg_state *buffer = &cur_regs(env)[BPF_REG_1];
 
-			ret = check_stack_access_within_bounds(env, BPF_REG_1, 0, abi.args[0].size, BPF_WRITE);
 			*native_result = *buffer;
 			*native_result_size = abi.args[0].size;
 		}
@@ -18178,7 +18177,6 @@ static int check_native_prototype_call(struct bpf_verifier_env *env,
 	    !native_call_abi(env, &meta, &abi) && abi.result_buffer) {
 		native_result = regs[BPF_REG_1];
 		native_result_size = abi.args[0].size;
-		native_prototype_record_result(env, btf, prototype, true);
 	}
 	native_call_clobbers_stack(env, &meta);
 	type = btf_type_skip_modifiers(btf, meta.func_proto->type, NULL);
