@@ -7566,9 +7566,20 @@ static bool in_sleepable(struct bpf_verifier_env *env)
  */
 static bool in_rcu_cs(struct bpf_verifier_env *env)
 {
-	return env->cur_state->active_rcu_locks ||
-	       env->cur_state->active_locks ||
-	       !in_sleepable(env);
+	if (env->cur_state->active_rcu_locks || env->cur_state->active_locks)
+		return true;
+	/* A source component is checked for its bare native entry. Its load-only
+	 * tracing caller never executes and cannot supply a runner RCU scope.
+	 */
+	if (in_sleepable(env) || env->prog->aux->ebpfos_component)
+		return false;
+	/* A BPF runner supplies this scope; a bare native ABI entry does not.
+	 * Retain the assumption without changing the stock answer or analysis.
+	 * Queries can conservatively retain a duty even if no pointer promotion
+	 * follows. A cold binding must not silently discard that duty.
+	 */
+	env->subprog_info[cur_func(env)->subprogno].requires_rcu = true;
+	return true;
 }
 
 /* Once GCC supports btf_type_tag the following mechanism will be replaced with tag check */
@@ -13716,6 +13727,9 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		result_buffer = caller->regs[BPF_REG_1];
 	}
 	env->insn_aux_data[*insn_idx].returns_two_regs = bpf_subprog_returns_two_regs(env, subprog);
+	env->insn_aux_data[*insn_idx].rcu_call_seen = true;
+	if (!state->active_rcu_locks && !state->active_locks)
+		env->insn_aux_data[*insn_idx].rcu_call_unprotected = true;
 	/* An independent byte-memory summary clobbers reachable stack values.
 	 * Select body verification when reachable stack storage holds pointer
 	 * spills that the summary would erase. BTF only selects operands.

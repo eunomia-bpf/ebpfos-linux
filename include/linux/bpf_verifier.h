@@ -699,6 +699,11 @@ struct bpf_insn_aux_data {
 	 * needs the JIT's fault-handled mode. Set while checking the load.
 	 */
 	u32 probe_load:1;
+	/* Native-entry bookkeeping only: all visits must supply explicit RCU.
+	 * These bits never change a verifier state or a verification decision.
+	 */
+	u32 rcu_call_seen:1;
+	u32 rcu_call_unprotected:1;
 	/*
 	 * CFG strongly connected component this instruction belongs to,
 	 * zero if it is a singleton SCC.
@@ -831,6 +836,8 @@ struct bpf_subprog_info {
 	bool changes_pkt_data: 1;
 	bool might_sleep: 1;
 	u8 arg_cnt:4;
+	/* Verification used the runner's implicit RCU critical section. */
+	bool requires_rcu: 1;
 	/* Termination follows a declared external kernel protocol. */
 	bool protocol_bounded: 1;
 	bool protocol_used: 1;
