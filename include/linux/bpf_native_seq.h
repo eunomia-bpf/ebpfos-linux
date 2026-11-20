@@ -29,7 +29,24 @@ static inline bool bpf_native_seq_insn(const struct bpf_insn *insn)
 static inline struct bpf_native_seq *bpf_native_seq_get(const struct bpf_prog *prog, u32 offset)
 {
 	struct bpf_prog_aux *aux = prog->aux->main_prog_aux ?: prog->aux;
-	return aux->native_seqs + offset;
+	struct bpf_native_seq *seq;
+
+	if (offset % 8 || offset > aux->native_seqs_size ||
+	    aux->native_seqs_size - offset < sizeof(*seq))
+		return NULL;
+	seq = aux->native_seqs + offset;
+	if (seq->magic != 0x3151534e || seq->version != 1 ||
+	    seq->header_size != sizeof(*seq) || seq->size % 8 ||
+	    seq->size < sizeof(*seq) || seq->size > aux->native_seqs_size - offset ||
+	    seq->elf_offset < sizeof(*seq) || seq->elf_offset % 8 ||
+	    seq->elf_offset > seq->size || seq->elf_size > seq->size - seq->elf_offset ||
+	    seq->gotos_offset % 8 || seq->gotos_offset > seq->size ||
+	    seq->gotos_count > (seq->size - seq->gotos_offset) / sizeof(struct bpf_native_goto) ||
+	    seq->bindings_offset % 8 || seq->bindings_offset > seq->size ||
+	    seq->bindings_count > (seq->size - seq->bindings_offset) / 8 ||
+	    seq->flags & ~15U || memchr_inv(seq->reserved, 0, sizeof(seq->reserved)))
+		return NULL;
+	return seq;
 }
 
 /* Kernel C callers guarantee eight-byte alignment. A wider compiler frame

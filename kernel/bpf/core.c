@@ -421,6 +421,12 @@ static int bpf_adj_branches(struct bpf_prog *prog, u32 pos, s32 end_old,
 			struct bpf_native_goto *targets;
 			u32 j;
 
+			/* bpf_native_seq_get validates the loader-supplied record
+			 * and returns NULL for a malformed one; a record with no
+			 * gotos has nothing to adjust here.
+			 */
+			if (!seq)
+				continue;
 			targets = (void *)seq + seq->gotos_offset;
 			for (j = 0; j < seq->gotos_count; j++) {
 				struct bpf_insn branch = { .imm = targets[j].delta };
