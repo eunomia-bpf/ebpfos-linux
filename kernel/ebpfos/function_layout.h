@@ -126,8 +126,7 @@ static inline unsigned int cell_abi_alignment_tag(const char *name)
 }
 static inline bool cell_abi_record_value(const struct btf *types, __u32 id)
 {
- unsigned int depth;
- for (depth = 0; depth < 64; ++depth) {
+ for (;;) {
   const struct btf_type *type = cell_layout_type(types, id);
   unsigned int kind;
   if (!type) return false;
@@ -137,7 +136,6 @@ static inline bool cell_abi_record_value(const struct btf *types, __u32 id)
       kind != BTF_KIND_VOLATILE && kind != BTF_KIND_RESTRICT) return false;
   id = type->type;
  }
- return false;
 }
 static inline unsigned int cell_abi_decl_alignment(const struct btf *types,
  const struct btf_type *tag)
@@ -153,8 +151,7 @@ static inline unsigned int cell_abi_decl_alignment(const struct btf *types,
 }
 static inline unsigned int cell_abi_type_alignment(const struct btf *types, __u32 id)
 {
- unsigned int depth;
- for (depth = 0; depth < 64; ++depth) {
+ for (;;) {
   const struct btf_type *type = cell_layout_type(types, id);
   unsigned int alignment = 0;
   __u32 tag_id;
@@ -175,7 +172,6 @@ static inline unsigned int cell_abi_type_alignment(const struct btf *types, __u3
   default: return 0;
   }
  }
- return ~0U;
 }
 static inline bool cell_abi_value_alignment(const struct btf *a, __u32 ai,
  const struct btf *b, __u32 bi)
@@ -222,7 +218,7 @@ static inline bool cell_layout(const struct btf *a, __u32 ai, const struct btf *
  const struct btf_type *x = cell_layout_type(a, ai), *y = cell_layout_type(b, bi);
  unsigned int i, kind, ykind;
  if (!ai || !bi) return ai == bi;
- if (!x || !y || depth > 64) return false;
+ if (!x || !y) return false;
  kind = BTF_INFO_KIND(x->info);ykind = BTF_INFO_KIND(y->info);
  if (nominal && (kind == BTF_KIND_STRUCT || kind == BTF_KIND_UNION || kind == BTF_KIND_FWD) &&
      (ykind == BTF_KIND_STRUCT || ykind == BTF_KIND_UNION || ykind == BTF_KIND_FWD)) {

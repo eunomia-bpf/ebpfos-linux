@@ -19,10 +19,10 @@ static inline bool btf_native_array_elements(const struct btf *btf, __u32 id,
 {
 	const struct btf_type *type;
 	bool array = false;
-	int depth, resolved;
+	int resolved;
 
 	*count = 1;
-	for (depth = 0; depth < 32; depth++) {
+	for (;;) {
 		resolved = btf__resolve_type(btf, id);
 		if (resolved <= 0)
 			return false;
@@ -38,7 +38,6 @@ static inline bool btf_native_array_elements(const struct btf *btf, __u32 id,
 		id = btf_array(type)->type;
 		array = true;
 	}
-	return false;
 }
 
 static inline bool btf_native_array_storage_match(const struct btf *local, __u32 local_id,
@@ -63,9 +62,9 @@ static inline int btf_native_scalar_type(const struct btf *btf, __u32 id)
 {
 	const struct btf_type *type;
 	const struct btf_member *member;
-	int resolved, depth;
+	int resolved;
 
-	for (depth = 0; depth < 16; depth++) {
+	for (;;) {
 		resolved = btf__resolve_type(btf, id);
 		if (resolved <= 0)
 			return -1;
@@ -84,7 +83,6 @@ static inline int btf_native_scalar_type(const struct btf *btf, __u32 id)
 			return -1;
 		id = member->type;
 	}
-	return -1;
 }
 
 static inline bool btf_native_scalar_abi_match(const struct btf *local, __u32 local_id,

@@ -52,13 +52,12 @@ static int check_btf_pointer_global(struct bpf_verifier_env *env,
 static bool btf_plain_scalar_global(const struct btf *btf, u32 id)
 {
 	const struct btf_type *type;
-	int depth;
 
 	/* Records keep their field ranges, pointer and managed-field rules.
 	 * This rule covers scalars and arrays of scalars only, including through
 	 * ordinary qualifiers, and never removes const at an array element.
 	 */
-	for (depth = 0; depth < 32; depth++) {
+	for (;;) {
 		type = btf_type_by_id(btf, id);
 		if (!type)
 			return false;
@@ -80,7 +79,6 @@ static bool btf_plain_scalar_global(const struct btf *btf, u32 id)
 			return false;
 		}
 	}
-	return false;
 }
 
 static bool btf_core_scalar_global(struct btf *btf, u32 id, u64 addr)

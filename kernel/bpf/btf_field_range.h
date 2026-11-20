@@ -51,8 +51,6 @@ static int btf_field_ranges(struct bpf_verifier_env *env, struct bpf_reg_state *
 	u32 bytes, i;
 	int err;
 
-	if (depth > 32)
-		return 0;
 	type = btf_field_range_type(btf, &id, &bytes);
 	if (!type)
 		return 0;
