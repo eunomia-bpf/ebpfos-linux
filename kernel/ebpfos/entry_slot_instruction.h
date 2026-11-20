@@ -45,7 +45,6 @@ static inline bool entry_native_instruction(const struct entry_native_slot *slot
  unsigned int generation, unsigned char instruction[5])
 {
  unsigned int i;
- if (generation > 2) return false;
  if (slot->displacement_size) {
   unsigned long distance = (generation ? slot->target[generation - 1] : slot->original) -
    (slot->ip + slot->displacement_size);

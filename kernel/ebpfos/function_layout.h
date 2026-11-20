@@ -126,18 +126,6 @@ static inline bool cell_variadic_tail_unused(const struct btf *btf,
  }
  return false;
 }
-static inline bool cell_variadic_tail_compatible(const struct btf *native,
- const struct btf_type *nf, const struct btf *compiled, const struct btf_type *cf)
-{
- const char prefix[] = "native:variadic_scalar_tail:";
- const char *native_types, *compiled_types;
- unsigned int supplied = cell_variadic_scalar_tail_info(native, nf, &native_types);
- unsigned int required = cell_variadic_scalar_tail_info(compiled, cf, &compiled_types);
- if (supplied == ~0U || required == ~0U || required > supplied) return false;
- if (required && strncmp(native_types + sizeof(prefix) - 1,
-      compiled_types + sizeof(prefix) - 1, strlen(compiled_types + sizeof(prefix) - 1))) return false;
- return !cell_variadic_tail_unused(native, nf) || cell_variadic_tail_unused(compiled, cf);
-}
 /* A record's alignment is C type information, not its byte size. In
  * particular a packed i128 and a naturally aligned i128 wrapper can have
  * identical BTF members. Keep the frontend fact in an ordinary declaration

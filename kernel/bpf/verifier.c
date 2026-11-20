@@ -10904,8 +10904,7 @@ static int check_kfunc_mem_size_reg(struct bpf_verifier_env *env, struct bpf_reg
 	struct bpf_call_arg_meta meta;
 	int err;
 
-	WARN_ON_ONCE((!bpf_is_arg_reg(regno) && !(env->native_arg_temps & BIT(regno))) ||
-		     (!bpf_is_arg_reg(pointer_regno) && !(env->native_arg_temps & BIT(pointer_regno))));
+	WARN_ON_ONCE(!bpf_is_arg_reg(regno) && !(env->native_arg_temps & BIT(regno)));
 
 	memset(&meta, 0, sizeof(meta));
 
