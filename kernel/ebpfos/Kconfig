@@ -26,7 +26,6 @@ config EBPFOS_KOPERATION
 config EBPFOS_ENTRY_LINK
  bool "Typed multi-target BPF entry links"
  depends on EBPFOS && X86_64
- depends on !CFI
  select INSTRUCTION_DECODER
  default y
  help
@@ -46,7 +45,7 @@ config EBPFOS_PLT
 
 config EBPFOS_PTVIEW
  bool "Prototype per-mm kernel view mappings"
- depends on EBPFOS_ENTRY_LINK && X86_64 && !X86_5LEVEL && !EBPFOS_PLT
+ depends on EBPFOS_ENTRY_LINK && X86_64
  default n
  help
    Opt-in four-level, non-PCID prototype. Private copies cover changed

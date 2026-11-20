@@ -134,10 +134,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  struct plt_image *image;
  struct bpf_prog **programs;
  u32 count = 0, i = 0, capacity, match;
- u8 *buffer, *p, *irq_default, *thread_default;
-#ifdef CONFIG_PREEMPT_RT
- u8 *softirq_default;
-#endif
+ u8 *buffer, *p;
  unsigned long ip, fallback = entry->slot.original ?: entry->slot.ip + 5;
  u8 *writable_text;
  int error;
@@ -195,17 +192,7 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  image->allocation = image->writable->size;
  p = buffer;ip = (unsigned long)image->text;
  PLT_BYTES(0xf3,0x0f,0x1e,0xfa); /* endbr64 */
- PLT_BYTES(0x65,0x44,0x8b,0x14,0x25);plt_u32(&p, (unsigned long)&__preempt_count);
- PLT_BYTES(0x41,0xf7,0xc2);plt_u32(&p, NMI_MASK | HARDIRQ_MASK |
-  (IS_ENABLED(CONFIG_PREEMPT_RT) ? 0 : SOFTIRQ_OFFSET));
- PLT_BYTES(0x0f,0x85);irq_default = p;p += 4;
  PLT_BYTES(0x65,0x4c,0x8b,0x1c,0x25);plt_u32(&p, (unsigned long)&current_task);
- PLT_BYTES(0x41,0xf7,0x83);plt_u32(&p, offsetof(struct task_struct, flags));plt_u32(&p, PF_KTHREAD);
- PLT_BYTES(0x0f,0x85);thread_default = p;p += 4;
-#ifdef CONFIG_PREEMPT_RT
- PLT_BYTES(0x41,0xf7,0x83);plt_u32(&p, offsetof(struct task_struct, softirq_disable_cnt));plt_u32(&p, SOFTIRQ_OFFSET);
- PLT_BYTES(0x0f,0x85);softirq_default = p;p += 4;
-#endif
  PLT_BYTES(0x45,0x8b,0x93);plt_u32(&p, offsetof(struct task_struct, ebpfos_version));
  /* x86 load ordering pairs with publication's release store. The entry is
   * held by this image; Tasks RCU protects the immutable table after the load. */
@@ -213,12 +200,6 @@ static struct plt_image *plt_generate(struct plt_entry *entry)
  PLT_BYTES(0x4d,0x8b,0x1b); /* mov (r11),r11 */
  PLT_BYTES(0x47,0x8b,0x14,0x93); /* mov (r11,r10,4),r10d */
  if (!plt_tree(&p, buffer, ip, image->cases, image->count)) goto range;
- /* Sorted native0 is the last emitted leaf. */
- { u8 *fixup = irq_default;plt_u32(&fixup, p - 5 - (irq_default + 4));
-   fixup = thread_default;plt_u32(&fixup, p - 5 - (thread_default + 4)); }
-#ifdef CONFIG_PREEMPT_RT
- { u8 *fixup = softirq_default;plt_u32(&fixup, p - 5 - (softirq_default + 4)); }
-#endif
  #undef PLT_BYTES
  image->size = p - buffer;
  image->code = bpf_entry_code_get(programs, count);
