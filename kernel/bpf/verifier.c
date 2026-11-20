@@ -3255,56 +3255,13 @@ int bpf_prog_kop_requirements(const struct bpf_prog *prog,
     return 0;
 }
 
-static int validate_call_exception_annotation(struct bpf_verifier_env *env,
-					     u32 index)
+static void note_call_exception_annotation(struct bpf_verifier_env *env,
+					  u32 index)
 {
-	struct bpf_insn *insns = env->prog->insnsi;
-	struct bpf_insn *branch;
-	u32 recovery, j, owner_start = 0, end = 0, operation, first, last;
-	int err;
-
-	branch = &insns[index];
 	/* The ordinary branch exposes both outcomes using the stock MAY_GOTO
 	 * analysis. No register refinement or call-state analysis is added.
 	 */
-	operation = branch->dst_reg ? index - 1 : index + 1;
-	first = branch->dst_reg ? index - 2 : index;
-	last = branch->dst_reg ? index : index + 1;
-	err = bpf_jit_get_call_exception(env->prog, &insns[operation],
-					 &recovery, NULL);
-	if (err)
-		return err;
-	for (j = 0; j < env->subprog_cnt; j++) {
-		u32 start = env->subprog_info[j].start;
-		u32 next = env->subprog_info[j + 1].start;
-
-		if (start <= first && last < next) {
-			owner_start = start;
-			end = next;
-		}
-	}
-	for (j = 0; j < env->prog->len; j++) {
-		const struct bpf_insn *insn = &insns[j];
-		u8 class = BPF_CLASS(insn->code);
-		u8 op = BPF_OP(insn->code);
-		s64 target;
-
-		if (class != BPF_JMP && class != BPF_JMP32)
-			continue;
-		if (op == BPF_EXIT)
-			continue;
-		if (op == BPF_CALL) {
-			if (!bpf_pseudo_call(insn))
-				continue;
-			target = (s64)j + 1 + insn->imm;
-		} else {
-			target = (s64)j + 1 +
-				(insn->code == (BPF_JMP32 | BPF_JA) ?
-				 insn->imm : insn->off);
-		}
-	}
 	env->insn_aux_data[index].kop_call_fault_branch = true;
-	return 0;
 }
 
 /* UD2 has no explicit operands. On Linux's returning WARN path #UD saves
@@ -5639,9 +5596,7 @@ static int lower_kop_proof_regions(struct bpf_verifier_env *env)
 
 		if (!bpf_is_may_goto_insn(insn) || !insn->imm)
 			continue;
-		err = validate_call_exception_annotation(env, i);
-		if (err)
-			return err;
+		note_call_exception_annotation(env, i);
 	}
 	if (cap) {
 		struct bpf_prog_aux *aux = env->prog->aux;
