@@ -1267,6 +1267,7 @@ static bool is_stack_slot_special(const struct bpf_stack_state *stack)
 	case STACK_IRQ_FLAG:
 		return true;
 	case STACK_INVALID:
+	case STACK_NATIVE_PADDING:
 	case STACK_POISON:
 	case STACK_MISC:
 	case STACK_ZERO:
@@ -6330,25 +6331,6 @@ static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *r
 			verbose(env, "R%d !read_ok\n", regno);
 			return -EACCES;
 		}
-		/* Typed calls/exits, stores and MOVSX consume their actual width.
-		 * Other operations may not observe unproved native result bits.
-		 */
-		if (reg->native_input_bits) {
-			u32 bits = input_bytes ? input_bytes * 8 : rw64 ? 64 : 32;
-			u8 class = BPF_CLASS(insn->code);
-
-			if (!input_bytes) {
-				if (class == BPF_STX && regno == insn->src_reg)
-					bits = bpf_size_to_bytes(BPF_SIZE(insn->code)) * 8;
-				else if ((class == BPF_ALU || class == BPF_ALU64) &&
-					 BPF_OP(insn->code) == BPF_MOV && BPF_SRC(insn->code) == BPF_X && insn->off > 0)
-					bits = insn->off;
-				else if ((class == BPF_ALU || class == BPF_ALU64) && BPF_OP(insn->code) == BPF_END)
-					bits = insn->imm;
-				else if (class == BPF_JMP && BPF_OP(insn->code) == BPF_CALL)
-					bits = 64;
-			}
-		}
 		/* We don't need to worry about FP liveness because it's read-only */
 		if (regno == BPF_REG_FP)
 			return 0;
@@ -7099,7 +7081,8 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 						zero_cnt++;
 						continue;
 					}
-					if (type == STACK_INVALID && env->allow_uninit_stack)
+					if ((type == STACK_INVALID || type == STACK_NATIVE_PADDING) &&
+					    env->allow_uninit_stack)
 						continue;
 					if (type == STACK_POISON) {
 						verbose(env, "reading from stack off %d+%d size %d, slot poisoned by dead code elimination\n",
@@ -7154,7 +7137,8 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 				continue;
 			if (type == STACK_ZERO)
 				continue;
-			if (type == STACK_INVALID && env->allow_uninit_stack)
+			if ((type == STACK_INVALID || type == STACK_NATIVE_PADDING) &&
+			    env->allow_uninit_stack)
 				continue;
 			if (type == STACK_POISON) {
 				verbose(env, "reading from stack off %d+%d size %d, slot poisoned by dead code elimination\n",
@@ -10538,7 +10522,8 @@ static int check_stack_range_initialized(
 		if (*stype == STACK_MISC)
 			goto mark;
 		if ((*stype == STACK_ZERO) ||
-		    (*stype == STACK_INVALID && env->allow_uninit_stack)) {
+		    ((*stype == STACK_INVALID || *stype == STACK_NATIVE_PADDING) &&
+		     env->allow_uninit_stack)) {
 			if (clobber) {
 				/* helper can write anything into the stack */
 				*stype = STACK_MISC;
