@@ -1375,17 +1375,6 @@ int __must_check arch_protect_bpf_trampoline(void *image, unsigned int size);
 int arch_bpf_trampoline_size(const struct btf_func_model *m, u32 flags,
 			     struct bpf_tramp_links *tlinks, void *func_addr);
 
-/* Native arguments -> the same flattened context used by BPF trampolines.
- * callback returns zero with a full register result, or requests fallback
- * before the program executes. No hook is installed by this operation.
- * raw_context initializes the complete raw argument array; otherwise only
- * the typed prototype's words are exposed, with the same helper metadata.
- */
-int arch_prepare_bpf_call(void *image, unsigned int size,
-			  const struct btf_func_model *model, void *cookie,
-			  int (*callback)(void *, const void *, u64 *),
-			  void *native_ip, void *fallback, bool raw_context);
-
 u64 notrace __bpf_prog_enter_recur(struct bpf_prog *prog,
 				 struct bpf_tramp_run_ctx *run_ctx);
 void notrace __bpf_prog_exit_recur(struct bpf_prog *prog, u64 start,
