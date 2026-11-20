@@ -17341,12 +17341,28 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 					  bool buffer)
 {
 	struct bpf_native_abi abi;
+	struct bpf_func_state *output_frame = NULL;
 	const struct btf_type *type = btf_type_skip_modifiers(btf, proto->type, NULL);
+	s64 output_offset = 0;
 	u32 physical = 0;
 	int err = bpf_native_abi_plan(btf, proto, &abi, env->prog->aux->trusted_kernel);
 
 	if (err)
 		return err;
+	if (buffer) {
+		struct bpf_reg_state *output = &cur_regs(env)[BPF_REG_1];
+
+		/* Transfer the callee's writes without synthesizing verifier stores.
+		 * Unknown destinations invalidate the existing tracked range; an
+		 * exact stack destination can also retain its declared pointer words.
+		 */
+		clobber_stack_argument(env, output, abi.args[0].size);
+		if (base_type(output->type) != PTR_TO_STACK ||
+		    !tnum_is_const(output->var_off))
+			return 0;
+		output_frame = bpf_func(env, output);
+		output_offset = output->off + (s64)output->var_off.value;
+	}
 	for (u32 offset = 0; offset < type->size;) {
 		struct native_arg_scope temporary __free(native_arg) = {};
 		u32 pointer = 0, regno;
@@ -17358,20 +17374,26 @@ static int native_prototype_record_result(struct bpf_verifier_env *env,
 		}
 		if (buffer) {
 			if (pointer) {
-				native_value_scope(env, &temporary, 13);
-				err = native_prototype_pointer_result(env, btf, pointer, 13);
-				if (err)
-					return err;
-				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
-						       BPF_DW, BPF_WRITE, 13, false, false, NULL);
-				offset += 8;
-			} else {
-				err = check_mem_access(env, env->insn_idx, BPF_REG_1, offset,
-						       BPF_B, BPF_WRITE, -1, false, false, NULL);
-				offset++;
+				s64 at = output_offset + offset;
+
+				/* Select an existing complete tracked slot. This does not
+				 * reject the call or impose a new source-memory bound.
+				 */
+				if (at <= -BPF_REG_SIZE &&
+				    at >= -(s64)output_frame->allocated_stack &&
+				    !(at % BPF_REG_SIZE)) {
+					int spi = (-at - 1) / BPF_REG_SIZE;
+
+					native_value_scope(env, &temporary, 13);
+					err = native_prototype_pointer_result(env, btf, pointer, 13);
+					if (err)
+						return err;
+					save_register_state(env, output_frame, spi,
+							    &cur_regs(env)[13], BPF_REG_SIZE);
+					mark_stack_slot_scratched(env, spi);
+				}
 			}
-			if (err)
-				return err;
+			offset += BPF_REG_SIZE;
 		} else {
 			if (!(abi.result_word_mask & BIT(offset / 8))) {
 				offset += 8;
