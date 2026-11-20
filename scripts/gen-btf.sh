@@ -81,7 +81,7 @@ gen_btf_data()
 	fi
 	if [ "${VMLINUX_PERCPU_LAYOUT:-1}" = 1 ] && [ -z "${BTF_BASE}" ] && is_enabled CONFIG_EBPFOS_BUILD &&
 	   is_enabled CONFIG_X86_64; then
-		percpu_layout="--percpu-layout __percpu_area --field-obligations ${srctree}/tools/bpf/resolve_btfids/field-obligations.tsv"
+		percpu_layout="--percpu-layout __percpu_area"
 	fi
 	${RESOLVE_BTFIDS} ${RESOLVE_BTFIDS_FLAGS} ${percpu_layout} ${native_set}	\
 		${BTF_BASE:+--btf_base ${BTF_BASE}}	\

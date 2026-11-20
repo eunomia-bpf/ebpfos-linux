@@ -1513,7 +1513,6 @@ int main(int argc, const char **argv)
 	};
 	const char *btfids_path = NULL;
 	const char *percpu_alias = NULL;
-	const char *field_obligations = NULL;
 	bool fatal_warnings = false;
 	bool native_set = false;
 	bool preserve_ids = false;
@@ -1535,8 +1534,6 @@ int main(int argc, const char **argv)
 			   "path to .BTF_ids section data blob to patch into ELF file"),
 		OPT_STRING(0, "percpu-layout", &percpu_alias, "symbol",
 			   "describe the existing per-CPU section through this base alias"),
-		OPT_STRING(0, "field-obligations", &field_obligations, "file",
-			   "type/field store obligations with their justifications"),
 		OPT_BOOLEAN(0, "native-set", &native_set,
 			    "preserve original prototypes and contracts for the declared native set"),
 		OPT_BOOLEAN(0, "preserve-ids", &preserve_ids,
@@ -1596,8 +1593,6 @@ int main(int argc, const char **argv)
 		btf__free(obj.btf);
 		obj.btf = view;
 	}
-	if (field_obligations && btf_field_obligations(obj.btf, field_obligations))
-		goto out;
 
 	if (!preserve_ids && finalize_btf(&obj))
 		goto out;
