@@ -9015,8 +9015,7 @@ static int btf_prepare_func_arg_info(struct bpf_prog *prog, int subprog,
 		}
 
 skip_pointer:
-		if (tags || sub->args[i].callback_count_mask ||
-		    size_arg >= 0 || read_only || user_address || has_btf_offset) {
+		if (tags) {
 			bpf_log(log, "arg#%d has pointer tag, but is not a pointer type\n", i);
 			return -EINVAL;
 		}
